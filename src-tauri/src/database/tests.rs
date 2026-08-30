@@ -393,7 +393,7 @@ fn protocol_compatibility_profile_round_trips_only_for_the_exact_target() {
     assert_eq!(
         db.get_protocol_compatibility_result(&target)
             .expect("read exact profile"),
-        Some(record)
+        Some(record.clone())
     );
 
     let changed_endpoint = ProbeTargetKey::new(
@@ -410,6 +410,11 @@ fn protocol_compatibility_profile_round_trips_only_for_the_exact_target() {
         .get_protocol_compatibility_result(&changed_endpoint)
         .expect("read changed target")
         .is_none());
+
+    let listed = db
+        .list_protocol_compatibility_profiles("provider-a")
+        .expect("list provider profiles");
+    assert_eq!(listed, vec![record]);
 }
 
 #[test]

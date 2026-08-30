@@ -32,7 +32,10 @@ vi.mock("@/lib/api/codexSubagentV2", () => ({
   },
 }));
 
-vi.mock("@/lib/api/protocol-compatibility", () => ({
+vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@/lib/api/protocol-compatibility")
+  >()),
   commitCodexProviderSetBatch: vi.fn(),
   prepareCodexProviderSetBatch: vi.fn(),
   preflightCodexProviderProtocolCompatibility: vi.fn(),
@@ -91,6 +94,14 @@ function verifiedPreflight(
   );
   return {
     provider: source,
+    adaptationPreview: {
+      persistence: "single",
+      status: "ready",
+      effectiveTransport: transport,
+      testedAt: 100,
+      expiresAt: 200,
+      models: [],
+    },
     receiptIds: models.map((model: string) => `receipt:${source.id}:${model}`),
     protocolApplied: false,
     observations: [],
@@ -130,7 +141,6 @@ beforeEach(() => {
       digest: `digest:${router.id}`,
       sourcePreviews: [],
       routerProviderId: router.id,
-      requiresSplitConfirmation: false,
       blocked: false,
     }),
   );
@@ -140,10 +150,10 @@ beforeEach(() => {
         digest,
         sourcePreviews: [],
         routerProviderId: router.id,
-        requiresSplitConfirmation: false,
         blocked: false,
       },
       router,
+      sourceSnapshots: [],
       projections: [],
       status: "committed",
       projectionErrorCode: null,
@@ -204,7 +214,7 @@ describe("CodexMultiRouterWizard", () => {
       expect.any(Array),
       expect.any(Object),
       expect.stringContaining("digest:"),
-      "accept_single",
+      "accept_auto",
     );
     expect(providersApi.add).not.toHaveBeenCalled();
     expect(providersApi.update).not.toHaveBeenCalled();
@@ -242,7 +252,7 @@ describe("CodexMultiRouterWizard", () => {
     expect(preflightCodexProviderProtocolCompatibility).not.toHaveBeenCalled();
   });
 
-  it("requires explicit confirmation before committing a split batch", async () => {
+  it("commits an automatically planned split batch without a second confirmation", async () => {
     vi.mocked(prepareCodexProviderSetBatch).mockResolvedValueOnce({
       digest: "split-digest",
       sourcePreviews: [
@@ -259,7 +269,6 @@ describe("CodexMultiRouterWizard", () => {
         },
       ],
       routerProviderId: "codex-multi-router",
-      requiresSplitConfirmation: true,
       blocked: false,
     });
     renderWithQueryClient(
@@ -282,17 +291,15 @@ describe("CodexMultiRouterWizard", () => {
       screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
     );
 
-    expect(await screen.findByText("按协议自动拆分")).toBeInTheDocument();
-    expect(commitCodexProviderSetBatch).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "确认按协议拆分" }));
     await waitFor(() =>
       expect(commitCodexProviderSetBatch).toHaveBeenCalledWith(
         expect.any(Array),
         expect.any(Object),
         "split-digest",
-        "confirm_split",
+        "accept_auto",
       ),
     );
+    expect(screen.queryByText("按协议自动拆分")).not.toBeInTheDocument();
   });
 
   it("keeps a blocked batch completely unsaved", async () => {
@@ -317,7 +324,6 @@ describe("CodexMultiRouterWizard", () => {
         },
       ],
       routerProviderId: "codex-multi-router",
-      requiresSplitConfirmation: false,
       blocked: true,
     });
     renderWithQueryClient(

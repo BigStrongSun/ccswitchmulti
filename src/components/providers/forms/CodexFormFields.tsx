@@ -60,6 +60,12 @@ import { CodexModelReasoningEditor } from "./CodexModelReasoningEditor";
 import { CodexModelReasoningSummary } from "./CodexModelReasoningSummary";
 import { cn } from "@/lib/utils";
 import { buildCodexProtocolProbeProviderDraft } from "@/lib/codexProtocolSettings";
+import {
+  migrateCodexProtocolOverrideKey,
+  normalizeCodexPublicModelKey,
+  setCodexProtocolOverride,
+  type CodexProtocolChoiceInput,
+} from "@/lib/protocol-lab/codex-overrides";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
 import {
   codexPlanModelListAction,
@@ -76,12 +82,14 @@ import type {
   CodexRoutingConfig,
   PromptCacheRoutingMode,
   CodexProtocolMode,
+  CodexProtocolOverride,
   CodexReasoningProjection,
   CodexToolSchemaDialect,
   CodexHistoryReplay,
   Provider,
   ProviderCategory,
 } from "@/types";
+import type { CodexProviderEditorSnapshot } from "@/lib/api/protocol-compatibility";
 import type { AppId } from "@/lib/api";
 import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import type {
@@ -207,6 +215,7 @@ export function validateCodexReasoningCapabilityDraft(
 }
 
 interface CodexFormFieldsProps {
+  codexProviderEditorSnapshot?: CodexProviderEditorSnapshot | null;
   appId?: AppId;
   providerId?: string;
   // 当前表单里的 provider 名称；自动生成混合协议 route 标签时使用。
@@ -264,6 +273,10 @@ interface CodexFormFieldsProps {
   onPromptCacheRoutingChange?: (value: PromptCacheRoutingMode) => void;
   protocolMode?: CodexProtocolMode;
   onProtocolModeChange?: (value: CodexProtocolMode) => void;
+  protocolOverrides?: Record<string, CodexProtocolOverride>;
+  onProtocolOverridesChange?: (
+    value: Record<string, CodexProtocolOverride>,
+  ) => void;
   reasoningProjection?: CodexReasoningProjection;
   onReasoningProjectionChange?: (value: CodexReasoningProjection) => void;
   toolSchemaDialect?: CodexToolSchemaDialect;
@@ -646,6 +659,7 @@ function mergeFetchedModelsIntoCatalogRows(
 }
 
 export function CodexFormFields({
+  codexProviderEditorSnapshot = null,
   appId = "codex",
   providerId,
   providerName,
@@ -692,6 +706,8 @@ export function CodexFormFields({
   onPromptCacheRoutingChange = () => undefined,
   protocolMode = "auto",
   onProtocolModeChange = () => undefined,
+  protocolOverrides = {},
+  onProtocolOverridesChange = () => undefined,
   reasoningProjection = "none",
   onReasoningProjectionChange = () => undefined,
   toolSchemaDialect = "openai",
@@ -1314,7 +1330,6 @@ export function CodexFormFields({
           catalogRowsRef.current,
         );
         bindProtocolProbeIdentity(resultIdentity);
-        onApiFormatChange("openai_responses");
         const summary = `深度探测完成：全部模型选择 Responses；${resultCounts}。`;
         const tone = failed > 0 || partial > 0 ? "warning" : "success";
         setProtocolProbeTone(tone);
@@ -1331,7 +1346,6 @@ export function CodexFormFields({
           catalogRowsRef.current,
         );
         bindProtocolProbeIdentity(resultIdentity);
-        onApiFormatChange("openai_chat");
         const summary = `深度探测完成：全部模型选择 Chat Completions；${resultCounts}。`;
         const tone = failed > 0 || partial > 0 ? "warning" : "success";
         setProtocolProbeTone(tone);
@@ -1422,6 +1436,16 @@ export function CodexFormFields({
 
   const handleUpdateCatalogRow = useCallback(
     (index: number, patch: Partial<CodexCatalogModel>) => {
+      const previousModel = catalogRowsRef.current[index]?.model ?? "";
+      if (patch.model !== undefined && patch.model !== previousModel) {
+        onProtocolOverridesChange(
+          migrateCodexProtocolOverrideKey(
+            protocolOverrides,
+            previousModel,
+            patch.model,
+          ),
+        );
+      }
       setCatalogRows((current) =>
         current.map((row, i) => {
           if (i !== index) return row;
@@ -1445,7 +1469,7 @@ export function CodexFormFields({
         }),
       );
     },
-    [],
+    [onProtocolOverridesChange, protocolOverrides],
   );
 
   const handleUpdateCatalogReasoningJson = useCallback(
@@ -1734,6 +1758,11 @@ export function CodexFormFields({
           models={catalogRows}
           defaultModel={codexModel}
           apiFormat={apiFormat}
+          adaptation={
+            protocolProbeOutcome?.adaptationPreview ??
+            codexProviderEditorSnapshot?.adaptation ??
+            null
+          }
           isMaintainedPreset={isMaintainedPreset}
           isSyncingModels={isFetchingModels}
           isValidatingConnection={
@@ -2373,7 +2402,7 @@ export function CodexFormFields({
                 {catalogRows.length > 0 && (
                   <div className="space-y-2">
                     {/* 列头：md+ 显示 */}
-                    <div className="hidden grid-cols-[88px_1fr_1fr_1fr_132px_76px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
+                    <div className="hidden grid-cols-[88px_1fr_1fr_1fr_132px_150px_76px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
                       <span>
                         {t("codexConfig.keepCatalogModelColumn", {
                           defaultValue: "保留",
@@ -2399,6 +2428,7 @@ export function CodexFormFields({
                           defaultValue: "上下文窗口",
                         })}
                       </span>
+                      <span>协议覆盖</span>
                       <span>
                         {t("codexConfig.catalogOrderColumn", {
                           defaultValue: "顺序",
@@ -2427,7 +2457,7 @@ export function CodexFormFields({
                       return (
                         <div
                           key={row.rowId}
-                          className="grid grid-cols-1 gap-2 rounded-md border border-transparent p-1 md:grid-cols-[88px_1fr_1fr_1fr_132px_76px_36px]"
+                          className="grid grid-cols-1 gap-2 rounded-md border border-transparent p-1 md:grid-cols-[88px_1fr_1fr_1fr_132px_150px_76px_36px]"
                         >
                           <label className="flex h-9 items-center gap-2 text-xs text-muted-foreground">
                             <input
@@ -2547,6 +2577,29 @@ export function CodexFormFields({
                               defaultValue: "上下文窗口",
                             })}
                           />
+                          <select
+                            className="h-9 rounded-md border border-border-default bg-background px-2 text-xs text-foreground"
+                            aria-label={`${model || "模型"} 协议选择`}
+                            value={
+                              protocolOverrides[
+                                normalizeCodexPublicModelKey(model)
+                              ] ?? "follow_auto"
+                            }
+                            onChange={(event) =>
+                              onProtocolOverridesChange(
+                                setCodexProtocolOverride(
+                                  protocolOverrides,
+                                  model,
+                                  event.target
+                                    .value as CodexProtocolChoiceInput,
+                                ),
+                              )
+                            }
+                          >
+                            <option value="follow_auto">跟随自动</option>
+                            <option value="openai_responses">Responses</option>
+                            <option value="openai_chat">Chat</option>
+                          </select>
                           <div className="flex h-9 items-center gap-1">
                             <Button
                               type="button"

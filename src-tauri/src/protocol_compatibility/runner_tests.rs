@@ -345,6 +345,31 @@ async fn upstream(
             json!({"nonce": nonce}).to_string()
         };
         if is_responses {
+            let reasoning_item = if matches!(
+                state.responses_mode,
+                ResponsesMode::SummaryReplayOnly
+                    | ResponsesMode::ReasoningTextReplayOnly
+                    | ResponsesMode::OmitReasoningReplayOnly
+                    | ResponsesMode::GenericOmitReasoningReplayOnly
+            ) {
+                json!({
+                    "id": "rs_fixture",
+                    "type": "reasoning",
+                    "summary": [{
+                        "type": "summary_text",
+                        "text": "private tool reasoning"
+                    }]
+                })
+            } else {
+                json!({
+                    "id": "rs_fixture",
+                    "type": "reasoning",
+                    "content": [{
+                        "type": "reasoning_text",
+                        "text": "private tool reasoning"
+                    }]
+                })
+            };
             let terminal = match state.responses_mode {
                 ResponsesMode::ForcedToolTerminalMissing => "",
                 ResponsesMode::ForcedToolIncomplete => {
@@ -359,16 +384,7 @@ async fn upstream(
             };
             return sse(format!(
                 "event: response.output_item.done\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\n{terminal}",
-                json!({
-                    "item": {
-                        "id": "rs_fixture",
-                        "type": "reasoning",
-                        "content": [{
-                            "type": "reasoning_text",
-                            "text": "private tool reasoning"
-                        }]
-                    }
-                }),
+                json!({"item": reasoning_item}),
                 json!({
                     "item": {
                         "id": "fc_fixture",
@@ -773,6 +789,52 @@ async fn responses_continuation_records_native_summary_replay_when_accepted() {
 }
 
 #[tokio::test]
+async fn responses_native_replay_preserves_the_upstream_reasoning_item_unchanged() {
+    let fixture = spawn_fixture(ResponsesMode::Complete).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    let responses = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .expect("Responses branch");
+    assert_eq!(responses.history_replay, super::HistoryReplay::NativeOnly);
+    assert_eq!(responses.assessment.continuation, ProbeStageStatus::Passed);
+    let requests = fixture.requests.lock().unwrap();
+    let continuation = requests
+        .iter()
+        .find(|(path, body)| {
+            path.ends_with("/responses")
+                && body
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                        })
+                    })
+        })
+        .map(|(_, body)| body)
+        .expect("Responses continuation request");
+    let reasoning = continuation["input"]
+        .as_array()
+        .expect("continuation input")
+        .iter()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+        .expect("native reasoning item");
+
+    assert_eq!(
+        reasoning["content"],
+        json!([{"type": "reasoning_text", "text": "private tool reasoning"}])
+    );
+    assert!(reasoning.get("summary").is_none());
+}
+
+#[tokio::test]
 async fn responses_continuation_falls_back_to_reasoning_text_replay_when_required() {
     let fixture = spawn_fixture(ResponsesMode::ReasoningTextReplayOnly).await;
     let result = run_protocol_compatibility_probe(
@@ -791,6 +853,33 @@ async fn responses_continuation_falls_back_to_reasoning_text_replay_when_require
         super::HistoryReplay::ResponsesReasoningTextContent
     );
     assert_eq!(responses.assessment.continuation, ProbeStageStatus::Passed);
+    let requests = fixture.requests.lock().unwrap();
+    let continuations = requests
+        .iter()
+        .filter(|(path, body)| {
+            path.ends_with("/responses")
+                && body
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                        })
+                    })
+        })
+        .map(|(_, body)| body)
+        .collect::<Vec<_>>();
+    assert_eq!(continuations.len(), 2);
+    assert_eq!(
+        continuations[0]["input"][1]["summary"],
+        json!([{"type": "summary_text", "text": "private tool reasoning"}])
+    );
+    assert!(continuations[0]["input"][1].get("content").is_none());
+    assert_eq!(
+        continuations[1]["input"][1]["content"],
+        json!([{"type": "reasoning_text", "text": "private tool reasoning"}])
+    );
+    assert!(continuations[1]["input"][1].get("summary").is_none());
 }
 
 #[tokio::test]
@@ -809,10 +898,39 @@ async fn responses_continuation_omits_reasoning_only_after_both_replay_shapes_ar
         .unwrap();
     assert_eq!(responses.history_replay, super::HistoryReplay::Omit);
     assert_eq!(responses.assessment.continuation, ProbeStageStatus::Passed);
+    let requests = fixture.requests.lock().unwrap();
+    let final_continuation = requests
+        .iter()
+        .filter(|(path, body)| {
+            path.ends_with("/responses")
+                && body
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                        })
+                    })
+        })
+        .map(|(_, body)| body)
+        .last()
+        .expect("final omit continuation");
+    let input = final_continuation["input"]
+        .as_array()
+        .expect("continuation input");
+    assert!(!input
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("reasoning")));
+    assert!(input
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call")));
+    assert!(input
+        .iter()
+        .any(|item| { item.get("type").and_then(Value::as_str) == Some("function_call_output") }));
 }
 
 #[tokio::test]
-async fn generic_continuation_400_negotiates_all_reasoning_replay_shapes_once() {
+async fn generic_continuation_400_does_not_downgrade_reasoning_replay_shape() {
     let fixture = spawn_fixture(ResponsesMode::GenericOmitReasoningReplayOnly).await;
     let result = run_protocol_compatibility_probe(
         candidate(&fixture.base_url, TransportKind::OpenAiResponses),
@@ -825,8 +943,8 @@ async fn generic_continuation_400_negotiates_all_reasoning_replay_shapes_once() 
         .iter()
         .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
         .unwrap();
-    assert_eq!(responses.history_replay, super::HistoryReplay::Omit);
-    assert_eq!(responses.assessment.continuation, ProbeStageStatus::Passed);
+    assert_eq!(responses.history_replay, super::HistoryReplay::NativeOnly);
+    assert_eq!(responses.assessment.continuation, ProbeStageStatus::Failed);
     let requests = fixture.requests.lock().unwrap();
     let responses_continuations = requests
         .iter()
@@ -842,7 +960,7 @@ async fn generic_continuation_400_negotiates_all_reasoning_replay_shapes_once() 
                     })
         })
         .count();
-    assert_eq!(responses_continuations, 3);
+    assert_eq!(responses_continuations, 1);
 }
 
 #[tokio::test]

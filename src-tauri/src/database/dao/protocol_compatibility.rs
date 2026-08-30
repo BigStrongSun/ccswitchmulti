@@ -468,6 +468,33 @@ impl Database {
             .map_err(|error| AppError::Database(format!("协议兼容性档案解析失败: {error}")))
     }
 
+    pub fn list_protocol_compatibility_profiles(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<ProtocolCompatibilityRecord>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut statement = conn
+            .prepare(
+                "SELECT profile_json FROM protocol_compatibility_profiles
+                 WHERE provider_id = ?1
+                 ORDER BY tested_at DESC, target_key ASC",
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let rows = statement
+            .query_map(params![provider_id], |row| row.get::<_, String>(0))
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let mut profiles = Vec::new();
+        for row in rows {
+            let json = row.map_err(|error| AppError::Database(error.to_string()))?;
+            profiles.push(
+                serde_json::from_str(&json).map_err(|error| {
+                    AppError::Database(format!("协议兼容性档案解析失败: {error}"))
+                })?,
+            );
+        }
+        Ok(profiles)
+    }
+
     pub fn get_protocol_probe_observation(
         &self,
         target: &ProbeTargetKey,

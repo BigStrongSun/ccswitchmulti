@@ -67,15 +67,15 @@ vi.mock("@/components/universal", () => ({
 vi.mock("@/components/universal/UniversalProviderFormModal", () => ({
   UniversalProviderFormModal: ({
     isOpen,
-    onSave,
+    onSaveAndSync,
   }: {
     isOpen: boolean;
-    onSave: (provider: UniversalProvider) => void | Promise<void>;
+    onSaveAndSync: (provider: UniversalProvider) => void | Promise<void>;
   }) =>
     isOpen ? (
       <button
         type="button"
-        onClick={() => void onSave(universalFormSubmission.current!)}
+        onClick={() => void onSaveAndSync(universalFormSubmission.current!)}
       >
         submit-universal-provider
       </button>
@@ -83,9 +83,13 @@ vi.mock("@/components/universal/UniversalProviderFormModal", () => ({
 }));
 
 vi.mock("@/components/ui/dialog", () => ({
-  Dialog: ({ children }: { children: React.ReactNode }) => (
-    <div>{children}</div>
-  ),
+  Dialog: ({
+    children,
+    open = true,
+  }: {
+    children: React.ReactNode;
+    open?: boolean;
+  }) => (open ? <div>{children}</div> : null),
   DialogContent: ({ children }: { children: React.ReactNode }) => (
     <div>{children}</div>
   ),
@@ -253,7 +257,7 @@ describe("AddProviderDialog", () => {
         }),
         ["receipt-model-a"],
         "codex-provider-digest",
-        "accept_single",
+        "accept_auto",
       ),
     );
     expect(universalProtocolMocks.preflightCodex).not.toHaveBeenCalled();
@@ -308,7 +312,7 @@ describe("AddProviderDialog", () => {
     expect(universalProtocolMocks.preflightCodex).not.toHaveBeenCalled();
   });
 
-  it("普通 Codex 混合结果只确认一次后端拆分事务", async () => {
+  it("普通 Codex 混合结果由后端规划后直接提交，不再要求拆分确认", async () => {
     const user = userEvent.setup();
     const handleSubmit = vi.fn().mockResolvedValue(undefined);
     const handleOpenChange = vi.fn();
@@ -349,20 +353,17 @@ describe("AddProviderDialog", () => {
 
     await user.click(screen.getByRole("tab", { name: "单独接入模型源" }));
     await user.click(screen.getByRole("button", { name: "common.add" }));
-    expect(await screen.findByText("Responses 模型")).toBeInTheDocument();
-    expect(screen.getAllByText("model-a").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("model-b").length).toBeGreaterThan(0);
-
-    await user.click(screen.getByRole("button", { name: "确认按协议拆分" }));
-
     await waitFor(() =>
       expect(universalProtocolMocks.commitCodex).toHaveBeenCalledWith(
         expect.objectContaining({ name: "Mixed Codex Relay" }),
         ["receipt-model-a", "receipt-model-b"],
         "split-digest",
-        "confirm_split",
+        "accept_auto",
       ),
     );
+    expect(
+      screen.queryByRole("button", { name: "确认按协议拆分" }),
+    ).not.toBeInTheDocument();
     expect(universalProtocolMocks.commitCodex).toHaveBeenCalledOnce();
     expect(handleSubmit).not.toHaveBeenCalled();
     expect(handleOpenChange).toHaveBeenCalledWith(false);
@@ -384,13 +385,16 @@ describe("AddProviderDialog", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "submit-universal-provider" }),
     );
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "确认测试" }).at(-1)!,
+    );
 
     await waitFor(() =>
       expect(universalProtocolMocks.commit).toHaveBeenCalledWith(
         universalFormSubmission.current,
         ["receipt-qwen"],
         "universal-digest",
-        "accept_single",
+        "accept_auto",
       ),
     );
     expect(universalApiMocks.saveAndSync).not.toHaveBeenCalled();

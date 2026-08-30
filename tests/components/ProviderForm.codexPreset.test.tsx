@@ -82,6 +82,7 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     onCatalogModelsChange,
     onProtocolProbeReceiptIdsChange,
     onProtocolModeChange,
+    onProtocolOverridesChange,
     onApiFormatChange,
   }: {
     codexApiKey: string;
@@ -100,6 +101,9 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     ) => void;
     onProtocolProbeReceiptIdsChange?: (receiptIds: string[]) => void;
     onProtocolModeChange?: (mode: "auto" | "manual") => void;
+    onProtocolOverridesChange?: (
+      overrides: Record<string, "openai_chat" | "openai_responses">,
+    ) => void;
     onApiFormatChange?: (format: "openai_chat" | "openai_responses") => void;
   }) => (
     <section aria-label="codex-provider-details">
@@ -145,6 +149,14 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
         }}
       >
         mock-set-manual-chat
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          onProtocolOverridesChange?.({ "model-a": "openai_chat" })
+        }
+      >
+        mock-set-protocol-override
       </button>
     </section>
   ),
@@ -313,6 +325,44 @@ describe("ProviderForm Codex preset selection", () => {
         apiFormat: "openai_chat",
       }),
     );
+  });
+
+  it("persists a per-model protocol override in Provider meta", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Third-party relay",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "relay"\nmodel = "model-a"\n[model_providers.relay]\nbase_url = "https://relay.example/v1"\nwire_api = "responses"\n',
+          modelCatalog: { models: [{ model: "model-a" }] },
+        },
+        meta: { apiFormat: "openai_responses" },
+      },
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "mock-set-protocol-override",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit.mock.calls[0][0].meta).toEqual(
+      expect.objectContaining({
+        codexProtocolOverrides: { "model-a": "openai_chat" },
+      }),
+    );
+    expect(
+      JSON.parse(onSubmit.mock.calls[0][0].settingsConfig).modelCatalog
+        .models[0],
+    ).not.toHaveProperty("apiFormat");
   });
 
   it("scrolls to Codex provider details after selecting any Codex source preset", async () => {

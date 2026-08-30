@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactElement } from "react";
@@ -8,6 +8,14 @@ import { ProviderList } from "@/components/providers/ProviderList";
 const useDragSortMock = vi.fn();
 const useSortableMock = vi.fn();
 const providerCardRenderSpy = vi.fn();
+const adaptationApiMocks = vi.hoisted(() => ({
+  listCodexProviderAdaptationSummaries: vi.fn(),
+}));
+
+vi.mock("@/lib/api/protocol-compatibility", () => ({
+  listCodexProviderAdaptationSummaries:
+    adaptationApiMocks.listCodexProviderAdaptationSummaries,
+}));
 
 vi.mock("@/hooks/useDragSort", () => ({
   useDragSort: (...args: unknown[]) => useDragSortMock(...args),
@@ -124,6 +132,9 @@ beforeEach(() => {
   useDragSortMock.mockReset();
   useSortableMock.mockReset();
   providerCardRenderSpy.mockClear();
+  adaptationApiMocks.listCodexProviderAdaptationSummaries
+    .mockReset()
+    .mockResolvedValue([]);
 
   useSortableMock.mockImplementation(({ id }: { id: string }) => ({
     setNodeRef: vi.fn(),
@@ -255,6 +266,50 @@ describe("ProviderList Component", () => {
     expect(
       screen.getByRole("button", { name: "切回 OpenAI 官方" }),
     ).toBeInTheDocument();
+  });
+
+  it("loads Codex adaptation summaries once and passes the matching summary to each card", async () => {
+    const provider = createProvider({ id: "qwen", name: "Qwen" });
+    const summary = {
+      providerId: "qwen",
+      persistence: "split",
+      status: "ready",
+      effectiveTransport: "mixed",
+      modelCount: 2,
+    } as const;
+    adaptationApiMocks.listCodexProviderAdaptationSummaries.mockResolvedValue([
+      summary,
+    ]);
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [provider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ qwen: provider }}
+        currentProviderId=""
+        appId="codex"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(providerCardRenderSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          provider,
+          adaptationSummary: summary,
+        }),
+      ),
+    );
+    expect(
+      adaptationApiMocks.listCodexProviderAdaptationSummaries,
+    ).toHaveBeenCalledTimes(1);
   });
 
   it("should render in order returned by useDragSort and pass through action callbacks", () => {

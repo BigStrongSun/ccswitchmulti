@@ -21,8 +21,7 @@ import { deepClone } from "@/utils/deepClone";
 interface UniversalProviderFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (provider: UniversalProvider) => void | Promise<void>;
-  onSaveAndSync?: (provider: UniversalProvider) => void | Promise<void>;
+  onSaveAndSync: (provider: UniversalProvider) => void | Promise<void>;
   editingProvider?: UniversalProvider | null;
   initialPreset?: UniversalProviderPreset | null;
 }
@@ -30,7 +29,6 @@ interface UniversalProviderFormModalProps {
 export function UniversalProviderFormModal({
   isOpen,
   onClose,
-  onSave,
   onSaveAndSync,
   editingProvider,
   initialPreset,
@@ -262,34 +260,18 @@ wire_api = "responses"`;
     if (!submittingRef.current) onClose();
   }, [onClose]);
 
-  // 新建路径也必须等待后端完成；失败时保留输入，交由上层显示具体错误。
-  const handleSubmit = useCallback(async () => {
-    const provider = buildProvider();
-    if (!provider || !beginSubmission()) return;
-
-    try {
-      await onSave(provider);
-      onClose();
-    } catch {
-      // Panel callback owns the toast/log. Keeping this panel open is the
-      // component-level failure contract.
-    } finally {
-      finishSubmission();
-    }
-  }, [beginSubmission, buildProvider, finishSubmission, onClose, onSave]);
-
-  // 打开保存并同步确认弹窗
+  // 新建与编辑共用同一条原子“保存并同步”入口。
   const handleSaveAndSyncClick = useCallback(() => {
     const provider = buildProvider();
-    if (!provider || !onSaveAndSync) return;
+    if (!provider) return;
 
     setPendingProvider(provider);
     setSyncConfirmOpen(true);
-  }, [buildProvider, onSaveAndSync]);
+  }, [buildProvider]);
 
   // 确认保存并同步
   const confirmSaveAndSync = useCallback(async () => {
-    if (!pendingProvider || !onSaveAndSync || !beginSubmission()) return;
+    if (!pendingProvider || !beginSubmission()) return;
 
     try {
       await onSaveAndSync(pendingProvider);
@@ -314,26 +296,15 @@ wire_api = "responses"`;
       <Button variant="outline" onClick={guardedClose} disabled={isSubmitting}>
         {t("common.cancel", { defaultValue: "取消" })}
       </Button>
-      {isEditMode && onSaveAndSync ? (
-        <Button
-          onClick={handleSaveAndSyncClick}
-          disabled={
-            isSubmitting || !name.trim() || !baseUrl.trim() || !apiKey.trim()
-          }
-        >
-          <RefreshCw className="mr-1.5 h-4 w-4" />
-          {t("universalProvider.saveAndSync", { defaultValue: "保存并同步" })}
-        </Button>
-      ) : (
-        <Button
-          onClick={handleSubmit}
-          disabled={
-            isSubmitting || !name.trim() || !baseUrl.trim() || !apiKey.trim()
-          }
-        >
-          {t("common.add", { defaultValue: "添加" })}
-        </Button>
-      )}
+      <Button
+        onClick={handleSaveAndSyncClick}
+        disabled={
+          isSubmitting || !name.trim() || !baseUrl.trim() || !apiKey.trim()
+        }
+      >
+        <RefreshCw className="mr-1.5 h-4 w-4" />
+        {t("universalProvider.saveAndSync", { defaultValue: "保存并同步" })}
+      </Button>
     </>
   );
 

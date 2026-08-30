@@ -19,7 +19,6 @@ use crate::{
         CodexProviderSetPreview,
     },
     protocol_compatibility::{
-        apply_probe_selection_to_provider, apply_selected_transport_to_catalog_model,
         compile_codex_router_probe_candidates, compile_provider_probe_candidates,
         run_protocol_compatibility_probe, run_protocol_compatibility_probe_with_reporter,
         ManualReasoningOverride, ProbeCandidate, ProbeReadiness, ProbeStageStatus, ProbeTargetKey,
@@ -113,6 +112,7 @@ pub struct ProtocolCompatibilityProbeRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CodexProviderProtocolPreflightOutcome {
     pub provider: Provider,
+    pub adaptation_preview: crate::commands::provider::CodexProviderAdaptationView,
     pub records: Vec<ProtocolCompatibilityRecord>,
     pub observations: Vec<ProtocolCompatibilityRecord>,
     pub receipt_ids: Vec<String>,
@@ -136,11 +136,10 @@ pub struct PrepareCodexProviderSetRequest {
     pub receipt_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodexProviderSetCommitIntent {
-    AcceptSingle,
-    ConfirmSplit,
+    AcceptAuto,
     ConfirmManual,
 }
 
@@ -157,6 +156,7 @@ pub struct CommitCodexProviderSetRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CodexProviderSetCommitOutcome {
     pub preview: CodexProviderSetPreview,
+    pub snapshot: crate::commands::provider::CodexProviderEditorSnapshot,
     pub projections: Vec<crate::codex_multirouter::projection::CodexRoutingProjectionStatus>,
     pub status: CodexProviderSetCommitStatus,
     pub projection_error_code: Option<String>,
@@ -182,7 +182,6 @@ pub struct CodexProviderSetBatchPreview {
     pub digest: String,
     pub source_previews: Vec<CodexProviderSetPreview>,
     pub router_provider_id: String,
-    pub requires_split_confirmation: bool,
     pub blocked: bool,
 }
 
@@ -200,6 +199,7 @@ pub struct CommitCodexProviderSetBatchRequest {
 pub struct CodexProviderSetBatchCommitOutcome {
     pub preview: CodexProviderSetBatchPreview,
     pub router: Provider,
+    pub source_snapshots: Vec<crate::commands::provider::CodexProviderEditorSnapshot>,
     pub projections: Vec<crate::codex_multirouter::projection::CodexRoutingProjectionStatus>,
     pub status: CodexProviderSetCommitStatus,
     pub projection_error_code: Option<String>,
@@ -305,17 +305,22 @@ fn prepare_codex_provider_set_batch_internal(
         if !source_ids.insert(provider.id.clone()) {
             return Err("codex_provider_set_batch_duplicate_source".to_string());
         }
-        let records = if provider.uses_manual_codex_protocol()
-            || provider.uses_fixed_codex_responses_transport()
+        let records = if provider.uses_fixed_codex_responses_transport()
+            || (provider.uses_manual_codex_protocol() && !provider.has_codex_protocol_overrides())
         {
             Vec::new()
         } else {
-            if source.receipt_ids.is_empty() {
+            if source.receipt_ids.is_empty() && !provider.uses_manual_codex_protocol() {
                 return Err("codex_provider_set_probe_required".to_string());
             }
-            let (records, _) = load_codex_provider_set_probe_receipts(state, &source.receipt_ids)?;
-            validate_codex_provider_set_probe_records(&provider, &records)?;
-            records
+            if source.receipt_ids.is_empty() {
+                Vec::new()
+            } else {
+                let (records, _) =
+                    load_codex_provider_set_probe_receipts(state, &source.receipt_ids)?;
+                validate_codex_provider_set_probe_records(&provider, &records)?;
+                records
+            }
         };
         sources.push((provider, records));
     }
@@ -329,10 +334,6 @@ fn prepare_codex_provider_set_batch_internal(
         now,
     )
     .map_err(|error| error.to_string())?;
-    let requires_split_confirmation = prepared
-        .source_previews
-        .iter()
-        .any(|preview| matches!(preview.plan, CodexProviderSetPlan::Split { .. }));
     let digest_material = json!({
         "sourcePreviews": prepared.source_previews,
         "routerProviderId": prepared.router.id,
@@ -349,7 +350,6 @@ fn prepare_codex_provider_set_batch_internal(
         digest,
         source_previews: prepared.source_previews.clone(),
         router_provider_id: prepared.router.id.clone(),
-        requires_split_confirmation,
         blocked: prepared.blocked,
     };
     Ok((prepared, preview))
@@ -386,11 +386,8 @@ where
     if preview.blocked {
         return Err("codex_provider_set_batch_blocked".to_string());
     }
-    match (preview.requires_split_confirmation, request.intent) {
-        (true, CodexProviderSetCommitIntent::ConfirmSplit)
-        | (false, CodexProviderSetCommitIntent::AcceptSingle) => {}
-        (true, _) => return Err("codex_provider_set_split_confirmation_required".to_string()),
-        (false, _) => return Err("codex_provider_set_batch_intent_required".to_string()),
+    if request.intent != CodexProviderSetCommitIntent::AcceptAuto {
+        return Err("codex_provider_set_batch_intent_required".to_string());
     }
 
     let router = prepared.router.clone();
@@ -414,9 +411,22 @@ where
                 publish,
             ),
         );
+    let source_snapshots = preview
+        .source_previews
+        .iter()
+        .map(|source| {
+            crate::commands::provider::get_codex_provider_editor_snapshot_internal(
+                state,
+                &source.source_provider_id,
+                now,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(CodexProviderSetBatchCommitOutcome {
         preview,
         router,
+        source_snapshots,
         projections,
         status,
         projection_error_code,
@@ -488,14 +498,21 @@ pub(crate) fn prepare_codex_provider_set_internal(
         .into_iter()
         .collect::<HashMap<_, _>>();
     if provider.uses_manual_codex_protocol() {
-        if !request.receipt_ids.is_empty() {
+        let records = if request.receipt_ids.is_empty() {
+            Vec::new()
+        } else {
             let (records, _) = load_codex_provider_set_probe_receipts(state, &request.receipt_ids)?;
             validate_codex_provider_set_probe_records(&provider, &records)?;
+            records
+        };
+        return if provider.has_codex_protocol_overrides() {
+            plan_codex_provider_set(&provider, &records, &providers, now)
+        } else {
+            let transport = manual_codex_provider_transport(&provider)?;
+            plan_manual_codex_provider_set(&provider, transport, &providers, now)
         }
-        let transport = manual_codex_provider_transport(&provider)?;
-        return plan_manual_codex_provider_set(&provider, transport, &providers, now)
-            .map(|prepared| prepared.preview)
-            .map_err(|error| error.to_string());
+        .map(|prepared| prepared.preview)
+        .map_err(|error| error.to_string());
     }
     if request.receipt_ids.is_empty() {
         return Err("codex_provider_set_probe_required".to_string());
@@ -545,7 +562,9 @@ where
         validate_codex_provider_set_probe_records(&provider, &claimed_records)?;
         claimed_records
     };
-    let prepared = if is_manual {
+    let prepared = if is_manual && provider.has_codex_protocol_overrides() {
+        plan_codex_provider_set(&provider, &records, &existing, now)
+    } else if is_manual {
         let transport = manual_codex_provider_transport(&provider)?;
         plan_manual_codex_provider_set(&provider, transport, &existing, now)
     } else {
@@ -558,22 +577,15 @@ where
     match (is_manual, &prepared.preview.plan, request.intent) {
         (
             true,
-            CodexProviderSetPlan::Single { .. },
+            CodexProviderSetPlan::Single { .. } | CodexProviderSetPlan::Split { .. },
             CodexProviderSetCommitIntent::ConfirmManual,
         ) => {}
         (true, _, _) => return Err("codex_provider_set_manual_intent_required".to_string()),
-        (
-            false,
-            CodexProviderSetPlan::Single { .. },
-            CodexProviderSetCommitIntent::AcceptSingle,
-        )
-        | (false, CodexProviderSetPlan::Split { .. }, CodexProviderSetCommitIntent::ConfirmSplit) =>
-            {}
-        (false, CodexProviderSetPlan::Split { .. }, _) => {
-            return Err("codex_provider_set_split_confirmation_required".to_string())
+        (false, CodexProviderSetPlan::Single { .. }, CodexProviderSetCommitIntent::AcceptAuto)
+        | (false, CodexProviderSetPlan::Split { .. }, CodexProviderSetCommitIntent::AcceptAuto) => {
         }
-        (false, CodexProviderSetPlan::Single { .. }, _) => {
-            return Err("codex_provider_set_single_intent_required".to_string())
+        (false, CodexProviderSetPlan::Single { .. } | CodexProviderSetPlan::Split { .. }, _) => {
+            return Err("codex_provider_set_auto_intent_required".to_string())
         }
         (false, CodexProviderSetPlan::Blocked { .. }, _) => {
             return Err("codex_provider_set_model_blocked".to_string())
@@ -599,8 +611,15 @@ where
                 publish,
             ),
         );
+    let snapshot = crate::commands::provider::get_codex_provider_editor_snapshot_internal(
+        state,
+        &preview.source_provider_id,
+        now,
+    )
+    .map_err(|error| error.to_string())?;
     Ok(CodexProviderSetCommitOutcome {
         preview,
+        snapshot,
         projections,
         status,
         projection_error_code,
@@ -755,10 +774,7 @@ pub async fn save_codex_provider_with_protocol_preflight(
 ) -> Result<CodexProviderProtocolSaveOutcome, String> {
     let (provider, records, observations, protocol_applied, probe_error) =
         match automatic_codex_provider_preflight(state.inner(), provider.clone()).await {
-            Ok((provider, records, observations)) => {
-                let protocol_applied = probe_selection_was_applied(&records);
-                (provider, records, observations, protocol_applied, None)
-            }
+            Ok((provider, records, observations)) => (provider, records, observations, false, None),
             Err(error) => (provider, Vec::new(), Vec::new(), false, Some(error)),
         };
     let record = records.first().cloned();
@@ -817,9 +833,18 @@ where
     .await?;
     let records = batch.records;
     let receipt_ids = remember_candidate_batch_receipts(state, &records, &batch.observations)?;
+    let adaptation_preview = crate::commands::provider::build_codex_provider_adaptation_preview(
+        &provider,
+        &records,
+        &batch.observations,
+        &providers,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|error| error.to_string())?;
     reporter(batch_finished_event(total, &records));
     Ok(CodexProviderProtocolPreflightOutcome {
         provider,
+        adaptation_preview,
         records,
         observations: batch.observations,
         receipt_ids,
@@ -856,7 +881,7 @@ pub(crate) async fn automatic_codex_provider_preflight(
     ),
     String,
 > {
-    if provider.uses_manual_codex_protocol() || provider.uses_fixed_codex_responses_transport() {
+    if provider.uses_fixed_codex_responses_transport() {
         return Ok((provider, Vec::new(), Vec::new()));
     }
 
@@ -885,82 +910,22 @@ fn compile_preflight_candidates(
         return compile_codex_router_probe_candidates(provider, providers)
             .map(|candidates| (candidates, true));
     }
-    compile_provider_probe_candidates(provider).map(|candidates| (candidates, false))
-}
-
-fn apply_unanimous_probe_selection(
-    provider: &mut Provider,
-    records: &[ProtocolCompatibilityRecord],
-) -> Result<bool, String> {
-    let selections = records
-        .iter()
-        .filter(|record| record.result.readiness == ProbeReadiness::Verified)
-        .filter_map(|record| {
-            record
-                .result
-                .selected_transport
-                .map(|transport| (record.target.public_model.as_str(), transport))
-        })
-        .collect::<Vec<_>>();
-    if selections.is_empty() {
-        return Ok(false);
+    if provider.uses_manual_codex_protocol() && !provider.has_codex_protocol_overrides() {
+        return Ok((Vec::new(), false));
     }
-
-    let has_catalog = provider
-        .settings_config
-        .get("modelCatalog")
-        .or_else(|| provider.settings_config.get("model_catalog"))
-        .and_then(|catalog| catalog.get("models"))
-        .and_then(Value::as_array)
-        .is_some();
-    let mut updated = provider.clone();
-    if has_catalog {
-        for (public_model, transport) in &selections {
-            apply_selected_transport_to_catalog_model(&mut updated, public_model, *transport)?;
-        }
-    } else if records.len() != 1 {
-        return Err(
-            "Codex provider needs a model catalog before applying multiple probe selections"
-                .to_string(),
-        );
-    }
-
-    if let Some(selected) = unanimous_selected_transport(records) {
-        let mut selected_result = records[0].result.clone();
-        selected_result.selected_transport = Some(selected);
-        apply_probe_selection_to_provider(&mut updated, &selected_result)?;
-    } else if !has_catalog {
-        return Err("Codex provider probe selection could not be applied".to_string());
-    }
-    *provider = updated;
-    Ok(true)
-}
-
-fn unanimous_selected_transport(records: &[ProtocolCompatibilityRecord]) -> Option<TransportKind> {
-    if records.is_empty()
-        || records
-            .iter()
-            .any(|record| record.result.readiness != ProbeReadiness::Verified)
-    {
-        return None;
-    }
-    let selected = records
-        .first()
-        .and_then(|record| record.result.selected_transport)?;
-    records
-        .iter()
-        .all(|record| record.result.selected_transport == Some(selected))
-        .then_some(selected)
-}
-
-fn unanimous_selection_was_applied(records: &[ProtocolCompatibilityRecord]) -> bool {
-    unanimous_selected_transport(records).is_some()
-}
-
-fn probe_selection_was_applied(records: &[ProtocolCompatibilityRecord]) -> bool {
-    records.iter().any(|record| {
-        record.result.readiness == ProbeReadiness::Verified
-            && record.result.selected_transport.is_some()
+    compile_provider_probe_candidates(provider).map(|candidates| {
+        (
+            candidates
+                .into_iter()
+                .filter(|candidate| {
+                    crate::codex_multirouter::provider_set::codex_model_follows_automatic_protocol(
+                        provider,
+                        &candidate.public_model,
+                    )
+                })
+                .collect(),
+            false,
+        )
     })
 }
 
@@ -1466,27 +1431,26 @@ fn parse_transport_hint(value: Option<&str>) -> TransportKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_reasoning_override, apply_unanimous_probe_selection, batch_finished_event,
-        build_observation_records_for_result, clear_reasoning_override,
-        commit_codex_provider_set_batch_internal_with_publisher,
+        apply_reasoning_override, batch_finished_event, build_observation_records_for_result,
+        clear_reasoning_override, commit_codex_provider_set_batch_internal_with_publisher,
         commit_codex_provider_set_internal_with_publisher, compile_preflight_candidates,
         find_cached_candidate_result, inspect_reasoning_compatibility, plan_reasoning_override,
         prepare_codex_provider_set_batch_internal, prepare_codex_provider_set_internal,
         remember_candidate_batch_receipts, run_automatic_candidate_result_with,
         run_candidate_batch_with, run_candidate_batch_with_observations,
-        run_explicit_candidate_result_with, unanimous_selection_was_applied,
-        ApplyReasoningOverrideRequest, ClearReasoningOverrideRequest,
-        CodexProviderSetBatchSourceRequest, CodexProviderSetCommitIntent,
-        CodexProviderSetCommitStatus, CommitCodexProviderSetBatchRequest,
-        CommitCodexProviderSetRequest, PlanReasoningOverrideRequest,
-        PrepareCodexProviderSetBatchRequest, PrepareCodexProviderSetRequest,
+        run_explicit_candidate_result_with, ApplyReasoningOverrideRequest,
+        ClearReasoningOverrideRequest, CodexProviderSetBatchSourceRequest,
+        CodexProviderSetCommitIntent, CodexProviderSetCommitStatus,
+        CommitCodexProviderSetBatchRequest, CommitCodexProviderSetRequest,
+        PlanReasoningOverrideRequest, PrepareCodexProviderSetBatchRequest,
+        PrepareCodexProviderSetRequest,
     };
     use crate::protocol_compatibility::{
         HistoryReplay, ManualReasoningOverride, ProbeCandidate, ProbeReadiness, ProbeTargetKey,
         ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, ProtocolProbeProgressEvent,
         ReasoningProjection, ReasoningSemantic, ReasoningSource, TransportKind,
     };
-    use crate::provider::{Provider, ProviderMeta};
+    use crate::provider::{CodexProtocolMode, CodexProtocolOverride, Provider, ProviderMeta};
     use crate::{database::Database, store::AppState};
     use serde_json::json;
     use std::{
@@ -1521,8 +1485,8 @@ mod tests {
                 "apiFormat": "openai_responses",
                 "config": "model = \"model-a\"\nmodel_provider = \"provider-a\"\n[model_providers.provider-a]\nbase_url = \"https://example.test/v1\"\nwire_api = \"responses\"\n",
                 "modelCatalog": {"models": [
-                    {"model": "model-a", "upstreamModel": "model-a", "apiFormat": "openai_responses"},
-                    {"model": "model-b", "upstreamModel": "model-b", "apiFormat": "openai_responses"}
+                    {"model": "model-a", "upstreamModel": "model-a"},
+                    {"model": "model-b", "upstreamModel": "model-b"}
                 ]}
             }),
             website_url: None,
@@ -1775,7 +1739,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_provider_set_requires_split_intent_before_one_atomic_commit() {
+    fn mixed_provider_set_accepts_the_automatic_plan_in_one_atomic_commit() {
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let provider = ordinary_provider();
@@ -1809,35 +1773,13 @@ mod tests {
         )
         .expect("prepare mixed Provider Set");
 
-        let wrong_intent = commit_codex_provider_set_internal_with_publisher(
-            &state,
-            CommitCodexProviderSetRequest {
-                provider: provider.clone(),
-                receipt_ids: receipt_ids.clone(),
-                digest: preview.digest.clone(),
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
-            },
-            now,
-            |_| panic!("a rejected intent must not publish"),
-        )
-        .expect_err("Split requires explicit confirmation");
-        assert!(wrong_intent.contains("codex_provider_set_split_confirmation_required"));
-        assert!(db
-            .get_all_providers("codex")
-            .expect("read providers")
-            .is_empty());
-        assert!(db
-            .list_protocol_probe_observations("provider-a")
-            .expect("read observations after rejected split intent")
-            .is_empty());
-
-        commit_codex_provider_set_internal_with_publisher(
+        let outcome = commit_codex_provider_set_internal_with_publisher(
             &state,
             CommitCodexProviderSetRequest {
                 provider,
                 receipt_ids: receipt_ids.clone(),
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |artifact| {
@@ -1848,7 +1790,17 @@ mod tests {
                 )
             },
         )
-        .expect("commit confirmed split");
+        .expect("commit the automatic Split plan without a second confirmation");
+
+        assert_eq!(
+            outcome.snapshot.adaptation.persistence,
+            crate::commands::provider::CodexProviderPersistence::Split
+        );
+        assert_eq!(
+            outcome.snapshot.adaptation.effective_transport,
+            Some(crate::commands::provider::CodexEffectiveTransport::Mixed)
+        );
+        assert_eq!(outcome.snapshot.adaptation.models.len(), 2);
 
         let providers = db
             .get_all_providers("codex")
@@ -1876,6 +1828,91 @@ mod tests {
             Err(error) => error,
         };
         assert!(consumed.contains("codex_provider_set_probe_required"));
+    }
+
+    #[test]
+    fn manual_per_model_override_prepares_a_split_with_receipts_only_for_auto_models() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db);
+        let mut provider = ordinary_provider();
+        let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+        meta.codex_protocol_mode = Some(crate::provider::CodexProtocolMode::Manual);
+        meta.codex_protocol_overrides.insert(
+            "model-b".to_string(),
+            crate::provider::CodexProtocolOverride::OpenaiChat,
+        );
+        let now = chrono::Utc::now().timestamp();
+        let receipt_ids = vec![remember_provider_set_receipt(
+            &state,
+            provider_set_record(
+                &provider,
+                "model-a",
+                "model-a",
+                TransportKind::OpenAiResponses,
+                now,
+            ),
+        )];
+
+        let preview = prepare_codex_provider_set_internal(
+            &state,
+            PrepareCodexProviderSetRequest {
+                provider,
+                receipt_ids,
+            },
+            now,
+        )
+        .expect("prepare mixed automatic/manual Provider Set");
+
+        assert!(matches!(
+            preview.plan,
+            crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. }
+        ));
+        assert_eq!(preview.responses_models, vec!["model-a"]);
+        assert_eq!(preview.chat_models, vec!["model-b"]);
+    }
+
+    #[test]
+    fn wizard_batch_uses_the_same_per_model_manual_override_planner() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db);
+        let mut provider = ordinary_provider();
+        let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+        meta.codex_protocol_mode = Some(crate::provider::CodexProtocolMode::Manual);
+        meta.codex_protocol_overrides.insert(
+            "model-b".to_string(),
+            crate::provider::CodexProtocolOverride::OpenaiChat,
+        );
+        let now = chrono::Utc::now().timestamp();
+        let receipt_ids = vec![remember_provider_set_receipt(
+            &state,
+            provider_set_record(
+                &provider,
+                "model-a",
+                "model-a",
+                TransportKind::OpenAiResponses,
+                now,
+            ),
+        )];
+
+        let (_, preview) = prepare_codex_provider_set_batch_internal(
+            &state,
+            PrepareCodexProviderSetBatchRequest {
+                sources: vec![CodexProviderSetBatchSourceRequest {
+                    provider,
+                    receipt_ids,
+                }],
+                router: router_provider("provider-a"),
+            },
+            now,
+        )
+        .expect("prepare wizard batch with mixed automatic/manual selection");
+
+        assert!(matches!(
+            preview.source_previews[0].plan,
+            crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. }
+        ));
+        assert_eq!(preview.source_previews[0].responses_models, vec!["model-a"]);
+        assert_eq!(preview.source_previews[0].chat_models, vec!["model-b"]);
     }
 
     #[test]
@@ -1918,7 +1955,7 @@ mod tests {
                 provider: provider.clone(),
                 receipt_ids: receipt_ids.clone(),
                 digest: preview.digest.clone(),
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |_| panic!("a conflicting commit must not publish"),
@@ -1939,7 +1976,7 @@ mod tests {
                 provider,
                 receipt_ids,
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |_| panic!("a Single Provider has no Router projection"),
@@ -1995,7 +2032,7 @@ mod tests {
                 provider,
                 receipt_ids: receipt_ids.clone(),
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |_| Err("injected projection failure".to_string()),
@@ -2080,7 +2117,7 @@ mod tests {
                 provider: provider.clone(),
                 receipt_ids: receipt_ids.clone(),
                 digest: preview.digest.clone(),
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |_| panic!("a failed database transaction must not publish"),
@@ -2115,7 +2152,7 @@ mod tests {
                 provider,
                 receipt_ids: receipt_ids.clone(),
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |artifact| {
@@ -2181,7 +2218,6 @@ mod tests {
         )
         .expect("prepare batch");
 
-        assert!(preview.requires_split_confirmation);
         assert!(db
             .get_all_providers("codex")
             .expect("read providers after prepare")
@@ -2197,7 +2233,7 @@ mod tests {
                 sources,
                 router,
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |artifact| {
@@ -2211,6 +2247,11 @@ mod tests {
         .expect("commit batch");
 
         assert_eq!(outcome.router.id, "router-provider");
+        assert_eq!(outcome.source_snapshots.len(), 1);
+        assert_eq!(
+            outcome.source_snapshots[0].adaptation.persistence,
+            crate::commands::provider::CodexProviderPersistence::Split
+        );
         let providers = db.get_all_providers("codex").expect("read committed batch");
         for expected in [
             "provider-a",
@@ -2287,7 +2328,7 @@ mod tests {
                 sources,
                 router,
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |_| Err("injected projection failure".to_string()),
@@ -2364,7 +2405,7 @@ mod tests {
                 sources: sources.clone(),
                 router: router.clone(),
                 digest: preview.digest.clone(),
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |_| panic!("a conflicting wizard commit must not publish"),
@@ -2385,7 +2426,7 @@ mod tests {
                 sources,
                 router,
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |artifact| {
@@ -2437,7 +2478,6 @@ mod tests {
             .expect("fixed Responses sources do not require probe receipts");
 
             assert!(!preview.blocked);
-            assert!(!preview.requires_split_confirmation);
             assert!(matches!(
                 preview.source_previews[0].plan,
                 crate::codex_multirouter::provider_set::CodexProviderSetPlan::Single {
@@ -2455,7 +2495,7 @@ mod tests {
                     sources,
                     router: router.clone(),
                     digest: preview.digest,
-                    intent: CodexProviderSetCommitIntent::AcceptSingle,
+                    intent: CodexProviderSetCommitIntent::AcceptAuto,
                 },
                 now,
                 |artifact| {
@@ -2540,7 +2580,7 @@ mod tests {
                 }],
                 router,
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |_| panic!("blocked batch must not publish"),
@@ -2624,13 +2664,16 @@ mod tests {
                 provider: provider.clone(),
                 receipt_ids: receipt_ids.clone(),
                 digest: preview.digest.clone(),
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
             |_| panic!("wrong manual intent must not publish"),
         )
         .expect_err("manual mode requires explicit manual confirmation");
-        assert!(error.contains("codex_provider_set_manual_intent_required"));
+        assert!(
+            error.contains("codex_provider_set_manual_intent_required"),
+            "unexpected commit error: {error}"
+        );
         assert!(db
             .get_all_providers("codex")
             .expect("read Providers")
@@ -2661,121 +2704,6 @@ mod tests {
                 .expect("read observations after manual override")
                 .len(),
             4
-        );
-    }
-
-    #[test]
-    fn partial_model_selection_keeps_that_model_and_the_global_protocol_unchanged() {
-        let mut provider = ordinary_provider();
-        let records = vec![
-            probe_record(
-                "model-a",
-                Some(TransportKind::OpenAiChat),
-                ProbeReadiness::Verified,
-            ),
-            probe_record(
-                "model-b",
-                Some(TransportKind::OpenAiChat),
-                ProbeReadiness::Partial,
-            ),
-        ];
-
-        assert!(apply_unanimous_probe_selection(&mut provider, &records)
-            .expect("apply unanimous selection"));
-        assert_eq!(
-            provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.api_format.as_deref()),
-            Some("openai_responses")
-        );
-        assert_eq!(provider.settings_config["apiFormat"], "openai_responses");
-        assert!(provider.settings_config["config"]
-            .as_str()
-            .expect("config")
-            .contains("wire_api = \"responses\""));
-        assert_eq!(
-            provider.settings_config["modelCatalog"]["models"][0]["apiFormat"],
-            "openai_chat"
-        );
-        assert_eq!(
-            provider.settings_config["modelCatalog"]["models"][1]["apiFormat"],
-            "openai_responses"
-        );
-    }
-
-    #[test]
-    fn mixed_multi_model_selection_updates_each_model_and_keeps_the_global_protocol() {
-        let mut provider = ordinary_provider();
-        let original = provider.clone();
-        let records = vec![
-            probe_record(
-                "model-a",
-                Some(TransportKind::OpenAiResponses),
-                ProbeReadiness::Verified,
-            ),
-            probe_record(
-                "model-b",
-                Some(TransportKind::OpenAiChat),
-                ProbeReadiness::Verified,
-            ),
-        ];
-
-        assert!(apply_unanimous_probe_selection(&mut provider, &records)
-            .expect("apply per-model selections"));
-        assert_eq!(
-            provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.api_format.as_deref()),
-            original
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.api_format.as_deref())
-        );
-        assert_eq!(
-            provider.settings_config["apiFormat"],
-            original.settings_config["apiFormat"]
-        );
-        assert_eq!(
-            provider.settings_config["config"],
-            original.settings_config["config"]
-        );
-        assert_eq!(
-            provider.settings_config["modelCatalog"]["models"][0]["apiFormat"],
-            "openai_responses"
-        );
-        assert_eq!(
-            provider.settings_config["modelCatalog"]["models"][1]["apiFormat"],
-            "openai_chat"
-        );
-        assert!(!unanimous_selection_was_applied(&records));
-    }
-
-    #[test]
-    fn catalog_match_failure_does_not_partially_apply_earlier_model_selections() {
-        let mut provider = ordinary_provider();
-        let original = provider.clone();
-        let records = vec![
-            probe_record(
-                "model-a",
-                Some(TransportKind::OpenAiChat),
-                ProbeReadiness::Verified,
-            ),
-            probe_record(
-                "model-missing",
-                Some(TransportKind::OpenAiResponses),
-                ProbeReadiness::Verified,
-            ),
-        ];
-
-        let error = apply_unanimous_probe_selection(&mut provider, &records)
-            .expect_err("missing catalog model must reject the whole update");
-
-        assert!(error.contains("model-missing"));
-        assert_eq!(
-            serde_json::to_value(provider).expect("serialize provider after rejection"),
-            serde_json::to_value(original).expect("serialize original provider")
         );
     }
 
@@ -2821,6 +2749,33 @@ mod tests {
                 && candidate.route_id.as_deref() == Some("target-route")
                 && candidate.canonical_endpoint() == "https://example.test/v1"
         }));
+    }
+
+    #[test]
+    fn explicit_preflight_compiles_only_models_that_follow_automatic_protocol_selection() {
+        let mut provider = ordinary_provider();
+        let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+        meta.codex_protocol_mode = Some(CodexProtocolMode::Manual);
+        meta.codex_protocol_overrides
+            .insert("model-a".to_string(), CodexProtocolOverride::OpenaiChat);
+        let original = provider.clone();
+
+        let (candidates, is_router) = compile_preflight_candidates(&provider, &HashMap::new())
+            .expect("compile ordinary Provider preflight");
+
+        assert!(!is_router);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.public_model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model-b"]
+        );
+        assert_eq!(
+            serde_json::to_value(provider).expect("serialize Provider after compile"),
+            serde_json::to_value(original).expect("serialize original Provider"),
+            "preflight candidate compilation must not mutate the Provider draft"
+        );
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -20,6 +21,10 @@ const apiMocks = vi.hoisted(() => ({
   upsert: vi.fn(),
   delete: vi.fn(),
   sync: vi.fn(),
+  updateTrayMenu: vi.fn().mockResolvedValue(true),
+  retryCodexMultiRouterProjection: vi.fn().mockResolvedValue({
+    state: "ready",
+  }),
 }));
 const protocolMocks = vi.hoisted(() => ({
   preflight: vi.fn(),
@@ -30,10 +35,17 @@ const callbackOutcome = vi.hoisted(() => ({
   resolved: vi.fn(),
   rejected: vi.fn(),
 }));
+const queryClientMocks = vi.hoisted(() => ({
+  invalidateQueries: vi.fn().mockResolvedValue(undefined),
+}));
 const formSubmission = vi.hoisted(() => ({
   current: null as UniversalProvider | null,
 }));
-const toastMocks = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+const toastMocks = vi.hoisted(() => ({
+  success: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+}));
 
 const provider: UniversalProvider = {
   id: "universal-contract",
@@ -55,6 +67,12 @@ const preflightOutcome: CodexProviderProtocolPreflightOutcome = {
   observations: [],
   receiptIds: ["receipt-qwen"],
   protocolApplied: false,
+  adaptationPreview: {
+    persistence: "single",
+    status: "ready",
+    effectiveTransport: "open_ai_responses",
+    models: [],
+  },
 };
 
 function preview(
@@ -87,7 +105,21 @@ const splitPreview = preview({
   },
 });
 
-vi.mock("@/lib/api", () => ({ universalProvidersApi: apiMocks }));
+vi.mock("@tanstack/react-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-query")>();
+  return {
+    ...actual,
+    useQueryClient: () => queryClientMocks,
+  };
+});
+vi.mock("@/lib/api", () => ({
+  universalProvidersApi: apiMocks,
+  providersApi: {
+    updateTrayMenu: apiMocks.updateTrayMenu,
+    retryCodexMultiRouterProjection:
+      apiMocks.retryCodexMultiRouterProjection,
+  },
+}));
 vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@/lib/api/protocol-compatibility")>();
@@ -105,20 +137,25 @@ vi.mock("@/components/universal/UniversalProviderCard", () => ({
 vi.mock("@/components/universal/UniversalProviderFormModal", () => ({
   UniversalProviderFormModal: ({
     onSaveAndSync,
+    onSave,
   }: {
     onSaveAndSync: (provider: UniversalProvider) => void | Promise<void>;
+    onSave?: (provider: UniversalProvider) => void | Promise<void>;
   }) => (
-    <button
-      type="button"
-      onClick={() =>
-        Promise.resolve(onSaveAndSync(formSubmission.current!)).then(
-          callbackOutcome.resolved,
-          callbackOutcome.rejected,
-        )
-      }
-    >
-      invoke-save-and-sync
-    </button>
+    <>
+      {onSave ? <span>legacy-save-present</span> : null}
+      <button
+        type="button"
+        onClick={() =>
+          Promise.resolve(onSaveAndSync(formSubmission.current!)).then(
+            callbackOutcome.resolved,
+            callbackOutcome.rejected,
+          )
+        }
+      >
+        invoke-save-and-sync
+      </button>
+    </>
   ),
 }));
 
@@ -128,14 +165,25 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
     apiMocks.getAll.mockResolvedValue({});
     protocolMocks.preflight.mockResolvedValue(preflightOutcome);
     protocolMocks.prepare.mockResolvedValue(singlePreview);
-    protocolMocks.commit.mockResolvedValue({ preview: singlePreview });
+    protocolMocks.commit.mockResolvedValue({
+      preview: singlePreview,
+      codexSnapshot: null,
+      status: "committed",
+      projectionErrorCode: null,
+      projections: [],
+    });
     formSubmission.current = provider;
   });
 
   it("deep-probes, prepares, and directly commits a Single plan", async () => {
     render(<UniversalProviderPanel />);
+    expect(screen.queryByText("legacy-save-present")).toBeNull();
     fireEvent.click(
       screen.getByRole("button", { name: "invoke-save-and-sync" }),
+    );
+    expect(protocolMocks.preflight).not.toHaveBeenCalled();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认测试" }),
     );
 
     await waitFor(() => expect(callbackOutcome.resolved).toHaveBeenCalled());
@@ -150,9 +198,63 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
       provider,
       ["receipt-qwen"],
       "universal-digest",
-      "accept_single",
+      "accept_auto",
     );
     expect(apiMocks.saveAndSync).not.toHaveBeenCalled();
+    expect(queryClientMocks.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["providers"],
+    });
+    expect(queryClientMocks.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["codex-provider-adaptation-summaries"],
+    });
+    expect(apiMocks.updateTrayMenu).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a committed projection warning instead of a save failure or success", async () => {
+    protocolMocks.commit.mockResolvedValueOnce({
+      preview: singlePreview,
+      codexSnapshot: null,
+      status: "committed_with_projection_error",
+      projectionErrorCode: "codex_provider_set_live_projection_failed",
+      projections: [
+        {
+          schemaVersion: 2,
+          routerProviderId: "router-needs-refresh",
+          state: "pending",
+          dependencyFingerprint: "pending-fingerprint",
+          generatedAt: "2026-08-30T00:00:00Z",
+          warnings: [],
+          routes: [],
+          lastErrorCode: "projection_publish_failed",
+        },
+      ],
+    });
+
+    render(<UniversalProviderPanel />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "invoke-save-and-sync" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "确认测试" }));
+
+    await waitFor(() => expect(callbackOutcome.resolved).toHaveBeenCalled());
+    expect(toastMocks.warning).toHaveBeenCalledWith(
+      expect.stringContaining("已保存"),
+      expect.objectContaining({
+        action: expect.objectContaining({ label: "重新投影" }),
+      }),
+    );
+    expect(toastMocks.success).not.toHaveBeenCalled();
+    expect(toastMocks.error).not.toHaveBeenCalled();
+
+    const warningOptions = toastMocks.warning.mock.calls[0]?.[1] as {
+      action?: { onClick?: () => void | Promise<void> };
+    };
+    await act(async () => {
+      await warningOptions.action?.onClick?.();
+    });
+    expect(apiMocks.retryCodexMultiRouterProjection).toHaveBeenCalledWith(
+      "router-needs-refresh",
+    );
   });
 
   it("keeps advanced manual protocol separate from automatic probing", async () => {
@@ -184,23 +286,15 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
     );
   });
 
-  it("shows backend model groups and commits Split only after confirmation", async () => {
+  it("commits an automatic Split without a second split confirmation", async () => {
     protocolMocks.prepare.mockResolvedValueOnce(splitPreview);
 
     render(<UniversalProviderPanel />);
     fireEvent.click(
       screen.getByRole("button", { name: "invoke-save-and-sync" }),
     );
-
-    const dialog = await screen.findByRole("dialog", {
-      name: "按协议自动拆分",
-    });
-    expect(within(dialog).getByText("qwen3.8")).toBeInTheDocument();
-    expect(within(dialog).getByText("deepseek-v4")).toBeInTheDocument();
-    expect(protocolMocks.commit).not.toHaveBeenCalled();
-
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "确认按协议拆分" }),
+      await screen.findByRole("button", { name: "确认测试" }),
     );
 
     await waitFor(() => expect(callbackOutcome.resolved).toHaveBeenCalled());
@@ -209,8 +303,11 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
       provider,
       ["receipt-qwen"],
       "universal-digest",
-      "confirm_split",
+      "accept_auto",
     );
+    expect(
+      screen.queryByRole("button", { name: "确认按协议拆分" }),
+    ).not.toBeInTheDocument();
     expect(apiMocks.saveAndSync).not.toHaveBeenCalled();
   });
 
@@ -237,6 +334,9 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "invoke-save-and-sync" }),
     );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认测试" }),
+    );
 
     const dialog = await screen.findByRole("dialog", {
       name: "暂时无法保存",
@@ -258,6 +358,9 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
     render(<UniversalProviderPanel />);
     fireEvent.click(
       screen.getByRole("button", { name: "invoke-save-and-sync" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认测试" }),
     );
 
     const dialog = await screen.findByRole("dialog", {

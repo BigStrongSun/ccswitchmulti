@@ -15,7 +15,10 @@ const {
   commitCodexProviderSetBatch: vi.fn(),
 }));
 
-vi.mock("@/lib/api/protocol-compatibility", () => ({
+vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@/lib/api/protocol-compatibility")
+  >()),
   preflightCodexProviderProtocolCompatibility,
   prepareCodexProviderSetBatch,
   commitCodexProviderSetBatch,
@@ -161,6 +164,7 @@ describe("CodexMultiRouterWizard", () => {
       | ((value: {
           preview: Record<string, unknown>;
           router: Provider;
+          sourceSnapshots: never[];
           projections: never[];
           status: "committed";
           projectionErrorCode: null;
@@ -169,6 +173,7 @@ describe("CodexMultiRouterWizard", () => {
     const firstCommit = new Promise<{
       preview: Record<string, unknown>;
       router: Provider;
+      sourceSnapshots: never[];
       projections: never[];
       status: "committed";
       projectionErrorCode: null;
@@ -195,6 +200,7 @@ describe("CodexMultiRouterWizard", () => {
           blocked: false,
         },
         router,
+        sourceSnapshots: [],
         projections: [],
         status: "committed" as const,
         projectionErrorCode: null,
@@ -236,6 +242,7 @@ describe("CodexMultiRouterWizard", () => {
         blocked: false,
       },
       router: firstRouter,
+      sourceSnapshots: [],
       projections: [],
       status: "committed",
       projectionErrorCode: null,

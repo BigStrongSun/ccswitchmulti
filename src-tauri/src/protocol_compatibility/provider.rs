@@ -182,44 +182,6 @@ pub fn apply_selected_transport_to_provider(
     Ok(())
 }
 
-pub fn apply_selected_transport_to_catalog_model(
-    provider: &mut Provider,
-    public_model: &str,
-    transport: TransportKind,
-) -> Result<(), String> {
-    let catalog_key = if provider.settings_config.get("modelCatalog").is_some() {
-        "modelCatalog"
-    } else {
-        "model_catalog"
-    };
-    let models = provider
-        .settings_config
-        .get_mut(catalog_key)
-        .and_then(|catalog| catalog.get_mut("models"))
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| {
-            "Codex provider has no model catalog for per-model protocol selection".to_string()
-        })?;
-    let matching = models
-        .iter()
-        .enumerate()
-        .filter_map(|(index, model)| {
-            (string_field(model, &["model", "id", "slug"]) == Some(public_model)).then_some(index)
-        })
-        .collect::<Vec<_>>();
-    let [index] = matching.as_slice() else {
-        return Err(format!(
-            "Codex protocol probe model `{public_model}` must match exactly one model catalog entry"
-        ));
-    };
-    let api_format = match transport {
-        TransportKind::OpenAiChat => "openai_chat",
-        TransportKind::OpenAiResponses => "openai_responses",
-    };
-    models[*index]["apiFormat"] = Value::String(api_format.to_string());
-    Ok(())
-}
-
 fn resolve_primary_model(provider: &Provider, configured_model: &str) -> (String, String) {
     let models = provider
         .settings_config

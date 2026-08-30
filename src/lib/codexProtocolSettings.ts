@@ -1,11 +1,13 @@
 import { normalizeCodexChatReasoningForSave } from "@/lib/codexChatReasoning";
 import { buildLocalProxyRequestOverrides } from "@/lib/requestOverrides";
+import { normalizeCodexPublicModelKey } from "@/lib/protocol-lab/codex-overrides";
 import type {
   CodexApiFormat,
   CodexCatalogModel,
   CodexChatReasoning,
   CodexHistoryReplay,
   CodexProtocolMode,
+  CodexProtocolOverride,
   CodexReasoningProjection,
   CodexToolSchemaDialect,
   PromptCacheRoutingMode,
@@ -16,6 +18,7 @@ import type {
 
 export interface CodexManualProtocolSettings {
   protocolMode: CodexProtocolMode;
+  protocolOverrides?: Record<string, CodexProtocolOverride>;
   apiFormat: CodexApiFormat;
   reasoningProjection: CodexReasoningProjection;
   toolSchemaDialect: CodexToolSchemaDialect;
@@ -64,21 +67,34 @@ export function buildCodexProtocolMeta(
 ): ProviderMeta {
   const {
     codexProtocolMode: _mode,
+    codexProtocolOverrides: _overrides,
     codexReasoningProjection: _projection,
     codexToolSchemaDialect: _schema,
     codexHistoryReplay: _history,
     ...base
   } = current ?? {};
+  const protocolOverrides = Object.fromEntries(
+    Object.entries(settings.protocolOverrides ?? {}).flatMap(
+      ([model, transport]) => {
+        const key = normalizeCodexPublicModelKey(model);
+        return key ? [[key, transport] as const] : [];
+      },
+    ),
+  );
+  const baseWithOverrides =
+    Object.keys(protocolOverrides).length > 0
+      ? { ...base, codexProtocolOverrides: protocolOverrides }
+      : base;
 
   if (
     settings.protocolMode === "auto" ||
     !matchesProbeTransport(settings.apiFormat)
   ) {
-    return base;
+    return baseWithOverrides;
   }
 
   return {
-    ...base,
+    ...baseWithOverrides,
     codexProtocolMode: "manual",
     codexToolSchemaDialect: settings.toolSchemaDialect,
     codexHistoryReplay:

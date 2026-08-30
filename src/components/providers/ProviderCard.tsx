@@ -30,6 +30,7 @@ import {
 import { useProviderHealth } from "@/lib/query/failover";
 import { useUsageQuery } from "@/lib/query/queries";
 import { resolveProviderIcon } from "@/utils/providerIcon";
+import type { CodexProviderAdaptationSummary } from "@/lib/api/protocol-compatibility";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -41,6 +42,7 @@ interface ProviderCardProps {
   provider: Provider;
   isCurrent: boolean;
   appId: AppId;
+  adaptationSummary?: CodexProviderAdaptationSummary;
   isInConfig?: boolean; // OpenCode: 是否已添加到 opencode.json
   isOmo?: boolean;
   isOmoSlim?: boolean;
@@ -206,6 +208,7 @@ export function ProviderCard({
   provider,
   isCurrent,
   appId,
+  adaptationSummary,
   isInConfig = true,
   isOmo = false,
   isOmoSlim = false,
@@ -305,6 +308,25 @@ export function ProviderCard({
     ? provider.meta
     : codexRouteOauthMeta;
   const codexHasRouting = appId === "codex" && hasCodexRoutingConfig(provider);
+  const isGeneratedCodexProtocolFacade =
+    appId === "codex" &&
+    (provider.settingsConfig.codexProtocolSet as { role?: unknown } | undefined)
+      ?.role === "facade";
+  const isUserCodexMultiRouter =
+    codexHasRouting && !isGeneratedCodexProtocolFacade;
+  const codexAdaptationLabel =
+    appId !== "codex" || isUserCodexMultiRouter || !adaptationSummary
+      ? null
+      : adaptationSummary.persistence === "split" ||
+          adaptationSummary.effectiveTransport === "mixed"
+        ? "自动适配 · Responses + Chat"
+        : adaptationSummary.effectiveTransport === "open_ai_responses"
+          ? "Responses"
+          : adaptationSummary.effectiveTransport === "open_ai_chat"
+            ? "Chat"
+            : adaptationSummary.persistence === "legacy_mixed"
+              ? "旧版混合协议"
+              : null;
   // xAI OAuth (SuperGrok 反代)：额度经自管 OAuth token 自动显示，与 codex_oauth 同构
   const isXaiOauth = provider.meta?.providerType === PROVIDER_TYPES.XAI_OAUTH;
   // 统一权威谓词覆盖 MultiRouter、托管 OAuth 与协议转换。
@@ -461,7 +483,21 @@ export function ProviderCard({
                 </span>
               )}
 
+              {appId === "codex" && isUserCodexMultiRouter && (
+                <span className="inline-flex items-center rounded-md bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                  MultiRouter
+                </span>
+              )}
+
+              {appId === "codex" && codexAdaptationLabel && (
+                <span className="inline-flex items-center rounded-md bg-cyan-100 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-800 dark:bg-cyan-900/40 dark:text-cyan-200">
+                  {codexAdaptationLabel}
+                </span>
+              )}
+
               {codexNeedsRouting &&
+                !isUserCodexMultiRouter &&
+                !codexAdaptationLabel &&
                 (codexHasRouting ? (
                   <span className="inline-flex items-center rounded-md bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
                     MultiRouter

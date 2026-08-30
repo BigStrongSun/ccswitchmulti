@@ -13,7 +13,10 @@ import {
 } from "@/components/providers/forms/ProviderForm";
 import { UniversalProviderFormModal } from "@/components/universal/UniversalProviderFormModal";
 import { UniversalProviderPanel } from "@/components/universal";
-import { useUniversalProviderSetSave } from "@/components/universal/useUniversalProviderSetSave";
+import {
+  isUniversalProviderSetCancelled,
+  useUniversalProviderSetSave,
+} from "@/components/universal/useUniversalProviderSetSave";
 import {
   isCodexProviderSetCancelled,
   useCodexProviderSetSave,
@@ -68,8 +71,11 @@ export function AddProviderDialog({
   const [selectedUniversalPreset, setSelectedUniversalPreset] =
     useState<UniversalProviderPreset | null>(null);
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
-  const { persistUniversalProviderSet, dialogs: universalProviderSetDialogs } =
-    useUniversalProviderSetSave();
+  const {
+    persistUniversalProviderSet,
+    retryProjection,
+    dialogs: universalProviderSetDialogs,
+  } = useUniversalProviderSetSave();
   const { persistCodexProviderSet, dialogs: codexProviderSetDialogs } =
     useCodexProviderSetSave();
   const codexDraftProviderIdRef = useRef<string | null>(null);
@@ -91,13 +97,41 @@ export function AddProviderDialog({
   const handleUniversalProviderSave = useCallback(
     async (provider: UniversalProvider) => {
       try {
-        await persistUniversalProviderSet(provider);
-        toast.success(
-          t("universalProvider.addedAndSynced", {
-            defaultValue: "统一供应商已添加并同步",
-          }),
-        );
+        const outcome = await persistUniversalProviderSet(provider);
+        if (outcome.status === "committed_with_projection_error") {
+          const hasRetryTarget = outcome.projections.some(
+            (projection) => projection.state === "pending",
+          );
+          toast.warning(
+            "统一供应商已保存，但 Codex 当前配置待刷新；其他应用配置不受影响。",
+            hasRetryTarget
+              ? {
+                  action: {
+                    label: "重新投影",
+                    onClick: () => {
+                      void retryProjection(outcome)
+                        .then(() => toast.success("Codex 当前配置已重新投影"))
+                        .catch((error) => {
+                          console.error(
+                            "Failed to retry Universal Provider Set projection",
+                            error,
+                          );
+                          toast.error("重新投影失败，请稍后再试");
+                        });
+                    },
+                  },
+                }
+              : undefined,
+          );
+        } else {
+          toast.success(
+            t("universalProvider.addedAndSynced", {
+              defaultValue: "统一供应商已添加并同步",
+            }),
+          );
+        }
       } catch (error) {
+        if (isUniversalProviderSetCancelled(error)) throw error;
         console.error(
           "[AddProviderDialog] Failed to atomically save and sync universal provider",
           error,
@@ -107,14 +141,14 @@ export function AddProviderDialog({
             defaultValue: "保存并同步失败，原配置未被修改",
           }),
         );
-        return;
+        throw error;
       }
 
       setUniversalFormOpen(false);
       setSelectedUniversalPreset(null);
       onOpenChange(false);
     },
-    [persistUniversalProviderSet, t, onOpenChange],
+    [persistUniversalProviderSet, retryProjection, t, onOpenChange],
   );
 
   const handleUniversalFormClose = useCallback(() => {
@@ -517,7 +551,7 @@ export function AddProviderDialog({
         <UniversalProviderFormModal
           isOpen={universalFormOpen}
           onClose={handleUniversalFormClose}
-          onSave={handleUniversalProviderSave}
+          onSaveAndSync={handleUniversalProviderSave}
           initialPreset={selectedUniversalPreset}
         />
       )}

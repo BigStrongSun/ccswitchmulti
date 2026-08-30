@@ -62,7 +62,7 @@ describe("Universal Provider Set API", () => {
       provider,
       ["receipt-1"],
       "digest-1",
-      "confirm_split",
+      "accept_auto",
     );
 
     expect(invokeMock).toHaveBeenNthCalledWith(
@@ -78,7 +78,7 @@ describe("Universal Provider Set API", () => {
           provider,
           receiptIds: ["receipt-1"],
           digest: "digest-1",
-          intent: "confirm_split",
+          intent: "accept_auto",
         },
       },
     );

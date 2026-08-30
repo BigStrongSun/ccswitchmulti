@@ -54,6 +54,10 @@ import { useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { isTextEditableTarget } from "@/utils/domUtils";
+import {
+  listCodexProviderAdaptationSummaries,
+  type CodexProviderAdaptationSummary,
+} from "@/lib/api/protocol-compatibility";
 
 interface ProviderListProps {
   providers: Record<string, Provider>;
@@ -105,6 +109,21 @@ export function ProviderList({
   const { sortedProviders, sensors, handleDragEnd } = useDragSort(
     providers,
     appId,
+  );
+  const { data: codexAdaptationSummaries = [] } = useQuery({
+    queryKey: ["codex-provider-adaptation-summaries"],
+    queryFn: listCodexProviderAdaptationSummaries,
+    enabled: appId === "codex",
+  });
+  const codexAdaptationSummaryByProvider = useMemo(
+    () =>
+      new Map(
+        codexAdaptationSummaries.map((summary) => [
+          summary.providerId,
+          summary,
+        ]),
+      ),
+    [codexAdaptationSummaries],
   );
 
   const { data: opencodeLiveIds } = useQuery({
@@ -482,6 +501,9 @@ export function ProviderList({
                         : provider.id === currentProviderId
                 }
                 appId={appId}
+                adaptationSummary={codexAdaptationSummaryByProvider.get(
+                  provider.id,
+                )}
                 isInConfig={isProviderInConfig(provider.id)}
                 isOmo={isOmo}
                 isOmoSlim={isOmoSlim}
@@ -622,6 +644,7 @@ interface SortableProviderCardProps {
   provider: Provider;
   isCurrent: boolean;
   appId: AppId;
+  adaptationSummary?: CodexProviderAdaptationSummary;
   isInConfig: boolean;
   isOmo: boolean;
   isOmoSlim: boolean;
@@ -653,6 +676,7 @@ function SortableProviderCard({
   provider,
   isCurrent,
   appId,
+  adaptationSummary,
   isInConfig,
   isOmo,
   isOmoSlim,
@@ -698,6 +722,7 @@ function SortableProviderCard({
         provider={provider}
         isCurrent={isCurrent}
         appId={appId}
+        adaptationSummary={adaptationSummary}
         isInConfig={isInConfig}
         isOmo={isOmo}
         isOmoSlim={isOmoSlim}

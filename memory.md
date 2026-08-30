@@ -1,5 +1,17 @@
 # CC Switch Repository Memory
 
+## 2026-08-30 Codex Provider 协议适配读模型、统一 workflow 与三入口收口
+
+- 本轮在 `main@75ce07ba` 上落实协议适配计划，没有新开分支。领域判断从页面收回后端：`ProviderMeta` 新增 `codexProtocolMode` 与规范化模型名 Key 的 `codexProtocolOverrides`；旧 `modelCatalog[].apiFormat` 和旧 Provider 级 manual 仅在读取/正常保存时原子迁移，不再作为新数据写入模型目录。
+- 后端新增 `get_codex_provider_editor_snapshot` 与 `list_codex_provider_adaptation_summaries`。读模型同时恢复逻辑 Provider、Single/Split/legacy 状态、每模型实际协议、自动/手工来源、Chat/Responses 独立证据、过期状态及 projection；列表仍保持扁平，内部同协议叶子不暴露，门面只显示 `自动适配 · Responses + Chat` 小标记。
+- Provider Set 按启用模型逐项规划：跟随自动必须持有当前请求指纹的 Verified receipt；手工覆盖允许无证据保存并在 read model 中告警；同协议落一个严格 Provider，混合协议落可见门面和两个隐藏叶子；自动 Partial/Failed 阻塞且数据库零写入。HTTP 521/5xx、网络、超时、401/403/429继续归类为可用性/认证错误，不能被当作协议不支持。
+- `Protocol Lab` 已抽为无页面概念的 reducer、adapter 和 `useProtocolLabWorkflow`。Add/Edit、MultiRouter Wizard、Universal 三个入口共用 consent、probe、prepare、commit、blocked、stale retry、projection warning 状态机；自动 Single/Split 都以 `accept_auto` 一次提交，不再弹 Split 二次确认。探测只更新 workflow/read model，不再改写顶层 `apiFormat`。
+- Wizard 保留模型源、模型列表、路由预览、启用及历史修复，但删除自身 receipt/Split 编排；Universal 由后端生成最终 Codex draft 后走同一事务。Universal 首次保存且当前没有 Codex Provider 时不会误投影未激活 facade；真实 projection 失败返回“已保存、待刷新”而不是保存失败。
+- Responses 续轮探测的三种请求体语义已锁定：`native_only` 原样回放上游 reasoning item；`responses_reasoning_text_content` 构造真实 `reasoning_text` content，绝不伪装为 summary；`omit` 只删除 reasoning item，保留工具调用与结果。只有明确的 400/422 replay-shape 拒绝才逐级降级，普通 400 不降级。
+- 生产等价探测继续由同一 candidate/request preparer 生成 endpoint、认证、模型映射、Custom User-Agent、header/body override、推理参数与请求预算，并进入 receipt 指纹；旧测试夹具也改用生产 preparer，避免 Chat 请求错误硬编码到 `/responses`。
+- Fresh 源码门禁：Rust 全量 `3718 passed / 0 failed / 6 ignored`；前端全量 `162 files / 1290 tests`；定向 Provider Set 49/49、ordinary preflight 11/11、Universal 22/22、protocol compatibility 124/124、Codex request contract 24/24、Responses continuation 4/4；typecheck、Prettier、rustfmt、`cargo check --no-default-features`、Clippy 和 `git diff --check` 均退出码 0。Clippy 仍有 28 条仓库既有非阻断 warning。本条记录时 Windows installer 的构建、安装和真实桌面 UI 验收尚未执行，不能把源码门禁冒充安装态验收。
+- 工作区同时存在 Profile 同步、请求转换、进程监控等并行 Rust 修改和构建目录。本任务精确暂存协议适配文件，并在 `services/provider/mod.rs` 只暂存覆盖迁移与 Universal projection 结果 hunks；不得 `git add .`、reset/clean 或把并行改动混进提交。
+
 ## 2026-08-27 用户反馈「官方模型推理强度丢失」追问：不是旧配置污染，是模型名重映射 + 能力契约缺口
 
 - 用户问题：v18 用户反馈官方模型（gpt-5.6-sol）推理强度可能丢失，是否「又考虑了旧配置」。结论：**不是** config.toml / models_cache 旧数据污染。

@@ -14,6 +14,7 @@ import type {
   CodexProtocolCompatibilityRecord,
   CodexProtocolProbeProgressEvent,
   CodexProtocolTransport,
+  CodexProviderEditorSnapshot,
   CodexProviderProtocolPreflightOutcome,
 } from "@/lib/api/protocol-compatibility";
 import type {
@@ -22,6 +23,7 @@ import type {
   CodexChatReasoning,
   CodexHistoryReplay,
   CodexProtocolMode,
+  CodexProtocolOverride,
   CodexReasoningProjection,
   CodexRoutingConfig,
   CodexToolSchemaDialect,
@@ -187,6 +189,23 @@ function createDeepProbeOutcome(
       name: "Third party",
       settingsConfig: {},
     },
+    adaptationPreview: {
+      persistence: "single",
+      status: records.every(
+        (record) => record.result.readiness === "verified",
+      )
+        ? "ready"
+        : "partial",
+      effectiveTransport:
+        records.every(
+          (record) =>
+            record.result.selected_transport ===
+            records[0]?.result.selected_transport,
+        ) && records[0]?.result.selected_transport
+          ? records[0].result.selected_transport
+          : "mixed",
+      models: [],
+    },
     records,
     observations: records,
     receiptIds: records.map(
@@ -327,16 +346,22 @@ function renderCatalogHarness(
     reasoningProjection?: CodexReasoningProjection;
     toolSchemaDialect?: CodexToolSchemaDialect;
     historyReplay?: CodexHistoryReplay;
+    codexProviderEditorSnapshot?: CodexProviderEditorSnapshot;
+    protocolOverrides?: Record<string, CodexProtocolOverride>;
   } = {},
 ) {
   const onCatalogChange = vi.fn();
   const onApiFormatChange = vi.fn();
   const onProtocolProbeReceiptIdsChange = vi.fn();
   let latestCatalog = initialCatalog;
+  let latestProtocolOverrides = options.protocolOverrides ?? {};
 
   function Harness() {
     const [catalog, setCatalog] = useState<CodexCatalogModel[]>(initialCatalog);
     const [apiFormat, setApiFormat] = useState<CodexApiFormat>("openai_chat");
+    const [protocolOverrides, setProtocolOverrides] = useState<
+      Record<string, CodexProtocolOverride>
+    >(latestProtocolOverrides);
 
     // 测试壳模拟 ProviderForm 对 modelCatalog 的受控回写。
     const handleCatalogChange = (next: CodexCatalogModel[]) => {
@@ -349,6 +374,7 @@ function renderCatalogHarness(
       <CodexFormFields
         providerId="codex-thirdparty"
         providerName={options.providerName}
+        codexProviderEditorSnapshot={options.codexProviderEditorSnapshot}
         codexApiKey={options.apiKey ?? "sk-test"}
         onApiKeyChange={vi.fn()}
         category="custom"
@@ -392,6 +418,11 @@ function renderCatalogHarness(
         codexChatReasoning={options.codexChatReasoning}
         promptCacheRouting={options.promptCacheRouting}
         protocolMode={options.protocolMode}
+        protocolOverrides={protocolOverrides}
+        onProtocolOverridesChange={(next) => {
+          latestProtocolOverrides = next;
+          setProtocolOverrides(next);
+        }}
         reasoningProjection={options.reasoningProjection}
         toolSchemaDialect={options.toolSchemaDialect}
         historyReplay={options.historyReplay}
@@ -411,6 +442,7 @@ function renderCatalogHarness(
     onApiFormatChange,
     onProtocolProbeReceiptIdsChange,
     latestCatalog: () => latestCatalog,
+    latestProtocolOverrides: () => latestProtocolOverrides,
   };
 }
 
@@ -604,6 +636,103 @@ function renderAutoSplitHarness() {
 }
 
 describe("CodexFormFields local model routing", () => {
+  it("restores split persistence and per-model transports from the editor snapshot", async () => {
+    const logicalProvider = {
+      id: "codex-thirdparty",
+      name: "Relay",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.5" }, { model: "qwen3.8" }],
+        },
+      },
+    };
+    renderCatalogHarness(
+      [{ model: "gpt-5.5" }, { model: "qwen3.8" }],
+      {
+        openAdvancedOptions: false,
+        codexProviderEditorSnapshot: {
+          logicalProvider,
+          adaptation: {
+            persistence: "split",
+            status: "ready",
+            effectiveTransport: "mixed",
+            testedAt: 1_777_777_777,
+            expiresAt: 1_888_888_888,
+            models: [
+              {
+                publicModel: "gpt-5.5",
+                upstreamModel: "gpt-5.5",
+                choice: "follow_auto",
+                choiceSource: "automatic",
+                effectiveTransport: "open_ai_responses",
+                readiness: "verified",
+                responses: null,
+                chat: null,
+              },
+              {
+                publicModel: "qwen3.8",
+                upstreamModel: "qwen3.8",
+                choice: "openai_chat",
+                choiceSource: "manual",
+                effectiveTransport: "open_ai_chat",
+                readiness: "verified",
+                responses: null,
+                chat: null,
+              },
+            ],
+          },
+        },
+      },
+    );
+    await waitForReasoningResolution();
+
+    expect(
+      screen.getByText("自动适配 · Responses + Chat"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("gpt-5.5：Responses")).toBeInTheDocument();
+    expect(screen.getByText("qwen3.8：Chat")).toBeInTheDocument();
+    expect(screen.getByText(/证据时间/)).toBeInTheDocument();
+  });
+
+  it("stores an advanced per-model protocol choice outside modelCatalog", async () => {
+    const { latestCatalog, latestProtocolOverrides } = renderCatalogHarness(
+      [{ model: "qwen3.8", upstreamModel: "Qwen/Qwen3.8" }],
+      {
+        protocolOverrides: { "qwen3.8": "openai_chat" },
+      },
+    );
+
+    fireEvent.change(screen.getByLabelText("qwen3.8 协议选择"), {
+      target: { value: "openai_responses" },
+    });
+
+    await waitFor(() => {
+      expect(latestProtocolOverrides()).toEqual({
+        "qwen3.8": "openai_responses",
+      });
+    });
+    expect(latestCatalog()[0]).not.toHaveProperty("apiFormat");
+  });
+
+  it("moves a per-model protocol override when the public model is renamed", async () => {
+    const { latestProtocolOverrides } = renderCatalogHarness(
+      [{ model: "qwen3.8", upstreamModel: "Qwen/Qwen3.8" }],
+      {
+        protocolOverrides: { "qwen3.8": "openai_chat" },
+      },
+    );
+
+    fireEvent.change(screen.getByLabelText("候选模型名"), {
+      target: { value: "qwen3.8-coder" },
+    });
+
+    await waitFor(() => {
+      expect(latestProtocolOverrides()).toEqual({
+        "qwen3.8-coder": "openai_chat",
+      });
+    });
+  });
+
   it("surfaces a persisted legacy mixed-protocol catalog as migration-required", async () => {
     renderCatalogHarness(
       [
@@ -972,7 +1101,7 @@ describe("CodexFormFields local model routing", () => {
     });
   });
 
-  it("confirms protocol probing and switches a single provider to Responses when Responses works", async () => {
+  it("keeps the top-level protocol unchanged when a single model prefers Responses", async () => {
     const records = [createDeepProbeRecord("gpt-5.5", "open_ai_responses")];
     vi.mocked(
       preflightCodexProviderProtocolCompatibility,
@@ -994,8 +1123,9 @@ describe("CodexFormFields local model routing", () => {
     ).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(onApiFormatChange).toHaveBeenCalledWith("openai_responses");
+      expect(screen.getByText("可加入 MultiRouter")).toBeInTheDocument();
     });
+    expect(onApiFormatChange).not.toHaveBeenCalled();
     expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "codex-thirdparty",
@@ -1008,6 +1138,28 @@ describe("CodexFormFields local model routing", () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it("keeps the top-level protocol unchanged when a single model prefers Chat", async () => {
+    const records = [createDeepProbeRecord("qwen3.8", "open_ai_chat")];
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockImplementationOnce(async (_provider, onProgress) => {
+      emitFinishedProgress(records, onProgress);
+      return createDeepProbeOutcome(records);
+    });
+    const { onApiFormatChange } = renderCatalogHarness(
+      [{ model: "qwen3.8", upstreamModel: "Qwen/Qwen3.8" }],
+      { shouldShowSpeedTest: true },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("可加入 MultiRouter")).toBeInTheDocument();
+    });
+    expect(onApiFormatChange).not.toHaveBeenCalled();
   });
 
   it("sends the exact provider request policy to protocol preflight", async () => {

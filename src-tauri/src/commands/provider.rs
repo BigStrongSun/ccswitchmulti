@@ -5,7 +5,7 @@ use crate::app_config::AppType;
 use crate::commands::copilot::CopilotAuthState;
 use crate::commands::xai_oauth::XaiOAuthState;
 use crate::error::AppError;
-use crate::provider::{ClaudeDesktopMode, Provider};
+use crate::provider::{ClaudeDesktopMode, CodexProtocolOverride, Provider};
 use crate::services::{
     EndpointLatency, ProviderService, ProviderSortUpdate, SpeedtestService, SwitchResult,
 };
@@ -57,6 +57,118 @@ pub fn get_codex_logical_provider_for_editing(
         .map_err(|error| error.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexProviderPersistence {
+    Single,
+    Split,
+    LegacyMixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexAdaptationStatus {
+    NotTested,
+    Ready,
+    Partial,
+    Failed,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexEffectiveTransport {
+    OpenAiResponses,
+    OpenAiChat,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexProtocolChoice {
+    FollowAuto,
+    OpenaiResponses,
+    OpenaiChat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexProtocolChoiceSource {
+    Automatic,
+    Manual,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProviderModelAdaptation {
+    pub public_model: String,
+    pub upstream_model: String,
+    pub choice: CodexProtocolChoice,
+    pub choice_source: CodexProtocolChoiceSource,
+    pub effective_transport: Option<crate::protocol_compatibility::TransportKind>,
+    pub readiness: crate::protocol_compatibility::ProbeReadiness,
+    pub responses: Option<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+    pub chat: Option<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProviderAdaptationView {
+    pub persistence: CodexProviderPersistence,
+    pub status: CodexAdaptationStatus,
+    pub effective_transport: Option<CodexEffectiveTransport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tested_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    pub models: Vec<CodexProviderModelAdaptation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projection: Option<crate::codex_multirouter::projection::CodexRoutingProjectionStatus>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProviderEditorSnapshot {
+    pub logical_provider: Provider,
+    pub adaptation: CodexProviderAdaptationView,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProviderAdaptationSummary {
+    pub provider_id: String,
+    pub persistence: CodexProviderPersistence,
+    pub status: CodexAdaptationStatus,
+    pub effective_transport: Option<CodexEffectiveTransport>,
+    pub model_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tested_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn get_codex_provider_editor_snapshot(
+    state: State<'_, AppState>,
+    providerId: String,
+) -> Result<CodexProviderEditorSnapshot, String> {
+    get_codex_provider_editor_snapshot_internal(
+        state.inner(),
+        &providerId,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_codex_provider_adaptation_summaries(
+    state: State<'_, AppState>,
+) -> Result<Vec<CodexProviderAdaptationSummary>, String> {
+    list_codex_provider_adaptation_summaries_internal(state.inner(), chrono::Utc::now().timestamp())
+        .map_err(|error| error.to_string())
+}
+
 fn get_codex_logical_provider_for_editing_internal(
     state: &AppState,
     provider_id: &str,
@@ -82,6 +194,628 @@ fn get_codex_logical_provider_for_editing_internal(
             "codex_provider_set_generated_leaf_not_editable".to_string(),
         )),
         _ => Ok(provider),
+    }
+}
+
+pub(crate) fn get_codex_provider_editor_snapshot_internal(
+    state: &AppState,
+    provider_id: &str,
+    now: i64,
+) -> Result<CodexProviderEditorSnapshot, AppError> {
+    let providers = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let persisted = providers.get(provider_id).cloned().ok_or_else(|| {
+        AppError::InvalidInput(format!("codex_provider_not_found: {provider_id}"))
+    })?;
+    if crate::codex_multirouter::provider_set::is_codex_provider_set_generated_leaf(&persisted) {
+        return Err(AppError::InvalidInput(
+            "codex_provider_set_generated_leaf_not_editable".to_string(),
+        ));
+    }
+    let persistence =
+        if crate::codex_multirouter::provider_set::is_codex_provider_set_facade(&persisted) {
+            CodexProviderPersistence::Split
+        } else if catalog_contains_legacy_codex_protocols(&persisted) {
+            CodexProviderPersistence::LegacyMixed
+        } else {
+            CodexProviderPersistence::Single
+        };
+    let mut logical_provider = match persistence {
+        CodexProviderPersistence::Split => {
+            crate::codex_multirouter::provider_set::restore_logical_codex_provider(
+                &persisted, &providers,
+            )
+            .map_err(|error| AppError::InvalidInput(error.to_string()))?
+        }
+        CodexProviderPersistence::Single | CodexProviderPersistence::LegacyMixed => {
+            persisted.clone()
+        }
+    };
+    crate::codex_multirouter::provider_set::migrate_legacy_codex_protocol_overrides_for_save(
+        &mut logical_provider,
+    )
+    .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+
+    let mut related_provider_ids = vec![provider_id.to_string()];
+    related_provider_ids.extend(providers.values().filter_map(|provider| {
+        (crate::codex_multirouter::provider_set::codex_provider_set_leaf_parent_id(provider)
+            == Some(provider_id))
+        .then(|| provider.id.clone())
+    }));
+    let mut profiles = Vec::new();
+    let mut observations = Vec::new();
+    for related_provider_id in related_provider_ids {
+        profiles.extend(
+            state
+                .db
+                .list_protocol_compatibility_profiles(&related_provider_id)?,
+        );
+        observations.extend(
+            state
+                .db
+                .list_protocol_probe_observations(&related_provider_id)?,
+        );
+    }
+
+    let persistence_transports = persisted_protocols_by_model(&persisted, &providers);
+    let catalog_models = codex_adaptation_catalog_models(&logical_provider);
+    let mut any_evidence = false;
+    let mut any_stale = false;
+    let mut any_verified = false;
+    let mut any_manual_without_verified_evidence = false;
+    let mut tested_at = None;
+    let mut expires_at = None;
+    let mut models = Vec::with_capacity(catalog_models.len());
+
+    for (public_model, upstream_model) in catalog_models {
+        let key =
+            crate::codex_multirouter::provider_set::normalize_codex_public_model_key(&public_model);
+        let protocol_override = logical_provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_protocol_overrides.get(&key))
+            .copied();
+        let (choice, choice_source, manual_transport) = match protocol_override {
+            Some(CodexProtocolOverride::OpenaiResponses) => (
+                CodexProtocolChoice::OpenaiResponses,
+                CodexProtocolChoiceSource::Manual,
+                Some(crate::protocol_compatibility::TransportKind::OpenAiResponses),
+            ),
+            Some(CodexProtocolOverride::OpenaiChat) => (
+                CodexProtocolChoice::OpenaiChat,
+                CodexProtocolChoiceSource::Manual,
+                Some(crate::protocol_compatibility::TransportKind::OpenAiChat),
+            ),
+            None => (
+                CodexProtocolChoice::FollowAuto,
+                CodexProtocolChoiceSource::Automatic,
+                None,
+            ),
+        };
+        let candidate = crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+            &logical_provider,
+            public_model.clone(),
+            upstream_model.clone(),
+        )
+        .ok();
+        let current_target = |transport| {
+            candidate
+                .as_ref()
+                .and_then(|candidate| candidate.target_key(transport).ok())
+        };
+        let responses_target =
+            current_target(crate::protocol_compatibility::TransportKind::OpenAiResponses);
+        let chat_target = current_target(crate::protocol_compatibility::TransportKind::OpenAiChat);
+        let responses = latest_codex_protocol_record(
+            &observations,
+            &public_model,
+            &upstream_model,
+            crate::protocol_compatibility::TransportKind::OpenAiResponses,
+        );
+        let chat = latest_codex_protocol_record(
+            &observations,
+            &public_model,
+            &upstream_model,
+            crate::protocol_compatibility::TransportKind::OpenAiChat,
+        );
+        let selected_profile =
+            latest_codex_selection_profile(&profiles, &public_model, &upstream_model);
+        for record in [responses, chat, selected_profile].into_iter().flatten() {
+            any_evidence = true;
+            tested_at =
+                Some(tested_at.map_or(record.tested_at, |value: i64| value.max(record.tested_at)));
+            expires_at = Some(
+                expires_at.map_or(record.expires_at, |value: i64| value.min(record.expires_at)),
+            );
+        }
+        let effective_transport = manual_transport
+            .or_else(|| persistence_transports.get(&key).copied())
+            .or_else(|| selected_profile.and_then(|profile| profile.result.selected_transport));
+        let current_selected_target = effective_transport.and_then(|transport| match transport {
+            crate::protocol_compatibility::TransportKind::OpenAiResponses => {
+                responses_target.as_ref()
+            }
+            crate::protocol_compatibility::TransportKind::OpenAiChat => chat_target.as_ref(),
+        });
+        let matching_profile = selected_profile.filter(|profile| {
+            current_selected_target
+                .is_some_and(|target| codex_protocol_record_matches_current_target(profile, target))
+        });
+        let effective_observation = match effective_transport {
+            Some(crate::protocol_compatibility::TransportKind::OpenAiResponses) => responses,
+            Some(crate::protocol_compatibility::TransportKind::OpenAiChat) => chat,
+            None => None,
+        };
+        let matching_observation = effective_observation.filter(|record| {
+            current_selected_target
+                .is_some_and(|target| codex_protocol_record_matches_current_target(record, target))
+        });
+        let evidence_for_readiness = matching_profile.or(matching_observation);
+        let readiness = evidence_for_readiness
+            .map(|record| record.result.readiness)
+            .unwrap_or(crate::protocol_compatibility::ProbeReadiness::Unverified);
+        let model_is_stale = effective_transport.is_some()
+            && evidence_for_readiness.is_none()
+            && (selected_profile.is_some() || effective_observation.is_some());
+        if let Some(record) = evidence_for_readiness {
+            if record.probe_version != crate::protocol_compatibility::PROBE_PROFILE_VERSION
+                || record.expires_at < now
+            {
+                any_stale = true;
+            }
+        }
+        any_stale |= model_is_stale;
+        any_verified |= readiness == crate::protocol_compatibility::ProbeReadiness::Verified;
+        any_manual_without_verified_evidence |= choice_source == CodexProtocolChoiceSource::Manual
+            && readiness != crate::protocol_compatibility::ProbeReadiness::Verified;
+        models.push(CodexProviderModelAdaptation {
+            public_model,
+            upstream_model,
+            choice,
+            choice_source,
+            effective_transport,
+            readiness,
+            responses: responses.cloned(),
+            chat: chat.cloned(),
+        });
+    }
+
+    let status = if any_stale {
+        CodexAdaptationStatus::Stale
+    } else if !any_evidence {
+        CodexAdaptationStatus::NotTested
+    } else if models
+        .iter()
+        .all(|model| model.readiness == crate::protocol_compatibility::ProbeReadiness::Verified)
+    {
+        CodexAdaptationStatus::Ready
+    } else if any_manual_without_verified_evidence || any_verified {
+        CodexAdaptationStatus::Partial
+    } else {
+        CodexAdaptationStatus::Failed
+    };
+    let effective_transport = aggregate_codex_effective_transport(&models);
+    let projection = if persistence == CodexProviderPersistence::Split {
+        crate::codex_multirouter::projection::read_projection_status(
+            state.db.as_ref(),
+            provider_id,
+        )?
+    } else {
+        None
+    };
+
+    Ok(CodexProviderEditorSnapshot {
+        logical_provider,
+        adaptation: CodexProviderAdaptationView {
+            persistence,
+            status,
+            effective_transport,
+            tested_at,
+            expires_at,
+            models,
+            projection,
+        },
+    })
+}
+
+pub(crate) fn build_codex_provider_adaptation_preview(
+    source: &Provider,
+    records: &[crate::protocol_compatibility::ProtocolCompatibilityRecord],
+    observations: &[crate::protocol_compatibility::ProtocolCompatibilityRecord],
+    existing_providers: &HashMap<String, Provider>,
+    now: i64,
+) -> Result<CodexProviderAdaptationView, AppError> {
+    let mut logical_provider = source.clone();
+    crate::codex_multirouter::provider_set::migrate_legacy_codex_protocol_overrides_for_save(
+        &mut logical_provider,
+    )
+    .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+    let prepared = if logical_provider.uses_manual_codex_protocol()
+        && !logical_provider.has_codex_protocol_overrides()
+    {
+        let transport = logical_provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.api_format.as_deref())
+            .or_else(|| {
+                logical_provider
+                    .settings_config
+                    .get("apiFormat")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .and_then(|api_format| match api_format {
+                "openai_responses" => {
+                    Some(crate::protocol_compatibility::TransportKind::OpenAiResponses)
+                }
+                "openai_chat" => Some(crate::protocol_compatibility::TransportKind::OpenAiChat),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                AppError::InvalidInput("codex_provider_set_manual_intent_required".to_string())
+            })?;
+        crate::codex_multirouter::provider_set::plan_manual_codex_provider_set(
+            &logical_provider,
+            transport,
+            existing_providers,
+            now,
+        )
+    } else {
+        crate::codex_multirouter::provider_set::plan_codex_provider_set(
+            &logical_provider,
+            records,
+            existing_providers,
+            now,
+        )
+    }
+    .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+    let persistence = match prepared.preview.plan {
+        crate::codex_multirouter::provider_set::CodexProviderSetPlan::Single { .. } => {
+            CodexProviderPersistence::Single
+        }
+        crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. } => {
+            CodexProviderPersistence::Split
+        }
+        crate::codex_multirouter::provider_set::CodexProviderSetPlan::Blocked { .. } => {
+            CodexProviderPersistence::Single
+        }
+    };
+    let mut any_evidence = false;
+    let mut any_stale = false;
+    let mut any_verified = false;
+    let mut any_manual_without_verified_evidence = false;
+    let mut tested_at = None;
+    let mut expires_at = None;
+    let mut models = Vec::new();
+
+    for (public_model, upstream_model) in codex_adaptation_catalog_models(&logical_provider) {
+        let key =
+            crate::codex_multirouter::provider_set::normalize_codex_public_model_key(&public_model);
+        let protocol_override = logical_provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_protocol_overrides.get(&key))
+            .copied();
+        let (choice, choice_source, manual_transport) = match protocol_override {
+            Some(CodexProtocolOverride::OpenaiResponses) => (
+                CodexProtocolChoice::OpenaiResponses,
+                CodexProtocolChoiceSource::Manual,
+                Some(crate::protocol_compatibility::TransportKind::OpenAiResponses),
+            ),
+            Some(CodexProtocolOverride::OpenaiChat) => (
+                CodexProtocolChoice::OpenaiChat,
+                CodexProtocolChoiceSource::Manual,
+                Some(crate::protocol_compatibility::TransportKind::OpenAiChat),
+            ),
+            None => (
+                CodexProtocolChoice::FollowAuto,
+                CodexProtocolChoiceSource::Automatic,
+                None,
+            ),
+        };
+        let selected = records
+            .iter()
+            .filter(|record| {
+                record.target.public_model == public_model
+                    && record.target.upstream_model == upstream_model
+            })
+            .max_by_key(|record| record.tested_at);
+        let responses = latest_codex_protocol_record(
+            observations,
+            &public_model,
+            &upstream_model,
+            crate::protocol_compatibility::TransportKind::OpenAiResponses,
+        );
+        let chat = latest_codex_protocol_record(
+            observations,
+            &public_model,
+            &upstream_model,
+            crate::protocol_compatibility::TransportKind::OpenAiChat,
+        );
+        for record in [responses, chat, selected].into_iter().flatten() {
+            any_evidence = true;
+            tested_at =
+                Some(tested_at.map_or(record.tested_at, |value: i64| value.max(record.tested_at)));
+            expires_at = Some(
+                expires_at.map_or(record.expires_at, |value: i64| value.min(record.expires_at)),
+            );
+        }
+        let effective_transport = manual_transport
+            .or_else(|| selected.and_then(|record| record.result.selected_transport));
+        let effective_evidence = match effective_transport {
+            Some(crate::protocol_compatibility::TransportKind::OpenAiResponses) => responses,
+            Some(crate::protocol_compatibility::TransportKind::OpenAiChat) => chat,
+            None => selected,
+        };
+        let readiness = if choice_source == CodexProtocolChoiceSource::Automatic {
+            selected
+                .map(|record| record.result.readiness)
+                .unwrap_or(crate::protocol_compatibility::ProbeReadiness::Unverified)
+        } else {
+            effective_evidence
+                .map(|record| record.result.readiness)
+                .unwrap_or(crate::protocol_compatibility::ProbeReadiness::Unverified)
+        };
+        if let Some(record) = effective_evidence {
+            any_stale |= record.probe_version
+                != crate::protocol_compatibility::PROBE_PROFILE_VERSION
+                || record.expires_at < now;
+        }
+        any_verified |= readiness == crate::protocol_compatibility::ProbeReadiness::Verified;
+        any_manual_without_verified_evidence |= choice_source == CodexProtocolChoiceSource::Manual
+            && readiness != crate::protocol_compatibility::ProbeReadiness::Verified;
+        models.push(CodexProviderModelAdaptation {
+            public_model,
+            upstream_model,
+            choice,
+            choice_source,
+            effective_transport,
+            readiness,
+            responses: responses.cloned(),
+            chat: chat.cloned(),
+        });
+    }
+
+    let status = if any_stale {
+        CodexAdaptationStatus::Stale
+    } else if !any_evidence {
+        CodexAdaptationStatus::NotTested
+    } else if models
+        .iter()
+        .all(|model| model.readiness == crate::protocol_compatibility::ProbeReadiness::Verified)
+    {
+        CodexAdaptationStatus::Ready
+    } else if any_manual_without_verified_evidence || any_verified {
+        CodexAdaptationStatus::Partial
+    } else {
+        CodexAdaptationStatus::Failed
+    };
+    let effective_transport = aggregate_codex_effective_transport(&models);
+    Ok(CodexProviderAdaptationView {
+        persistence,
+        status,
+        effective_transport,
+        tested_at,
+        expires_at,
+        models,
+        projection: None,
+    })
+}
+
+fn list_codex_provider_adaptation_summaries_internal(
+    state: &AppState,
+    now: i64,
+) -> Result<Vec<CodexProviderAdaptationSummary>, AppError> {
+    let providers = ProviderService::list(state, AppType::Codex)?;
+    providers
+        .keys()
+        .map(|provider_id| {
+            let snapshot = get_codex_provider_editor_snapshot_internal(state, provider_id, now)?;
+            Ok(CodexProviderAdaptationSummary {
+                provider_id: provider_id.clone(),
+                persistence: snapshot.adaptation.persistence,
+                status: snapshot.adaptation.status,
+                effective_transport: snapshot.adaptation.effective_transport,
+                model_count: snapshot.adaptation.models.len(),
+                tested_at: snapshot.adaptation.tested_at,
+                expires_at: snapshot.adaptation.expires_at,
+            })
+        })
+        .collect()
+}
+
+fn codex_adaptation_catalog_models(provider: &Provider) -> Vec<(String, String)> {
+    provider
+        .settings_config
+        .get("modelCatalog")
+        .or_else(|| provider.settings_config.get("model_catalog"))
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|model| model.get("enabled").and_then(serde_json::Value::as_bool) != Some(false))
+        .filter_map(|model| {
+            let public_model = ["model", "id", "slug"]
+                .into_iter()
+                .find_map(|field| model.get(field).and_then(serde_json::Value::as_str))?
+                .trim()
+                .to_string();
+            let upstream_model = ["upstreamModel", "upstream_model", "model", "id", "slug"]
+                .into_iter()
+                .find_map(|field| model.get(field).and_then(serde_json::Value::as_str))?
+                .trim()
+                .to_string();
+            (!public_model.is_empty() && !upstream_model.is_empty())
+                .then_some((public_model, upstream_model))
+        })
+        .collect()
+}
+
+fn catalog_contains_legacy_codex_protocols(provider: &Provider) -> bool {
+    provider
+        .settings_config
+        .get("modelCatalog")
+        .or_else(|| provider.settings_config.get("model_catalog"))
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|models| {
+            models.iter().any(|model| {
+                ["apiFormat", "api_format", "wireApi", "wire_api"]
+                    .into_iter()
+                    .any(|field| {
+                        model
+                            .get(field)
+                            .and_then(serde_json::Value::as_str)
+                            .is_some()
+                    })
+            })
+        })
+}
+
+fn persisted_protocols_by_model(
+    persisted: &Provider,
+    providers: &HashMap<String, Provider>,
+) -> HashMap<String, crate::protocol_compatibility::TransportKind> {
+    let mut transports = HashMap::new();
+    if crate::codex_multirouter::provider_set::is_codex_provider_set_facade(persisted) {
+        for (field, transport) in [
+            (
+                "responsesProviderId",
+                crate::protocol_compatibility::TransportKind::OpenAiResponses,
+            ),
+            (
+                "chatProviderId",
+                crate::protocol_compatibility::TransportKind::OpenAiChat,
+            ),
+        ] {
+            if let Some(leaf) = persisted
+                .settings_config
+                .pointer(&format!("/codexProtocolSet/{field}"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|leaf_id| providers.get(leaf_id))
+            {
+                for (public_model, upstream_model) in codex_adaptation_catalog_models(leaf) {
+                    transports.insert(
+                        crate::codex_multirouter::provider_set::normalize_codex_public_model_key(
+                            &public_model,
+                        ),
+                        transport,
+                    );
+                    transports.insert(
+                        crate::codex_multirouter::provider_set::normalize_codex_public_model_key(
+                            &upstream_model,
+                        ),
+                        transport,
+                    );
+                }
+            }
+        }
+    } else if let Some(transport) = persisted_provider_transport(persisted) {
+        for (public_model, _) in codex_adaptation_catalog_models(persisted) {
+            transports.insert(
+                crate::codex_multirouter::provider_set::normalize_codex_public_model_key(
+                    &public_model,
+                ),
+                transport,
+            );
+        }
+    }
+    transports
+}
+
+fn persisted_provider_transport(
+    provider: &Provider,
+) -> Option<crate::protocol_compatibility::TransportKind> {
+    let value = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_format.as_deref())
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("api_format")
+                .and_then(serde_json::Value::as_str)
+        })?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "openai_responses" | "responses" => {
+            Some(crate::protocol_compatibility::TransportKind::OpenAiResponses)
+        }
+        "openai_chat" | "chat" => Some(crate::protocol_compatibility::TransportKind::OpenAiChat),
+        _ => None,
+    }
+}
+
+fn latest_codex_protocol_record<'a>(
+    records: &'a [crate::protocol_compatibility::ProtocolCompatibilityRecord],
+    public_model: &str,
+    upstream_model: &str,
+    transport: crate::protocol_compatibility::TransportKind,
+) -> Option<&'a crate::protocol_compatibility::ProtocolCompatibilityRecord> {
+    records
+        .iter()
+        .filter(|record| {
+            record.target.public_model == public_model
+                && record.target.upstream_model == upstream_model
+                && record.target.transport == transport
+        })
+        .max_by_key(|record| record.tested_at)
+}
+
+fn latest_codex_selection_profile<'a>(
+    records: &'a [crate::protocol_compatibility::ProtocolCompatibilityRecord],
+    public_model: &str,
+    upstream_model: &str,
+) -> Option<&'a crate::protocol_compatibility::ProtocolCompatibilityRecord> {
+    records
+        .iter()
+        .filter(|record| {
+            record.target.public_model == public_model
+                && record.target.upstream_model == upstream_model
+                && record.result.selected_transport == Some(record.target.transport)
+        })
+        .max_by_key(|record| record.tested_at)
+}
+
+fn codex_protocol_record_matches_current_target(
+    record: &crate::protocol_compatibility::ProtocolCompatibilityRecord,
+    current: &crate::protocol_compatibility::ProbeTargetKey,
+) -> bool {
+    record.target.public_model == current.public_model
+        && record.target.upstream_model == current.upstream_model
+        && record.target.transport == current.transport
+        && record.target.endpoint_fingerprint == current.endpoint_fingerprint
+        && record.target.authentication_kind == current.authentication_kind
+        && record.target.credential_fingerprint == current.credential_fingerprint
+        && record.target.request_policy_fingerprint == current.request_policy_fingerprint
+}
+
+fn aggregate_codex_effective_transport(
+    models: &[CodexProviderModelAdaptation],
+) -> Option<CodexEffectiveTransport> {
+    let has_responses = models.iter().any(|model| {
+        model.effective_transport
+            == Some(crate::protocol_compatibility::TransportKind::OpenAiResponses)
+    });
+    let has_chat = models.iter().any(|model| {
+        model.effective_transport == Some(crate::protocol_compatibility::TransportKind::OpenAiChat)
+    });
+    if has_responses && has_chat {
+        return Some(CodexEffectiveTransport::Mixed);
+    }
+    if has_responses {
+        Some(CodexEffectiveTransport::OpenAiResponses)
+    } else if has_chat {
+        Some(CodexEffectiveTransport::OpenAiChat)
+    } else {
+        None
     }
 }
 
@@ -238,7 +972,10 @@ where
         >,
     >,
 {
-    if provider.uses_manual_codex_protocol() {
+    let requires_probe =
+        crate::codex_multirouter::provider_set::requires_automatic_codex_protocol_probe(&provider)
+            .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+    if !requires_probe {
         return Ok((provider, Vec::new(), Vec::new()));
     }
     match probe(provider.clone()).await {
@@ -1332,6 +2069,12 @@ pub struct CommitUniversalProviderSetRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UniversalProviderSetCommitOutcome {
     pub preview: UniversalProviderSetPreview,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_snapshot: Option<CodexProviderEditorSnapshot>,
+    pub projections: Vec<crate::codex_multirouter::projection::CodexRoutingProjectionStatus>,
+    pub status: crate::commands::protocol_compatibility::CodexProviderSetCommitStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projection_error_code: Option<String>,
 }
 
 #[tauri::command]
@@ -1389,6 +2132,26 @@ fn commit_universal_provider_set_internal(
     request: CommitUniversalProviderSetRequest,
     now: i64,
 ) -> Result<UniversalProviderSetCommitOutcome, String> {
+    commit_universal_provider_set_internal_with_publisher(state, request, now, |artifact| {
+        crate::codex_config::publish_codex_multirouter_projection_for_database(
+            state.db.as_ref(),
+            &artifact.projection_settings,
+        )
+        .map_err(|error| error.to_string())
+    })
+}
+
+fn commit_universal_provider_set_internal_with_publisher<F>(
+    state: &AppState,
+    request: CommitUniversalProviderSetRequest,
+    now: i64,
+    publish: F,
+) -> Result<UniversalProviderSetCommitOutcome, String>
+where
+    F: FnMut(
+        &crate::codex_multirouter::projection::CodexRoutingProjectionArtifact,
+    ) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, String>,
+{
     let receipt_claim = state.claim_codex_provider_set_probe_receipts(&request.receipt_ids)?;
     let preview = prepare_universal_provider_set_internal(
         state,
@@ -1405,12 +2168,13 @@ fn commit_universal_provider_set_internal(
         ProviderService::prepare_universal_codex_provider_from_definition(state, &request.provider)
             .map_err(|error| error.to_string())?;
     match (codex_provider.as_ref(), preview.codex.as_ref(), request.intent) {
-        (None, None, crate::commands::protocol_compatibility::CodexProviderSetCommitIntent::AcceptSingle) => {}
+        (None, None, crate::commands::protocol_compatibility::CodexProviderSetCommitIntent::AcceptAuto) => {}
         (Some(provider), Some(codex), intent) if provider.uses_manual_codex_protocol() => {
             if !matches!(
                 (&codex.plan, intent),
                 (
-                    crate::codex_multirouter::provider_set::CodexProviderSetPlan::Single { .. },
+                    crate::codex_multirouter::provider_set::CodexProviderSetPlan::Single { .. }
+                        | crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. },
                     crate::commands::protocol_compatibility::CodexProviderSetCommitIntent::ConfirmManual
                 )
             ) {
@@ -1423,7 +2187,7 @@ fn commit_universal_provider_set_internal(
                 plan: crate::codex_multirouter::provider_set::CodexProviderSetPlan::Single { .. },
                 ..
             }),
-            crate::commands::protocol_compatibility::CodexProviderSetCommitIntent::AcceptSingle,
+            crate::commands::protocol_compatibility::CodexProviderSetCommitIntent::AcceptAuto,
         ) => {}
         (
             Some(_),
@@ -1431,16 +2195,8 @@ fn commit_universal_provider_set_internal(
                 plan: crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. },
                 ..
             }),
-            crate::commands::protocol_compatibility::CodexProviderSetCommitIntent::ConfirmSplit,
+            crate::commands::protocol_compatibility::CodexProviderSetCommitIntent::AcceptAuto,
         ) => {}
-        (
-            Some(_),
-            Some(crate::codex_multirouter::provider_set::CodexProviderSetPreview {
-                plan: crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. },
-                ..
-            }),
-            _,
-        ) => return Err("codex_provider_set_split_confirmation_required".to_string()),
         (
             Some(_),
             Some(crate::codex_multirouter::provider_set::CodexProviderSetPreview {
@@ -1455,22 +2211,40 @@ fn commit_universal_provider_set_internal(
         _ => return Err("codex_provider_set_dependency_changed".to_string()),
     }
 
+    let codex_provider_id = codex_provider.as_ref().map(|provider| provider.id.clone());
     let (records, observations) = match codex_provider.as_ref() {
         Some(_) => crate::commands::protocol_compatibility::protocol_state_from_provider_set_receipt_bundles(
             receipt_claim.bundles(),
         ),
         _ => (Vec::new(), Vec::new()),
     };
-    ProviderService::save_and_sync_universal_to_apps_with_codex_protocol_state(
-        state,
-        request.provider,
-        codex_provider,
-        &records,
-        &observations,
-    )
-    .map_err(|error| error.to_string())?;
+    let sync_outcome =
+        ProviderService::save_and_sync_universal_to_apps_with_codex_protocol_state_and_publisher(
+            state,
+            request.provider,
+            codex_provider,
+            &records,
+            &observations,
+            publish,
+        )
+        .map_err(|error| error.to_string())?;
     receipt_claim.consume_after_database_commit();
-    Ok(UniversalProviderSetCommitOutcome { preview })
+    let codex_snapshot = codex_provider_id
+        .as_deref()
+        .map(|provider_id| get_codex_provider_editor_snapshot_internal(state, provider_id, now))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    Ok(UniversalProviderSetCommitOutcome {
+        preview,
+        codex_snapshot,
+        projections: sync_outcome.projections,
+        status: if sync_outcome.projection_error_code.is_some() {
+            crate::commands::protocol_compatibility::CodexProviderSetCommitStatus::CommittedWithProjectionError
+        } else {
+            crate::commands::protocol_compatibility::CodexProviderSetCommitStatus::Committed
+        },
+        projection_error_code: sync_outcome.projection_error_code,
+    })
 }
 
 fn universal_provider_set_digest(
@@ -1609,10 +2383,8 @@ fn validate_legacy_universal_provider_set_commit(
     )
     .map_err(|error| AppError::InvalidInput(error.to_string()))?;
     match prepared.preview.plan {
-        crate::codex_multirouter::provider_set::CodexProviderSetPlan::Single { .. } => Ok(()),
-        crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. } => Err(
-            AppError::InvalidInput("codex_provider_set_split_confirmation_required".to_string()),
-        ),
+        crate::codex_multirouter::provider_set::CodexProviderSetPlan::Single { .. }
+        | crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. } => Ok(()),
         crate::codex_multirouter::provider_set::CodexProviderSetPlan::Blocked { .. } => Err(
             AppError::InvalidInput("codex_provider_set_model_blocked".to_string()),
         ),
@@ -1987,15 +2759,17 @@ mod native_query_credentials_tests {
 #[cfg(test)]
 mod codex_protocol_preflight_save_tests {
     use super::{
-        get_codex_logical_provider_for_editing_internal, update_provider_internal_with_probe,
+        build_codex_provider_adaptation_preview, get_codex_logical_provider_for_editing_internal,
+        get_codex_provider_editor_snapshot_internal, update_provider_internal_with_probe,
+        CodexAdaptationStatus, CodexEffectiveTransport, CodexProtocolChoice,
+        CodexProtocolChoiceSource, CodexProviderPersistence,
     };
     use crate::{
         app_config::AppType,
         database::Database,
         protocol_compatibility::{
-            apply_selected_transport_to_provider, compile_codex_router_probe_candidates,
-            ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
-            ProtocolCompatibilityRecord, TransportKind,
+            compile_codex_router_probe_candidates, ProbeCandidate, ProbeReadiness,
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, TransportKind,
         },
         provider::{CodexProtocolMode, Provider, ProviderMeta},
         services::ProviderService,
@@ -2019,8 +2793,7 @@ mod codex_protocol_preflight_save_tests {
                 "config": "model = \"qwen-visible\"\nmodel_provider = \"qwen\"\n[model_providers.qwen]\nbase_url = \"https://vllm.example/v1\"\nwire_api = \"responses\"\n",
                 "modelCatalog": {"models": [{
                     "model": "qwen-visible",
-                    "upstreamModel": "Qwen/Qwen3.8",
-                    "apiFormat": "openai_responses"
+                    "upstreamModel": "Qwen/Qwen3.8"
                 }]}
             }),
             website_url: None,
@@ -2060,39 +2833,44 @@ mod codex_protocol_preflight_save_tests {
         )
     }
 
-    fn chat_record() -> ProtocolCompatibilityRecord {
-        let target = ProbeTargetKey::new(
-            "qwen-provider",
-            None::<String>,
-            "qwen-visible",
-            "Qwen/Qwen3.8",
-            TransportKind::OpenAiChat,
-            "https://vllm.example/v1/chat/completions",
-            "bearer",
+    fn chat_record() -> (ProbeCandidate, ProtocolCompatibilityRecord) {
+        let candidate = crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+            &codex_provider(),
+            "qwen-visible".to_string(),
+            "Qwen/Qwen3.8".to_string(),
         )
-        .unwrap()
-        .with_credential("probe-secret");
+        .expect("compile ordinary Provider candidate");
+        let target = candidate
+            .target_key(TransportKind::OpenAiChat)
+            .expect("compile ordinary Provider Chat target");
         let now = chrono::Utc::now().timestamp();
-        ProtocolCompatibilityRecord::new(
-            target,
-            ProtocolCompatibilityProbeResult {
-                selected_transport: Some(TransportKind::OpenAiChat),
-                readiness: ProbeReadiness::Verified,
-                branches: Vec::new(),
-            },
-            now,
-            now + 600,
+        (
+            candidate,
+            ProtocolCompatibilityRecord::new(
+                target,
+                ProtocolCompatibilityProbeResult {
+                    selected_transport: Some(TransportKind::OpenAiChat),
+                    readiness: ProbeReadiness::Verified,
+                    branches: Vec::new(),
+                },
+                now,
+                now + 600,
+            ),
         )
     }
 
     fn transport_observations(
+        candidate: &ProbeCandidate,
         record: &ProtocolCompatibilityRecord,
     ) -> Vec<ProtocolCompatibilityRecord> {
         [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
             .into_iter()
             .map(|transport| {
                 let mut observation = record.clone();
-                observation.target.transport = transport;
+                observation.target = candidate
+                    .target_key(transport)
+                    .expect("compile independent transport observation target");
+                observation.result.readiness = ProbeReadiness::Unverified;
                 observation
             })
             .collect()
@@ -2107,19 +2885,17 @@ mod codex_protocol_preflight_save_tests {
             .expect("seed provider");
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_probe = calls.clone();
-        let expected_record = chat_record();
+        let (probe_candidate, expected_record) = chat_record();
         let returned_record = expected_record.clone();
-        let returned_observations = transport_observations(&returned_record);
+        let returned_observations = transport_observations(&probe_candidate, &returned_record);
 
         update_provider_internal_with_probe(
             &state,
             AppType::Codex,
             None,
             provider,
-            move |mut candidate| {
+            move |candidate| {
                 calls_for_probe.fetch_add(1, Ordering::SeqCst);
-                apply_selected_transport_to_provider(&mut candidate, TransportKind::OpenAiChat)
-                    .expect("apply detected protocol");
                 std::future::ready(Ok((
                     candidate,
                     vec![returned_record],
@@ -2204,7 +2980,7 @@ mod codex_protocol_preflight_save_tests {
             now,
             now + 600,
         );
-        let observations = transport_observations(&record);
+        let observations = transport_observations(&candidate, &record);
 
         update_provider_internal_with_probe(
             &state,
@@ -2287,6 +3063,13 @@ mod codex_protocol_preflight_save_tests {
             .as_object_mut()
             .expect("catalog model")
             .remove("apiFormat");
+        provider.settings_config["modelCatalog"]["models"]
+            .as_array_mut()
+            .expect("catalog models")
+            .push(json!({
+                "model": "qwen-coder-visible",
+                "upstreamModel": "Qwen/Qwen3-Coder"
+            }));
         db.save_provider(AppType::Codex.as_str(), &provider)
             .expect("seed manual provider");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -2310,13 +3093,188 @@ mod codex_protocol_preflight_save_tests {
             .get_provider_by_id("qwen-provider", AppType::Codex.as_str())
             .unwrap()
             .unwrap();
+        let meta = saved.meta.as_ref().expect("saved Provider meta");
+        assert_eq!(meta.api_format.as_deref(), Some("openai_responses"));
         assert_eq!(
-            saved.meta.and_then(|meta| meta.api_format),
-            Some("openai_responses".to_string())
+            serde_json::to_value(&meta.codex_protocol_overrides)
+                .expect("serialize migrated overrides"),
+            json!({
+                "qwen-visible": "openai_responses",
+                "qwen-coder-visible": "openai_responses"
+            })
         );
-        assert!(saved.settings_config["modelCatalog"]["models"][0]
-            .get("apiFormat")
-            .is_none());
+        assert!(saved.settings_config["modelCatalog"]["models"]
+            .as_array()
+            .expect("saved catalog models")
+            .iter()
+            .all(|model| model.get("apiFormat").is_none()));
+    }
+
+    #[tokio::test]
+    async fn legacy_per_model_protocols_migrate_inside_the_provider_set_save_transaction() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let mut provider = codex_provider();
+        provider.settings_config["modelCatalog"]["models"][0]["apiFormat"] =
+            json!("openai_responses");
+        provider.settings_config["modelCatalog"]["models"]
+            .as_array_mut()
+            .expect("catalog models")
+            .push(json!({
+                "model": "qwen-coder-visible",
+                "upstreamModel": "Qwen/Qwen3-Coder",
+                "apiFormat": "openai_chat"
+            }));
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "other-provider".to_string(),
+                "Other".to_string(),
+                json!({"auth": {}}),
+                None,
+            ),
+        )
+        .expect("seed another Provider");
+        db.set_current_provider("codex", "other-provider")
+            .expect("activate another Provider");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+
+        update_provider_internal_with_probe(
+            &state,
+            AppType::Codex,
+            None,
+            provider,
+            move |candidate| {
+                calls_for_probe.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok((candidate, Vec::new(), Vec::new())))
+            },
+        )
+        .await
+        .expect("save migrated mixed Provider Set");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "all enabled models are manual after migration"
+        );
+        let snapshot = get_codex_provider_editor_snapshot_internal(
+            &state,
+            "qwen-provider",
+            chrono::Utc::now().timestamp(),
+        )
+        .expect("read migrated editor snapshot");
+        assert_eq!(
+            snapshot.adaptation.persistence,
+            CodexProviderPersistence::Split
+        );
+        assert_eq!(
+            serde_json::to_value(
+                &snapshot
+                    .logical_provider
+                    .meta
+                    .as_ref()
+                    .expect("logical Provider meta")
+                    .codex_protocol_overrides,
+            )
+            .expect("serialize migrated overrides"),
+            json!({
+                "qwen-visible": "openai_responses",
+                "qwen-coder-visible": "openai_chat"
+            })
+        );
+        assert!(
+            snapshot.logical_provider.settings_config["modelCatalog"]["models"]
+                .as_array()
+                .expect("logical catalog models")
+                .iter()
+                .all(|model| model.get("apiFormat").is_none())
+        );
+        assert!(db
+            .get_provider_by_id("qwen-provider--ccsm-responses", "codex")
+            .expect("read Responses leaf")
+            .is_some());
+        assert!(db
+            .get_provider_by_id("qwen-provider--ccsm-chat", "codex")
+            .expect("read Chat leaf")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn per_model_manual_mode_still_probes_follow_auto_models_and_materializes_a_split() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let mut provider = codex_provider();
+        provider.settings_config["modelCatalog"]["models"]
+            .as_array_mut()
+            .expect("catalog models")
+            .push(json!({
+                "model": "qwen-coder-visible",
+                "upstreamModel": "Qwen/Qwen3-Coder"
+            }));
+        if let Some(model) = provider.settings_config["modelCatalog"]["models"][0].as_object_mut() {
+            model.remove("apiFormat");
+        }
+        let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+        meta.codex_protocol_mode = Some(CodexProtocolMode::Manual);
+        meta.codex_protocol_overrides.insert(
+            "qwen-coder-visible".to_string(),
+            crate::provider::CodexProtocolOverride::OpenaiChat,
+        );
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "other-provider".to_string(),
+                "Other".to_string(),
+                json!({"auth": {}}),
+                None,
+            ),
+        )
+        .expect("seed another Provider");
+        db.set_current_provider("codex", "other-provider")
+            .expect("activate another Provider");
+        let provider_for_probe = provider.clone();
+
+        update_provider_internal_with_probe(
+            &state,
+            AppType::Codex,
+            None,
+            provider,
+            move |candidate| {
+                let target =
+                    crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+                        &provider_for_probe,
+                        "qwen-visible".to_string(),
+                        "Qwen/Qwen3.8".to_string(),
+                    )
+                    .expect("compile automatic model")
+                    .target_key(TransportKind::OpenAiResponses)
+                    .expect("compile target");
+                let now = chrono::Utc::now().timestamp();
+                let record = ProtocolCompatibilityRecord::new(
+                    target,
+                    ProtocolCompatibilityProbeResult {
+                        selected_transport: Some(TransportKind::OpenAiResponses),
+                        readiness: ProbeReadiness::Verified,
+                        branches: Vec::new(),
+                    },
+                    now,
+                    now + 600,
+                );
+                std::future::ready(Ok((candidate, vec![record], Vec::new())))
+            },
+        )
+        .await
+        .expect("save mixed automatic/manual Provider Set");
+
+        assert!(db
+            .get_provider_by_id("qwen-provider--ccsm-responses", "codex")
+            .expect("read Responses leaf")
+            .is_some());
+        assert!(db
+            .get_provider_by_id("qwen-provider--ccsm-chat", "codex")
+            .expect("read Chat leaf")
+            .is_some());
     }
 
     #[test]
@@ -2398,6 +3356,209 @@ mod codex_protocol_preflight_save_tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn editor_snapshot_restores_split_protocols_and_independent_transport_evidence() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let mut source = codex_provider();
+        source.settings_config["modelCatalog"]["models"]
+            .as_array_mut()
+            .expect("catalog models")
+            .push(json!({
+                "model": "qwen-coder-visible",
+                "upstreamModel": "Qwen/Qwen3-Coder"
+            }));
+        let now = chrono::Utc::now().timestamp();
+        let record = |public_model: &str, upstream_model: &str, transport: TransportKind| {
+            let target = crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+                &source,
+                public_model.to_string(),
+                upstream_model.to_string(),
+            )
+            .expect("compile candidate")
+            .target_key(transport)
+            .expect("target");
+            ProtocolCompatibilityRecord::new(
+                target,
+                ProtocolCompatibilityProbeResult {
+                    selected_transport: Some(transport),
+                    readiness: ProbeReadiness::Verified,
+                    branches: Vec::new(),
+                },
+                now,
+                now + 600,
+            )
+        };
+        let selected = vec![
+            record(
+                "qwen-visible",
+                "Qwen/Qwen3.8",
+                TransportKind::OpenAiResponses,
+            ),
+            record(
+                "qwen-coder-visible",
+                "Qwen/Qwen3-Coder",
+                TransportKind::OpenAiChat,
+            ),
+        ];
+        let observations = vec![
+            record(
+                "qwen-visible",
+                "Qwen/Qwen3.8",
+                TransportKind::OpenAiResponses,
+            ),
+            record("qwen-visible", "Qwen/Qwen3.8", TransportKind::OpenAiChat),
+        ];
+        let prepared = crate::codex_multirouter::provider_set::plan_codex_provider_set(
+            &source,
+            &selected,
+            &HashMap::new(),
+            now,
+        )
+        .expect("prepare split");
+        crate::codex_multirouter::mutation::apply_codex_provider_set_mutation_with_publisher(
+            db.as_ref(),
+            prepared,
+            |artifact| {
+                Ok(
+                    crate::codex_multirouter::projection::ProjectionReadBack::verified(
+                        artifact.dependency_fingerprint.clone(),
+                    ),
+                )
+            },
+        )
+        .expect("seed split Provider Set");
+        db.save_protocol_probe_observations(&observations)
+            .expect("seed independent observations");
+
+        let snapshot = get_codex_provider_editor_snapshot_internal(&state, "qwen-provider", now)
+            .expect("read editor snapshot");
+
+        assert_eq!(snapshot.logical_provider.id, source.id);
+        assert_eq!(
+            snapshot.adaptation.persistence,
+            CodexProviderPersistence::Split
+        );
+        assert_eq!(snapshot.adaptation.status, CodexAdaptationStatus::Ready);
+        assert_eq!(
+            snapshot.adaptation.effective_transport,
+            Some(CodexEffectiveTransport::Mixed)
+        );
+        assert_eq!(snapshot.adaptation.models.len(), 2);
+        let responses_model = snapshot
+            .adaptation
+            .models
+            .iter()
+            .find(|model| model.public_model == "qwen-visible")
+            .expect("Responses model");
+        assert_eq!(responses_model.choice, CodexProtocolChoice::FollowAuto);
+        assert_eq!(
+            responses_model.choice_source,
+            CodexProtocolChoiceSource::Automatic
+        );
+        assert_eq!(
+            responses_model.effective_transport,
+            Some(TransportKind::OpenAiResponses)
+        );
+        assert!(responses_model.responses.is_some());
+        assert!(responses_model.chat.is_some());
+    }
+
+    #[test]
+    fn preflight_adaptation_preview_exposes_the_split_without_mutating_the_draft() {
+        let mut source = codex_provider();
+        source.settings_config["modelCatalog"]["models"][0]
+            .as_object_mut()
+            .expect("first catalog model")
+            .remove("apiFormat");
+        source
+            .meta
+            .get_or_insert_with(ProviderMeta::default)
+            .codex_protocol_mode = Some(CodexProtocolMode::Auto);
+        source.settings_config["modelCatalog"]["models"]
+            .as_array_mut()
+            .expect("catalog models")
+            .push(json!({
+                "model": "qwen-coder-visible",
+                "upstreamModel": "Qwen/Qwen3-Coder"
+            }));
+        let now = chrono::Utc::now().timestamp();
+        let record = |public_model: &str, upstream_model: &str, transport: TransportKind| {
+            let target = crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+                &source,
+                public_model.to_string(),
+                upstream_model.to_string(),
+            )
+            .expect("compile candidate")
+            .target_key(transport)
+            .expect("target");
+            ProtocolCompatibilityRecord::new(
+                target,
+                ProtocolCompatibilityProbeResult {
+                    selected_transport: Some(transport),
+                    readiness: ProbeReadiness::Verified,
+                    branches: Vec::new(),
+                },
+                now,
+                now + 600,
+            )
+        };
+        let records = vec![
+            record(
+                "qwen-visible",
+                "Qwen/Qwen3.8",
+                TransportKind::OpenAiResponses,
+            ),
+            record(
+                "qwen-coder-visible",
+                "Qwen/Qwen3-Coder",
+                TransportKind::OpenAiChat,
+            ),
+        ];
+        let observations = records
+            .iter()
+            .flat_map(|selected| {
+                [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
+                    .into_iter()
+                    .map(|transport| {
+                        let mut observation = selected.clone();
+                        observation.target.transport = transport;
+                        observation
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        let preview = build_codex_provider_adaptation_preview(
+            &source,
+            &records,
+            &observations,
+            &HashMap::new(),
+            now,
+        )
+        .expect("build zero-write adaptation preview");
+
+        assert_eq!(preview.persistence, CodexProviderPersistence::Split);
+        assert_eq!(preview.status, CodexAdaptationStatus::Ready);
+        assert_eq!(
+            preview.effective_transport,
+            Some(CodexEffectiveTransport::Mixed)
+        );
+        assert_eq!(preview.models.len(), 2);
+        assert_eq!(
+            source
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref()),
+            Some("openai_responses"),
+            "the preview must not rewrite the draft's top-level protocol"
+        );
+        assert!(source.settings_config["modelCatalog"]["models"]
+            .as_array()
+            .expect("catalog models")
+            .iter()
+            .all(|model| model.get("apiFormat").is_none()));
     }
 
     #[test]
@@ -2515,7 +3676,9 @@ mod codex_protocol_preflight_save_tests {
 #[cfg(test)]
 mod universal_codex_protocol_preflight_tests {
     use super::{
-        commit_universal_provider_set_internal, prepare_universal_provider_set_internal,
+        commit_universal_provider_set_internal,
+        commit_universal_provider_set_internal_with_publisher,
+        prepare_universal_provider_set_internal,
         save_and_sync_universal_provider_internal_with_probe,
         sync_universal_provider_internal_with_probe, CommitUniversalProviderSetRequest,
         PrepareUniversalProviderSetRequest,
@@ -2526,12 +3689,12 @@ mod universal_codex_protocol_preflight_tests {
         database::Database,
         error::AppError,
         protocol_compatibility::{
-            apply_selected_transport_to_provider, compile_provider_probe_candidate_for_model,
-            ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
-            ProtocolCompatibilityRecord, TransportKind,
+            compile_provider_probe_candidate_for_model, ProbeReadiness, ProbeTargetKey,
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, TransportKind,
         },
         provider::{
-            CodexModelConfig, CodexProtocolMode, Provider, ProviderMeta, UniversalProvider,
+            CodexModelConfig, CodexProtocolMode, CodexProtocolOverride, Provider, ProviderMeta,
+            UniversalProvider,
         },
         services::ProviderService,
         store::AppState,
@@ -2544,22 +3707,27 @@ mod universal_codex_protocol_preflight_tests {
 
     fn remember_provider_set_receipt(
         state: &AppState,
+        candidate: &crate::protocol_compatibility::ProbeCandidate,
         record: ProtocolCompatibilityRecord,
     ) -> String {
-        let observations = protocol_observations(&record);
+        let observations = protocol_observations(candidate, &record);
         state
             .remember_codex_provider_set_probe_receipt(record, observations)
             .expect("remember Universal Provider Set receipt bundle")
     }
 
     fn protocol_observations(
+        candidate: &crate::protocol_compatibility::ProbeCandidate,
         record: &ProtocolCompatibilityRecord,
     ) -> Vec<ProtocolCompatibilityRecord> {
         [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
             .into_iter()
             .map(|transport| {
                 let mut observation = record.clone();
-                observation.target.transport = transport;
+                observation.target = candidate
+                    .target_key(transport)
+                    .expect("compile independent Universal transport observation target");
+                observation.result.readiness = ProbeReadiness::Unverified;
                 observation
             })
             .collect()
@@ -2614,16 +3782,18 @@ mod universal_codex_protocol_preflight_tests {
         ]
         .into_iter()
         .map(|(public_model, upstream_model, transport, readiness)| {
-            let target = compile_provider_probe_candidate_for_model(
+            let candidate = compile_provider_probe_candidate_for_model(
                 &codex_provider,
                 public_model.to_string(),
                 upstream_model.to_string(),
             )
-            .expect("compile Universal Codex candidate")
-            .target_key(transport)
-            .expect("compile Universal Codex target");
+            .expect("compile Universal Codex candidate");
+            let target = candidate
+                .target_key(transport)
+                .expect("compile Universal Codex target");
             remember_provider_set_receipt(
                 state,
+                &candidate,
                 ProtocolCompatibilityRecord::new(
                     target,
                     ProtocolCompatibilityProbeResult {
@@ -2666,7 +3836,7 @@ mod universal_codex_protocol_preflight_tests {
                 provider: universal,
                 receipt_ids,
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
         )
@@ -2777,7 +3947,7 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[tokio::test]
-    async fn legacy_universal_save_and_sync_requires_explicit_split_confirmation() {
+    async fn legacy_universal_save_and_sync_accepts_the_automatic_split() {
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -2807,53 +3977,45 @@ mod universal_codex_protocol_preflight_tests {
         db.save_provider(AppType::Codex.as_str(), &existing_codex)
             .expect("seed the authoritative Universal Codex catalog");
 
-        let error = save_and_sync_universal_provider_internal_with_probe(
-            &state,
-            universal,
-            move |candidate| {
-                let now = chrono::Utc::now().timestamp();
-                let record =
-                    |public_model: &str, upstream_model: &str, transport: TransportKind| {
-                        let target = compile_provider_probe_candidate_for_model(
-                            &candidate,
-                            public_model.to_string(),
-                            upstream_model.to_string(),
-                        )
-                        .expect("compile Universal Codex model candidate")
-                        .target_key(transport)
-                        .expect("compile Universal Codex probe target");
-                        ProtocolCompatibilityRecord::new(
-                            target,
-                            ProtocolCompatibilityProbeResult {
-                                selected_transport: Some(transport),
-                                readiness: ProbeReadiness::Verified,
-                                branches: Vec::new(),
-                            },
-                            now,
-                            now + 600,
-                        )
-                    };
-                let records = vec![
-                    record(
-                        "qwen-visible",
-                        "Qwen/Qwen3.8",
-                        TransportKind::OpenAiResponses,
-                    ),
-                    record("glm-visible", "zai-org/GLM-4.5", TransportKind::OpenAiChat),
-                ];
-                std::future::ready(Ok((candidate, records, Vec::new())))
-            },
-        )
+        save_and_sync_universal_provider_internal_with_probe(&state, universal, move |candidate| {
+            let now = chrono::Utc::now().timestamp();
+            let record = |public_model: &str, upstream_model: &str, transport: TransportKind| {
+                let target = compile_provider_probe_candidate_for_model(
+                    &candidate,
+                    public_model.to_string(),
+                    upstream_model.to_string(),
+                )
+                .expect("compile Universal Codex model candidate")
+                .target_key(transport)
+                .expect("compile Universal Codex probe target");
+                ProtocolCompatibilityRecord::new(
+                    target,
+                    ProtocolCompatibilityProbeResult {
+                        selected_transport: Some(transport),
+                        readiness: ProbeReadiness::Verified,
+                        branches: Vec::new(),
+                    },
+                    now,
+                    now + 600,
+                )
+            };
+            let records = vec![
+                record(
+                    "qwen-visible",
+                    "Qwen/Qwen3.8",
+                    TransportKind::OpenAiResponses,
+                ),
+                record("glm-visible", "zai-org/GLM-4.5", TransportKind::OpenAiChat),
+            ];
+            std::future::ready(Ok((candidate, records, Vec::new())))
+        })
         .await
-        .expect_err("legacy save-and-sync must not commit a split without confirmation");
-        assert!(error
-            .to_string()
-            .contains("codex_provider_set_split_confirmation_required"));
+        .expect("legacy save-and-sync accepts its automatic split plan");
 
         assert!(db
             .get_universal_provider("universal-mixed")
             .expect("read Universal definition")
-            .is_none());
+            .is_some());
         for (app_type, provider_id) in [
             ("claude", "universal-claude-universal-mixed"),
             ("gemini", "universal-gemini-universal-mixed"),
@@ -2861,8 +4023,8 @@ mod universal_codex_protocol_preflight_tests {
             assert!(
                 db.get_provider_by_id(provider_id, app_type)
                     .expect("read generated Universal child")
-                    .is_none(),
-                "rejected legacy split must not write the {app_type} child"
+                    .is_some(),
+                "automatic legacy split must write the {app_type} child"
             );
         }
         for provider_id in [
@@ -2871,8 +4033,8 @@ mod universal_codex_protocol_preflight_tests {
         ] {
             assert!(db
                 .get_provider_by_id(provider_id, AppType::Codex.as_str())
-                .expect("read rejected Universal Codex leaf")
-                .is_none());
+                .expect("read committed Universal Codex leaf")
+                .is_some());
         }
     }
 
@@ -2979,7 +4141,7 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
-    fn universal_mixed_prepare_is_zero_write_and_commit_requires_split_confirmation() {
+    fn universal_mixed_prepare_is_zero_write_and_accept_auto_commits_split_once() {
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -3009,23 +4171,27 @@ mod universal_codex_protocol_preflight_tests {
             .expect("seed Universal Codex catalog");
         let now = chrono::Utc::now().timestamp();
         let record = |public_model: &str, upstream_model: &str, transport: TransportKind| {
-            let target = compile_provider_probe_candidate_for_model(
+            let candidate = compile_provider_probe_candidate_for_model(
                 &existing_codex,
                 public_model.to_string(),
                 upstream_model.to_string(),
             )
-            .expect("compile Universal Codex model candidate")
-            .target_key(transport)
-            .expect("compile Universal Codex probe target");
-            ProtocolCompatibilityRecord::new(
-                target,
-                ProtocolCompatibilityProbeResult {
-                    selected_transport: Some(transport),
-                    readiness: ProbeReadiness::Verified,
-                    branches: Vec::new(),
-                },
-                now,
-                now + 600,
+            .expect("compile Universal Codex model candidate");
+            let target = candidate
+                .target_key(transport)
+                .expect("compile Universal Codex probe target");
+            (
+                candidate,
+                ProtocolCompatibilityRecord::new(
+                    target,
+                    ProtocolCompatibilityProbeResult {
+                        selected_transport: Some(transport),
+                        readiness: ProbeReadiness::Verified,
+                        branches: Vec::new(),
+                    },
+                    now,
+                    now + 600,
+                ),
             )
         };
         let receipt_ids = [
@@ -3037,7 +4203,7 @@ mod universal_codex_protocol_preflight_tests {
             record("glm-visible", "zai-org/GLM-4.5", TransportKind::OpenAiChat),
         ]
         .into_iter()
-        .map(|record| remember_provider_set_receipt(&state, record))
+        .map(|(candidate, record)| remember_provider_set_receipt(&state, &candidate, record))
         .collect::<Vec<_>>();
 
         let preview = prepare_universal_provider_set_internal(
@@ -3066,34 +4232,29 @@ mod universal_codex_protocol_preflight_tests {
             .expect("read Gemini child")
             .is_none());
 
-        let error = commit_universal_provider_set_internal(
-            &state,
-            CommitUniversalProviderSetRequest {
-                provider: universal.clone(),
-                receipt_ids: receipt_ids.clone(),
-                digest: preview.digest.clone(),
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
-            },
-            now,
-        )
-        .expect_err("mixed Universal Provider Set requires split confirmation");
-        assert!(error.contains("codex_provider_set_split_confirmation_required"));
-        assert!(db
-            .get_universal_provider("universal-preview")
-            .expect("read Universal definition after rejected commit")
-            .is_none());
-
-        commit_universal_provider_set_internal(
+        let outcome = commit_universal_provider_set_internal(
             &state,
             CommitUniversalProviderSetRequest {
                 provider: universal,
                 receipt_ids,
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
         )
-        .expect("confirm and commit Universal split");
+        .expect("accept and commit the automatic Universal split");
+        let serialized = serde_json::to_value(&outcome).expect("serialize Universal outcome");
+        assert_eq!(serialized["status"], "committed");
+        assert!(outcome.projections.is_empty());
+        assert_eq!(
+            outcome
+                .codex_snapshot
+                .as_ref()
+                .expect("committed Universal Codex snapshot")
+                .adaptation
+                .persistence,
+            super::CodexProviderPersistence::Split
+        );
         for provider_id in [
             "universal-codex-universal-preview",
             "universal-codex-universal-preview--ccsm-responses",
@@ -3104,6 +4265,248 @@ mod universal_codex_protocol_preflight_tests {
                 .expect("read committed Universal Provider Set member")
                 .is_some());
         }
+    }
+
+    #[test]
+    fn universal_projection_failure_reports_committed_warning_without_rolling_back_data() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let (universal, receipt_ids) =
+            mixed_universal_fixture(&state, "universal-projection", ProbeReadiness::Verified);
+        db.set_current_provider(
+            AppType::Codex.as_str(),
+            "universal-codex-universal-projection",
+        )
+        .expect("activate existing Universal Codex child");
+        let now = chrono::Utc::now().timestamp();
+        let preview = prepare_universal_provider_set_internal(
+            &state,
+            PrepareUniversalProviderSetRequest {
+                provider: universal.clone(),
+                receipt_ids: receipt_ids.clone(),
+            },
+            now,
+        )
+        .expect("prepare Universal Provider Set");
+
+        let outcome = commit_universal_provider_set_internal_with_publisher(
+            &state,
+            CommitUniversalProviderSetRequest {
+                provider: universal,
+                receipt_ids: receipt_ids.clone(),
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
+            },
+            now,
+            |_| Err("simulated projection publish failure".to_string()),
+        )
+        .expect("database commit remains successful when live projection fails");
+
+        assert_eq!(
+            outcome.status,
+            crate::commands::protocol_compatibility::CodexProviderSetCommitStatus::CommittedWithProjectionError
+        );
+        assert_eq!(
+            outcome.projection_error_code.as_deref(),
+            Some("codex_provider_set_live_projection_failed")
+        );
+        assert_eq!(outcome.projections.len(), 1);
+        assert_eq!(
+            outcome.projections[0].state,
+            crate::codex_multirouter::projection::ProjectionState::Pending
+        );
+        assert_eq!(
+            outcome.projections[0].last_error_code.as_deref(),
+            Some("projection_publish_failed")
+        );
+        assert!(db
+            .get_universal_provider("universal-projection")
+            .expect("read committed Universal definition")
+            .is_some());
+        for provider_id in [
+            "universal-codex-universal-projection",
+            "universal-codex-universal-projection--ccsm-responses",
+            "universal-codex-universal-projection--ccsm-chat",
+        ] {
+            assert!(db
+                .get_provider_by_id(provider_id, AppType::Codex.as_str())
+                .expect("read committed Universal Provider Set member")
+                .is_some());
+        }
+        let consumed = match state.get_codex_provider_set_probe_receipts(&receipt_ids) {
+            Ok(_) => false,
+            Err(error) => error.contains("codex_provider_set_probe_required"),
+        };
+        assert!(consumed, "successful database commit must consume receipts");
+    }
+
+    #[test]
+    fn universal_disable_collects_dependent_router_projection_failure_after_atomic_delete() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let (mut universal, receipt_ids) = mixed_universal_fixture(
+            &state,
+            "universal-delete-projection",
+            ProbeReadiness::Verified,
+        );
+        let now = chrono::Utc::now().timestamp();
+        let preview = prepare_universal_provider_set_internal(
+            &state,
+            PrepareUniversalProviderSetRequest {
+                provider: universal.clone(),
+                receipt_ids: receipt_ids.clone(),
+            },
+            now,
+        )
+        .expect("prepare Universal Provider Set");
+        commit_universal_provider_set_internal_with_publisher(
+            &state,
+            CommitUniversalProviderSetRequest {
+                provider: universal.clone(),
+                receipt_ids,
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
+            },
+            now,
+            |artifact| {
+                Ok(
+                    crate::codex_multirouter::projection::ProjectionReadBack::verified(
+                        artifact.dependency_fingerprint.clone(),
+                    ),
+                )
+            },
+        )
+        .expect("seed split Universal Provider Set");
+        let dependent_router = Provider::with_id(
+            "dependent-router".to_string(),
+            "Dependent Router".to_string(),
+            json!({
+                "auth": {},
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "routes": [{
+                        "id": "universal-route",
+                        "enabled": true,
+                        "targetProviderId": "universal-codex-universal-delete-projection",
+                        "modelSelection": {"mode": "all"},
+                        "authPolicy": {"source": "provider_config"}
+                    }]
+                }
+            }),
+            None,
+        );
+        db.save_provider(AppType::Codex.as_str(), &dependent_router)
+            .expect("seed dependent Router");
+
+        universal.apps.codex = false;
+        universal.models.codex = None;
+        let outcome =
+            ProviderService::save_and_sync_universal_to_apps_with_codex_protocol_state_and_publisher(
+                &state,
+                universal,
+                None,
+                &[],
+                &[],
+                |_| Err("simulated dependent Router projection failure".to_string()),
+            )
+            .expect("database deletion remains successful when derived projection fails");
+
+        assert_eq!(
+            outcome.projection_error_code.as_deref(),
+            Some("codex_provider_set_live_projection_failed")
+        );
+        assert_eq!(outcome.projections.len(), 1);
+        assert_eq!(
+            outcome.projections[0].router_provider_id,
+            "dependent-router"
+        );
+        assert_eq!(
+            outcome.projections[0].state,
+            crate::codex_multirouter::projection::ProjectionState::Pending
+        );
+        for provider_id in [
+            "universal-codex-universal-delete-projection",
+            "universal-codex-universal-delete-projection--ccsm-responses",
+            "universal-codex-universal-delete-projection--ccsm-chat",
+        ] {
+            assert!(db
+                .get_provider_by_id(provider_id, AppType::Codex.as_str())
+                .expect("read deleted Universal Provider Set member")
+                .is_none());
+        }
+        let updated_router = db
+            .get_provider_by_id("dependent-router", AppType::Codex.as_str())
+            .expect("read dependent Router")
+            .expect("dependent Router remains");
+        assert_eq!(
+            updated_router.settings_config["codexRouting"]["enabled"],
+            false
+        );
+    }
+
+    #[test]
+    fn universal_per_model_manual_override_commits_a_split_with_only_auto_receipts() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let (mut universal, receipt_ids) =
+            mixed_universal_fixture(&state, "universal-model-override", ProbeReadiness::Verified);
+        let meta = universal.meta.get_or_insert_with(ProviderMeta::default);
+        meta.codex_protocol_mode = Some(CodexProtocolMode::Manual);
+        meta.codex_protocol_overrides
+            .insert("glm-visible".to_string(), CodexProtocolOverride::OpenaiChat);
+        let auto_receipt_ids = vec![receipt_ids[0].clone()];
+        let now = chrono::Utc::now().timestamp();
+        let preview = prepare_universal_provider_set_internal(
+            &state,
+            PrepareUniversalProviderSetRequest {
+                provider: universal.clone(),
+                receipt_ids: auto_receipt_ids.clone(),
+            },
+            now,
+        )
+        .expect("prepare Universal mixed automatic/manual plan");
+        assert!(matches!(
+            preview.codex.as_ref().expect("Codex preview").plan,
+            crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. }
+        ));
+
+        commit_universal_provider_set_internal(
+            &state,
+            CommitUniversalProviderSetRequest {
+                provider: universal,
+                receipt_ids: auto_receipt_ids,
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::ConfirmManual,
+            },
+            now,
+        )
+        .expect("commit Universal mixed automatic/manual plan");
+
+        for provider_id in [
+            "universal-codex-universal-model-override",
+            "universal-codex-universal-model-override--ccsm-responses",
+            "universal-codex-universal-model-override--ccsm-chat",
+        ] {
+            assert!(db
+                .get_provider_by_id(provider_id, AppType::Codex.as_str())
+                .expect("read committed Universal Provider Set member")
+                .is_some());
+        }
+        assert_eq!(
+            db.list_protocol_compatibility_profiles(
+                "universal-codex-universal-model-override--ccsm-responses"
+            )
+            .expect("read automatic model profile")
+            .len(),
+            1
+        );
+        assert!(db
+            .list_protocol_compatibility_profiles(
+                "universal-codex-universal-model-override--ccsm-chat"
+            )
+            .expect("read manual model profiles")
+            .is_empty());
     }
 
     #[test]
@@ -3132,7 +4535,7 @@ mod universal_codex_protocol_preflight_tests {
                 provider: universal.clone(),
                 receipt_ids: receipt_ids.clone(),
                 digest: preview.digest.clone(),
-                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
         ) {
@@ -3152,7 +4555,7 @@ mod universal_codex_protocol_preflight_tests {
                 provider: universal,
                 receipt_ids,
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
         )
@@ -3191,7 +4594,7 @@ mod universal_codex_protocol_preflight_tests {
                 provider: universal,
                 receipt_ids,
                 digest: preview.digest,
-                intent: CodexProviderSetCommitIntent::AcceptSingle,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
             },
             now,
         )
@@ -3285,16 +4688,18 @@ mod universal_codex_protocol_preflight_tests {
             .to_codex_provider()
             .expect("Codex child is enabled");
         let now = chrono::Utc::now().timestamp();
-        let target = compile_provider_probe_candidate_for_model(
+        let candidate = compile_provider_probe_candidate_for_model(
             &codex_provider,
             "qwen-visible".to_string(),
             "qwen-visible".to_string(),
         )
-        .expect("compile Universal Codex candidate")
-        .target_key(TransportKind::OpenAiResponses)
-        .expect("compile probed Responses target");
+        .expect("compile Universal Codex candidate");
+        let target = candidate
+            .target_key(TransportKind::OpenAiResponses)
+            .expect("compile probed Responses target");
         let receipt_ids = vec![remember_provider_set_receipt(
             &state,
+            &candidate,
             ProtocolCompatibilityRecord::new(
                 target,
                 ProtocolCompatibilityProbeResult {
@@ -3367,16 +4772,18 @@ mod universal_codex_protocol_preflight_tests {
             .to_codex_provider()
             .expect("Codex child is enabled");
         let now = chrono::Utc::now().timestamp();
-        let target = compile_provider_probe_candidate_for_model(
+        let candidate = compile_provider_probe_candidate_for_model(
             &codex_provider,
             "qwen-visible".to_string(),
             "qwen-visible".to_string(),
         )
-        .expect("compile Universal Codex candidate")
-        .target_key(TransportKind::OpenAiResponses)
-        .expect("compile probed Responses target");
+        .expect("compile Universal Codex candidate");
+        let target = candidate
+            .target_key(TransportKind::OpenAiResponses)
+            .expect("compile probed Responses target");
         let receipt_ids = vec![remember_provider_set_receipt(
             &state,
+            &candidate,
             ProtocolCompatibilityRecord::new(
                 target,
                 ProtocolCompatibilityProbeResult {
@@ -3455,16 +4862,18 @@ mod universal_codex_protocol_preflight_tests {
             reasoning_effort: Some("medium".to_string()),
         });
 
-        let target = ProbeTargetKey::new(
-            "universal-codex-universal-complete",
-            None::<String>,
-            "qwen-visible",
-            "qwen-visible",
-            TransportKind::OpenAiChat,
-            "https://gateway.example/v1/chat/completions",
-            "bearer",
+        let codex_candidate = universal
+            .to_codex_provider()
+            .expect("Codex child is enabled");
+        let candidate = compile_provider_probe_candidate_for_model(
+            &codex_candidate,
+            "qwen-visible".to_string(),
+            "qwen-visible".to_string(),
         )
-        .expect("profile target");
+        .expect("compile complete Universal Codex candidate");
+        let target = candidate
+            .target_key(TransportKind::OpenAiChat)
+            .expect("compile complete Universal Chat target");
         let now = chrono::Utc::now().timestamp();
         let record = ProtocolCompatibilityRecord::new(
             target.clone(),
@@ -3477,22 +4886,16 @@ mod universal_codex_protocol_preflight_tests {
             now + 600,
         );
         let returned_record = record.clone();
-        let returned_observations = protocol_observations(&returned_record);
+        let returned_observations = protocol_observations(&candidate, &returned_record);
 
-        save_and_sync_universal_provider_internal_with_probe(
-            &state,
-            universal,
-            move |mut candidate| {
-                assert_eq!(candidate.id, "universal-codex-universal-complete");
-                apply_selected_transport_to_provider(&mut candidate, TransportKind::OpenAiChat)
-                    .expect("apply selected transport");
-                std::future::ready(Ok((
-                    candidate,
-                    vec![returned_record],
-                    returned_observations,
-                )))
-            },
-        )
+        save_and_sync_universal_provider_internal_with_probe(&state, universal, move |candidate| {
+            assert_eq!(candidate.id, "universal-codex-universal-complete");
+            std::future::ready(Ok((
+                candidate,
+                vec![returned_record],
+                returned_observations,
+            )))
+        })
         .await
         .expect("save the complete Universal Provider transaction");
 
@@ -3528,7 +4931,13 @@ mod universal_codex_protocol_preflight_tests {
         let rebound_record = db
             .get_protocol_compatibility_result(&rebound_target)
             .expect("read rebound protocol profile")
-            .expect("rebound protocol profile exists");
+            .unwrap_or_else(|| {
+                panic!(
+                    "rebound protocol profile exists; target={rebound_target:#?}; saved={:#?}",
+                    db.list_protocol_compatibility_profiles("universal-codex-universal-complete")
+                        .expect("list rebound protocol profiles")
+                )
+            });
         assert_eq!(
             rebound_record.result, record.result,
             "the selected Codex profile must commit with the definition and children"
@@ -3939,16 +5348,22 @@ mod universal_codex_protocol_preflight_tests {
         });
         ProviderService::upsert_universal(&state, universal).expect("seed universal provider");
 
-        let expected_target = ProbeTargetKey::new(
-            "universal-codex-universal-probe",
-            None::<String>,
-            "qwen-visible",
-            "qwen-visible",
-            TransportKind::OpenAiChat,
-            "https://vllm.example/v1/chat/completions",
-            "bearer",
+        let universal = db
+            .get_universal_provider("universal-probe")
+            .expect("read Universal definition")
+            .expect("Universal definition exists");
+        let codex_candidate = universal
+            .to_codex_provider()
+            .expect("Codex child is enabled");
+        let candidate = compile_provider_probe_candidate_for_model(
+            &codex_candidate,
+            "qwen-visible".to_string(),
+            "qwen-visible".to_string(),
         )
-        .expect("target");
+        .expect("compile Universal sync Codex candidate");
+        let expected_target = candidate
+            .target_key(TransportKind::OpenAiChat)
+            .expect("compile Universal sync Chat target");
         let now = chrono::Utc::now().timestamp();
         let expected_record = ProtocolCompatibilityRecord::new(
             expected_target.clone(),
@@ -3961,25 +5376,19 @@ mod universal_codex_protocol_preflight_tests {
             now + 600,
         );
         let returned_record = expected_record.clone();
-        let returned_observations = protocol_observations(&returned_record);
+        let returned_observations = protocol_observations(&candidate, &returned_record);
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_probe = calls.clone();
 
-        sync_universal_provider_internal_with_probe(
-            &state,
-            "universal-probe",
-            move |mut candidate| {
-                calls_for_probe.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(candidate.id, "universal-codex-universal-probe");
-                apply_selected_transport_to_provider(&mut candidate, TransportKind::OpenAiChat)
-                    .expect("apply detected transport");
-                std::future::ready(Ok((
-                    candidate,
-                    vec![returned_record],
-                    returned_observations,
-                )))
-            },
-        )
+        sync_universal_provider_internal_with_probe(&state, "universal-probe", move |candidate| {
+            calls_for_probe.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(candidate.id, "universal-codex-universal-probe");
+            std::future::ready(Ok((
+                candidate,
+                vec![returned_record],
+                returned_observations,
+            )))
+        })
         .await
         .expect("sync universal provider");
 
@@ -4006,7 +5415,13 @@ mod universal_codex_protocol_preflight_tests {
         let rebound_record = db
             .get_protocol_compatibility_result(&rebound_target)
             .expect("read saved profile")
-            .expect("saved profile exists");
+            .unwrap_or_else(|| {
+                panic!(
+                    "saved profile exists; target={rebound_target:#?}; saved={:#?}",
+                    db.list_protocol_compatibility_profiles("universal-codex-universal-probe")
+                        .expect("list saved Universal profiles")
+                )
+            });
         assert_eq!(rebound_record.result, expected_record.result);
         assert_eq!(
             db.list_protocol_probe_observations("universal-codex-universal-probe")
@@ -4017,7 +5432,7 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[tokio::test]
-    async fn legacy_universal_sync_requires_explicit_split_confirmation() {
+    async fn legacy_universal_sync_accepts_the_automatic_split() {
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -4046,7 +5461,7 @@ mod universal_codex_protocol_preflight_tests {
         db.save_provider(AppType::Codex.as_str(), &codex_provider)
             .expect("seed authoritative Universal Codex catalog");
 
-        let error = sync_universal_provider_internal_with_probe(
+        sync_universal_provider_internal_with_probe(
             &state,
             "universal-sync-mixed",
             move |candidate| {
@@ -4084,19 +5499,15 @@ mod universal_codex_protocol_preflight_tests {
             },
         )
         .await
-        .expect_err("legacy sync must not commit a split without confirmation");
-
-        assert!(error
-            .to_string()
-            .contains("codex_provider_set_split_confirmation_required"));
+        .expect("legacy sync accepts its automatic split plan");
         for provider_id in [
             "universal-codex-universal-sync-mixed--ccsm-responses",
             "universal-codex-universal-sync-mixed--ccsm-chat",
         ] {
             assert!(db
                 .get_provider_by_id(provider_id, AppType::Codex.as_str())
-                .expect("read rejected Universal Codex leaf")
-                .is_none());
+                .expect("read committed Universal Codex leaf")
+                .is_some());
         }
     }
 }

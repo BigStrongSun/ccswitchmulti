@@ -241,6 +241,9 @@ export interface ProviderMeta {
   apiFormatSource?: "manual" | "probe" | "inferred" | string;
   // Codex 第三方协议策略；缺省/auto 由深度探测决定，manual 使用下列高级覆盖。
   codexProtocolMode?: CodexProtocolMode;
+  // Codex 逐公开模型的高级协议覆盖；缺少 key 表示跟随自动探测。
+  // key 必须使用 trim + ASCII lowercase 后的公开模型名，禁止写回 modelCatalog。
+  codexProtocolOverrides?: Record<string, CodexProtocolOverride>;
   codexReasoningProjection?: CodexReasoningProjection;
   codexToolSchemaDialect?: CodexToolSchemaDialect;
   codexHistoryReplay?: CodexHistoryReplay;
@@ -304,6 +307,8 @@ export type CodexApiFormat =
   | "openai_chat"
   | "openai_messages"
   | "anthropic";
+
+export type CodexProtocolOverride = "openai_responses" | "openai_chat";
 
 export type CodexReasoningEffort =
   | "none"

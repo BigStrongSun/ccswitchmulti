@@ -4,6 +4,7 @@ import { CheckCircle2, Download, Loader2, Route, Server } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { CodexApiFormat, CodexCatalogModel } from "@/types";
+import type { CodexProviderAdaptationView } from "@/lib/api/protocol-compatibility";
 
 type ValidationTone = "muted" | "success" | "warning" | "error";
 
@@ -11,6 +12,7 @@ interface CodexProviderReadinessSectionProps {
   models: CodexCatalogModel[];
   defaultModel?: string;
   apiFormat: CodexApiFormat;
+  adaptation?: CodexProviderAdaptationView | null;
   isMaintainedPreset: boolean;
   isSyncingModels: boolean;
   isValidatingConnection: boolean;
@@ -38,6 +40,7 @@ export function CodexProviderReadinessSection({
   models,
   defaultModel,
   apiFormat,
+  adaptation = null,
   isMaintainedPreset,
   isSyncingModels,
   isValidatingConnection,
@@ -74,6 +77,25 @@ export function CodexProviderReadinessSection({
           : validationTone === "error"
             ? "连接验证失败"
             : "建议先验证连接";
+  const effectiveProtocolLabel = adaptation
+    ? adaptation.persistence === "split" ||
+      adaptation.effectiveTransport === "mixed"
+      ? "自动适配 · Responses + Chat"
+      : adaptation.effectiveTransport === "open_ai_responses"
+        ? "Responses"
+        : adaptation.effectiveTransport === "open_ai_chat"
+          ? "Chat"
+          : adaptation.persistence === "legacy_mixed"
+            ? "旧版混合协议"
+            : apiFormatLabel(apiFormat)
+    : apiFormatLabel(apiFormat);
+  const evidenceTime = adaptation?.testedAt
+    ? new Date(adaptation.testedAt * 1000).toLocaleString()
+    : "尚未验证";
+  const evidenceExpired =
+    adaptation?.status === "stale" ||
+    (adaptation?.expiresAt != null &&
+      adaptation.expiresAt <= Math.floor(Date.now() / 1000));
 
   return (
     <section
@@ -132,7 +154,7 @@ export function CodexProviderReadinessSection({
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-4">
         <div className="rounded-md border border-border-default bg-background/70 p-3">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Server className="h-3.5 w-3.5" />
@@ -153,12 +175,40 @@ export function CodexProviderReadinessSection({
           </p>
         </div>
         <div className="rounded-md border border-border-default bg-background/70 p-3">
-          <p className="text-xs text-muted-foreground">上游协议</p>
+          <p className="text-xs text-muted-foreground">实际协议</p>
           <p className="mt-1 text-sm font-medium text-foreground">
-            {apiFormatLabel(apiFormat)}
+            {effectiveProtocolLabel}
+          </p>
+        </div>
+        <div className="rounded-md border border-border-default bg-background/70 p-3">
+          <p className="text-xs text-muted-foreground">兼容性证据</p>
+          <p className="mt-1 text-sm font-medium text-foreground">
+            {adaptation ? `${adaptation.models.length} 个模型` : "尚未读取"}
+          </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+            证据时间：{evidenceTime}
+            {evidenceExpired ? " · 已过期" : ""}
           </p>
         </div>
       </div>
+
+      {adaptation && adaptation.models.length > 0 && (
+        <div className="flex flex-wrap gap-2" aria-label="模型实际协议">
+          {adaptation.models.map((model) => (
+            <span
+              key={model.publicModel}
+              className="rounded-full border border-border-default bg-background px-2.5 py-1 text-xs text-foreground"
+            >
+              {model.publicModel}：
+              {model.effectiveTransport === "open_ai_responses"
+                ? "Responses"
+                : model.effectiveTransport === "open_ai_chat"
+                  ? "Chat"
+                  : "未确认"}
+            </span>
+          ))}
+        </div>
+      )}
 
       <div className="rounded-md border border-border-default bg-background/70 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">

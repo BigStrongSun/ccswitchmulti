@@ -39,9 +39,6 @@ export function UniversalProviderPanel({
     id: string;
     name: string;
   }>({ open: false, id: "", name: "" });
-  const { persistUniversalProviderSet, dialogs: providerSetDialogs } =
-    useUniversalProviderSetSave();
-
   // 加载数据
   const loadProviders = useCallback(async () => {
     try {
@@ -60,6 +57,12 @@ export function UniversalProviderPanel({
     }
   }, [t]);
 
+  const {
+    persistUniversalProviderSet,
+    retryProjection,
+    dialogs: providerSetDialogs,
+  } = useUniversalProviderSetSave({ onCommitted: loadProviders });
+
   useEffect(() => {
     loadProviders();
   }, [loadProviders]);
@@ -70,53 +73,55 @@ export function UniversalProviderPanel({
     toast.error(message);
   }, []);
 
-  // 添加/编辑供应商
-  const handleSave = useCallback(
-    async (provider: UniversalProvider) => {
-      try {
-        await persistUniversalProviderSet(provider);
-
-        toast.success(
-          editingProvider
-            ? t("universalProvider.updated", {
-                defaultValue: "统一供应商已更新",
-              })
-            : t("universalProvider.addedAndSynced", {
-                defaultValue: "统一供应商已添加并同步",
-              }),
-        );
-        loadProviders();
-        setEditingProvider(null);
-      } catch (error) {
-        showSaveError(
-          error,
-          t("universalProvider.saveError", {
-            defaultValue: "保存统一供应商失败",
-          }),
-        );
-        throw error;
+  const notifyCommitOutcome = useCallback(
+    (
+      outcome: Awaited<ReturnType<typeof persistUniversalProviderSet>>,
+      successMessage: string,
+    ) => {
+      if (outcome.status !== "committed_with_projection_error") {
+        toast.success(successMessage);
+        return;
       }
+
+      const hasRetryTarget = outcome.projections.some(
+        (projection) => projection.state === "pending",
+      );
+      toast.warning(
+        "统一供应商已保存，但 Codex 当前配置待刷新；其他应用配置不受影响。",
+        hasRetryTarget
+          ? {
+              action: {
+                label: "重新投影",
+                onClick: () => {
+                  void retryProjection(outcome)
+                    .then(() => toast.success("Codex 当前配置已重新投影"))
+                    .catch((error) => {
+                      console.error(
+                        "Failed to retry Universal Provider Set projection",
+                        error,
+                      );
+                      toast.error("重新投影失败，请稍后再试");
+                    });
+                },
+              },
+            }
+          : undefined,
+      );
     },
-    [
-      editingProvider,
-      loadProviders,
-      persistUniversalProviderSet,
-      showSaveError,
-      t,
-    ],
+    [persistUniversalProviderSet, retryProjection],
   );
 
   // 保存并同步供应商
   const handleSaveAndSync = useCallback(
     async (provider: UniversalProvider) => {
       try {
-        await persistUniversalProviderSet(provider);
-        toast.success(
+        const outcome = await persistUniversalProviderSet(provider);
+        notifyCommitOutcome(
+          outcome,
           t("universalProvider.savedAndSynced", {
             defaultValue: "已保存并同步到所有应用",
           }),
         );
-        loadProviders();
         setEditingProvider(null);
       } catch (error) {
         showSaveError(
@@ -128,7 +133,7 @@ export function UniversalProviderPanel({
         throw error;
       }
     },
-    [loadProviders, persistUniversalProviderSet, showSaveError, t],
+    [notifyCommitOutcome, persistUniversalProviderSet, showSaveError, t],
   );
 
   // 删除供应商
@@ -161,8 +166,9 @@ export function UniversalProviderPanel({
     if (!provider) return;
 
     try {
-      await persistUniversalProviderSet(provider);
-      toast.success(
+      const outcome = await persistUniversalProviderSet(provider);
+      notifyCommitOutcome(
+        outcome,
         t("universalProvider.synced", { defaultValue: "已同步到所有应用" }),
       );
     } catch (error) {
@@ -176,6 +182,7 @@ export function UniversalProviderPanel({
   }, [
     persistUniversalProviderSet,
     providers,
+    notifyCommitOutcome,
     showSaveError,
     syncConfirm.id,
     t,
@@ -204,13 +211,13 @@ export function UniversalProviderPanel({
         createdAt: Date.now(),
       };
       try {
-        await persistUniversalProviderSet(duplicated);
-        toast.success(
+        const outcome = await persistUniversalProviderSet(duplicated);
+        notifyCommitOutcome(
+          outcome,
           t("universalProvider.duplicatedAndSynced", {
             defaultValue: "统一供应商已复制并同步",
           }),
         );
-        loadProviders();
       } catch (error) {
         showSaveError(
           error,
@@ -220,7 +227,7 @@ export function UniversalProviderPanel({
         );
       }
     },
-    [loadProviders, persistUniversalProviderSet, showSaveError, t],
+    [notifyCommitOutcome, persistUniversalProviderSet, showSaveError, t],
   );
 
   // 打开编辑
@@ -315,7 +322,6 @@ export function UniversalProviderPanel({
           setIsFormOpen(false);
           setEditingProvider(null);
         }}
-        onSave={handleSave}
         onSaveAndSync={handleSaveAndSync}
         editingProvider={editingProvider}
       />

@@ -37,11 +37,13 @@ import type {
   CodexReasoningEffort,
   PromptCacheRoutingMode,
   CodexProtocolMode,
+  CodexProtocolOverride,
   CodexReasoningProjection,
   CodexToolSchemaDialect,
   CodexHistoryReplay,
   ClaudeApiKeyField,
 } from "@/types";
+import type { CodexProviderEditorSnapshot } from "@/lib/api/protocol-compatibility";
 import {
   providerPresets,
   type ProviderPreset,
@@ -385,6 +387,7 @@ export interface ProviderFormProps {
     icon?: string;
     iconColor?: string;
   };
+  codexProviderEditorSnapshot?: CodexProviderEditorSnapshot | null;
   showButtons?: boolean;
   isProxyTakeover?: boolean;
 }
@@ -410,6 +413,7 @@ function ProviderFormFull({
   onManageUniversalProviders,
   onSubmittingChange,
   initialData,
+  codexProviderEditorSnapshot,
   showButtons = true,
   isProxyTakeover = false,
 }: ProviderFormProps) {
@@ -768,6 +772,9 @@ function ProviderFormFull({
   const [codexProtocolMode, setCodexProtocolMode] = useState<CodexProtocolMode>(
     initialCodexProtocolSettings.protocolMode,
   );
+  const [codexProtocolOverrides, setCodexProtocolOverrides] = useState<
+    Record<string, CodexProtocolOverride>
+  >(() => ({ ...(initialData?.meta?.codexProtocolOverrides ?? {}) }));
   const [codexReasoningProjection, setCodexReasoningProjection] =
     useState<CodexReasoningProjection>(
       initialCodexProtocolSettings.reasoningProjection,
@@ -788,6 +795,9 @@ function ProviderFormFull({
       initialCodexApiFormat,
     );
     setCodexProtocolMode(loaded.protocolMode);
+    setCodexProtocolOverrides({
+      ...(initialData?.meta?.codexProtocolOverrides ?? {}),
+    });
     setCodexReasoningProjection(loaded.reasoningProjection);
     setCodexToolSchemaDialect(loaded.toolSchemaDialect);
     setCodexHistoryReplay(loaded.historyReplay);
@@ -1972,6 +1982,8 @@ function ProviderFormFull({
     if (appId === "codex") {
       nextMeta = buildCodexProtocolMeta(nextMeta, {
         protocolMode: category === "official" ? "auto" : codexProtocolMode,
+        protocolOverrides:
+          category === "official" ? {} : codexProtocolOverrides,
         apiFormat: localCodexApiFormat,
         reasoningProjection: codexReasoningProjection,
         toolSchemaDialect: codexToolSchemaDialect,
@@ -2660,6 +2672,7 @@ function ProviderFormFull({
               <CodexFormFields
                 providerId={providerId}
                 providerName={form.watch("name")}
+                codexProviderEditorSnapshot={codexProviderEditorSnapshot}
                 isXaiOauthPreset={
                   presetProviderType === "xai_oauth" ||
                   initialData?.meta?.providerType === "xai_oauth"
@@ -2712,6 +2725,8 @@ function ProviderFormFull({
                 onPromptCacheRoutingChange={setPromptCacheRouting}
                 protocolMode={codexProtocolMode}
                 onProtocolModeChange={setCodexProtocolMode}
+                protocolOverrides={codexProtocolOverrides}
+                onProtocolOverridesChange={setCodexProtocolOverrides}
                 reasoningProjection={codexReasoningProjection}
                 onReasoningProjectionChange={setCodexReasoningProjection}
                 toolSchemaDialect={codexToolSchemaDialect}

@@ -11,6 +11,7 @@ const apiMocks = vi.hoisted(() => ({
   prepareCodexProviderSet: vi.fn(),
   commitCodexProviderSet: vi.fn(),
   preflightCodexProviderProtocolCompatibility: vi.fn(),
+  getCodexProviderEditorSnapshot: vi.fn(),
   invalidateQueries: vi.fn(),
 }));
 const formSubmission = vi.hoisted(() => ({
@@ -49,6 +50,8 @@ vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => {
     commitCodexProviderSet: apiMocks.commitCodexProviderSet,
     preflightCodexProviderProtocolCompatibility:
       apiMocks.preflightCodexProviderProtocolCompatibility,
+    getCodexProviderEditorSnapshot:
+      apiMocks.getCodexProviderEditorSnapshot,
   };
 });
 
@@ -73,6 +76,7 @@ vi.mock("@/components/common/FullScreenPanel", () => ({
 vi.mock("@/components/providers/forms/ProviderForm", () => ({
   ProviderForm: ({
     initialData,
+    codexProviderEditorSnapshot,
     onSubmit,
     isProxyTakeover,
   }: {
@@ -86,6 +90,9 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
       iconColor?: string;
       protocolProbeReceiptIds?: string[];
     };
+    codexProviderEditorSnapshot?: {
+      adaptation?: { effectiveTransport?: string | null };
+    } | null;
     onSubmit: (values: {
       name: string;
       websiteUrl: string;
@@ -120,6 +127,9 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
       <output data-testid="is-proxy-takeover">
         {isProxyTakeover ? "true" : "false"}
       </output>
+      <output data-testid="codex-editor-snapshot">
+        {JSON.stringify(codexProviderEditorSnapshot ?? null)}
+      </output>
     </form>
   ),
 }));
@@ -152,8 +162,66 @@ describe("EditProviderDialog", () => {
       status: "committed",
     });
     apiMocks.preflightCodexProviderProtocolCompatibility.mockReset();
+    apiMocks.getCodexProviderEditorSnapshot.mockReset();
     apiMocks.invalidateQueries.mockReset().mockResolvedValue(undefined);
     formSubmission.receiptIds = [];
+  });
+
+  it("loads the authoritative editor snapshot for an ordinary Codex provider", async () => {
+    const provider: Provider = {
+      id: "deepseek",
+      name: "DeepSeek",
+      category: "custom",
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "db-key" },
+        config: 'model = "deepseek-v4"',
+        modelCatalog: { models: [{ model: "deepseek-v4" }] },
+      },
+    };
+    const logicalProvider: Provider = {
+      ...provider,
+      meta: {
+        codexProtocolMode: "manual",
+        codexProtocolOverrides: { "deepseek-v4": "openai_chat" },
+      },
+    };
+    apiMocks.getCodexProviderEditorSnapshot.mockResolvedValue({
+      logicalProvider,
+      adaptation: {
+        persistence: "single",
+        status: "ready",
+        effectiveTransport: "open_ai_chat",
+        testedAt: 1_777_777_777,
+        expiresAt: 1_888_888_888,
+        models: [],
+      },
+    });
+
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="codex"
+        isProxyTakeover
+      />,
+    );
+
+    await waitFor(() =>
+      expect(apiMocks.getCodexProviderEditorSnapshot).toHaveBeenCalledWith(
+        "deepseek",
+      ),
+    );
+    expect(
+      JSON.parse(screen.getByTestId("codex-editor-snapshot").textContent ?? ""),
+    ).toMatchObject({
+      adaptation: {
+        persistence: "single",
+        status: "ready",
+        effectiveTransport: "open_ai_chat",
+      },
+    });
   });
 
   it("保留 Codex 数据库中的 modelCatalog，避免 live 配置缺字段时清空模型映射", async () => {
@@ -315,7 +383,7 @@ describe("EditProviderDialog", () => {
         expect.objectContaining({ id: "deepseek", name: "DeepSeek" }),
         ["receipt-deepseek-v4"],
         "edit-digest",
-        "accept_single",
+        "accept_auto",
       ),
     );
     expect(
@@ -374,7 +442,7 @@ describe("EditProviderDialog", () => {
     ).not.toHaveBeenCalled();
   });
 
-  it("编辑自动拆分门面时加载一个恢复后的逻辑 Provider，而不展示 Router 叶子配置", async () => {
+  it("编辑自动拆分门面时从 editor snapshot 恢复逻辑 Provider 和拆分证据", async () => {
     const facade: Provider = {
       id: "qwen",
       name: "Qwen",
@@ -407,7 +475,15 @@ describe("EditProviderDialog", () => {
         },
       },
     };
-    apiMocks.getCodexLogicalProviderForEditing.mockResolvedValue(logical);
+    apiMocks.getCodexProviderEditorSnapshot.mockResolvedValue({
+      logicalProvider: logical,
+      adaptation: {
+        persistence: "split",
+        status: "ready",
+        effectiveTransport: "mixed",
+        models: [],
+      },
+    });
 
     render(
       <EditProviderDialog
@@ -421,14 +497,18 @@ describe("EditProviderDialog", () => {
     );
 
     await waitFor(() =>
-      expect(apiMocks.getCodexLogicalProviderForEditing).toHaveBeenCalledWith(
+      expect(apiMocks.getCodexProviderEditorSnapshot).toHaveBeenCalledWith(
         "qwen",
       ),
     );
+    expect(apiMocks.getCodexLogicalProviderForEditing).not.toHaveBeenCalled();
     await waitFor(() =>
       expect(
         JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
       ).toEqual(logical.settingsConfig),
     );
+    expect(
+      JSON.parse(screen.getByTestId("codex-editor-snapshot").textContent ?? ""),
+    ).toMatchObject({ adaptation: { persistence: "split" } });
   });
 });

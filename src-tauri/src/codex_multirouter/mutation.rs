@@ -438,6 +438,8 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
                 &virtual_providers,
                 now,
             )
+        } else if source.uses_manual_codex_protocol() && source.has_codex_protocol_overrides() {
+            plan_codex_provider_set(&source, &records, &virtual_providers, now)
         } else if source.uses_manual_codex_protocol() {
             let api_format = source
                 .meta
@@ -1247,16 +1249,14 @@ mod tests {
         transport: TransportKind,
         now: i64,
     ) -> ProtocolCompatibilityRecord {
-        let target = ProbeTargetKey::new(
-            "relay",
-            None::<String>,
-            model,
-            upstream_model,
-            transport,
-            "https://relay.example/v1/responses",
-            "bearer",
+        let target = crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+            &mixed_source(),
+            model.to_string(),
+            upstream_model.to_string(),
         )
-        .expect("target");
+        .expect("compile mixed Provider candidate")
+        .target_key(transport)
+        .expect("mixed Provider target");
         ProtocolCompatibilityRecord::new(
             target,
             crate::protocol_compatibility::ProtocolCompatibilityProbeResult {

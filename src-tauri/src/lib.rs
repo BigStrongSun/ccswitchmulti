@@ -1462,6 +1462,8 @@ pub fn run() {
             commands::get_providers,
             commands::get_current_provider,
             commands::get_codex_logical_provider_for_editing,
+            commands::get_codex_provider_editor_snapshot,
+            commands::list_codex_provider_adaptation_summaries,
             commands::add_provider,
             commands::update_provider,
             commands::update_codex_subagent_v2,

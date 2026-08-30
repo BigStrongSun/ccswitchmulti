@@ -2,7 +2,7 @@ use http::header::{HeaderValue, InvalidHeaderValue};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 // SSOT 模式：不再写供应商副本文件
 
@@ -95,6 +95,12 @@ impl Provider {
     pub fn uses_manual_codex_protocol(&self) -> bool {
         self.meta.as_ref().and_then(|meta| meta.codex_protocol_mode)
             == Some(CodexProtocolMode::Manual)
+    }
+
+    pub fn has_codex_protocol_overrides(&self) -> bool {
+        self.meta
+            .as_ref()
+            .is_some_and(|meta| !meta.codex_protocol_overrides.is_empty())
     }
 
     /// Whether the provider form's "auth field" was explicitly set to
@@ -411,6 +417,13 @@ pub enum CodexProtocolMode {
     Manual,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexProtocolOverride {
+    OpenaiResponses,
+    OpenaiChat,
+}
+
 /// Claude Desktop 本地路由模式下暴露给 Desktop 的安全模型路由。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -588,6 +601,14 @@ pub struct ProviderMeta {
     /// Codex third-party protocol selection policy. Missing means automatic probing.
     #[serde(rename = "codexProtocolMode", skip_serializing_if = "Option::is_none")]
     pub codex_protocol_mode: Option<CodexProtocolMode>,
+    /// Per-public-model Codex transport overrides. Keys are normalized public model names.
+    /// Missing keys continue to follow automatic protocol evidence.
+    #[serde(
+        default,
+        rename = "codexProtocolOverrides",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub codex_protocol_overrides: BTreeMap<String, CodexProtocolOverride>,
     /// Advanced-mode response projection for Chat reasoning.
     /// Supported manual values: raw_reasoning_text, none.
     /// Native summaries are selected only from observed, target-bound protocol evidence.

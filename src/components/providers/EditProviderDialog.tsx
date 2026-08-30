@@ -13,6 +13,10 @@ import {
   useCodexProviderSetSave,
 } from "@/components/providers/forms/useCodexProviderSetSave";
 import { openclawApi, providersApi, vscodeApi, type AppId } from "@/lib/api";
+import {
+  getCodexProviderEditorSnapshot,
+  type CodexProviderEditorSnapshot,
+} from "@/lib/api/protocol-compatibility";
 
 interface EditProviderDialogProps {
   open: boolean;
@@ -38,7 +42,8 @@ export function EditProviderDialog({
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
   const { persistCodexProviderSet, dialogs: codexProviderSetDialogs } =
     useCodexProviderSetSave();
-  const [logicalProvider, setLogicalProvider] = useState<Provider | null>(null);
+  const [codexProviderEditorSnapshot, setCodexProviderEditorSnapshot] =
+    useState<CodexProviderEditorSnapshot | null>(null);
   const [logicalProviderError, setLogicalProviderError] = useState("");
 
   const isGeneratedSplitFacade =
@@ -46,30 +51,34 @@ export function EditProviderDialog({
     provider?.settingsConfig.codexProtocolSet != null &&
     (provider.settingsConfig.codexProtocolSet as { role?: unknown }).role ===
       "facade";
-  const editingProvider = logicalProvider ?? provider;
+  const editingProvider =
+    codexProviderEditorSnapshot?.logicalProvider ?? provider;
 
   useEffect(() => {
     let cancelled = false;
-    setLogicalProvider(null);
+    setCodexProviderEditorSnapshot(null);
     setLogicalProviderError("");
-    if (!open || !provider || !isGeneratedSplitFacade) return;
-
-    void providersApi
-      .getCodexLogicalProviderForEditing(provider.id)
-      .then((restored) => {
-        if (!cancelled) setLogicalProvider(restored);
-      })
-      .catch((error) => {
+    if (!open || !provider || appId !== "codex") {
+      return;
+    }
+    void (async () => {
+      try {
+        const snapshot = await getCodexProviderEditorSnapshot(provider.id);
+        if (!cancelled && snapshot?.logicalProvider) {
+          setCodexProviderEditorSnapshot(snapshot);
+        }
+      } catch (error) {
         if (!cancelled) {
           setLogicalProviderError(
             error instanceof Error ? error.message : String(error),
           );
         }
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [isGeneratedSplitFacade, open, provider?.id]);
+  }, [appId, open, provider?.id]);
 
   // 默认使用传入的 provider.settingsConfig，若当前编辑对象是"当前生效供应商"，则尝试读取实时配置替换初始值
   const [liveSettings, setLiveSettings] = useState<Record<
@@ -89,7 +98,7 @@ export function EditProviderDialog({
         return;
       }
 
-      if (isGeneratedSplitFacade && !logicalProvider) return;
+      if (isGeneratedSplitFacade && !codexProviderEditorSnapshot) return;
 
       // 关键修复：只在首次打开时加载一次
       if (hasLoadedLive) {
@@ -176,7 +185,7 @@ export function EditProviderDialog({
     hasLoadedLive,
     isProxyTakeover,
     isGeneratedSplitFacade,
-    logicalProvider,
+    codexProviderEditorSnapshot,
   ]); // 只依赖 provider.id，不依赖整个 provider 对象
 
   const initialSettingsConfig = useMemo(() => {
@@ -309,7 +318,7 @@ export function EditProviderDialog({
     ],
   );
 
-  if (!provider || (isGeneratedSplitFacade && !logicalProvider)) {
+  if (!provider || (isGeneratedSplitFacade && !codexProviderEditorSnapshot)) {
     if (!logicalProviderError) return null;
     return (
       <FullScreenPanel
@@ -352,6 +361,7 @@ export function EditProviderDialog({
         onCancel={() => onOpenChange(false)}
         onSubmittingChange={setIsFormSubmitting}
         initialData={initialData}
+        codexProviderEditorSnapshot={codexProviderEditorSnapshot}
         showButtons={false}
         isProxyTakeover={isProxyTakeover}
       />

@@ -1,204 +1,190 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+
 import { CodexProtocolProbeProgressDialog } from "@/components/providers/forms/CodexProtocolProbeProgressDialog";
 import { CodexProviderSetPreviewDialog } from "@/components/providers/forms/CodexProviderSetPreviewDialog";
+import { Button } from "@/components/ui/button";
 import {
-  commitUniversalProviderSet,
-  preflightUniversalCodexProtocolCompatibility,
-  prepareUniversalProviderSet,
-  type CodexProtocolProbeProgressEvent,
-  type CodexProviderProtocolPreflightOutcome,
-  type UniversalProviderSetPreview,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { providersApi } from "@/lib/api";
+import type {
+  UniversalProviderSetCommitOutcome,
+  UniversalProviderSetPreview,
 } from "@/lib/api/protocol-compatibility";
+import { createUniversalCodexProtocolLabAdapter } from "@/lib/protocol-lab/codex-adapters";
+import {
+  ProtocolLabCancelled,
+  useProtocolLabWorkflow,
+} from "@/lib/protocol-lab/useProtocolLabWorkflow";
 import type { UniversalProvider } from "@/types";
 
-export class UniversalProviderSetCancelled extends Error {}
-
-interface PendingUniversalProviderSetOperation {
-  provider: UniversalProvider;
-  resolve: () => void;
-  reject: (error: unknown) => void;
-  receiptIds: string[];
-  preview: UniversalProviderSetPreview | null;
-}
+export class UniversalProviderSetCancelled extends ProtocolLabCancelled {}
 
 export function isUniversalProviderSetCancelled(error: unknown): boolean {
   return error instanceof UniversalProviderSetCancelled;
 }
 
-export function useUniversalProviderSetSave() {
-  const activeOperation = useRef<PendingUniversalProviderSetOperation | null>(
-    null,
-  );
-  const [probeOpen, setProbeOpen] = useState(false);
-  const [probeRunning, setProbeRunning] = useState(false);
-  const [probeEvents, setProbeEvents] = useState<
-    CodexProtocolProbeProgressEvent[]
-  >([]);
-  const [probeOutcome, setProbeOutcome] =
-    useState<CodexProviderProtocolPreflightOutcome | null>(null);
-  const [probeError, setProbeError] = useState("");
-  const [probeModels, setProbeModels] = useState<string[]>([]);
-  const [preview, setPreview] = useState<UniversalProviderSetPreview | null>(
-    null,
-  );
-  const [commitPending, setCommitPending] = useState(false);
+interface UseUniversalProviderSetSaveOptions {
+  onCommitted?: () => void | Promise<void>;
+}
 
-  const finishOperation = useCallback((error?: unknown) => {
-    const operation = activeOperation.current;
-    if (!operation) return;
-    activeOperation.current = null;
-    setProbeOpen(false);
-    setProbeRunning(false);
-    setPreview(null);
-    setCommitPending(false);
-    if (error === undefined) operation.resolve();
-    else operation.reject(error);
-  }, []);
+export function useUniversalProviderSetSave({
+  onCommitted,
+}: UseUniversalProviderSetSaveOptions = {}) {
+  const queryClient = useQueryClient();
+  const adapter = useMemo(() => createUniversalCodexProtocolLabAdapter(), []);
+  const workflow = useProtocolLabWorkflow(adapter);
 
-  const commitPrepared = useCallback(
-    async (
-      operation: PendingUniversalProviderSetOperation,
-      intent: "accept_single" | "confirm_split" | "confirm_manual",
-    ) => {
-      if (!operation.preview) {
-        throw new Error("Universal Provider Set preview is missing");
-      }
-      await commitUniversalProviderSet(
-        operation.provider,
-        operation.receiptIds,
-        operation.preview.digest,
-        intent,
+  const refreshProviderViews = useCallback(async () => {
+    const refreshes = await Promise.allSettled([
+      queryClient.invalidateQueries({ queryKey: ["providers"] }),
+      queryClient.invalidateQueries({
+        queryKey: ["codex-provider-adaptation-summaries"],
+      }),
+      Promise.resolve(onCommitted?.()),
+    ]);
+    if (refreshes.some((refresh) => refresh.status === "rejected")) {
+      console.warn(
+        "Universal Provider Set committed, but one or more views failed to refresh",
+        refreshes,
       );
-    },
-    [],
-  );
-
-  const runOperation = useCallback(
-    async (operation: PendingUniversalProviderSetOperation) => {
-      const codexModel = operation.provider.models.codex?.model?.trim();
-      const automaticCodexProbe =
-        operation.provider.apps.codex &&
-        operation.provider.meta?.codexProtocolMode !== "manual";
-      setProbeModels(codexModel ? [codexModel] : []);
-      setProbeEvents([]);
-      setProbeOutcome(null);
-      setProbeError("");
-      setPreview(null);
-      setProbeOpen(automaticCodexProbe);
-      setProbeRunning(automaticCodexProbe);
-
-      try {
-        const outcome = automaticCodexProbe
-          ? await preflightUniversalCodexProtocolCompatibility(
-              operation.provider,
-              (event) => setProbeEvents((current) => [...current, event]),
-            )
-          : null;
-        if (activeOperation.current !== operation) return;
-        setProbeOutcome(outcome);
-        setProbeRunning(false);
-        operation.receiptIds = outcome?.receiptIds ?? [];
-        operation.preview = await prepareUniversalProviderSet(
-          operation.provider,
-          operation.receiptIds,
-        );
-        if (activeOperation.current !== operation) return;
-
-        const codexPlan = operation.preview.codex?.plan;
-        if (codexPlan?.kind === "split" || codexPlan?.kind === "blocked") {
-          setProbeOpen(false);
-          setPreview(operation.preview);
-          return;
-        }
-
-        await commitPrepared(
-          operation,
-          operation.provider.meta?.codexProtocolMode === "manual"
-            ? "confirm_manual"
-            : "accept_single",
-        );
-        finishOperation();
-      } catch (error) {
-        if (activeOperation.current !== operation) return;
-        setProbeRunning(false);
-        setProbeOpen(true);
-        setProbeError(error instanceof Error ? error.message : String(error));
-      }
-    },
-    [commitPrepared, finishOperation],
-  );
+      toast.warning(
+        "模型源已保存，但部分页面未能立即刷新；重新打开对应页面即可恢复。",
+      );
+    }
+    try {
+      await providersApi.updateTrayMenu();
+    } catch (error) {
+      console.warn(
+        "Failed to refresh tray menu after Universal Provider Set commit",
+        error,
+      );
+      toast.warning(
+        "模型源已保存，但托盘菜单刷新失败；重新打开应用后会自动恢复。",
+      );
+    }
+  }, [onCommitted, queryClient]);
 
   const persistUniversalProviderSet = useCallback(
-    (provider: UniversalProvider) => {
-      if (activeOperation.current) {
-        return Promise.reject(
-          new Error(
-            "Another Universal Provider Set operation is already running",
-          ),
-        );
-      }
-      return new Promise<void>((resolve, reject) => {
-        const operation: PendingUniversalProviderSetOperation = {
-          provider,
-          resolve,
-          reject,
-          receiptIds: [],
-          preview: null,
-        };
-        activeOperation.current = operation;
-        void runOperation(operation);
-      });
+    async (provider: UniversalProvider) => {
+      const outcome = await workflow.save(provider);
+      await refreshProviderViews();
+      return outcome;
     },
-    [runOperation],
+    [refreshProviderViews, workflow],
+  );
+
+  const retryProjection = useCallback(
+    async (outcome: UniversalProviderSetCommitOutcome) => {
+      const routerIds = Array.from(
+        new Set(
+          outcome.projections
+            .filter((projection) => projection.state === "pending")
+            .map((projection) => projection.routerProviderId),
+        ),
+      );
+      if (routerIds.length === 0) {
+        throw new Error("codex_provider_set_projection_retry_target_missing");
+      }
+      const projections = await Promise.all(
+        routerIds.map((providerId) =>
+          providersApi.retryCodexMultiRouterProjection(providerId),
+        ),
+      );
+      await refreshProviderViews();
+      if (projections.some((projection) => projection.state !== "ready")) {
+        throw new Error("codex_provider_set_live_projection_failed");
+      }
+      return projections;
+    },
+    [refreshProviderViews],
   );
 
   const handleBack = useCallback(() => {
-    finishOperation(new UniversalProviderSetCancelled());
-  }, [finishOperation]);
+    workflow.cancel(new UniversalProviderSetCancelled());
+  }, [workflow]);
 
   const handleRetry = useCallback(() => {
-    const operation = activeOperation.current;
-    if (operation && !probeRunning && !commitPending) {
-      void runOperation(operation);
-    }
-  }, [commitPending, probeRunning, runOperation]);
+    workflow.retry();
+  }, [workflow]);
 
-  const handleConfirmSplit = useCallback(async () => {
-    const operation = activeOperation.current;
-    if (!operation || commitPending) return;
-    setCommitPending(true);
-    try {
-      await commitPrepared(operation, "confirm_split");
-      finishOperation();
-    } catch (error) {
-      finishOperation(error);
-    }
-  }, [commitPending, commitPrepared, finishOperation]);
-
+  const probeModel = workflow.state.draft?.models.codex?.model?.trim();
+  const awaitingConsent =
+    workflow.state.phase === "awaiting_probe_consent" ||
+    workflow.state.phase === "stale_retry";
+  const probeOpen =
+    workflow.state.phase === "probing" || workflow.state.phase === "failed";
+  const preview =
+    workflow.state.phase === "blocked"
+      ? (workflow.state.preparePreview as UniversalProviderSetPreview | null)
+      : null;
   const dialogs = (
     <>
-      <CodexProtocolProbeProgressDialog
-        open={probeOpen}
-        running={probeRunning}
-        expectedModels={probeModels}
-        events={probeEvents}
-        outcome={probeOutcome}
-        error={probeError}
+      <Dialog
+        open={awaitingConsent}
         onOpenChange={(open) => {
           if (!open) handleBack();
         }}
-        onRetry={probeError ? handleRetry : undefined}
+      >
+        <DialogContent className="max-w-lg" zIndex="top">
+          <DialogHeader>
+            <DialogTitle>确认测试 Chat / Responses</DialogTitle>
+            <DialogDescription className="space-y-2 text-left">
+              <span className="block">
+                “保存并同步”会先对 Codex 模型发送少量真实请求，分别验证
+                Responses 与 Chat Completions，然后以同一原子事务保存最终配置。
+              </span>
+              <span className="block">
+                测试可能产生少量额度或流量消耗。认证、限流、网络、HTTP 521
+                和其他 5xx 会单独显示为可用性问题，不会据此推荐错误协议。
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={handleBack}>
+              取消
+            </Button>
+            <Button type="button" onClick={() => void workflow.confirmProbe()}>
+              确认测试
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <CodexProtocolProbeProgressDialog
+        open={probeOpen}
+        running={workflow.state.phase === "probing"}
+        expectedModels={probeModel ? [probeModel] : []}
+        events={workflow.state.progress}
+        outcome={workflow.probeOutcome}
+        error={workflow.state.errorDetail ?? ""}
+        onOpenChange={(open) => {
+          if (!open) handleBack();
+        }}
+        onRetry={handleRetry}
       />
       <CodexProviderSetPreviewDialog
         open={preview !== null}
         preview={preview?.codex ?? null}
-        pending={commitPending}
+        pending={workflow.state.phase === "committing"}
         onBack={handleBack}
-        onConfirmSplit={handleConfirmSplit}
+        onConfirmSplit={() => undefined}
         onRetry={handleRetry}
       />
     </>
   );
 
-  return { persistUniversalProviderSet, dialogs };
+  return {
+    persistUniversalProviderSet,
+    retryProjection,
+    dialogs,
+    workflow,
+  };
 }

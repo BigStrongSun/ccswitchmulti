@@ -40,7 +40,6 @@ describe("UniversalProviderFormModal async persistence", () => {
       <UniversalProviderFormModal
         isOpen
         editingProvider={editingProvider}
-        onSave={vi.fn()}
         onSaveAndSync={onSaveAndSync}
         onClose={onClose}
       />,
@@ -78,7 +77,6 @@ describe("UniversalProviderFormModal async persistence", () => {
       <UniversalProviderFormModal
         isOpen
         editingProvider={editingProvider}
-        onSave={vi.fn()}
         onSaveAndSync={onSaveAndSync}
         onClose={onClose}
       />,
@@ -99,14 +97,18 @@ describe("UniversalProviderFormModal async persistence", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
-  it("keeps a new-provider form open when the initial save rejects", async () => {
+  it("uses the same save-and-sync action for a new provider and keeps its draft after failure", async () => {
     const rejected = Promise.reject(new Error("save failed"));
     rejected.catch(() => undefined);
-    const onSave = vi.fn(() => rejected);
+    const onSaveAndSync = vi.fn(() => rejected);
     const onClose = vi.fn();
 
     render(
-      <UniversalProviderFormModal isOpen onSave={onSave} onClose={onClose} />,
+      <UniversalProviderFormModal
+        isOpen
+        onSaveAndSync={onSaveAndSync}
+        onClose={onClose}
+      />,
     );
 
     fireEvent.change(screen.getByLabelText("API 地址"), {
@@ -115,11 +117,17 @@ describe("UniversalProviderFormModal async persistence", () => {
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "new-secret" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    expect(screen.queryByRole("button", { name: "添加" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "保存并同步" }));
+    fireEvent.click(
+      within(syncDialog()).getByRole("button", { name: "保存并同步" }),
+    );
 
-    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onSaveAndSync).toHaveBeenCalledTimes(1));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "添加" })).toBeEnabled(),
+      expect(
+        within(syncDialog()).getByRole("button", { name: "保存并同步" }),
+      ).toBeEnabled(),
     );
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByLabelText("API 地址")).toHaveValue(

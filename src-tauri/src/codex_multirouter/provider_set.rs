@@ -182,6 +182,10 @@ pub fn plan_codex_provider_set(
             blocked.push(blocked_model(model, "duplicate_model_identity", None));
             continue;
         }
+        if let Some(selected) = codex_protocol_override(source, &model.public_model) {
+            selections.push((model.clone(), selected));
+            continue;
+        }
         let matches = records
             .iter()
             .filter(|record| {
@@ -195,6 +199,16 @@ pub fn plan_codex_provider_set(
         };
         if matches.len() != 1 {
             blocked.push(blocked_model(model, "conflicting_probe_records", None));
+            continue;
+        }
+        let expected_target = compile_provider_probe_candidate_for_model(
+            source,
+            model.public_model.clone(),
+            model.upstream_model.clone(),
+        )
+        .and_then(|candidate| candidate.target_key(record.target.transport));
+        if expected_target.as_ref() != Ok(&record.target) {
+            blocked.push(blocked_model(model, "probe_target_mismatch", Some(record)));
             continue;
         }
         if record.probe_version != PROBE_PROFILE_VERSION || record.expires_at < now {
@@ -485,13 +499,166 @@ fn rebind_profiles(
         rebound_record.target = target;
         rebound.push(rebound_record);
     }
-    if rebound.len() != responses_models.len() + chat_models.len() {
+    Ok(rebound)
+}
+
+pub fn normalize_codex_public_model_key(model: &str) -> String {
+    model.trim().to_ascii_lowercase()
+}
+
+pub fn requires_automatic_codex_protocol_probe(
+    provider: &Provider,
+) -> Result<bool, CodexProviderSetError> {
+    // Routers derive their probe candidates from route targets rather than from a local model
+    // catalog. Let the shared preflight compiler decide whether the configured routes produce
+    // any candidates instead of rejecting the Router as a catalog-less ordinary Provider.
+    if provider.settings_config.get("codexRouting").is_some() {
+        return Ok(true);
+    }
+    if provider.uses_manual_codex_protocol() && !provider.has_codex_protocol_overrides() {
+        return Ok(false);
+    }
+    Ok(source_catalog(provider)?
+        .iter()
+        .filter(|model| model.enabled)
+        .any(|model| codex_model_follows_automatic_protocol(provider, &model.public_model)))
+}
+
+pub fn codex_model_follows_automatic_protocol(provider: &Provider, public_model: &str) -> bool {
+    codex_protocol_override(provider, public_model).is_none()
+}
+
+pub fn migrate_legacy_codex_protocol_overrides_for_save(
+    provider: &mut Provider,
+) -> Result<(), CodexProviderSetError> {
+    let top_level_transport = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_format.as_deref())
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("apiFormat")
+                .and_then(Value::as_str)
+        })
+        .and_then(parse_protocol_override);
+    let was_manual = provider.uses_manual_codex_protocol();
+    let existing_overrides = provider
+        .meta
+        .as_ref()
+        .map(|meta| meta.codex_protocol_overrides.clone())
+        .unwrap_or_default();
+    let had_explicit_overrides = !existing_overrides.is_empty();
+    let mut migrated = BTreeMap::new();
+    for (model, transport) in existing_overrides {
+        insert_protocol_override(&mut migrated, &model, transport)?;
+    }
+
+    let settings = settings_object_mut(provider)?;
+    let catalog_key = if settings.contains_key("modelCatalog") {
+        "modelCatalog"
+    } else {
+        "model_catalog"
+    };
+    let catalog = settings.get_mut(catalog_key);
+    let mut enabled_models = Vec::new();
+    let mut found_legacy_model_protocol = false;
+    if let Some(models) = catalog
+        .and_then(|catalog| catalog.get_mut("models"))
+        .and_then(Value::as_array_mut)
+    {
+        for model in models {
+            let public_model = string_field(model, &["model", "id", "slug"]).map(str::to_string);
+            let enabled = model.get("enabled").and_then(Value::as_bool) != Some(false);
+            let legacy_transport = ["apiFormat", "api_format", "wireApi", "wire_api"]
+                .into_iter()
+                .find_map(|key| model.get(key).and_then(Value::as_str))
+                .and_then(parse_protocol_override);
+            if let (Some(public_model), Some(transport)) =
+                (public_model.as_deref(), legacy_transport)
+            {
+                insert_protocol_override(&mut migrated, public_model, transport)?;
+                found_legacy_model_protocol = true;
+            }
+            if enabled {
+                if let Some(public_model) = public_model {
+                    enabled_models.push(public_model);
+                }
+            }
+            if let Some(object) = model.as_object_mut() {
+                object.remove("apiFormat");
+                object.remove("api_format");
+                object.remove("wireApi");
+                object.remove("wire_api");
+            }
+        }
+    }
+
+    if was_manual && !had_explicit_overrides && !found_legacy_model_protocol {
+        if let Some(transport) = top_level_transport {
+            for model in enabled_models {
+                insert_protocol_override(&mut migrated, &model, transport)?;
+            }
+        }
+    }
+    let meta = provider.meta.get_or_insert_with(Default::default);
+    meta.codex_protocol_overrides = migrated;
+    if found_legacy_model_protocol || !meta.codex_protocol_overrides.is_empty() {
+        meta.codex_protocol_mode = Some(crate::provider::CodexProtocolMode::Manual);
+    }
+    Ok(())
+}
+
+fn insert_protocol_override(
+    overrides: &mut BTreeMap<String, crate::provider::CodexProtocolOverride>,
+    model: &str,
+    transport: crate::provider::CodexProtocolOverride,
+) -> Result<(), CodexProviderSetError> {
+    let key = normalize_codex_public_model_key(model);
+    if key.is_empty() {
         return Err(error(
-            "codex_provider_set_profile_rebind_failed",
-            "Every selected model must materialize exactly one executable profile",
+            "codex_provider_set_invalid_protocol_override",
+            "Codex protocol override model name cannot be empty",
         ));
     }
-    Ok(rebound)
+    if overrides
+        .insert(key.clone(), transport)
+        .is_some_and(|existing| existing != transport)
+    {
+        return Err(error(
+            "codex_provider_set_conflicting_protocol_override",
+            format!("Codex protocol override `{key}` is configured more than once"),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_protocol_override(value: &str) -> Option<crate::provider::CodexProtocolOverride> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "openai_responses" | "responses" | "open_ai_responses" => {
+            Some(crate::provider::CodexProtocolOverride::OpenaiResponses)
+        }
+        "openai_chat" | "chat" | "open_ai_chat" => {
+            Some(crate::provider::CodexProtocolOverride::OpenaiChat)
+        }
+        _ => None,
+    }
+}
+
+fn codex_protocol_override(source: &Provider, public_model: &str) -> Option<TransportKind> {
+    let key = normalize_codex_public_model_key(public_model);
+    source
+        .meta
+        .as_ref()?
+        .codex_protocol_overrides
+        .iter()
+        .find(|(configured, _)| normalize_codex_public_model_key(configured) == key)
+        .map(|(_, transport)| match transport {
+            crate::provider::CodexProtocolOverride::OpenaiResponses => {
+                TransportKind::OpenAiResponses
+            }
+            crate::provider::CodexProtocolOverride::OpenaiChat => TransportKind::OpenAiChat,
+        })
 }
 
 fn persistence_digest_value(persistence: &CodexProviderSetPersistence) -> Value {
@@ -1473,13 +1640,14 @@ fn error(code: impl Into<String>, message: impl Into<String>) -> CodexProviderSe
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_leaf_id, plan_codex_provider_set, plan_manual_codex_provider_set, responses_leaf_id,
-        restore_logical_codex_provider, rewrite_dependent_routers_for_provider_set,
-        CodexProviderSetPersistence, CodexProviderSetPlan, CODEX_PROTOCOL_SET_VERSION,
+        chat_leaf_id, migrate_legacy_codex_protocol_overrides_for_save, plan_codex_provider_set,
+        plan_manual_codex_provider_set, responses_leaf_id, restore_logical_codex_provider,
+        rewrite_dependent_routers_for_provider_set, CodexProviderSetPersistence,
+        CodexProviderSetPlan, CODEX_PROTOCOL_SET_VERSION,
     };
     use crate::protocol_compatibility::{
-        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
-        ProtocolCompatibilityRecord, TransportKind,
+        ProbeReadiness, ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
+        TransportKind,
     };
     use crate::provider::{Provider, ProviderMeta};
     use serde_json::{json, Value};
@@ -1526,16 +1694,30 @@ mod tests {
         selected: Option<TransportKind>,
         readiness: ProbeReadiness,
     ) -> ProtocolCompatibilityRecord {
-        let transport = selected.unwrap_or(TransportKind::OpenAiResponses);
-        let target = ProbeTargetKey::new(
-            "relay",
-            None::<String>,
+        record_for_source(
+            &source_provider(),
             model,
             upstream_model,
-            transport,
-            "https://relay.example/v1/responses",
-            "bearer",
+            selected,
+            readiness,
         )
+    }
+
+    fn record_for_source(
+        source: &Provider,
+        model: &str,
+        upstream_model: &str,
+        selected: Option<TransportKind>,
+        readiness: ProbeReadiness,
+    ) -> ProtocolCompatibilityRecord {
+        let transport = selected.unwrap_or(TransportKind::OpenAiResponses);
+        let target = crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+            source,
+            model.to_string(),
+            upstream_model.to_string(),
+        )
+        .expect("compile probe candidate")
+        .target_key(transport)
         .expect("probe target");
         ProtocolCompatibilityRecord::new(
             target,
@@ -1547,6 +1729,40 @@ mod tests {
             100,
             200,
         )
+    }
+
+    #[test]
+    fn planner_blocks_a_profile_from_a_different_request_policy_fingerprint() {
+        let source = source_provider();
+        let mut foreign = record(
+            "model-a",
+            "upstream-a",
+            Some(TransportKind::OpenAiResponses),
+            ProbeReadiness::Verified,
+        );
+        foreign.target.request_policy_fingerprint = "foreign-policy".to_string();
+        let prepared = plan_codex_provider_set(
+            &source,
+            &[
+                foreign,
+                record(
+                    "model-b",
+                    "upstream-b",
+                    Some(TransportKind::OpenAiResponses),
+                    ProbeReadiness::Verified,
+                ),
+            ],
+            &HashMap::new(),
+            150,
+        )
+        .expect("a mismatched profile is represented as a blocked plan");
+
+        let CodexProviderSetPlan::Blocked { models } = prepared.preview.plan else {
+            panic!("the planner must not trust a caller that skipped receipt validation");
+        };
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model, "model-a");
+        assert_eq!(models[0].reason, "probe_target_mismatch");
     }
 
     fn records(a: TransportKind, b: TransportKind) -> Vec<ProtocolCompatibilityRecord> {
@@ -1618,6 +1834,14 @@ mod tests {
             150,
         )
         .expect("split plan")
+    }
+
+    fn with_protocol_overrides(mut provider: Provider, overrides: Value) -> Provider {
+        let mut encoded = serde_json::to_value(&provider).expect("serialize Provider");
+        encoded["meta"]["codexProtocolMode"] = Value::String("manual".to_string());
+        encoded["meta"]["codexProtocolOverrides"] = overrides;
+        provider = serde_json::from_value(encoded).expect("deserialize Provider with overrides");
+        provider
     }
 
     #[test]
@@ -1693,7 +1917,22 @@ mod tests {
         let source = source_provider();
         let prepared = plan_codex_provider_set(
             &source,
-            &records(TransportKind::OpenAiResponses, TransportKind::OpenAiChat),
+            &[
+                record_for_source(
+                    &source,
+                    "model-a",
+                    "upstream-a",
+                    Some(TransportKind::OpenAiResponses),
+                    ProbeReadiness::Verified,
+                ),
+                record_for_source(
+                    &source,
+                    "model-b",
+                    "upstream-b",
+                    Some(TransportKind::OpenAiChat),
+                    ProbeReadiness::Verified,
+                ),
+            ],
             &HashMap::new(),
             150,
         )
@@ -1745,6 +1984,59 @@ mod tests {
     }
 
     #[test]
+    fn manual_model_override_can_split_while_only_follow_auto_models_require_receipts() {
+        let source =
+            with_protocol_overrides(source_provider(), json!({" MODEL-B ": "openai_chat"}));
+        let prepared = plan_codex_provider_set(
+            &source,
+            &[record(
+                "model-a",
+                "upstream-a",
+                Some(TransportKind::OpenAiResponses),
+                ProbeReadiness::Verified,
+            )],
+            &HashMap::new(),
+            150,
+        )
+        .expect("the manual model does not need a fabricated probe receipt");
+
+        let CodexProviderSetPersistence::Split {
+            responses_provider,
+            chat_provider,
+            ..
+        } = prepared.persistence
+        else {
+            panic!("expected Split");
+        };
+        assert_eq!(model_names(&responses_provider), vec!["model-a"]);
+        assert_eq!(model_names(&chat_provider), vec!["model-b"]);
+        assert_eq!(prepared.profiles.len(), 1);
+        assert_eq!(prepared.profiles[0].target.public_model, "model-a");
+    }
+
+    #[test]
+    fn saving_legacy_model_protocols_migrates_them_to_normalized_meta_overrides() {
+        let mut source = source_provider();
+
+        migrate_legacy_codex_protocol_overrides_for_save(&mut source)
+            .expect("legacy protocol fields migrate during the normal save transaction");
+
+        let meta = source.meta.as_ref().expect("Provider meta");
+        assert_eq!(
+            serde_json::to_value(&meta.codex_protocol_overrides).expect("serialize overrides"),
+            json!({
+                "model-a": "openai_chat",
+                "model-b": "openai_responses"
+            })
+        );
+        assert_eq!(
+            meta.codex_protocol_mode,
+            Some(crate::provider::CodexProtocolMode::Manual)
+        );
+        assert_no_model_protocols(&source);
+    }
+
+    #[test]
     fn split_facade_default_route_follows_the_source_default_model_transport() {
         let mut source = source_provider();
         source.settings_config["config"] = Value::String(
@@ -1754,7 +2046,22 @@ mod tests {
 
         let prepared = plan_codex_provider_set(
             &source,
-            &records(TransportKind::OpenAiResponses, TransportKind::OpenAiChat),
+            &[
+                record_for_source(
+                    &source,
+                    "model-a",
+                    "upstream-a",
+                    Some(TransportKind::OpenAiResponses),
+                    ProbeReadiness::Verified,
+                ),
+                record_for_source(
+                    &source,
+                    "model-b",
+                    "upstream-b",
+                    Some(TransportKind::OpenAiChat),
+                    ProbeReadiness::Verified,
+                ),
+            ],
             &HashMap::new(),
             150,
         )
@@ -1949,7 +2256,22 @@ mod tests {
         let existing = [(occupied.id.clone(), occupied)].into_iter().collect();
         let error = plan_codex_provider_set(
             &source,
-            &records(TransportKind::OpenAiResponses, TransportKind::OpenAiChat),
+            &[
+                record_for_source(
+                    &source,
+                    "model-a",
+                    "upstream-a",
+                    Some(TransportKind::OpenAiResponses),
+                    ProbeReadiness::Verified,
+                ),
+                record_for_source(
+                    &source,
+                    "model-b",
+                    "upstream-b",
+                    Some(TransportKind::OpenAiChat),
+                    ProbeReadiness::Verified,
+                ),
+            ],
             &existing,
             150,
         )
@@ -2256,7 +2578,22 @@ mod tests {
 
         let error = plan_codex_provider_set(
             &source,
-            &records(TransportKind::OpenAiResponses, TransportKind::OpenAiChat),
+            &[
+                record_for_source(
+                    &source,
+                    "model-a",
+                    "upstream-a",
+                    Some(TransportKind::OpenAiResponses),
+                    ProbeReadiness::Verified,
+                ),
+                record_for_source(
+                    &source,
+                    "model-b",
+                    "upstream-b",
+                    Some(TransportKind::OpenAiChat),
+                    ProbeReadiness::Verified,
+                ),
+            ],
             &HashMap::new(),
             150,
         )

@@ -50,8 +50,8 @@ pub(crate) use provider::apply_selected_transport_to_provider;
 pub(crate) use provider::compile_provider_probe_candidate;
 pub(crate) use provider::compile_provider_probe_candidate_for_model;
 pub use provider::{
-    apply_probe_selection_to_provider, apply_selected_transport_to_catalog_model,
-    compile_codex_router_probe_candidates, compile_provider_probe_candidates,
+    apply_probe_selection_to_provider, compile_codex_router_probe_candidates,
+    compile_provider_probe_candidates,
 };
 
 pub(crate) mod profile;

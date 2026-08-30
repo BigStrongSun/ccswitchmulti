@@ -136,6 +136,27 @@ describe("Codex protocol settings", () => {
     ).toEqual({ customUserAgent: "keep-me" });
   });
 
+  it("persists normalized per-model overrides independently from provider mode", () => {
+    expect(
+      buildCodexProtocolMeta(undefined, {
+        protocolMode: "auto",
+        protocolOverrides: {
+          " Qwen3.8 ": "openai_chat",
+          "GPT-5.5": "openai_responses",
+        },
+        apiFormat: "openai_responses",
+        reasoningProjection: "none",
+        toolSchemaDialect: "openai",
+        historyReplay: "native_only",
+      }),
+    ).toEqual({
+      codexProtocolOverrides: {
+        "qwen3.8": "openai_chat",
+        "gpt-5.5": "openai_responses",
+      },
+    });
+  });
+
   it("loads manual settings conservatively and normalizes protocol-specific defaults", () => {
     expect(readCodexProtocolSettings(undefined, "openai_responses")).toEqual({
       protocolMode: "auto",

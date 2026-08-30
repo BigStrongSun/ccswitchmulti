@@ -778,8 +778,6 @@ fn is_bounded_replay_shape_rejection(
         result,
         Err(ProbeCaptureError::ReasoningReplayRejected {
             status_code: 400 | 422
-        }) | Err(ProbeCaptureError::HttpStatus {
-            status_code: 400 | 422
         })
     )
 }
@@ -935,11 +933,7 @@ fn build_continuation_request(
         .cloned()
         .unwrap_or_default();
     if transport == TransportKind::OpenAiResponses {
-        input.extend(
-            extract_responses_output_items(exchange)
-                .into_iter()
-                .map(canonicalize_reasoning_item_for_summary_replay),
-        );
+        input.extend(extract_responses_output_items(exchange));
     } else {
         let mut function_call = json!({
             "type": "function_call",
@@ -959,34 +953,6 @@ fn build_continuation_request(
     }));
     request["input"] = Value::Array(input);
     request
-}
-
-fn canonicalize_reasoning_item_for_summary_replay(mut item: Value) -> Value {
-    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
-        return item;
-    }
-    let has_summary = item
-        .get("summary")
-        .and_then(Value::as_array)
-        .is_some_and(|summary| !summary.is_empty());
-    if !has_summary {
-        let text = item
-            .get("content")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .filter(|text| !text.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !text.is_empty() {
-            item["summary"] = json!([{"type": "summary_text", "text": text}]);
-        }
-    }
-    if let Some(object) = item.as_object_mut() {
-        object.remove("content");
-    }
-    item
 }
 
 fn extract_responses_output_items(exchange: &CapturedProbeExchange) -> Vec<Value> {

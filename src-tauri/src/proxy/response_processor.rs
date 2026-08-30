@@ -958,12 +958,7 @@ mod tests {
         };
 
         let output = create_logged_passthrough_stream_with_options(
-            upstream,
-            "test-sse",
-            None,
-            timeout,
-            None,
-            true,
+            upstream, "test-sse", None, timeout, None, true,
         )
         .collect::<Vec<_>>()
         .await;

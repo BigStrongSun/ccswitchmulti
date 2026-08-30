@@ -18,6 +18,12 @@ function probeOutcome(
       name: "Fixture provider",
       settingsConfig: {},
     },
+    adaptationPreview: {
+      persistence: "single",
+      status: "ready",
+      effectiveTransport: "open_ai_chat",
+      models: [],
+    },
     records: [
       {
         probeVersion: 1,
