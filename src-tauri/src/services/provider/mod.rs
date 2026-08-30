@@ -35,10 +35,10 @@ pub use live::{
 // Internal re-exports (pub(crate))
 pub(crate) use live::sanitize_claude_settings_for_live;
 pub(crate) use live::{
-    build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
-    provider_exists_in_live_config, strip_common_config_from_live_settings,
-    sync_codex_router_provider, sync_current_provider_for_app_to_live,
-    write_codex_config_only_with_common_config,
+    build_codex_live_config_for_provider, build_effective_settings_with_common_config,
+    normalize_provider_common_config_for_storage, provider_exists_in_live_config,
+    strip_common_config_from_live_settings, sync_codex_router_provider,
+    sync_current_provider_for_app_to_live, write_codex_config_only_with_common_config,
     write_live_with_common_config,
 };
 

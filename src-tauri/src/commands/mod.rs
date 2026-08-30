@@ -76,3 +76,7 @@ pub use s3_sync::*;
 pub use usage::*;
 pub use webdav_sync::*;
 pub use workspace::*;
+
+pub use crate::codex_config_consistency::{
+    inspect_codex_config_consistency, resolve_codex_config_consistency,
+};

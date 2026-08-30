@@ -6,6 +6,7 @@ mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
 pub mod codex_config;
+pub mod codex_config_consistency;
 mod codex_desktop;
 mod codex_guardian;
 pub mod codex_history_migration;
@@ -1508,6 +1509,8 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::get_settings,
+            codex_config_consistency::inspect_codex_config_consistency,
+            codex_config_consistency::resolve_codex_config_consistency,
             codex_config::get_codex_subagent_reasoning_capabilities,
             codex_config::resolve_codex_model_reasoning_capability,
             codex_config::trigger_codex_model_reasoning_detection,
