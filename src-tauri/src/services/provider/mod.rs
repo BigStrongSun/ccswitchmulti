@@ -4625,6 +4625,39 @@ requires_openai_auth = true
     }
 
     #[test]
+    fn codex_live_sync_resolves_a_stale_generated_leaf_to_its_facade() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let facade = Provider::with_id(
+            "relay".to_string(),
+            "Relay".to_string(),
+            json!({
+                "codexProtocolSet": {
+                    "version": 1,
+                    "role": "facade",
+                    "responsesProviderId": "relay::responses",
+                    "chatProviderId": "relay::chat"
+                }
+            }),
+            None,
+        );
+        let leaf = generated_codex_provider_set_leaf("relay::chat", &facade.id);
+        db.save_provider(AppType::Codex.as_str(), &facade)
+            .expect("save facade");
+        db.save_provider(AppType::Codex.as_str(), &leaf)
+            .expect("save leaf");
+        db.set_current_provider(AppType::Codex.as_str(), &leaf.id)
+            .expect("seed stale current leaf");
+
+        assert_eq!(
+            ProviderService::user_operable_current_provider_id(&state, &AppType::Codex)
+                .expect("resolve current provider for live sync")
+                .as_deref(),
+            Some(facade.id.as_str())
+        );
+    }
+
+    #[test]
     fn deleting_a_generated_provider_set_leaf_is_rejected_before_database_mutation() {
         let db = Arc::new(Database::memory().expect("memory db"));
         let state = AppState::new(db.clone());
@@ -4674,6 +4707,36 @@ requires_openai_auth = true
                 .as_deref(),
             Some(leaf.id.as_str()),
             "rejected operation must not activate the leaf"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn force_repair_rejects_a_generated_leaf_before_creating_a_backup() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let leaf = generated_codex_provider_set_leaf("relay::chat", "relay");
+        db.save_provider(AppType::Codex.as_str(), &leaf)
+            .expect("save leaf");
+
+        let error = ProviderService::force_repair_and_switch_codex_provider(&state, &leaf.id)
+            .expect_err("generated leaf must not enter the recovery workflow");
+
+        assert!(
+            error
+                .to_string()
+                .contains("codex_provider_set_generated_leaf_not_operable"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !crate::config::get_home_dir()
+                .join(".cc-switch")
+                .join("backups")
+                .join("codex-force-repair")
+                .exists(),
+            "rejected leaf recovery must not create backup artifacts"
         );
     }
 
@@ -4745,6 +4808,8 @@ requires_openai_auth = true
                 "https://alternate.example.invalid/v1".to_string(),
             )
             .expect_err("generated leaf endpoint activity must be internal"),
+            ProviderService::remove_from_live_config(&state, AppType::Codex, &leaf.id)
+                .expect_err("generated leaf live removal must be internal"),
             ProviderService::update_sort_order(
                 &state,
                 AppType::Codex,
@@ -5064,21 +5129,30 @@ impl ProviderService {
         if app_type.is_additive_mode() {
             return Ok(String::new());
         }
-        let current = crate::settings::get_effective_current_provider(&state.db, &app_type)?
-            .unwrap_or_default();
-        if app_type != AppType::Codex || current.is_empty() {
-            return Ok(current);
+        Ok(Self::user_operable_current_provider_id(state, &app_type)?.unwrap_or_default())
+    }
+
+    pub(crate) fn user_operable_current_provider_id(
+        state: &AppState,
+        app_type: &AppType,
+    ) -> Result<Option<String>, AppError> {
+        let Some(current) = crate::settings::get_effective_current_provider(&state.db, app_type)?
+        else {
+            return Ok(None);
+        };
+        if *app_type != AppType::Codex {
+            return Ok(Some(current));
         }
         let Some(provider) = state
             .db
             .get_provider_by_id(&current, AppType::Codex.as_str())?
         else {
-            return Ok(String::new());
+            return Ok(None);
         };
         let Some(parent_id) =
             crate::codex_multirouter::provider_set::codex_provider_set_leaf_parent_id(&provider)
         else {
-            return Ok(current);
+            return Ok(Some(current));
         };
         let parent_is_facade = state
             .db
@@ -5086,13 +5160,13 @@ impl ProviderService {
             .as_ref()
             .is_some_and(crate::codex_multirouter::provider_set::is_codex_provider_set_facade);
         if parent_is_facade {
-            Ok(parent_id.to_string())
+            Ok(Some(parent_id.to_string()))
         } else {
             log::warn!(
                 "Codex current Provider points to an orphaned internal Provider Set leaf: {}",
                 current
             );
-            Ok(String::new())
+            Ok(None)
         }
     }
 
@@ -6042,6 +6116,7 @@ impl ProviderService {
         app_type: AppType,
         id: &str,
     ) -> Result<(), AppError> {
+        Self::ensure_codex_provider_id_is_user_operable(state, &app_type, id)?;
         match app_type {
             AppType::OpenCode => {
                 let provider_category = state
@@ -6256,6 +6331,7 @@ impl ProviderService {
             .db
             .get_provider_by_id(provider_id, AppType::Codex.as_str())?
             .ok_or_else(|| AppError::Message(format!("Codex 供应商 {provider_id} 不存在")))?;
+        Self::ensure_codex_provider_is_user_operable(&AppType::Codex, &original_provider)?;
         let original_current_provider = Self::current(state, AppType::Codex)?;
         let original_live = crate::codex_config::read_codex_config_text()?;
         let live_repair =
@@ -6567,11 +6643,10 @@ impl ProviderService {
             return sync_current_provider_for_app_to_live(state, &app_type);
         }
 
-        let current_id =
-            match crate::settings::get_effective_current_provider(&state.db, &app_type)? {
-                Some(id) => id,
-                None => return Ok(()),
-            };
+        let current_id = match Self::user_operable_current_provider_id(state, &app_type)? {
+            Some(id) => id,
+            None => return Ok(()),
+        };
 
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let Some(provider) = providers.get(&current_id) else {

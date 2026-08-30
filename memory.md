@@ -4729,3 +4729,12 @@ supported in one streaming turn`。
 - 提交前故障注入又发现投影终态误报：`ensure_projection_with_publisher` 按设计把 publisher 失败持久化成 `Pending` 诊断并返回 `Ok(status)`，但 ordinary/batch 命令只把 Rust `Err` 映射成 `committed_with_projection_error`，所以数据库已提交且 live 投影失败时仍会误报 `committed`。根修是在两条提交路径共用的结果分类器中把任何非 `Ready` 投影都映射为可重试的 `committed_with_projection_error`，同时保留 Pending 诊断、已提交 Provider/observation 和已消费 receipt；首次保存但尚未启用的向导 Router 不发布 live 投影，仍正确返回 `committed`。
 - 对应 ordinary 与已启用 Router batch 回归均先得到 `Committed != CommittedWithProjectionError` 的真实 RED，再在统一分类器后 2/2 GREEN；定向门禁更新为 Provider Set 45/45、wizard batch 9/9。精确代码候选 tree `dfb52594a8f5f391dd5ef63f3b125f10de229b0e` 独立通过 Rust library 3651 passed/0 failed/6 ignored、`cargo check --no-default-features`、`cargo clippy --no-default-features` 与 `cargo fmt --check`；Clippy 仍为 25 条既有非阻断 warning，前端代码相对已通过 156 files/1259 tests 的前一候选没有变化。
 - 联网交叉验证本轮再次使用 Codex 内置搜索和 Matrix WebSearch 独立链。内置链读取 OpenAI Codex 当前官方 `model-provider-info` 源码，确认外层只接受 Responses；Matrix 搜索结果与技术查询不相关，证据不足。receipt/SQLite 并发与事务结论以本地调用链、互斥状态机、RED→GREEN 和独立候选为权威。
+
+## 2026-08-30 Codex Provider Set 叶子操作与历史 current 最终封口
+
+- 独立复审发现两条仍可能把内部叶子泄漏到用户操作面的边缘链路：`force_repair_and_switch_codex_provider` 原先在检查叶子身份前读取 live、准备备份并可能进入修复；启动/全局 live 同步则直接读取历史 effective current，旧数据库若遗留 `current=leaf` 会把内部叶子作为真实 Provider 投影。根因是这些入口没有复用普通 `current()` 已有的“结构化叶子归一到有效门面、孤儿叶子 fail closed”语义。
+- 新增 `user_operable_current_provider_id` 作为唯一 current 解析边界：非 Codex 保留原值，普通 Codex Provider 保留原值，结构有效的 Provider Set 叶子只返回门面 ID，孤儿叶子返回空并告警。普通 current、单应用同步、全局 respecting-takeover 同步和服务内同步统一复用该边界，不按 ID 后缀或模型品牌猜测。
+- 所有剩余副作用入口在任何 live/备份/数据库动作前拒绝叶子：强制修复先校验已加载 Provider 的结构化 ownership；`remove_from_live_config` 先走统一 ID guard。新增回归覆盖历史 current 叶子映射、强制修复拒绝且不创建备份、以及 live removal 纳入“全部直接用户操作拒绝”矩阵。
+- 本轮只精确暂存 `services/provider/live.rs` 与 `services/provider/mod.rs` 中上述 hunks；同文件的 active Profile snapshot、Router projection、switch warning 以及其他流式/Profile 并行修改全部留在未暂存工作区。代码索引 tree `aa4e82c4819fd23a0f630d3a8be415091ab60f01`、detached 候选 `0005e7d0dba0b42a07860a09303700a7266c83b1`，候选工作树干净。
+- fresh 候选验证：Rust library 3653 passed/0 failed/6 ignored；前端 156 files/1259 tests；`pnpm typecheck`、`pnpm format:check`、`pnpm build:renderer`、`cargo fmt --check`、`cargo check --no-default-features`、`cargo clippy --no-default-features` 全部退出码 0。Clippy 保留 25 条既有非阻断 warning；两个 Rust 文件通过 UTF-8 strict/no-BOM/no-U+FFFD 检查。未构建安装器、未安装、未重启、未推送或发布。
+- 外部协议事实沿用本任务前置的两条独立检索链：Codex 内置搜索读取 OpenAI Codex 当前源码，Matrix WebSearch 独立链无有效结果，证据不足；两者不改变本轮本地边界结论。内部叶子封口的权威证据来自当前源码调用链、RED→GREEN 回归、精确索引和 detached 候选验证。
