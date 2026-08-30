@@ -19,6 +19,12 @@ export { openclawApi } from "./openclaw";
 export { sessionsApi } from "./sessions";
 export { workspaceApi } from "./workspace";
 export { codexSubagentV2Api } from "./codexSubagentV2";
+export {
+  codexConfigConsistencyApi,
+  type CodexConfigConsistencyAction,
+  type CodexConfigConsistencyReport,
+  type CodexConfigConsistencyState,
+} from "./codexConfigConsistency";
 export * as configApi from "./config";
 export * as authApi from "./auth";
 export * as copilotApi from "./copilot";

@@ -123,6 +123,8 @@ import {
 } from "@/components/codex/CodexRouterWorkspacePage";
 import { CodexUsagePage } from "@/components/codex/CodexUsagePage";
 import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizard";
+import { CodexConfigConsistencyDialog } from "@/components/codex/CodexConfigConsistencyDialog";
+import { useCodexConfigConsistency } from "@/hooks/useCodexConfigConsistency";
 
 type View =
   | "providers"
@@ -206,6 +208,7 @@ function App() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const shownRecoveryOutcomeIds = useRef(new Set<string>());
+  const codexConfigConsistency = useCodexConfigConsistency();
 
   const acknowledgeRecoveryOutcome = (outcome: RecoveryOutcome) => {
     void settingsApi
@@ -2262,6 +2265,15 @@ function App() {
 
       <DeepLinkImportDialog />
       <FirstRunNoticeDialog />
+      <CodexConfigConsistencyDialog
+        report={codexConfigConsistency.report}
+        pending={codexConfigConsistency.pending}
+        error={codexConfigConsistency.error}
+        onApply={() => void codexConfigConsistency.resolve("apply_ccsm")}
+        onKeep={() => void codexConfigConsistency.resolve("keep_codex")}
+        onLater={() => void codexConfigConsistency.resolve("later")}
+        onRetry={() => void codexConfigConsistency.resolve("apply_ccsm")}
+      />
     </div>
   );
 }

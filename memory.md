@@ -4750,3 +4750,13 @@ supported in one streaming turn`。
 - 本轮只精确暂存 `services/provider/live.rs` 与 `services/provider/mod.rs` 中上述 hunks；同文件的 active Profile snapshot、Router projection、switch warning 以及其他流式/Profile 并行修改全部留在未暂存工作区。代码索引 tree `aa4e82c4819fd23a0f630d3a8be415091ab60f01`、detached 候选 `0005e7d0dba0b42a07860a09303700a7266c83b1`，候选工作树干净。
 - fresh 候选验证：Rust library 3653 passed/0 failed/6 ignored；前端 156 files/1259 tests；`pnpm typecheck`、`pnpm format:check`、`pnpm build:renderer`、`cargo fmt --check`、`cargo check --no-default-features`、`cargo clippy --no-default-features` 全部退出码 0。Clippy 保留 25 条既有非阻断 warning；两个 Rust 文件通过 UTF-8 strict/no-BOM/no-U+FFFD 检查。未构建安装器、未安装、未重启、未推送或发布。
 - 外部协议事实沿用本任务前置的两条独立检索链：Codex 内置搜索读取 OpenAI Codex 当前源码，Matrix WebSearch 独立链无有效结果，证据不足；两者不改变本轮本地边界结论。内部叶子封口的权威证据来自当前源码调用链、RED→GREEN 回归、精确索引和 detached 候选验证。
+
+## 2026-08-31 Codex 配置漂移对账与前端处置闭环
+
+- 本轮直接在 `main` 修复，不创建分支。根因边界是 CCSM 的预期配置、Codex 当前 `config.toml` 和启动恢复时序此前没有统一的语义指纹/对账状态：注释、空白和键顺序差异不应触发提示，但 Codex 在 CCSM 外部改写模型、路由或 features 后必须可检测；启动对账失败也不能阻塞 CCSM 启动。
+- `24205c46` 先收口 Codex V2 Router 的 Common Config live/backup 同步；`137eefb7` 新增语义 TOML fingerprint、changed key paths（只返回路径不返回值）、CAS 指纹校验、外部漂移 backup 及 `apply_ccsm`/`keep_codex`/`later`；`0de7f292` 在启动恢复完成后执行对账，仅 `external_drift` 发布 `codex-config-consistency` 事件，失败记录并继续启动。
+- 前端 Task 4 通过 `useCodexConfigConsistency` 同时监听事件并执行一次 inspect 兜底，按 `actualFingerprint` 去重；`CodexConfigConsistencyDialog` 展示 Provider 与变更路径，不展示 API key、OAuth token 或配置值，并提供应用 CCSM、保留 Codex、稍后处理和失败重试。Tauri API 暴露 inspect/resolve 两个命令，四种语言均补齐文案。
+- 关键安全边界：应用 CCSM 不是盲写，而是比较当前 live fingerprint 后再写入；若 Codex 在确认后再次变化则拒绝并保留弹窗，外部漂移先备份；不修改 rollout JSONL、SQLite history 或 session projection。
+- fresh 源码验证：前端完整 `pnpm test:unit` 为 165 files/1301 tests，新增对话框与 hook 3/3，`pnpm typecheck` 与新增文件 Prettier 检查通过；Rust `codex_config_consistency` 9/9、Provider 相关 109/109 通过。完整 Rust/前端之外的 dirty worktree 修改均未纳入本次前端提交。
+- 尚未完成安装态验收：未重启已安装 CCSM、未人工在真实 Codex `config.toml` 外部改写后观察桌面弹窗、未构建/安装/发布。上述结论是源码和测试证据，不等同于安装态 UI 证明。
+- 联网交叉验证沿用本任务前置已完成的 Codex 内置搜索与 `matrix-websearch` 两条独立链；二者未提供比本机源码更直接的字段级实现依据，因此具体故障根因、CAS 边界和测试结论以当前源码、日志/配置调用链与 RED→GREEN 回归为准。

@@ -3236,6 +3236,17 @@
     "logoutAll": "すべての xAI アカウントを削除",
     "loginRequired": "先に xAI アカウントへログインしてください"
   },
+  "codexConfigConsistency": {
+    "title": "Codex 設定と CCSM が一致しません",
+    "description": "Codex config.toml が CCSM の外部で変更されました。処理方法を選択してください。",
+    "provider": "現在のプロバイダー：",
+    "changedKeys": "変更されたキーのパス：",
+    "noSecrets": "表示するのはキーのパスだけです。API キーや OAuth トークンなどの機密値は表示しません。",
+    "applyCcsm": "CCSM の設定を適用",
+    "keepCodex": "Codex の変更を保持",
+    "later": "後で処理",
+    "retry": "適用を再試行"
+  },
   "managedAuth": {
     "selectedAccountNeedsReauth": "リンクされたアカウントが存在しないか、再ログインが必要です",
     "selectedAccountUnavailable": "リンクされたアカウントが存在しないか、再ログインが必要です。別のアカウントを選択してください"

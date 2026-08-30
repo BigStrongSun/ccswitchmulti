@@ -3244,6 +3244,17 @@
     "logoutAll": "Remove all xAI accounts",
     "loginRequired": "Sign in to an xAI account first"
   },
+  "codexConfigConsistency": {
+    "title": "Codex configuration differs from CCSM",
+    "description": "Codex config.toml was changed outside CCSM. Choose how to handle the change.",
+    "provider": "Current provider:",
+    "changedKeys": "Changed key paths:",
+    "noSecrets": "Only key paths are shown. API keys, OAuth tokens, and other secrets are never displayed.",
+    "applyCcsm": "Apply CCSM configuration",
+    "keepCodex": "Keep Codex changes",
+    "later": "Handle later",
+    "retry": "Retry apply"
+  },
   "managedAuth": {
     "selectedAccountNeedsReauth": "The linked account is missing or needs you to sign in again",
     "selectedAccountUnavailable": "The linked account is missing or needs you to sign in again. Select another account."

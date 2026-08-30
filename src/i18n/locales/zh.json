@@ -3249,6 +3249,17 @@
     "logoutAll": "移除所有 xAI 账号",
     "loginRequired": "请先登录 xAI 账号"
   },
+  "codexConfigConsistency": {
+    "title": "Codex 配置与 CCSM 不一致",
+    "description": "检测到 Codex config.toml 在 CCSM 之外发生了修改。请选择如何处理。",
+    "provider": "当前 Provider：",
+    "changedKeys": "变更的键路径：",
+    "noSecrets": "这里只显示键路径，不会显示 API Key、OAuth Token 或其他敏感值。",
+    "applyCcsm": "应用 CCSM 配置",
+    "keepCodex": "保留 Codex 修改",
+    "later": "稍后处理",
+    "retry": "重试应用"
+  },
   "managedAuth": {
     "selectedAccountNeedsReauth": "已绑定账号不存在或需要重新登录",
     "selectedAccountUnavailable": "已绑定账号不存在或需要重新登录，请重新选择账号"
