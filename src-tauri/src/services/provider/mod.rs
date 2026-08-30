@@ -5124,6 +5124,24 @@ impl ProviderService {
         add_to_live: bool,
         protocol_profiles: &[ProtocolCompatibilityRecord],
     ) -> Result<bool, AppError> {
+        Self::add_with_protocol_state(
+            state,
+            app_type,
+            provider,
+            add_to_live,
+            protocol_profiles,
+            &[],
+        )
+    }
+
+    pub(crate) fn add_with_protocol_state(
+        state: &AppState,
+        app_type: AppType,
+        provider: Provider,
+        add_to_live: bool,
+        protocol_profiles: &[ProtocolCompatibilityRecord],
+        protocol_observations: &[ProtocolCompatibilityRecord],
+    ) -> Result<bool, AppError> {
         let mut provider = Self::prepare_provider_for_mutation(state, &app_type, provider)?;
         if app_type.is_additive_mode() {
             Self::set_provider_live_config_managed(&mut provider, add_to_live);
@@ -5132,7 +5150,13 @@ impl ProviderService {
         // Codex mutations compile all affected schema-v2 plans before committing the Provider,
         // then refresh their derived projections from the database truth. Other applications keep
         // their existing persistence path.
-        Self::persist_provider_mutation(state, &app_type, &provider, protocol_profiles)?;
+        Self::persist_provider_mutation(
+            state,
+            &app_type,
+            &provider,
+            protocol_profiles,
+            protocol_observations,
+        )?;
 
         // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
         if app_type.is_additive_mode() {
@@ -5193,6 +5217,24 @@ impl ProviderService {
         original_id: Option<&str>,
         provider: Provider,
         protocol_profiles: &[ProtocolCompatibilityRecord],
+    ) -> Result<bool, AppError> {
+        Self::update_with_protocol_state(
+            state,
+            app_type,
+            original_id,
+            provider,
+            protocol_profiles,
+            &[],
+        )
+    }
+
+    pub(crate) fn update_with_protocol_state(
+        state: &AppState,
+        app_type: AppType,
+        original_id: Option<&str>,
+        provider: Provider,
+        protocol_profiles: &[ProtocolCompatibilityRecord],
+        protocol_observations: &[ProtocolCompatibilityRecord],
     ) -> Result<bool, AppError> {
         let original_id = original_id.unwrap_or(provider.id.as_str()).to_string();
         let existing_provider = state
@@ -5340,7 +5382,13 @@ impl ProviderService {
 
         // Save through the Codex domain mutation so Provider edits, catalog refreshes and
         // MultiRouter plan saves all share the same compiler/projection lifecycle.
-        Self::persist_provider_mutation(state, &app_type, &provider, protocol_profiles)?;
+        Self::persist_provider_mutation(
+            state,
+            &app_type,
+            &provider,
+            protocol_profiles,
+            protocol_observations,
+        )?;
 
         if is_current && Self::is_codex_schema_v2_router(&app_type, &provider) {
             let status = crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
@@ -5450,6 +5498,7 @@ impl ProviderService {
         app_type: &AppType,
         provider: &Provider,
         protocol_profiles: &[ProtocolCompatibilityRecord],
+        protocol_observations: &[ProtocolCompatibilityRecord],
     ) -> Result<(), AppError> {
         if *app_type != AppType::Codex {
             return state.db.save_provider(app_type.as_str(), provider);
@@ -5489,9 +5538,17 @@ impl ProviderService {
                 chrono::Utc::now().timestamp(),
             )
             .map_err(|error| AppError::InvalidInput(error.to_string()))?;
-            let outcome = crate::codex_multirouter::mutation::apply_codex_provider_set_mutation(
+            let outcome = crate::codex_multirouter::mutation::apply_codex_provider_set_mutation_with_observations_and_publisher(
                 state.db.as_ref(),
                 prepared,
+                protocol_observations.to_vec(),
+                |artifact| {
+                    crate::codex_config::publish_codex_multirouter_projection_for_database(
+                        state.db.as_ref(),
+                        &artifact.projection_settings,
+                    )
+                    .map_err(|error| error.to_string())
+                },
             )?;
             for projection in outcome.projections {
                 if projection.state
@@ -5545,9 +5602,17 @@ impl ProviderService {
                     ));
                 }
             }
-            let outcome = crate::codex_multirouter::mutation::apply_codex_provider_set_mutation(
+            let outcome = crate::codex_multirouter::mutation::apply_codex_provider_set_mutation_with_observations_and_publisher(
                 state.db.as_ref(),
                 prepared,
+                protocol_observations.to_vec(),
+                |artifact| {
+                    crate::codex_config::publish_codex_multirouter_projection_for_database(
+                        state.db.as_ref(),
+                        &artifact.projection_settings,
+                    )
+                    .map_err(|error| error.to_string())
+                },
             )?;
             for projection in outcome.projections {
                 if projection.state
@@ -5566,16 +5631,17 @@ impl ProviderService {
             return Ok(());
         }
 
-        let outcome = if protocol_profiles.is_empty() {
+        let outcome = if protocol_profiles.is_empty() && protocol_observations.is_empty() {
             crate::codex_multirouter::mutation::apply_codex_provider_mutation(
                 state.db.as_ref(),
                 provider.clone(),
             )?
         } else {
-            crate::codex_multirouter::mutation::apply_codex_provider_mutation_with_profiles(
+            crate::codex_multirouter::mutation::apply_codex_provider_mutation_with_protocol_state(
                 state.db.as_ref(),
                 provider.clone(),
                 protocol_profiles,
+                protocol_observations,
             )?
         };
         for projection in outcome.projections {
@@ -8079,6 +8145,22 @@ impl ProviderService {
         prepared_codex_provider: Option<Provider>,
         protocol_profiles: &[ProtocolCompatibilityRecord],
     ) -> Result<bool, AppError> {
+        Self::sync_universal_to_apps_with_codex_protocol_state(
+            state,
+            id,
+            prepared_codex_provider,
+            protocol_profiles,
+            &[],
+        )
+    }
+
+    pub(crate) fn sync_universal_to_apps_with_codex_protocol_state(
+        state: &AppState,
+        id: &str,
+        prepared_codex_provider: Option<Provider>,
+        protocol_profiles: &[ProtocolCompatibilityRecord],
+        protocol_observations: &[ProtocolCompatibilityRecord],
+    ) -> Result<bool, AppError> {
         let provider = state
             .db
             .get_universal_provider(id)?
@@ -8090,6 +8172,7 @@ impl ProviderService {
             false,
             prepared_codex_provider,
             protocol_profiles,
+            protocol_observations,
         )
     }
 
@@ -8099,12 +8182,29 @@ impl ProviderService {
         prepared_codex_provider: Option<Provider>,
         protocol_profiles: &[ProtocolCompatibilityRecord],
     ) -> Result<bool, AppError> {
+        Self::save_and_sync_universal_to_apps_with_codex_protocol_state(
+            state,
+            provider,
+            prepared_codex_provider,
+            protocol_profiles,
+            &[],
+        )
+    }
+
+    pub(crate) fn save_and_sync_universal_to_apps_with_codex_protocol_state(
+        state: &AppState,
+        provider: UniversalProvider,
+        prepared_codex_provider: Option<Provider>,
+        protocol_profiles: &[ProtocolCompatibilityRecord],
+        protocol_observations: &[ProtocolCompatibilityRecord],
+    ) -> Result<bool, AppError> {
         Self::sync_universal_definition_to_apps_with_codex_profiles(
             state,
             provider,
             true,
             prepared_codex_provider,
             protocol_profiles,
+            protocol_observations,
         )
     }
 
@@ -8114,6 +8214,7 @@ impl ProviderService {
         persist_definition: bool,
         prepared_codex_provider: Option<Provider>,
         protocol_profiles: &[ProtocolCompatibilityRecord],
+        protocol_observations: &[ProtocolCompatibilityRecord],
     ) -> Result<bool, AppError> {
         let id = provider.id.as_str();
 
@@ -8187,6 +8288,15 @@ impl ProviderService {
                         .to_string(),
                 ));
             }
+            if protocol_observations
+                .iter()
+                .any(|observation| observation.target.provider_id != codex_provider.id)
+            {
+                return Err(AppError::InvalidInput(
+                    "Universal Codex protocol observation does not belong to the generated Provider"
+                        .to_string(),
+                ));
+            }
             let existing = state
                 .db
                 .get_all_providers(AppType::Codex.as_str())?
@@ -8237,7 +8347,10 @@ impl ProviderService {
                 )?,
             )
         } else {
-            if prepared_codex_provider.is_some() || !protocol_profiles.is_empty() {
+            if prepared_codex_provider.is_some()
+                || !protocol_profiles.is_empty()
+                || !protocol_observations.is_empty()
+            {
                 return Err(AppError::Message(
                     "统一供应商未启用 Codex，不能应用协议探测结果".to_string(),
                 ));
@@ -8284,6 +8397,7 @@ impl ProviderService {
                         mutations: Vec::new(),
                         profile_owner_ids: HashSet::new(),
                         records: Vec::new(),
+                        observations: Vec::new(),
                         replace_profile_provider_ids: HashSet::new(),
                         setting_keys_to_delete: Vec::new(),
                         universal_provider: None,
@@ -8293,6 +8407,7 @@ impl ProviderService {
                     Vec::new(),
                 )
             };
+        transaction.observations = protocol_observations.to_vec();
         if codex_current_before.is_none() {
             // Universal save/sync must not silently activate its generated Codex child. The
             // Provider Set planner normally activates the first ordinary Provider, but Universal

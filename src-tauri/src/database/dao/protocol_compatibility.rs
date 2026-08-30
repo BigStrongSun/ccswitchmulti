@@ -41,6 +41,23 @@ impl Database {
             .map_err(|error| AppError::Database(error.to_string()))
     }
 
+    pub fn save_protocol_probe_bundle(
+        &self,
+        selection: &ProtocolCompatibilityRecord,
+        observations: &[ProtocolCompatibilityRecord],
+    ) -> Result<(), AppError> {
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        save_protocol_compatibility_result_in_transaction(&tx, selection)?;
+        for observation in observations {
+            save_protocol_probe_observation_in_transaction(&tx, observation)?;
+        }
+        tx.commit()
+            .map_err(|error| AppError::Database(error.to_string()))
+    }
+
     pub fn prune_protocol_compatibility_results(&self, now: i64) -> Result<u64, AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
@@ -288,7 +305,7 @@ pub(super) fn save_protocol_compatibility_result_in_transaction(
     Ok(())
 }
 
-fn save_protocol_probe_observation_in_transaction(
+pub(super) fn save_protocol_probe_observation_in_transaction(
     tx: &Transaction<'_>,
     record: &ProtocolCompatibilityRecord,
 ) -> Result<(), AppError> {

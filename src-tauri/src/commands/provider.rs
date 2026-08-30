@@ -149,6 +149,7 @@ where
             (
                 Provider,
                 Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+                Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
             ),
             String,
         >,
@@ -159,8 +160,16 @@ where
     }
 
     let provider = ProviderService::prepare_provider_for_mutation(state, &app_type, provider)?;
-    let (provider, record) = resolve_automatic_probe_outcome(provider, probe).await?;
-    ProviderService::add_with_protocol_profiles(state, app_type, provider, add_to_live, &record)
+    let (provider, records, observations) =
+        resolve_automatic_probe_outcome(provider, probe).await?;
+    ProviderService::add_with_protocol_state(
+        state,
+        app_type,
+        provider,
+        add_to_live,
+        &records,
+        &observations,
+    )
 }
 
 async fn update_provider_internal_with_probe<F, Fut>(
@@ -177,6 +186,7 @@ where
             (
                 Provider,
                 Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+                Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
             ),
             String,
         >,
@@ -192,8 +202,16 @@ where
             "Only additive-mode providers support changing provider key".to_string(),
         ));
     }
-    let (provider, record) = resolve_automatic_probe_outcome(provider, probe).await?;
-    ProviderService::update_with_protocol_profiles(state, app_type, original_id, provider, &record)
+    let (provider, records, observations) =
+        resolve_automatic_probe_outcome(provider, probe).await?;
+    ProviderService::update_with_protocol_state(
+        state,
+        app_type,
+        original_id,
+        provider,
+        &records,
+        &observations,
+    )
 }
 
 async fn resolve_automatic_probe_outcome<F, Fut>(
@@ -202,6 +220,7 @@ async fn resolve_automatic_probe_outcome<F, Fut>(
 ) -> Result<
     (
         Provider,
+        Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
         Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
     ),
     AppError,
@@ -213,13 +232,14 @@ where
             (
                 Provider,
                 Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+                Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
             ),
             String,
         >,
     >,
 {
     if provider.uses_manual_codex_protocol() {
-        return Ok((provider, Vec::new()));
+        return Ok((provider, Vec::new(), Vec::new()));
     }
     match probe(provider.clone()).await {
         Ok(outcome) => Ok(outcome),
@@ -1369,6 +1389,7 @@ fn commit_universal_provider_set_internal(
     request: CommitUniversalProviderSetRequest,
     now: i64,
 ) -> Result<UniversalProviderSetCommitOutcome, String> {
+    let receipt_claim = state.claim_codex_provider_set_probe_receipts(&request.receipt_ids)?;
     let preview = prepare_universal_provider_set_internal(
         state,
         PrepareUniversalProviderSetRequest {
@@ -1434,22 +1455,21 @@ fn commit_universal_provider_set_internal(
         _ => return Err("codex_provider_set_dependency_changed".to_string()),
     }
 
-    let records = match codex_provider.as_ref() {
-        Some(provider) if !provider.uses_manual_codex_protocol() => {
-            state.get_codex_provider_set_probe_receipts(&request.receipt_ids)?
-        }
-        _ => Vec::new(),
+    let (records, observations) = match codex_provider.as_ref() {
+        Some(_) => crate::commands::protocol_compatibility::protocol_state_from_provider_set_receipt_bundles(
+            receipt_claim.bundles(),
+        ),
+        _ => (Vec::new(), Vec::new()),
     };
-    ProviderService::save_and_sync_universal_to_apps_with_codex_profiles(
+    ProviderService::save_and_sync_universal_to_apps_with_codex_protocol_state(
         state,
         request.provider,
         codex_provider,
         &records,
+        &observations,
     )
     .map_err(|error| error.to_string())?;
-    if let Err(error) = state.forget_codex_provider_set_probe_receipts(&request.receipt_ids) {
-        log::warn!("Universal Provider Set 已提交，但清理一次性探测 receipt 失败：{error}");
-    }
+    receipt_claim.consume_after_database_commit();
     Ok(UniversalProviderSetCommitOutcome { preview })
 }
 
@@ -1505,6 +1525,7 @@ where
             (
                 Provider,
                 Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+                Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
             ),
             String,
         >,
@@ -1513,13 +1534,15 @@ where
     let Some(provider) = ProviderService::prepare_universal_codex_provider(state, id)? else {
         return ProviderService::sync_universal_to_apps(state, id);
     };
-    let (provider, profiles) = resolve_automatic_probe_outcome(provider, probe).await?;
+    let (provider, profiles, observations) =
+        resolve_automatic_probe_outcome(provider, probe).await?;
     validate_legacy_universal_provider_set_commit(state, &provider, &profiles)?;
-    ProviderService::sync_universal_to_apps_with_codex_profiles(
+    ProviderService::sync_universal_to_apps_with_codex_protocol_state(
         state,
         id,
         Some(provider),
         &profiles,
+        &observations,
     )
 }
 
@@ -1534,6 +1557,7 @@ where
         Output = Result<
             (
                 Provider,
+                Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
                 Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
             ),
             String,
@@ -1550,13 +1574,15 @@ where
             &[],
         );
     };
-    let (codex_provider, profiles) = resolve_automatic_probe_outcome(codex_provider, probe).await?;
+    let (codex_provider, profiles, observations) =
+        resolve_automatic_probe_outcome(codex_provider, probe).await?;
     validate_legacy_universal_provider_set_commit(state, &codex_provider, &profiles)?;
-    ProviderService::save_and_sync_universal_to_apps_with_codex_profiles(
+    ProviderService::save_and_sync_universal_to_apps_with_codex_protocol_state(
         state,
         provider,
         Some(codex_provider),
         &profiles,
+        &observations,
     )
 }
 
@@ -1967,8 +1993,9 @@ mod codex_protocol_preflight_save_tests {
         app_config::AppType,
         database::Database,
         protocol_compatibility::{
-            apply_selected_transport_to_provider, ProbeReadiness, ProbeTargetKey,
-            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, TransportKind,
+            apply_selected_transport_to_provider, compile_codex_router_probe_candidates,
+            ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+            ProtocolCompatibilityRecord, TransportKind,
         },
         provider::{CodexProtocolMode, Provider, ProviderMeta},
         services::ProviderService,
@@ -2011,6 +2038,28 @@ mod codex_protocol_preflight_save_tests {
         }
     }
 
+    fn codex_router(id: &str) -> Provider {
+        Provider::with_id(
+            id.to_string(),
+            format!("Router {id}"),
+            json!({
+                "auth": {},
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "routes": [{
+                        "id": "route-qwen",
+                        "enabled": true,
+                        "targetProviderId": "qwen-provider",
+                        "modelSelection": {"mode": "all"},
+                        "authPolicy": {"source": "provider_config"}
+                    }]
+                }
+            }),
+            None,
+        )
+    }
+
     fn chat_record() -> ProtocolCompatibilityRecord {
         let target = ProbeTargetKey::new(
             "qwen-provider",
@@ -2036,6 +2085,19 @@ mod codex_protocol_preflight_save_tests {
         )
     }
 
+    fn transport_observations(
+        record: &ProtocolCompatibilityRecord,
+    ) -> Vec<ProtocolCompatibilityRecord> {
+        [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
+            .into_iter()
+            .map(|transport| {
+                let mut observation = record.clone();
+                observation.target.transport = transport;
+                observation
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn ordinary_codex_update_runs_preflight_and_atomically_saves_its_profile() {
         let db = Arc::new(Database::memory().expect("memory database"));
@@ -2047,6 +2109,7 @@ mod codex_protocol_preflight_save_tests {
         let calls_for_probe = calls.clone();
         let expected_record = chat_record();
         let returned_record = expected_record.clone();
+        let returned_observations = transport_observations(&returned_record);
 
         update_provider_internal_with_probe(
             &state,
@@ -2057,7 +2120,11 @@ mod codex_protocol_preflight_save_tests {
                 calls_for_probe.fetch_add(1, Ordering::SeqCst);
                 apply_selected_transport_to_provider(&mut candidate, TransportKind::OpenAiChat)
                     .expect("apply detected protocol");
-                std::future::ready(Ok((candidate, vec![returned_record])))
+                std::future::ready(Ok((
+                    candidate,
+                    vec![returned_record],
+                    returned_observations,
+                )))
             },
         )
         .await
@@ -2092,6 +2159,69 @@ mod codex_protocol_preflight_save_tests {
             .expect("read rebound profile")
             .expect("rebound profile exists");
         assert_eq!(rebound.result, expected_record.result);
+        assert_eq!(
+            db.list_protocol_probe_observations("qwen-provider")
+                .expect("read committed observations")
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_v2_router_update_atomically_saves_both_protocol_observations() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let source = codex_provider();
+        let active_router = codex_router("active-router");
+        let router = codex_router("router-provider");
+        for provider in [&source, &active_router, &router] {
+            db.save_provider(AppType::Codex.as_str(), provider)
+                .expect("seed Codex Provider");
+        }
+        db.set_current_provider(AppType::Codex.as_str(), &active_router.id)
+            .expect("keep the updated Router inactive");
+        let providers = db
+            .get_all_providers(AppType::Codex.as_str())
+            .expect("load Router dependencies")
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let candidate = compile_codex_router_probe_candidates(&router, &providers)
+            .expect("compile Router probe candidate")
+            .into_iter()
+            .next()
+            .expect("Router candidate");
+        let target = candidate
+            .target_key(TransportKind::OpenAiChat)
+            .expect("Router Chat target");
+        let now = chrono::Utc::now().timestamp();
+        let record = ProtocolCompatibilityRecord::new(
+            target,
+            ProtocolCompatibilityProbeResult {
+                selected_transport: Some(TransportKind::OpenAiChat),
+                readiness: ProbeReadiness::Verified,
+                branches: Vec::new(),
+            },
+            now,
+            now + 600,
+        );
+        let observations = transport_observations(&record);
+
+        update_provider_internal_with_probe(
+            &state,
+            AppType::Codex,
+            None,
+            router,
+            move |candidate| std::future::ready(Ok((candidate, vec![record], observations))),
+        )
+        .await
+        .expect("Router update should save its complete protocol state");
+
+        assert_eq!(
+            db.list_protocol_probe_observations("router-provider")
+                .expect("read Router observations")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -2110,7 +2240,7 @@ mod codex_protocol_preflight_save_tests {
             provider,
             move |candidate| {
                 calls_for_probe.fetch_add(1, Ordering::SeqCst);
-                std::future::ready(Ok((candidate, Vec::new())))
+                std::future::ready(Ok((candidate, Vec::new(), Vec::new())))
             },
         )
         .await;
@@ -2169,7 +2299,7 @@ mod codex_protocol_preflight_save_tests {
             provider,
             move |candidate| {
                 calls_for_probe.fetch_add(1, Ordering::SeqCst);
-                std::future::ready(Ok((candidate, Vec::new())))
+                std::future::ready(Ok((candidate, Vec::new(), Vec::new())))
             },
         )
         .await
@@ -2412,6 +2542,29 @@ mod universal_codex_protocol_preflight_tests {
         Arc,
     };
 
+    fn remember_provider_set_receipt(
+        state: &AppState,
+        record: ProtocolCompatibilityRecord,
+    ) -> String {
+        let observations = protocol_observations(&record);
+        state
+            .remember_codex_provider_set_probe_receipt(record, observations)
+            .expect("remember Universal Provider Set receipt bundle")
+    }
+
+    fn protocol_observations(
+        record: &ProtocolCompatibilityRecord,
+    ) -> Vec<ProtocolCompatibilityRecord> {
+        [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
+            .into_iter()
+            .map(|transport| {
+                let mut observation = record.clone();
+                observation.target.transport = transport;
+                observation
+            })
+            .collect()
+    }
+
     fn mixed_universal_fixture(
         state: &AppState,
         id: &str,
@@ -2469,8 +2622,9 @@ mod universal_codex_protocol_preflight_tests {
             .expect("compile Universal Codex candidate")
             .target_key(transport)
             .expect("compile Universal Codex target");
-            state
-                .remember_codex_provider_set_probe_receipt(ProtocolCompatibilityRecord::new(
+            remember_provider_set_receipt(
+                state,
+                ProtocolCompatibilityRecord::new(
                     target,
                     ProtocolCompatibilityProbeResult {
                         selected_transport: Some(transport),
@@ -2479,8 +2633,8 @@ mod universal_codex_protocol_preflight_tests {
                     },
                     now,
                     now + 600,
-                ))
-                .expect("remember Universal Provider Set receipt")
+                ),
+            )
         })
         .collect::<Vec<_>>();
         (universal, receipt_ids)
@@ -2687,7 +2841,7 @@ mod universal_codex_protocol_preflight_tests {
                     ),
                     record("glm-visible", "zai-org/GLM-4.5", TransportKind::OpenAiChat),
                 ];
-                std::future::ready(Ok((candidate, records)))
+                std::future::ready(Ok((candidate, records, Vec::new())))
             },
         )
         .await
@@ -2883,11 +3037,7 @@ mod universal_codex_protocol_preflight_tests {
             record("glm-visible", "zai-org/GLM-4.5", TransportKind::OpenAiChat),
         ]
         .into_iter()
-        .map(|record| {
-            state
-                .remember_codex_provider_set_probe_receipt(record)
-                .expect("remember Universal Provider Set receipt")
-        })
+        .map(|record| remember_provider_set_receipt(&state, record))
         .collect::<Vec<_>>();
 
         let preview = prepare_universal_provider_set_internal(
@@ -2954,6 +3104,59 @@ mod universal_codex_protocol_preflight_tests {
                 .expect("read committed Universal Provider Set member")
                 .is_some());
         }
+    }
+
+    #[test]
+    fn universal_provider_set_commit_rejects_receipts_claimed_by_another_commit() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let (universal, receipt_ids) =
+            mixed_universal_fixture(&state, "universal-claim", ProbeReadiness::Verified);
+        let now = chrono::Utc::now().timestamp();
+        let preview = prepare_universal_provider_set_internal(
+            &state,
+            PrepareUniversalProviderSetRequest {
+                provider: universal.clone(),
+                receipt_ids: receipt_ids.clone(),
+            },
+            now,
+        )
+        .expect("prepare Universal Provider Set");
+        let competing_claim = state
+            .claim_codex_provider_set_probe_receipts(&receipt_ids)
+            .expect("simulate another Universal commit holding the receipts");
+
+        let conflict = match commit_universal_provider_set_internal(
+            &state,
+            CommitUniversalProviderSetRequest {
+                provider: universal.clone(),
+                receipt_ids: receipt_ids.clone(),
+                digest: preview.digest.clone(),
+                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+            },
+            now,
+        ) {
+            Ok(_) => panic!("a second Universal commit must not reuse in-flight receipts"),
+            Err(error) => error,
+        };
+        assert!(conflict.contains("codex_provider_set_probe_receipt_in_use"));
+        assert!(db
+            .get_universal_provider("universal-claim")
+            .expect("read Universal definition after conflict")
+            .is_none());
+
+        drop(competing_claim);
+        commit_universal_provider_set_internal(
+            &state,
+            CommitUniversalProviderSetRequest {
+                provider: universal,
+                receipt_ids,
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+            },
+            now,
+        )
+        .expect("released claim allows the Universal commit to retry");
     }
 
     #[test]
@@ -3057,6 +3260,182 @@ mod universal_codex_protocol_preflight_tests {
         });
     }
 
+    #[test]
+    fn universal_manual_override_commits_probe_observations_and_consumes_receipt() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let mut universal = UniversalProvider::new(
+            "universal-manual-observation".to_string(),
+            "Universal Manual Observation".to_string(),
+            "newapi".to_string(),
+            "https://gateway.example/v1".to_string(),
+            "probe-secret".to_string(),
+        );
+        universal.apps.codex = true;
+        universal.models.codex = Some(CodexModelConfig {
+            model: Some("qwen-visible".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+        });
+        universal.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            codex_protocol_mode: Some(CodexProtocolMode::Manual),
+            ..ProviderMeta::default()
+        });
+        let codex_provider = universal
+            .to_codex_provider()
+            .expect("Codex child is enabled");
+        let now = chrono::Utc::now().timestamp();
+        let target = compile_provider_probe_candidate_for_model(
+            &codex_provider,
+            "qwen-visible".to_string(),
+            "qwen-visible".to_string(),
+        )
+        .expect("compile Universal Codex candidate")
+        .target_key(TransportKind::OpenAiResponses)
+        .expect("compile probed Responses target");
+        let receipt_ids = vec![remember_provider_set_receipt(
+            &state,
+            ProtocolCompatibilityRecord::new(
+                target,
+                ProtocolCompatibilityProbeResult {
+                    selected_transport: Some(TransportKind::OpenAiResponses),
+                    readiness: ProbeReadiness::Verified,
+                    branches: Vec::new(),
+                },
+                now,
+                now + 600,
+            ),
+        )];
+        let preview = prepare_universal_provider_set_internal(
+            &state,
+            PrepareUniversalProviderSetRequest {
+                provider: universal.clone(),
+                receipt_ids: receipt_ids.clone(),
+            },
+            now,
+        )
+        .expect("prepare manual Universal Provider Set");
+
+        commit_universal_provider_set_internal(
+            &state,
+            CommitUniversalProviderSetRequest {
+                provider: universal,
+                receipt_ids: receipt_ids.clone(),
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::ConfirmManual,
+            },
+            now,
+        )
+        .expect("commit manual Universal Provider Set");
+
+        assert_eq!(
+            db.list_protocol_probe_observations("universal-codex-universal-manual-observation")
+                .expect("read manual Universal observations")
+                .len(),
+            2,
+            "manual override must preserve both probed transport facts"
+        );
+        let consumed = match state.get_codex_provider_set_probe_receipts(&receipt_ids) {
+            Ok(_) => panic!("successful manual commit must consume its receipt"),
+            Err(error) => error,
+        };
+        assert!(consumed.contains("codex_provider_set_probe_required"));
+    }
+
+    #[test]
+    fn universal_manual_override_database_failure_keeps_receipt_and_writes_no_observations() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let mut universal = UniversalProvider::new(
+            "universal-manual-retry".to_string(),
+            "Universal Manual Retry".to_string(),
+            "newapi".to_string(),
+            "https://gateway.example/v1".to_string(),
+            "probe-secret".to_string(),
+        );
+        universal.apps.codex = true;
+        universal.models.codex = Some(CodexModelConfig {
+            model: Some("qwen-visible".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+        });
+        universal.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            codex_protocol_mode: Some(CodexProtocolMode::Manual),
+            ..ProviderMeta::default()
+        });
+        let codex_provider = universal
+            .to_codex_provider()
+            .expect("Codex child is enabled");
+        let now = chrono::Utc::now().timestamp();
+        let target = compile_provider_probe_candidate_for_model(
+            &codex_provider,
+            "qwen-visible".to_string(),
+            "qwen-visible".to_string(),
+        )
+        .expect("compile Universal Codex candidate")
+        .target_key(TransportKind::OpenAiResponses)
+        .expect("compile probed Responses target");
+        let receipt_ids = vec![remember_provider_set_receipt(
+            &state,
+            ProtocolCompatibilityRecord::new(
+                target,
+                ProtocolCompatibilityProbeResult {
+                    selected_transport: Some(TransportKind::OpenAiResponses),
+                    readiness: ProbeReadiness::Verified,
+                    branches: Vec::new(),
+                },
+                now,
+                now + 600,
+            ),
+        )];
+        let preview = prepare_universal_provider_set_internal(
+            &state,
+            PrepareUniversalProviderSetRequest {
+                provider: universal.clone(),
+                receipt_ids: receipt_ids.clone(),
+            },
+            now,
+        )
+        .expect("prepare retryable manual Universal Provider Set");
+        {
+            let conn = db.conn.lock().expect("lock database");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_manual_universal_commit
+                 BEFORE INSERT ON providers
+                 WHEN NEW.id = 'universal-codex-universal-manual-retry'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected manual Universal failure');
+                 END;",
+            )
+            .expect("install manual Universal failure trigger");
+        }
+
+        let error = commit_universal_provider_set_internal(
+            &state,
+            CommitUniversalProviderSetRequest {
+                provider: universal,
+                receipt_ids: receipt_ids.clone(),
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::ConfirmManual,
+            },
+            now,
+        )
+        .expect_err("database failure must abort manual Universal commit");
+
+        assert!(error.contains("injected manual Universal failure"));
+        assert!(db
+            .list_protocol_probe_observations("universal-codex-universal-manual-retry")
+            .expect("read rejected manual Universal observations")
+            .is_empty());
+        assert_eq!(
+            state
+                .get_codex_provider_set_probe_receipts(&receipt_ids)
+                .expect("failed manual Universal commit keeps retry receipt")
+                .len(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn universal_save_and_sync_commits_definition_all_children_and_profile_together() {
         let db = Arc::new(Database::memory().expect("memory database"));
@@ -3098,6 +3477,7 @@ mod universal_codex_protocol_preflight_tests {
             now + 600,
         );
         let returned_record = record.clone();
+        let returned_observations = protocol_observations(&returned_record);
 
         save_and_sync_universal_provider_internal_with_probe(
             &state,
@@ -3106,7 +3486,11 @@ mod universal_codex_protocol_preflight_tests {
                 assert_eq!(candidate.id, "universal-codex-universal-complete");
                 apply_selected_transport_to_provider(&mut candidate, TransportKind::OpenAiChat)
                     .expect("apply selected transport");
-                std::future::ready(Ok((candidate, vec![returned_record])))
+                std::future::ready(Ok((
+                    candidate,
+                    vec![returned_record],
+                    returned_observations,
+                )))
             },
         )
         .await
@@ -3149,6 +3533,12 @@ mod universal_codex_protocol_preflight_tests {
             rebound_record.result, record.result,
             "the selected Codex profile must commit with the definition and children"
         );
+        assert_eq!(
+            db.list_protocol_probe_observations("universal-codex-universal-complete")
+                .expect("read Universal observations")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -3170,7 +3560,7 @@ mod universal_codex_protocol_preflight_tests {
 
         save_and_sync_universal_provider_internal_with_probe(&state, universal, move |candidate| {
             calls_for_probe.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(Ok((candidate, Vec::new())))
+            std::future::ready(Ok((candidate, Vec::new(), Vec::new())))
         })
         .await
         .expect("save Universal Provider without Codex");
@@ -3260,6 +3650,75 @@ mod universal_codex_protocol_preflight_tests {
                 .is_none(),
             "a rejected Universal sync must not leave a partial Claude child"
         );
+    }
+
+    #[test]
+    fn universal_sync_rejects_foreign_probe_observation_before_writing_other_children() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let mut universal = UniversalProvider::new(
+            "universal-observation-atomic".to_string(),
+            "Universal Observation Atomic".to_string(),
+            "newapi".to_string(),
+            "https://gateway.example/v1".to_string(),
+            "probe-secret".to_string(),
+        );
+        universal.apps.claude = true;
+        universal.apps.codex = true;
+        universal.models.codex = Some(CodexModelConfig {
+            model: Some("qwen-visible".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+        });
+        ProviderService::upsert_universal(&state, universal).expect("seed universal provider");
+        let codex_provider = ProviderService::prepare_universal_codex_provider(
+            &state,
+            "universal-observation-atomic",
+        )
+        .expect("prepare Codex child")
+        .expect("Codex child enabled");
+        let target = compile_provider_probe_candidate_for_model(
+            &codex_provider,
+            "qwen-visible".to_string(),
+            "qwen-visible".to_string(),
+        )
+        .expect("compile Universal Codex candidate")
+        .target_key(TransportKind::OpenAiResponses)
+        .expect("compile Universal Codex target");
+        let now = chrono::Utc::now().timestamp();
+        let profile = ProtocolCompatibilityRecord::new(
+            target,
+            ProtocolCompatibilityProbeResult {
+                selected_transport: Some(TransportKind::OpenAiResponses),
+                readiness: ProbeReadiness::Verified,
+                branches: Vec::new(),
+            },
+            now,
+            now + 600,
+        );
+        let mut foreign_observation = profile.clone();
+        foreign_observation.target.provider_id = "foreign-provider".to_string();
+
+        let error = ProviderService::sync_universal_to_apps_with_codex_protocol_state(
+            &state,
+            "universal-observation-atomic",
+            Some(codex_provider),
+            &[profile],
+            &[foreign_observation],
+        )
+        .expect_err("foreign protocol observation must reject the sync");
+        assert!(error.to_string().contains("observation"), "{error}");
+
+        assert!(db
+            .get_provider_by_id(
+                "universal-claude-universal-observation-atomic",
+                AppType::Claude.as_str(),
+            )
+            .expect("read Claude child")
+            .is_none());
+        assert!(db
+            .list_protocol_probe_observations("foreign-provider")
+            .expect("read rejected foreign observations")
+            .is_empty());
     }
 
     #[test]
@@ -3502,6 +3961,7 @@ mod universal_codex_protocol_preflight_tests {
             now + 600,
         );
         let returned_record = expected_record.clone();
+        let returned_observations = protocol_observations(&returned_record);
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_probe = calls.clone();
 
@@ -3513,7 +3973,11 @@ mod universal_codex_protocol_preflight_tests {
                 assert_eq!(candidate.id, "universal-codex-universal-probe");
                 apply_selected_transport_to_provider(&mut candidate, TransportKind::OpenAiChat)
                     .expect("apply detected transport");
-                std::future::ready(Ok((candidate, vec![returned_record])))
+                std::future::ready(Ok((
+                    candidate,
+                    vec![returned_record],
+                    returned_observations,
+                )))
             },
         )
         .await
@@ -3544,6 +4008,12 @@ mod universal_codex_protocol_preflight_tests {
             .expect("read saved profile")
             .expect("saved profile exists");
         assert_eq!(rebound_record.result, expected_record.result);
+        assert_eq!(
+            db.list_protocol_probe_observations("universal-codex-universal-probe")
+                .expect("read synced Universal observations")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -3610,7 +4080,7 @@ mod universal_codex_protocol_preflight_tests {
                     ),
                     record("glm-visible", "zai-org/GLM-4.5", TransportKind::OpenAiChat),
                 ];
-                std::future::ready(Ok((candidate, records)))
+                std::future::ready(Ok((candidate, records, Vec::new())))
             },
         )
         .await

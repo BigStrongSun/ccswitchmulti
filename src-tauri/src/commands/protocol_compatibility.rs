@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     app_config::AppType,
+    codex_multirouter::projection::{CodexRoutingProjectionStatus, ProjectionState},
     codex_multirouter::provider_set::{
         plan_codex_provider_set, plan_manual_codex_provider_set, CodexProviderSetPlan,
         CodexProviderSetPreview,
@@ -211,6 +212,48 @@ pub enum CodexProviderSetCommitStatus {
     CommittedWithProjectionError,
 }
 
+fn classify_codex_provider_set_projection_commit(
+    result: Result<
+        crate::codex_multirouter::mutation::CodexProviderMutationOutcome,
+        crate::error::AppError,
+    >,
+) -> (
+    Vec<CodexRoutingProjectionStatus>,
+    CodexProviderSetCommitStatus,
+    Option<String>,
+) {
+    match result {
+        Ok(outcome)
+            if outcome
+                .projections
+                .iter()
+                .all(|projection| projection.state == ProjectionState::Ready) =>
+        {
+            (
+                outcome.projections,
+                CodexProviderSetCommitStatus::Committed,
+                None,
+            )
+        }
+        Ok(outcome) => {
+            log::warn!("Codex Provider Set committed; live projection is pending and will retry");
+            (
+                outcome.projections,
+                CodexProviderSetCommitStatus::CommittedWithProjectionError,
+                Some("codex_provider_set_live_projection_failed".to_string()),
+            )
+        }
+        Err(error) => {
+            log::warn!("Codex Provider Set committed; live projection will retry: {error}");
+            (
+                Vec::new(),
+                CodexProviderSetCommitStatus::CommittedWithProjectionError,
+                Some("codex_provider_set_live_projection_failed".to_string()),
+            )
+        }
+    }
+}
+
 #[tauri::command]
 pub fn prepare_codex_provider_set_batch(
     state: State<'_, AppState>,
@@ -270,7 +313,7 @@ fn prepare_codex_provider_set_batch_internal(
             if source.receipt_ids.is_empty() {
                 return Err("codex_provider_set_probe_required".to_string());
             }
-            let records = state.get_codex_provider_set_probe_receipts(&source.receipt_ids)?;
+            let (records, _) = load_codex_provider_set_probe_receipts(state, &source.receipt_ids)?;
             validate_codex_provider_set_probe_records(&provider, &records)?;
             records
         };
@@ -328,6 +371,7 @@ where
         .iter()
         .flat_map(|source| source.receipt_ids.iter().cloned())
         .collect::<Vec<_>>();
+    let receipt_claim = state.claim_codex_provider_set_probe_receipts(&receipt_ids)?;
     let (prepared, preview) = prepare_codex_provider_set_batch_internal(
         state,
         PrepareCodexProviderSetBatchRequest {
@@ -351,32 +395,25 @@ where
 
     let router = prepared.router.clone();
     let projection_router_ids = prepared.projection_router_ids.clone();
-    let transaction = prepared
+    let (_, observations) =
+        protocol_state_from_provider_set_receipt_bundles(receipt_claim.bundles());
+    let mut transaction = prepared
         .transaction
         .ok_or_else(|| "codex_provider_set_batch_blocked".to_string())?;
+    transaction.observations = observations;
     state
         .db
         .apply_provider_set_database_transaction(transaction)
         .map_err(|error| error.to_string())?;
+    receipt_claim.consume_after_database_commit();
     let (projections, status, projection_error_code) =
-        match crate::codex_multirouter::mutation::finalize_codex_provider_set_projections_with_publisher(
-            state.db.as_ref(),
-            projection_router_ids,
-            publish,
-        ) {
-            Ok(outcome) => (outcome.projections, CodexProviderSetCommitStatus::Committed, None),
-            Err(error) => {
-                log::warn!("Codex wizard Provider Set batch committed; projection will retry: {error}");
-                (
-                    Vec::new(),
-                    CodexProviderSetCommitStatus::CommittedWithProjectionError,
-                    Some("codex_provider_set_live_projection_failed".to_string()),
-                )
-            }
-        };
-    if let Err(error) = state.forget_codex_provider_set_probe_receipts(&receipt_ids) {
-        log::warn!("Codex Provider Set batch committed but receipt cleanup failed: {error}");
-    }
+        classify_codex_provider_set_projection_commit(
+            crate::codex_multirouter::mutation::finalize_codex_provider_set_projections_with_publisher(
+                state.db.as_ref(),
+                projection_router_ids,
+                publish,
+            ),
+        );
     Ok(CodexProviderSetBatchCommitOutcome {
         preview,
         router,
@@ -451,6 +488,10 @@ pub(crate) fn prepare_codex_provider_set_internal(
         .into_iter()
         .collect::<HashMap<_, _>>();
     if provider.uses_manual_codex_protocol() {
+        if !request.receipt_ids.is_empty() {
+            let (records, _) = load_codex_provider_set_probe_receipts(state, &request.receipt_ids)?;
+            validate_codex_provider_set_probe_records(&provider, &records)?;
+        }
         let transport = manual_codex_provider_transport(&provider)?;
         return plan_manual_codex_provider_set(&provider, transport, &providers, now)
             .map(|prepared| prepared.preview)
@@ -459,7 +500,7 @@ pub(crate) fn prepare_codex_provider_set_internal(
     if request.receipt_ids.is_empty() {
         return Err("codex_provider_set_probe_required".to_string());
     }
-    let records = state.get_codex_provider_set_probe_receipts(&request.receipt_ids)?;
+    let (records, _) = load_codex_provider_set_probe_receipts(state, &request.receipt_ids)?;
     validate_codex_provider_set_probe_records(&provider, &records)?;
     plan_codex_provider_set(&provider, &records, &providers, now)
         .map(|prepared| prepared.preview)
@@ -477,6 +518,9 @@ where
         &crate::codex_multirouter::projection::CodexRoutingProjectionArtifact,
     ) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, String>,
 {
+    let receipt_claim = state.claim_codex_provider_set_probe_receipts(&request.receipt_ids)?;
+    let (claimed_records, observations) =
+        protocol_state_from_provider_set_receipt_bundles(receipt_claim.bundles());
     let provider =
         ProviderService::prepare_provider_for_mutation(state, &AppType::Codex, request.provider)
             .map_err(|error| error.to_string())?;
@@ -488,14 +532,18 @@ where
         .collect::<HashMap<_, _>>();
     let is_manual = provider.uses_manual_codex_protocol();
     let records = if is_manual {
-        Vec::new()
+        if request.receipt_ids.is_empty() {
+            Vec::new()
+        } else {
+            validate_codex_provider_set_probe_records(&provider, &claimed_records)?;
+            claimed_records
+        }
     } else {
         if request.receipt_ids.is_empty() {
             return Err("codex_provider_set_probe_required".to_string());
         }
-        let records = state.get_codex_provider_set_probe_receipts(&request.receipt_ids)?;
-        validate_codex_provider_set_probe_records(&provider, &records)?;
-        records
+        validate_codex_provider_set_probe_records(&provider, &claimed_records)?;
+        claimed_records
     };
     let prepared = if is_manual {
         let transport = manual_codex_provider_transport(&provider)?;
@@ -532,21 +580,30 @@ where
         }
     }
     let preview = prepared.preview.clone();
-    let outcome =
-        crate::codex_multirouter::mutation::apply_codex_provider_set_mutation_with_publisher(
-            state.db.as_ref(),
-            prepared,
-            publish,
-        )
+    let mut commit = crate::codex_multirouter::mutation::prepare_codex_provider_set_commit(
+        state.db.as_ref(),
+        prepared,
+    )
+    .map_err(|error| error.to_string())?;
+    commit.transaction.observations = observations;
+    state
+        .db
+        .apply_provider_set_database_transaction(commit.transaction)
         .map_err(|error| error.to_string())?;
-    if let Err(error) = state.forget_codex_provider_set_probe_receipts(&request.receipt_ids) {
-        log::warn!("Codex Provider Set 已提交，但清理一次性探测 receipt 失败：{error}");
-    }
+    receipt_claim.consume_after_database_commit();
+    let (projections, status, projection_error_code) =
+        classify_codex_provider_set_projection_commit(
+            crate::codex_multirouter::mutation::finalize_codex_provider_set_projections_with_publisher(
+                state.db.as_ref(),
+                commit.projection_router_ids,
+                publish,
+            ),
+        );
     Ok(CodexProviderSetCommitOutcome {
         preview,
-        projections: outcome.projections,
-        status: CodexProviderSetCommitStatus::Committed,
-        projection_error_code: None,
+        projections,
+        status,
+        projection_error_code,
     })
 }
 
@@ -590,6 +647,35 @@ fn validate_codex_provider_set_probe_records(
         }
     }
     Ok(())
+}
+
+pub(crate) fn load_codex_provider_set_probe_receipts(
+    state: &AppState,
+    receipt_ids: &[String],
+) -> Result<
+    (
+        Vec<ProtocolCompatibilityRecord>,
+        Vec<ProtocolCompatibilityRecord>,
+    ),
+    String,
+> {
+    let bundles = state.get_codex_provider_set_probe_receipts(receipt_ids)?;
+    Ok(protocol_state_from_provider_set_receipt_bundles(&bundles))
+}
+
+pub(crate) fn protocol_state_from_provider_set_receipt_bundles(
+    bundles: &[crate::store::CodexProviderSetProbeReceiptBundle],
+) -> (
+    Vec<ProtocolCompatibilityRecord>,
+    Vec<ProtocolCompatibilityRecord>,
+) {
+    let mut records = Vec::with_capacity(bundles.len());
+    let mut observations = Vec::with_capacity(bundles.len() * 2);
+    for bundle in bundles {
+        records.push(bundle.record.clone());
+        observations.extend(bundle.observations.clone());
+    }
+    (records, observations)
 }
 
 #[tauri::command]
@@ -667,31 +753,33 @@ pub async fn save_codex_provider_with_protocol_preflight(
     originalId: Option<String>,
     addToLive: Option<bool>,
 ) -> Result<CodexProviderProtocolSaveOutcome, String> {
-    let (provider, records, protocol_applied, probe_error) =
+    let (provider, records, observations, protocol_applied, probe_error) =
         match automatic_codex_provider_preflight(state.inner(), provider.clone()).await {
-            Ok((provider, records)) => {
+            Ok((provider, records, observations)) => {
                 let protocol_applied = probe_selection_was_applied(&records);
-                (provider, records, protocol_applied, None)
+                (provider, records, observations, protocol_applied, None)
             }
-            Err(error) => (provider, Vec::new(), false, Some(error)),
+            Err(error) => (provider, Vec::new(), Vec::new(), false, Some(error)),
         };
     let record = records.first().cloned();
 
     if let Some(original_id) = originalId.as_deref() {
-        ProviderService::update_with_protocol_profiles(
+        ProviderService::update_with_protocol_state(
             state.inner(),
             AppType::Codex,
             Some(original_id),
             provider.clone(),
             &records,
+            &observations,
         )
     } else {
-        ProviderService::add_with_protocol_profiles(
+        ProviderService::add_with_protocol_state(
             state.inner(),
             AppType::Codex,
             provider.clone(),
             addToLive.unwrap_or(true),
             &records,
+            &observations,
         )
     }
     .map_err(|error| error.to_string())?;
@@ -727,16 +815,8 @@ where
         })
     })
     .await?;
-    state
-        .db
-        .save_protocol_probe_observations(&batch.observations)
-        .map_err(|error| error.to_string())?;
     let records = batch.records;
-    let receipt_ids = records
-        .iter()
-        .cloned()
-        .map(|record| state.remember_codex_provider_set_probe_receipt(record))
-        .collect::<Result<Vec<_>, _>>()?;
+    let receipt_ids = remember_candidate_batch_receipts(state, &records, &batch.observations)?;
     reporter(batch_finished_event(total, &records));
     Ok(CodexProviderProtocolPreflightOutcome {
         provider,
@@ -747,12 +827,37 @@ where
     })
 }
 
+fn remember_candidate_batch_receipts(
+    state: &AppState,
+    records: &[ProtocolCompatibilityRecord],
+    observations: &[ProtocolCompatibilityRecord],
+) -> Result<Vec<String>, String> {
+    if observations.len() != records.len() * 2 {
+        return Err("codex_provider_set_probe_observation_mismatch".to_string());
+    }
+    records
+        .iter()
+        .cloned()
+        .zip(observations.chunks_exact(2))
+        .map(|(record, observations)| {
+            state.remember_codex_provider_set_probe_receipt(record, observations.to_vec())
+        })
+        .collect()
+}
+
 pub(crate) async fn automatic_codex_provider_preflight(
     state: &AppState,
     provider: Provider,
-) -> Result<(Provider, Vec<ProtocolCompatibilityRecord>), String> {
+) -> Result<
+    (
+        Provider,
+        Vec<ProtocolCompatibilityRecord>,
+        Vec<ProtocolCompatibilityRecord>,
+    ),
+    String,
+> {
     if provider.uses_manual_codex_protocol() || provider.uses_fixed_codex_responses_transport() {
-        return Ok((provider, Vec::new()));
+        return Ok((provider, Vec::new(), Vec::new()));
     }
 
     let providers = state
@@ -763,17 +868,13 @@ pub(crate) async fn automatic_codex_provider_preflight(
         .collect::<HashMap<_, _>>();
     let (candidates, _is_router) = compile_preflight_candidates(&provider, &providers)?;
     if candidates.is_empty() {
-        return Ok((provider, Vec::new()));
+        return Ok((provider, Vec::new(), Vec::new()));
     }
     let batch = run_candidate_batch_with_observations(candidates, |candidate| {
         run_automatic_candidate_result(state, candidate)
     })
     .await?;
-    state
-        .db
-        .save_protocol_probe_observations(&batch.observations)
-        .map_err(|error| error.to_string())?;
-    Ok((provider, batch.records))
+    Ok((provider, batch.records, batch.observations))
 }
 
 fn compile_preflight_candidates(
@@ -893,11 +994,7 @@ async fn run_candidate_and_persist(
         build_observation_records_for_result(&observation_candidate, &record.result)?;
     state
         .db
-        .save_protocol_probe_observations(&observations)
-        .map_err(|error| error.to_string())?;
-    state
-        .db
-        .save_protocol_compatibility_result(&record)
+        .save_protocol_probe_bundle(&record, &observations)
         .map_err(|error| error.to_string())?;
     Ok(record)
 }
@@ -1375,11 +1472,12 @@ mod tests {
         commit_codex_provider_set_internal_with_publisher, compile_preflight_candidates,
         find_cached_candidate_result, inspect_reasoning_compatibility, plan_reasoning_override,
         prepare_codex_provider_set_batch_internal, prepare_codex_provider_set_internal,
-        run_automatic_candidate_result_with, run_candidate_batch_with,
-        run_candidate_batch_with_observations, run_explicit_candidate_result_with,
-        unanimous_selection_was_applied, ApplyReasoningOverrideRequest,
-        ClearReasoningOverrideRequest, CodexProviderSetBatchSourceRequest,
-        CodexProviderSetCommitIntent, CommitCodexProviderSetBatchRequest,
+        remember_candidate_batch_receipts, run_automatic_candidate_result_with,
+        run_candidate_batch_with, run_candidate_batch_with_observations,
+        run_explicit_candidate_result_with, unanimous_selection_was_applied,
+        ApplyReasoningOverrideRequest, ClearReasoningOverrideRequest,
+        CodexProviderSetBatchSourceRequest, CodexProviderSetCommitIntent,
+        CodexProviderSetCommitStatus, CommitCodexProviderSetBatchRequest,
         CommitCodexProviderSetRequest, PlanReasoningOverrideRequest,
         PrepareCodexProviderSetBatchRequest, PrepareCodexProviderSetRequest,
     };
@@ -1511,6 +1609,23 @@ mod tests {
         )
     }
 
+    fn remember_provider_set_receipt(
+        state: &AppState,
+        record: ProtocolCompatibilityRecord,
+    ) -> String {
+        let observations = [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
+            .into_iter()
+            .map(|transport| {
+                let mut observation = record.clone();
+                observation.target.transport = transport;
+                observation
+            })
+            .collect();
+        state
+            .remember_codex_provider_set_probe_receipt(record, observations)
+            .expect("remember Provider Set receipt bundle")
+    }
+
     #[test]
     fn provider_set_prepare_with_mixed_verified_receipts_is_zero_write() {
         let db = Arc::new(Database::memory().expect("memory database"));
@@ -1533,11 +1648,7 @@ mod tests {
             ),
         ]
         .into_iter()
-        .map(|record| {
-            state
-                .remember_codex_provider_set_probe_receipt(record)
-                .expect("remember Provider Set receipt")
-        })
+        .map(|record| remember_provider_set_receipt(&state, record))
         .collect::<Vec<_>>();
 
         let preview = prepare_codex_provider_set_internal(
@@ -1560,6 +1671,59 @@ mod tests {
             .get_all_providers("codex")
             .expect("read providers")
             .is_empty());
+        assert!(db
+            .list_protocol_probe_observations("provider-a")
+            .expect("read observations after prepare")
+            .is_empty());
+    }
+
+    #[test]
+    fn duplicate_logical_targets_keep_their_own_observation_pair() {
+        let state = AppState::new(Arc::new(Database::memory().expect("memory database")));
+        let provider = ordinary_provider();
+        let first = provider_set_record(
+            &provider,
+            "model-a",
+            "model-a",
+            TransportKind::OpenAiResponses,
+            100,
+        );
+        let mut second = first.clone();
+        second.tested_at = 101;
+        second.expires_at = 701;
+        let observations_for = |record: &ProtocolCompatibilityRecord| {
+            [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
+                .into_iter()
+                .map(|transport| {
+                    let mut observation = record.clone();
+                    observation.target.transport = transport;
+                    observation
+                })
+                .collect::<Vec<_>>()
+        };
+        let records = vec![first.clone(), second.clone()];
+        let observations = observations_for(&first)
+            .into_iter()
+            .chain(observations_for(&second))
+            .collect::<Vec<_>>();
+
+        let receipt_ids = remember_candidate_batch_receipts(&state, &records, &observations)
+            .expect("remember duplicate logical target receipts");
+        let bundles = state
+            .get_codex_provider_set_probe_receipts(&receipt_ids)
+            .expect("read duplicate logical target receipts");
+
+        assert_eq!(bundles.len(), 2);
+        assert_eq!(bundles[0].record.tested_at, 100);
+        assert!(bundles[0]
+            .observations
+            .iter()
+            .all(|observation| observation.tested_at == 100));
+        assert_eq!(bundles[1].record.tested_at, 101);
+        assert!(bundles[1]
+            .observations
+            .iter()
+            .all(|observation| observation.tested_at == 101));
     }
 
     #[test]
@@ -1576,18 +1740,17 @@ mod tests {
         );
         foreign.target.provider_id = "another-provider".to_string();
         let receipt_ids = vec![
-            state
-                .remember_codex_provider_set_probe_receipt(foreign)
-                .expect("remember foreign receipt"),
-            state
-                .remember_codex_provider_set_probe_receipt(provider_set_record(
+            remember_provider_set_receipt(&state, foreign),
+            remember_provider_set_receipt(
+                &state,
+                provider_set_record(
                     &provider,
                     "model-b",
                     "model-b",
                     TransportKind::OpenAiResponses,
                     100,
-                ))
-                .expect("remember valid receipt"),
+                ),
+            ),
         ];
 
         let error = prepare_codex_provider_set_internal(
@@ -1604,6 +1767,10 @@ mod tests {
         assert!(db
             .get_all_providers("codex")
             .expect("read providers")
+            .is_empty());
+        assert!(db
+            .list_protocol_probe_observations("provider-a")
+            .expect("read observations after rejected intent")
             .is_empty());
     }
 
@@ -1630,11 +1797,7 @@ mod tests {
             ),
         ]
         .into_iter()
-        .map(|record| {
-            state
-                .remember_codex_provider_set_probe_receipt(record)
-                .expect("remember Provider Set receipt")
-        })
+        .map(|record| remember_provider_set_receipt(&state, record))
         .collect::<Vec<_>>();
         let preview = prepare_codex_provider_set_internal(
             &state,
@@ -1663,12 +1826,16 @@ mod tests {
             .get_all_providers("codex")
             .expect("read providers")
             .is_empty());
+        assert!(db
+            .list_protocol_probe_observations("provider-a")
+            .expect("read observations after rejected split intent")
+            .is_empty());
 
         commit_codex_provider_set_internal_with_publisher(
             &state,
             CommitCodexProviderSetRequest {
                 provider,
-                receipt_ids,
+                receipt_ids: receipt_ids.clone(),
                 digest: preview.digest,
                 intent: CodexProviderSetCommitIntent::ConfirmSplit,
             },
@@ -1698,6 +1865,280 @@ mod tests {
                 .expect("read current Provider"),
             Some("provider-a".to_string())
         );
+        assert_eq!(
+            db.list_protocol_probe_observations("provider-a")
+                .expect("read committed observations")
+                .len(),
+            4
+        );
+        let consumed = match state.get_codex_provider_set_probe_receipts(&receipt_ids) {
+            Ok(_) => panic!("successful commit must consume every receipt"),
+            Err(error) => error,
+        };
+        assert!(consumed.contains("codex_provider_set_probe_required"));
+    }
+
+    #[test]
+    fn provider_set_commit_rejects_receipts_claimed_by_another_commit() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let provider = ordinary_provider();
+        let now = chrono::Utc::now().timestamp();
+        let receipt_ids = ["model-a", "model-b"]
+            .into_iter()
+            .map(|model| {
+                remember_provider_set_receipt(
+                    &state,
+                    provider_set_record(
+                        &provider,
+                        model,
+                        model,
+                        TransportKind::OpenAiResponses,
+                        now,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let preview = prepare_codex_provider_set_internal(
+            &state,
+            PrepareCodexProviderSetRequest {
+                provider: provider.clone(),
+                receipt_ids: receipt_ids.clone(),
+            },
+            now,
+        )
+        .expect("prepare Provider Set");
+        let competing_claim = state
+            .claim_codex_provider_set_probe_receipts(&receipt_ids)
+            .expect("simulate another commit holding the receipts");
+
+        let conflict = match commit_codex_provider_set_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetRequest {
+                provider: provider.clone(),
+                receipt_ids: receipt_ids.clone(),
+                digest: preview.digest.clone(),
+                intent: CodexProviderSetCommitIntent::AcceptSingle,
+            },
+            now,
+            |_| panic!("a conflicting commit must not publish"),
+        ) {
+            Ok(_) => panic!("a second commit must not reuse an in-flight receipt claim"),
+            Err(error) => error,
+        };
+        assert!(conflict.contains("codex_provider_set_probe_receipt_in_use"));
+        assert!(db
+            .get_all_providers("codex")
+            .expect("read Providers after conflict")
+            .is_empty());
+
+        drop(competing_claim);
+        commit_codex_provider_set_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetRequest {
+                provider,
+                receipt_ids,
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::AcceptSingle,
+            },
+            now,
+            |_| panic!("a Single Provider has no Router projection"),
+        )
+        .expect("released claim allows the original commit to retry");
+    }
+
+    #[test]
+    fn provider_set_projection_failure_keeps_database_commit_and_consumes_receipts() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let provider = ordinary_provider();
+        let router = router_provider(&provider.id);
+        db.save_provider("codex", &provider)
+            .expect("seed source Provider before its dependent Router");
+        db.save_provider("codex", &router)
+            .expect("seed dependent Router");
+        db.set_current_provider("codex", &router.id)
+            .expect("activate dependent Router");
+        let now = chrono::Utc::now().timestamp();
+        let receipt_ids = [
+            provider_set_record(
+                &provider,
+                "model-a",
+                "model-a",
+                TransportKind::OpenAiResponses,
+                now,
+            ),
+            provider_set_record(
+                &provider,
+                "model-b",
+                "model-b",
+                TransportKind::OpenAiChat,
+                now,
+            ),
+        ]
+        .into_iter()
+        .map(|record| remember_provider_set_receipt(&state, record))
+        .collect::<Vec<_>>();
+        let preview = prepare_codex_provider_set_internal(
+            &state,
+            PrepareCodexProviderSetRequest {
+                provider: provider.clone(),
+                receipt_ids: receipt_ids.clone(),
+            },
+            now,
+        )
+        .expect("prepare Provider Set with dependent Router");
+
+        let outcome = commit_codex_provider_set_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetRequest {
+                provider,
+                receipt_ids: receipt_ids.clone(),
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+            },
+            now,
+            |_| Err("injected projection failure".to_string()),
+        )
+        .expect("derived projection failure must not report the database commit as rolled back");
+
+        assert_eq!(
+            outcome.status,
+            CodexProviderSetCommitStatus::CommittedWithProjectionError
+        );
+        assert_eq!(
+            outcome.projection_error_code.as_deref(),
+            Some("codex_provider_set_live_projection_failed")
+        );
+        assert!(db
+            .get_provider_by_id("provider-a", "codex")
+            .expect("read committed facade")
+            .is_some());
+        assert_eq!(
+            db.list_protocol_probe_observations("provider-a")
+                .expect("read committed observations")
+                .len(),
+            4
+        );
+        let consumed = match state.get_codex_provider_set_probe_receipts(&receipt_ids) {
+            Ok(_) => panic!("committed database state must consume the receipt claim"),
+            Err(error) => error,
+        };
+        assert!(consumed.contains("codex_provider_set_probe_required"));
+    }
+
+    #[test]
+    fn provider_set_database_failure_rolls_back_observations_and_keeps_receipts_for_retry() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let provider = ordinary_provider();
+        let now = chrono::Utc::now().timestamp();
+        let receipt_ids = [
+            provider_set_record(
+                &provider,
+                "model-a",
+                "model-a",
+                TransportKind::OpenAiResponses,
+                now,
+            ),
+            provider_set_record(
+                &provider,
+                "model-b",
+                "model-b",
+                TransportKind::OpenAiResponses,
+                now,
+            ),
+        ]
+        .into_iter()
+        .map(|record| remember_provider_set_receipt(&state, record))
+        .collect::<Vec<_>>();
+        let preview = prepare_codex_provider_set_internal(
+            &state,
+            PrepareCodexProviderSetRequest {
+                provider: provider.clone(),
+                receipt_ids: receipt_ids.clone(),
+            },
+            now,
+        )
+        .expect("prepare single-protocol Provider Set");
+        {
+            let conn = db.conn.lock().expect("lock database");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_provider_set_commit
+                 BEFORE INSERT ON providers
+                 WHEN NEW.id = 'provider-a'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected Provider Set commit failure');
+                 END;",
+            )
+            .expect("install Provider Set failure trigger");
+        }
+
+        let failed = commit_codex_provider_set_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetRequest {
+                provider: provider.clone(),
+                receipt_ids: receipt_ids.clone(),
+                digest: preview.digest.clone(),
+                intent: CodexProviderSetCommitIntent::AcceptSingle,
+            },
+            now,
+            |_| panic!("a failed database transaction must not publish"),
+        )
+        .expect_err("injected database failure must abort Provider Set commit");
+
+        assert!(failed.contains("injected Provider Set commit failure"));
+        assert!(db
+            .get_all_providers("codex")
+            .expect("read Providers after failed commit")
+            .is_empty());
+        assert!(db
+            .list_protocol_probe_observations("provider-a")
+            .expect("read observations after failed commit")
+            .is_empty());
+        assert_eq!(
+            state
+                .get_codex_provider_set_probe_receipts(&receipt_ids)
+                .expect("failed commit retains retry receipts")
+                .len(),
+            2
+        );
+
+        {
+            let conn = db.conn.lock().expect("lock database");
+            conn.execute_batch("DROP TRIGGER fail_provider_set_commit;")
+                .expect("remove Provider Set failure trigger");
+        }
+        commit_codex_provider_set_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetRequest {
+                provider,
+                receipt_ids: receipt_ids.clone(),
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::AcceptSingle,
+            },
+            now,
+            |artifact| {
+                Ok(
+                    crate::codex_multirouter::projection::ProjectionReadBack::verified(
+                        artifact.dependency_fingerprint.clone(),
+                    ),
+                )
+            },
+        )
+        .expect("retry succeeds with the original receipts");
+
+        assert_eq!(
+            db.list_protocol_probe_observations("provider-a")
+                .expect("read observations after retry")
+                .len(),
+            4
+        );
+        let consumed = match state.get_codex_provider_set_probe_receipts(&receipt_ids) {
+            Ok(_) => panic!("successful retry must consume every receipt"),
+            Err(error) => error,
+        };
+        assert!(consumed.contains("codex_provider_set_probe_required"));
     }
 
     #[test]
@@ -1723,11 +2164,7 @@ mod tests {
             ),
         ]
         .into_iter()
-        .map(|record| {
-            state
-                .remember_codex_provider_set_probe_receipt(record)
-                .expect("remember batch receipt")
-        })
+        .map(|record| remember_provider_set_receipt(&state, record))
         .collect::<Vec<_>>();
         let sources = vec![CodexProviderSetBatchSourceRequest {
             provider: provider.clone(),
@@ -1748,6 +2185,10 @@ mod tests {
         assert!(db
             .get_all_providers("codex")
             .expect("read providers after prepare")
+            .is_empty());
+        assert!(db
+            .list_protocol_probe_observations("provider-a")
+            .expect("read wizard observations after prepare")
             .is_empty());
 
         let outcome = commit_codex_provider_set_batch_internal_with_publisher(
@@ -1786,6 +2227,176 @@ mod tests {
         assert!(routes
             .iter()
             .all(|route| route["targetProviderId"] != "provider-a"));
+        assert_eq!(
+            db.list_protocol_probe_observations("provider-a")
+                .expect("read wizard observations")
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn wizard_batch_projection_failure_keeps_database_commit_and_consumes_receipts() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let provider = ordinary_provider();
+        let router = router_provider("provider-a");
+        db.save_provider("codex", &provider)
+            .expect("seed source Provider before editing the active Router");
+        db.save_provider("codex", &router)
+            .expect("seed active Router before the wizard batch edit");
+        db.set_current_provider("codex", &router.id)
+            .expect("activate Router before the wizard batch edit");
+        let now = chrono::Utc::now().timestamp();
+        let receipt_ids = [
+            provider_set_record(
+                &provider,
+                "model-a",
+                "model-a",
+                TransportKind::OpenAiResponses,
+                now,
+            ),
+            provider_set_record(
+                &provider,
+                "model-b",
+                "model-b",
+                TransportKind::OpenAiChat,
+                now,
+            ),
+        ]
+        .into_iter()
+        .map(|record| remember_provider_set_receipt(&state, record))
+        .collect::<Vec<_>>();
+        let sources = vec![CodexProviderSetBatchSourceRequest {
+            provider,
+            receipt_ids: receipt_ids.clone(),
+        }];
+        let (_, preview) = prepare_codex_provider_set_batch_internal(
+            &state,
+            PrepareCodexProviderSetBatchRequest {
+                sources: sources.clone(),
+                router: router.clone(),
+            },
+            now,
+        )
+        .expect("prepare batch with an active Router projection");
+
+        let outcome = commit_codex_provider_set_batch_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetBatchRequest {
+                sources,
+                router,
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::ConfirmSplit,
+            },
+            now,
+            |_| Err("injected projection failure".to_string()),
+        )
+        .expect("derived projection failure must not report the database commit as rolled back");
+
+        assert_eq!(
+            outcome.status,
+            CodexProviderSetCommitStatus::CommittedWithProjectionError
+        );
+        assert_eq!(
+            outcome.projection_error_code.as_deref(),
+            Some("codex_provider_set_live_projection_failed")
+        );
+        assert!(db
+            .get_provider_by_id("router-provider", "codex")
+            .expect("read committed Router")
+            .is_some());
+        assert_eq!(
+            db.list_protocol_probe_observations("provider-a")
+                .expect("read committed wizard observations")
+                .len(),
+            4
+        );
+        let consumed = match state.get_codex_provider_set_probe_receipts(&receipt_ids) {
+            Ok(_) => panic!("committed batch must consume every receipt"),
+            Err(error) => error,
+        };
+        assert!(consumed.contains("codex_provider_set_probe_required"));
+    }
+
+    #[test]
+    fn wizard_batch_commit_rejects_receipts_claimed_by_another_commit() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let provider = ordinary_provider();
+        let now = chrono::Utc::now().timestamp();
+        let receipt_ids = ["model-a", "model-b"]
+            .into_iter()
+            .map(|model| {
+                remember_provider_set_receipt(
+                    &state,
+                    provider_set_record(
+                        &provider,
+                        model,
+                        model,
+                        TransportKind::OpenAiResponses,
+                        now,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let sources = vec![CodexProviderSetBatchSourceRequest {
+            provider,
+            receipt_ids: receipt_ids.clone(),
+        }];
+        let router = router_provider("provider-a");
+        let (_, preview) = prepare_codex_provider_set_batch_internal(
+            &state,
+            PrepareCodexProviderSetBatchRequest {
+                sources: sources.clone(),
+                router: router.clone(),
+            },
+            now,
+        )
+        .expect("prepare wizard batch");
+        let competing_claim = state
+            .claim_codex_provider_set_probe_receipts(&receipt_ids)
+            .expect("simulate another wizard commit holding the receipts");
+
+        let conflict = match commit_codex_provider_set_batch_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetBatchRequest {
+                sources: sources.clone(),
+                router: router.clone(),
+                digest: preview.digest.clone(),
+                intent: CodexProviderSetCommitIntent::AcceptSingle,
+            },
+            now,
+            |_| panic!("a conflicting wizard commit must not publish"),
+        ) {
+            Ok(_) => panic!("a second wizard commit must not reuse in-flight receipts"),
+            Err(error) => error,
+        };
+        assert!(conflict.contains("codex_provider_set_probe_receipt_in_use"));
+        assert!(db
+            .get_all_providers("codex")
+            .expect("read Providers after wizard conflict")
+            .is_empty());
+
+        drop(competing_claim);
+        commit_codex_provider_set_batch_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetBatchRequest {
+                sources,
+                router,
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::AcceptSingle,
+            },
+            now,
+            |artifact| {
+                Ok(
+                    crate::codex_multirouter::projection::ProjectionReadBack::verified(
+                        artifact.dependency_fingerprint.clone(),
+                    ),
+                )
+            },
+        )
+        .expect("released claim allows the wizard commit to retry");
     }
 
     #[test]
@@ -1888,21 +2499,18 @@ mod tests {
         partial.result.readiness = ProbeReadiness::Partial;
         let receipt_ids = [verified, partial]
             .into_iter()
-            .map(|record| {
-                state
-                    .remember_codex_provider_set_probe_receipt(record)
-                    .expect("remember batch receipt")
-            })
+            .map(|record| remember_provider_set_receipt(&state, record))
             .collect::<Vec<_>>();
+        let router = router_provider("provider-a");
 
         let (prepared, preview) = prepare_codex_provider_set_batch_internal(
             &state,
             PrepareCodexProviderSetBatchRequest {
                 sources: vec![CodexProviderSetBatchSourceRequest {
-                    provider,
-                    receipt_ids,
+                    provider: provider.clone(),
+                    receipt_ids: receipt_ids.clone(),
                 }],
-                router: router_provider("provider-a"),
+                router: router.clone(),
             },
             now,
         )
@@ -1918,6 +2526,42 @@ mod tests {
             .get_all_providers("codex")
             .expect("read Providers")
             .is_empty());
+        assert!(db
+            .list_protocol_probe_observations("provider-a")
+            .expect("read observations after blocked prepare")
+            .is_empty());
+
+        let blocked = commit_codex_provider_set_batch_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetBatchRequest {
+                sources: vec![CodexProviderSetBatchSourceRequest {
+                    provider,
+                    receipt_ids: receipt_ids.clone(),
+                }],
+                router,
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::AcceptSingle,
+            },
+            now,
+            |_| panic!("blocked batch must not publish"),
+        )
+        .expect_err("blocked batch must not commit");
+        assert!(blocked.contains("codex_provider_set_batch_blocked"));
+        assert!(db
+            .get_all_providers("codex")
+            .expect("read Providers after blocked commit")
+            .is_empty());
+        assert!(db
+            .list_protocol_probe_observations("provider-a")
+            .expect("read observations after blocked commit")
+            .is_empty());
+        assert_eq!(
+            state
+                .get_codex_provider_set_probe_receipts(&receipt_ids)
+                .expect("blocked or cancelled flow retains unconsumed receipts")
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -1939,11 +2583,30 @@ mod tests {
                 .remove("apiFormat");
         }
         let now = chrono::Utc::now().timestamp();
+        let receipt_ids = [
+            provider_set_record(
+                &provider,
+                "model-a",
+                "model-a",
+                TransportKind::OpenAiResponses,
+                now,
+            ),
+            provider_set_record(
+                &provider,
+                "model-b",
+                "model-b",
+                TransportKind::OpenAiResponses,
+                now,
+            ),
+        ]
+        .into_iter()
+        .map(|record| remember_provider_set_receipt(&state, record))
+        .collect::<Vec<_>>();
         let preview = prepare_codex_provider_set_internal(
             &state,
             PrepareCodexProviderSetRequest {
                 provider: provider.clone(),
-                receipt_ids: Vec::new(),
+                receipt_ids: receipt_ids.clone(),
             },
             now,
         )
@@ -1959,7 +2622,7 @@ mod tests {
             &state,
             CommitCodexProviderSetRequest {
                 provider: provider.clone(),
-                receipt_ids: Vec::new(),
+                receipt_ids: receipt_ids.clone(),
                 digest: preview.digest.clone(),
                 intent: CodexProviderSetCommitIntent::AcceptSingle,
             },
@@ -1972,12 +2635,16 @@ mod tests {
             .get_all_providers("codex")
             .expect("read Providers")
             .is_empty());
+        assert!(db
+            .list_protocol_probe_observations("provider-a")
+            .expect("read observations after rejected manual intent")
+            .is_empty());
 
         commit_codex_provider_set_internal_with_publisher(
             &state,
             CommitCodexProviderSetRequest {
                 provider,
-                receipt_ids: Vec::new(),
+                receipt_ids,
                 digest: preview.digest,
                 intent: CodexProviderSetCommitIntent::ConfirmManual,
             },
@@ -1989,6 +2656,12 @@ mod tests {
             .get_provider_by_id("provider-a", "codex")
             .expect("read Provider")
             .is_some());
+        assert_eq!(
+            db.list_protocol_probe_observations("provider-a")
+                .expect("read observations after manual override")
+                .len(),
+            4
+        );
     }
 
     #[test]

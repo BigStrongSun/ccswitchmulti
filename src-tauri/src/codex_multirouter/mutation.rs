@@ -122,6 +122,7 @@ impl PreparedCodexProviderDeletion {
                 .collect(),
             profile_owner_ids: HashSet::new(),
             records: Vec::new(),
+            observations: Vec::new(),
             replace_profile_provider_ids: HashSet::new(),
             setting_keys_to_delete: self.projection_setting_keys(),
             universal_provider: None,
@@ -188,7 +189,7 @@ pub fn apply_codex_provider_mutation(
     db: &Database,
     provider: Provider,
 ) -> Result<CodexProviderMutationOutcome, AppError> {
-    apply_codex_provider_mutation_with_profiles_and_publisher(db, provider, &[], |artifact| {
+    apply_codex_provider_mutation_with_profiles_and_publisher(db, provider, &[], &[], |artifact| {
         crate::codex_config::publish_codex_multirouter_projection_for_database(
             db,
             &artifact.projection_settings,
@@ -210,13 +211,28 @@ pub fn apply_codex_provider_mutation_with_profiles(
     provider: Provider,
     profiles: &[ProtocolCompatibilityRecord],
 ) -> Result<CodexProviderMutationOutcome, AppError> {
-    apply_codex_provider_mutation_with_profiles_and_publisher(db, provider, profiles, |artifact| {
-        crate::codex_config::publish_codex_multirouter_projection_for_database(
-            db,
-            &artifact.projection_settings,
-        )
-        .map_err(|error| error.to_string())
-    })
+    apply_codex_provider_mutation_with_protocol_state(db, provider, profiles, &[])
+}
+
+pub fn apply_codex_provider_mutation_with_protocol_state(
+    db: &Database,
+    provider: Provider,
+    profiles: &[ProtocolCompatibilityRecord],
+    observations: &[ProtocolCompatibilityRecord],
+) -> Result<CodexProviderMutationOutcome, AppError> {
+    apply_codex_provider_mutation_with_profiles_and_publisher(
+        db,
+        provider,
+        profiles,
+        observations,
+        |artifact| {
+            crate::codex_config::publish_codex_multirouter_projection_for_database(
+                db,
+                &artifact.projection_settings,
+            )
+            .map_err(|error| error.to_string())
+        },
+    )
 }
 
 pub fn apply_codex_provider_mutation_with_publisher<F>(
@@ -227,7 +243,7 @@ pub fn apply_codex_provider_mutation_with_publisher<F>(
 where
     F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
 {
-    apply_codex_provider_mutation_with_profiles_and_publisher(db, provider, &[], publish)
+    apply_codex_provider_mutation_with_profiles_and_publisher(db, provider, &[], &[], publish)
 }
 
 pub fn apply_codex_provider_set_mutation_with_publisher<F>(
@@ -238,7 +254,25 @@ pub fn apply_codex_provider_set_mutation_with_publisher<F>(
 where
     F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
 {
-    let commit = prepare_codex_provider_set_commit(db, prepared)?;
+    apply_codex_provider_set_mutation_with_observations_and_publisher(
+        db,
+        prepared,
+        Vec::new(),
+        publish,
+    )
+}
+
+pub(crate) fn apply_codex_provider_set_mutation_with_observations_and_publisher<F>(
+    db: &Database,
+    prepared: PreparedCodexProviderSetMutation,
+    observations: Vec<ProtocolCompatibilityRecord>,
+    publish: F,
+) -> Result<CodexProviderMutationOutcome, AppError>
+where
+    F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
+{
+    let mut commit = prepare_codex_provider_set_commit(db, prepared)?;
+    commit.transaction.observations = observations;
     db.apply_provider_set_database_transaction(commit.transaction)?;
     finalize_codex_provider_set_projections_with_publisher(
         db,
@@ -336,11 +370,12 @@ pub(crate) fn prepare_codex_provider_set_commit(
             replanned.preview.source_provider_id.clone(),
         )
     });
-    let profile_owner_ids = replanned
+    let mut profile_owner_ids: HashSet<String> = replanned
         .profiles
         .iter()
         .map(|record| record.target.provider_id.clone())
         .collect();
+    profile_owner_ids.insert(replanned.preview.source_provider_id.clone());
     let setting_keys_to_delete = replanned
         .delete_provider_ids
         .iter()
@@ -351,6 +386,7 @@ pub(crate) fn prepare_codex_provider_set_commit(
             mutations,
             profile_owner_ids,
             records: replanned.profiles.clone(),
+            observations: Vec::new(),
             replace_profile_provider_ids: replanned.replace_profile_provider_ids.clone(),
             setting_keys_to_delete,
             universal_provider: None,
@@ -382,6 +418,7 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
 
     let mut mutations = BTreeMap::<String, Option<Provider>>::new();
     let mut profiles = Vec::new();
+    let mut profile_owner_ids = HashSet::new();
     let mut replace_profile_provider_ids = HashSet::new();
     let mut setting_keys_to_delete = Vec::new();
     let mut projection_router_ids = Vec::new();
@@ -390,6 +427,7 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
     let mut current_provider_after = None;
 
     for (source, records) in sources {
+        profile_owner_ids.insert(source.id.clone());
         let prepared = if source.uses_fixed_codex_responses_transport() {
             // Official and account-managed Codex sources are native Responses endpoints. They
             // deliberately skip paid compatibility probes, but still use the same single-
@@ -534,10 +572,11 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
     projection_router_ids.sort();
     projection_router_ids.dedup();
 
-    let profile_owner_ids = profiles
-        .iter()
-        .map(|record| record.target.provider_id.clone())
-        .collect();
+    profile_owner_ids.extend(
+        profiles
+            .iter()
+            .map(|record| record.target.provider_id.clone()),
+    );
     Ok(PreparedCodexProviderSetBatchCommit {
         transaction: Some(ProviderSetDatabaseTransaction {
             mutations: mutations
@@ -550,6 +589,7 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
                 .collect(),
             profile_owner_ids,
             records: profiles,
+            observations: Vec::new(),
             replace_profile_provider_ids,
             setting_keys_to_delete,
             universal_provider: None,
@@ -613,6 +653,7 @@ fn apply_codex_provider_mutation_with_profiles_and_publisher<F>(
     db: &Database,
     provider: Provider,
     profiles: &[ProtocolCompatibilityRecord],
+    observations: &[ProtocolCompatibilityRecord],
     mut publish: F,
 ) -> Result<CodexProviderMutationOutcome, AppError>
 where
@@ -621,10 +662,11 @@ where
     let prepared = prepare_codex_provider_mutation(db, provider, profiles)?;
     let mut mutations = Vec::with_capacity(1 + prepared.router_updates.len());
     prepared.append_provider_mutations(&mut mutations);
-    db.apply_provider_set_with_protocol_profiles_and_setting_cleanup(
+    db.apply_provider_set_with_protocol_state_and_setting_cleanup(
         &mutations,
         Some(prepared.provider.id.as_str()),
         &prepared.profiles,
+        observations,
         &prepared.related_provider_ids,
         &[],
     )?;
@@ -1683,6 +1725,7 @@ mod tests {
             &db,
             target("openai_chat"),
             &[verified_qwen_profile()],
+            &[],
             |artifact| {
                 Ok(ProjectionReadBack::verified(
                     artifact.dependency_fingerprint.clone(),
@@ -1725,6 +1768,7 @@ mod tests {
             &db,
             target("openai_chat"),
             &[mismatched],
+            &[],
             |artifact| {
                 Ok(ProjectionReadBack::verified(
                     artifact.dependency_fingerprint.clone(),

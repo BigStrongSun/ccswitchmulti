@@ -60,6 +60,7 @@ pub(crate) struct ProviderSetDatabaseTransaction {
     pub mutations: Vec<ProviderSetDatabaseMutation>,
     pub profile_owner_ids: HashSet<String>,
     pub records: Vec<ProtocolCompatibilityRecord>,
+    pub observations: Vec<ProtocolCompatibilityRecord>,
     pub replace_profile_provider_ids: HashSet<String>,
     pub setting_keys_to_delete: Vec<String>,
     pub universal_provider: Option<UniversalProvider>,
@@ -444,29 +445,32 @@ impl Database {
         Ok(())
     }
 
-    pub(crate) fn apply_provider_set_with_protocol_profiles_and_setting_cleanup(
+    pub(crate) fn apply_provider_set_with_protocol_state_and_setting_cleanup(
         &self,
         mutations: &[(&str, &str, Option<&Provider>)],
         profile_owner_id: Option<&str>,
         records: &[ProtocolCompatibilityRecord],
+        observations: &[ProtocolCompatibilityRecord],
         related_provider_ids: &HashSet<String>,
         setting_keys_to_delete: &[String],
     ) -> Result<(), AppError> {
-        self.apply_provider_set_with_protocol_profiles_setting_cleanup_and_universal_upsert(
+        self.apply_provider_set_with_protocol_state_setting_cleanup_and_universal_upsert(
             mutations,
             profile_owner_id,
             records,
+            observations,
             related_provider_ids,
             setting_keys_to_delete,
             None,
         )
     }
 
-    pub(crate) fn apply_provider_set_with_protocol_profiles_setting_cleanup_and_universal_upsert(
+    pub(crate) fn apply_provider_set_with_protocol_state_setting_cleanup_and_universal_upsert(
         &self,
         mutations: &[(&str, &str, Option<&Provider>)],
         profile_owner_id: Option<&str>,
         records: &[ProtocolCompatibilityRecord],
+        observations: &[ProtocolCompatibilityRecord],
         related_provider_ids: &HashSet<String>,
         setting_keys_to_delete: &[String],
         universal_provider: Option<&UniversalProvider>,
@@ -488,6 +492,7 @@ impl Database {
                 .collect(),
             profile_owner_ids,
             records: records.to_vec(),
+            observations: observations.to_vec(),
             replace_profile_provider_ids: HashSet::new(),
             setting_keys_to_delete: setting_keys_to_delete.to_vec(),
             universal_provider: universal_provider.cloned(),
@@ -515,6 +520,16 @@ impl Database {
         }) {
             return Err(AppError::InvalidInput(
                 "protocol compatibility profile does not belong to the Provider set being saved"
+                    .to_string(),
+            ));
+        }
+        if mutation.observations.iter().any(|record| {
+            !mutation
+                .profile_owner_ids
+                .contains(&record.target.provider_id)
+        }) {
+            return Err(AppError::InvalidInput(
+                "protocol probe observation does not belong to the Provider set being saved"
                     .to_string(),
             ));
         }
@@ -578,6 +593,12 @@ impl Database {
         for record in &mutation.records {
             super::protocol_compatibility::save_protocol_compatibility_result_in_transaction(
                 &tx, record,
+            )?;
+        }
+        for observation in &mutation.observations {
+            super::protocol_compatibility::save_protocol_probe_observation_in_transaction(
+                &tx,
+                observation,
             )?;
         }
         for key in &mutation.setting_keys_to_delete {
@@ -1193,6 +1214,7 @@ mod tests {
             mutations,
             profile_owner_ids: HashSet::new(),
             records: Vec::new(),
+            observations: Vec::new(),
             replace_profile_provider_ids: HashSet::new(),
             setting_keys_to_delete: Vec::new(),
             universal_provider: None,
@@ -1250,6 +1272,8 @@ mod tests {
         .into_iter()
         .collect();
         transaction.records = vec![record.clone()];
+        let observation = profile("relay", "model-a", TransportKind::OpenAiChat);
+        transaction.observations = vec![observation.clone()];
         transaction.universal_provider = Some(universal);
         transaction.current_provider_after = Some(("codex".to_string(), "relay".to_string()));
 
@@ -1276,6 +1300,10 @@ mod tests {
             .get_protocol_compatibility_result(&record.target)
             .expect("read profile")
             .is_none());
+        assert!(db
+            .list_protocol_probe_observations("relay")
+            .expect("read observations")
+            .is_empty());
         assert_eq!(
             db.get_universal_provider("universal")
                 .expect("read Universal")
@@ -1287,6 +1315,37 @@ mod tests {
             db.get_current_provider("codex").expect("read current"),
             Some("relay".to_string())
         );
+    }
+
+    #[test]
+    fn provider_set_transaction_commits_probe_observations_with_provider_and_profile() {
+        let db = Database::memory().expect("memory database");
+        let selected = profile("relay", "model-a", TransportKind::OpenAiResponses);
+        let responses = profile("relay", "model-a", TransportKind::OpenAiResponses);
+        let chat = profile("relay", "model-a", TransportKind::OpenAiChat);
+        let mut transaction = database_transaction(vec![upsert(provider("relay", "ready"))]);
+        transaction.profile_owner_ids = ["relay".to_string()].into_iter().collect();
+        transaction.records = vec![selected.clone()];
+        transaction.observations = vec![responses.clone(), chat.clone()];
+
+        db.apply_provider_set_database_transaction(transaction)
+            .expect("commit Provider Set bundle");
+
+        assert!(db
+            .get_provider_by_id("relay", "codex")
+            .expect("read provider")
+            .is_some());
+        assert_eq!(
+            db.get_protocol_compatibility_result(&selected.target)
+                .expect("read selected profile"),
+            Some(selected)
+        );
+        let observations = db
+            .list_protocol_probe_observations("relay")
+            .expect("read observations");
+        assert_eq!(observations.len(), 2);
+        assert!(observations.contains(&responses));
+        assert!(observations.contains(&chat));
     }
 
     #[test]

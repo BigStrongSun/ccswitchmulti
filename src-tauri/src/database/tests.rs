@@ -484,6 +484,62 @@ fn protocol_probe_observations_round_trip_independently_for_each_transport() {
 }
 
 #[test]
+fn protocol_probe_bundle_rolls_back_selection_when_observation_write_fails() {
+    use crate::protocol_compatibility::{
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, TransportKind,
+    };
+
+    let db = Database::memory().expect("create memory db");
+    let target = ProbeTargetKey::new(
+        "provider-a",
+        None::<String>,
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiResponses,
+        "https://example.test/v1/responses",
+        "bearer",
+    )
+    .unwrap();
+    let selection = ProtocolCompatibilityRecord::new(
+        target.clone(),
+        ProtocolCompatibilityProbeResult {
+            selected_transport: Some(TransportKind::OpenAiResponses),
+            readiness: ProbeReadiness::Verified,
+            branches: Vec::new(),
+        },
+        1_000,
+        3_000,
+    );
+    let observation = selection.clone();
+    {
+        let conn = db.conn.lock().expect("lock database");
+        conn.execute_batch(
+            "CREATE TRIGGER fail_protocol_observation_insert
+             BEFORE INSERT ON protocol_probe_observations
+             BEGIN
+               SELECT RAISE(ABORT, 'injected observation failure');
+             END;",
+        )
+        .expect("install observation failure trigger");
+    }
+
+    let error = db
+        .save_protocol_probe_bundle(&selection, &[observation])
+        .expect_err("observation failure must abort the diagnostic bundle");
+
+    assert!(error.to_string().contains("injected observation failure"));
+    assert!(db
+        .get_protocol_compatibility_result(&target)
+        .expect("read rolled-back selection")
+        .is_none());
+    assert!(db
+        .get_protocol_probe_observation(&target)
+        .expect("read rolled-back observation")
+        .is_none());
+}
+
+#[test]
 fn deleting_logical_provider_deletes_its_protocol_probe_observations() {
     use crate::protocol_compatibility::{
         ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,

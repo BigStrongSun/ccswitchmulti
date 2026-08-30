@@ -1577,6 +1577,11 @@ pub(crate) fn codex_provider_has_legacy_mixed_model_transports(provider: &Provid
         || provider.settings_config.get("codexProtocolSet").is_some()
         || provider
             .settings_config
+            .get(CODEX_ROUTER_PARENT_PROVIDER_ID)
+            .and_then(JsonValue::as_str)
+            .is_some_and(|provider_id| !provider_id.trim().is_empty())
+        || provider
+            .settings_config
             .pointer("/codexRouting/schemaVersion")
             .and_then(JsonValue::as_u64)
             == Some(2)
@@ -7906,8 +7911,8 @@ wire_api = "responses"
         ));
         assert_eq!(
             resolve_legacy_codex_transport(&provider, "qwen-visible", "Qwen/Qwen3.8", &db, 150,),
-            LegacyCodexTransportResolution::MigrationRequired,
-            "legacy mixed data without a current Verified profile must expose migration state"
+            LegacyCodexTransportResolution::NotApplicable,
+            "resolved Router Providers never use the request-time legacy migration bridge"
         );
         assert!(!codex_provider_uses_chat_completions(&provider));
     }
@@ -7951,7 +7956,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn routed_provider_inherits_equivalent_detected_transport_without_resave() {
+    fn routed_provider_keeps_persisted_transport_and_requires_provider_set_migration() {
         let db = Database::memory().expect("memory database");
         let mut standalone = create_provider(json!({
             "auth": {"OPENAI_API_KEY": "probe-secret"},
@@ -7987,14 +7992,18 @@ wire_api = "responses"
             ..ProviderMeta::default()
         });
 
-        assert!(apply_detected_codex_transport_to_effective_provider(
+        assert!(!apply_detected_codex_transport_to_effective_provider(
             &mut provider,
             "qwen-visible",
             "Qwen/Qwen3.8",
             &db,
             150,
         ));
-        assert!(codex_provider_uses_chat_completions(&provider));
+        assert!(!codex_provider_uses_chat_completions(&provider));
+        assert_eq!(
+            resolve_legacy_codex_transport(&provider, "qwen-visible", "Qwen/Qwen3.8", &db, 150,),
+            LegacyCodexTransportResolution::NotApplicable
+        );
     }
 
     #[test]
