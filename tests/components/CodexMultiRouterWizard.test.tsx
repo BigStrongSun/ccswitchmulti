@@ -479,6 +479,81 @@ describe("CodexMultiRouterWizard", () => {
     expect(onEnablePlan.mock.calls[0][0]).toBe(persisted);
   });
 
+  it("keeps an enabled plan in the wizard and exposes separate post-setup actions", async () => {
+    const qwenSource = provider({
+      id: "qwen-local",
+      name: "Qwen Local",
+      settingsConfig: {
+        base_url: "https://qwen.example/v1",
+        auth: { OPENAI_API_KEY: "sk-qwen" },
+        modelCatalog: { models: [{ model: "qwen3.6" }] },
+      },
+    });
+    const onOpenChange = vi.fn();
+    const onOpenHistoryRepair = vi.fn();
+    const onOpenWorkspace = vi.fn();
+    const onEnablePlan = vi.fn();
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[qwenSource]}
+        onOpenChange={onOpenChange}
+        onCreateProvider={vi.fn()}
+        onOpenHistoryRepair={onOpenHistoryRepair}
+        onOpenWorkspace={onOpenWorkspace}
+        onEnablePlan={onEnablePlan}
+      />,
+    );
+
+    await completeWizardDeepProbe();
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "启用这个多路路由" }),
+    );
+
+    await waitFor(() => expect(onEnablePlan).toHaveBeenCalledTimes(1));
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    expect(
+      screen.getByText("MultiRouter 已启用，继续完成可选设置"),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /修复 Codex 历史记录/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /设置模型推理强度/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /配置 Sub-Agent/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /调整模型顺序/ }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "稍后完成" })).toBeVisible();
+
+    const persisted = vi.mocked(commitCodexProviderSetBatch).mock.calls[0][1];
+    fireEvent.click(
+      screen.getByRole("button", { name: /修复 Codex 历史记录/ }),
+    );
+    expect(onOpenHistoryRepair).toHaveBeenCalledOnce();
+    fireEvent.click(
+      screen.getByRole("button", { name: /设置模型推理强度/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /配置 Sub-Agent/ }));
+    fireEvent.click(screen.getByRole("button", { name: /调整模型顺序/ }));
+    expect(onOpenWorkspace).toHaveBeenNthCalledWith(1, persisted, "sources");
+    expect(onOpenWorkspace).toHaveBeenNthCalledWith(
+      2,
+      persisted,
+      "subagents",
+    );
+    expect(onOpenWorkspace).toHaveBeenNthCalledWith(
+      3,
+      persisted,
+      "model-order",
+    );
+  });
+
   it("keeps the wizard controls inside small app windows", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
@@ -1449,7 +1524,7 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.getByText("状态机：connectivityFailed")).toBeInTheDocument();
   });
 
-  it("closes the overlay after enabling so the status-page handoff can continue", async () => {
+  it("keeps the overlay open after enabling until the user finishes the optional setup", async () => {
     const onOpenChange = vi.fn();
     const onEnablePlan = vi.fn().mockResolvedValue(undefined);
 
@@ -1472,13 +1547,16 @@ describe("CodexMultiRouterWizard", () => {
     fireEvent.click(publishButtons[publishButtons.length - 1]);
 
     expect(
-      await screen.findByText(/启用成功后向导会自动关闭/),
+      await screen.findByText(/启用成功后可继续完成独立设置/),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "启用这个多路路由" }));
 
     expect(onEnablePlan).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("状态机：completed")).toBeInTheDocument();
+    expect(await screen.findByText("状态机：enabled")).toBeInTheDocument();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "稍后完成" }));
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

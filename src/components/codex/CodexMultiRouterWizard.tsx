@@ -6,13 +6,17 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  Bot,
   CheckCircle2,
   Database,
   GitBranch,
+  GripVertical,
+  History,
   RefreshCw,
   Route,
   Server,
   ShieldAlert,
+  SlidersHorizontal,
   Wand2,
   X,
 } from "lucide-react";
@@ -106,6 +110,7 @@ interface CodexMultiRouterWizardProps {
   onOpenChange: (open: boolean) => void;
   onCreateProvider: () => void;
   onOpenProviderConfig?: (provider: Provider) => void;
+  onOpenHistoryRepair?: () => void;
   onOpenWorkspace: (provider: Provider, tab: WorkspaceTab) => void;
   onEnablePlan: (provider: Provider) => void | Promise<void>;
 }
@@ -750,6 +755,7 @@ export function CodexMultiRouterWizard({
   onOpenChange,
   onCreateProvider,
   onOpenProviderConfig,
+  onOpenHistoryRepair,
   onOpenWorkspace,
   onEnablePlan,
 }: CodexMultiRouterWizardProps) {
@@ -1795,13 +1801,12 @@ export function CodexMultiRouterWizard({
       await onEnablePlan(savedPlan);
       dispatchFlow({ type: "ENABLE_SUCCESS" });
       toast.success(
-        "已启用多路模型，状态页已打开。请在 Codex 里发送一次请求；当前链路、监听、Codex 接管、路由入口和最近转发均成功后，状态页会显示真实请求验证结果。",
+        "已启用多路模型。你可以继续修复历史记录，或进入各自独立的模型、Sub-Agent 与排序设置。",
         {
           closeButton: true,
           duration: 12000,
         },
       );
-      closeWizard(false);
     } catch (error) {
       const message = formatWizardError(error);
       recordWizardIssue({
@@ -2556,67 +2561,174 @@ export function CodexMultiRouterWizard({
               </div>
             )}
 
-            {currentStep.key === "activate" && (
-              <div className="space-y-4">
-                <div className="rounded-lg border p-4 text-sm text-muted-foreground">
-                  将保存 {previewRoutes.length} 条路由和 {previewModels.length}{" "}
-                  个可见模型到{" "}
-                  {activePlan ? activePlan.name : "新的 MultiRouter"}。
-                </div>
-                {draftSources.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-amber-500/40 bg-amber-500/10 p-4 text-sm leading-6 text-amber-900 dark:text-amber-100">
-                    尚未选择模型源，保存入口仍保留；请回到“选择模型源”添加并配置至少一个
-                    Provider 后再保存。
+            {currentStep.key === "activate" &&
+              flowState.status !== "enabled" && (
+                <div className="space-y-4">
+                  <div className="rounded-lg border p-4 text-sm text-muted-foreground">
+                    将保存 {previewRoutes.length} 条路由和{" "}
+                    {previewModels.length} 个可见模型到{" "}
+                    {activePlan ? activePlan.name : "新的 MultiRouter"}。
                   </div>
-                ) : null}
-                <Button
-                  onClick={saveMultiRouterPlan}
-                  disabled={
-                    isSavingPlan ||
-                    editingTargetMissing ||
-                    draftSources.length === 0 ||
-                    aliasSelectionIssues.length > 0 ||
-                    (connectivityResults.length > 0 &&
-                      !canContinueAfterConnectivity(connectivityResults))
-                  }
-                >
-                  <Database className="mr-2 h-4 w-4" />
-                  {isSavingPlan ? "正在保存..." : "保存并发布"}
-                </Button>
-              </div>
-            )}
+                  {draftSources.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-amber-500/40 bg-amber-500/10 p-4 text-sm leading-6 text-amber-900 dark:text-amber-100">
+                      尚未选择模型源，保存入口仍保留；请回到“选择模型源”添加并配置至少一个
+                      Provider 后再保存。
+                    </div>
+                  ) : null}
+                  <Button
+                    onClick={saveMultiRouterPlan}
+                    disabled={
+                      isSavingPlan ||
+                      editingTargetMissing ||
+                      draftSources.length === 0 ||
+                      aliasSelectionIssues.length > 0 ||
+                      (connectivityResults.length > 0 &&
+                        !canContinueAfterConnectivity(connectivityResults))
+                    }
+                  >
+                    <Database className="mr-2 h-4 w-4" />
+                    {isSavingPlan ? "正在保存..." : "保存并发布"}
+                  </Button>
+                </div>
+              )}
 
-            {currentStep.key === "activate" && (
-              <div className="space-y-4">
-                <div className="rounded-lg border p-4 text-sm leading-6 text-muted-foreground">
-                  保存完成后，请显式启用这个多路路由。启用成功后向导会自动关闭，并露出
-                  MultiRouter 状态页；保持 CCSwitchMulti 运行，去 Codex
-                  里发送一次请求。状态页会持续展示当前链路、监听、Codex
-                  接管、路由入口和最近转发；五项成功后会在原地显示真实请求验证通过。
+            {currentStep.key === "activate" &&
+              flowState.status !== "enabled" && (
+                <div className="space-y-4">
+                  <div className="rounded-lg border p-4 text-sm leading-6 text-muted-foreground">
+                    保存完成后，请显式启用这个多路路由。启用成功后可继续完成独立设置，
+                    也可以稍后关闭向导，再到 MultiRouter
+                    状态页完成真实请求验证。
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    <Button
+                      onClick={enableSavedPlan}
+                      disabled={!savedPlan || isEnablingPlan}
+                    >
+                      <CheckCircle2 className="mr-2 h-4 w-4" />
+                      启用这个多路路由
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={!savedPlan}
+                      onClick={() => {
+                        if (!savedPlan) return;
+                        closeWizard(false);
+                        onOpenWorkspace(savedPlan, "status");
+                      }}
+                    >
+                      <Route className="mr-2 h-4 w-4" />
+                      打开状态页继续验证
+                    </Button>
+                  </div>
                 </div>
-                <div className="flex flex-wrap gap-3">
-                  <Button
-                    onClick={enableSavedPlan}
-                    disabled={!savedPlan || isEnablingPlan}
-                  >
-                    <CheckCircle2 className="mr-2 h-4 w-4" />
-                    启用这个多路路由
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={!savedPlan}
-                    onClick={() => {
-                      if (!savedPlan) return;
-                      closeWizard(false);
-                      onOpenWorkspace(savedPlan, "status");
-                    }}
-                  >
-                    <Route className="mr-2 h-4 w-4" />
-                    打开状态页继续验证
-                  </Button>
+              )}
+
+            {currentStep.key === "activate" &&
+              flowState.status === "enabled" &&
+              savedPlan && (
+                <div className="space-y-4">
+                  <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4">
+                    <div className="flex items-start gap-3">
+                      <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
+                      <div>
+                        <div className="font-medium text-emerald-900 dark:text-emerald-100">
+                          MultiRouter 已启用，继续完成可选设置
+                        </div>
+                        <div className="mt-1 text-sm leading-6 text-emerald-900/80 dark:text-emerald-100/80">
+                          协议探测和路由已经保存。下面的入口彼此独立，不会重新拆分
+                          Provider，也不会把推理强度或 Sub-Agent
+                          设置混进协议事务。
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-auto justify-start gap-3 px-4 py-3 text-left"
+                      disabled={!onOpenHistoryRepair}
+                      onClick={() => {
+                        onOpenChange(false);
+                        onOpenHistoryRepair?.();
+                      }}
+                    >
+                      <History className="h-5 w-5 shrink-0" />
+                      <span>
+                        <span className="block font-medium">
+                          修复 Codex 历史记录
+                        </span>
+                        <span className="block text-xs text-muted-foreground">
+                          打开历史修复页，处理 Provider 与模型切换记录
+                        </span>
+                      </span>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-auto justify-start gap-3 px-4 py-3 text-left"
+                      onClick={() => {
+                        onOpenChange(false);
+                        onOpenWorkspace(savedPlan, "sources");
+                      }}
+                    >
+                      <SlidersHorizontal className="h-5 w-5 shrink-0" />
+                      <span>
+                        <span className="block font-medium">
+                          设置模型推理强度
+                        </span>
+                        <span className="block text-xs text-muted-foreground">
+                          回到各模型源，单独维护推理能力和档位
+                        </span>
+                      </span>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-auto justify-start gap-3 px-4 py-3 text-left"
+                      onClick={() => {
+                        onOpenChange(false);
+                        onOpenWorkspace(savedPlan, "subagents");
+                      }}
+                    >
+                      <Bot className="h-5 w-5 shrink-0" />
+                      <span>
+                        <span className="block font-medium">
+                          配置 Sub-Agent
+                        </span>
+                        <span className="block text-xs text-muted-foreground">
+                          进入独立的 Sub-Agent V1/V2 配置区
+                        </span>
+                      </span>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-auto justify-start gap-3 px-4 py-3 text-left"
+                      onClick={() => {
+                        onOpenChange(false);
+                        onOpenWorkspace(savedPlan, "model-order");
+                      }}
+                    >
+                      <GripVertical className="h-5 w-5 shrink-0" />
+                      <span>
+                        <span className="block font-medium">调整模型顺序</span>
+                        <span className="block text-xs text-muted-foreground">
+                          调整 Codex 模型选择器中的展示顺序
+                        </span>
+                      </span>
+                    </Button>
+                  </div>
+
+                  <div className="flex justify-end">
+                    <Button type="button" onClick={() => closeWizard(false)}>
+                      稍后完成
+                    </Button>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
           </div>
         </div>
 

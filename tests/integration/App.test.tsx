@@ -141,7 +141,13 @@ vi.mock("@/components/codex/CodexUsagePage", () => ({
 }));
 
 vi.mock("@/components/codex/CodexMultiRouterWizard", () => ({
-  CodexMultiRouterWizard: ({ open, mode, planId, onOpenChange }: any) =>
+  CodexMultiRouterWizard: ({
+    open,
+    mode,
+    planId,
+    onOpenChange,
+    onOpenHistoryRepair,
+  }: any) =>
     open ? (
       <div
         data-testid="codex-multirouter-wizard"
@@ -149,8 +155,29 @@ vi.mock("@/components/codex/CodexMultiRouterWizard", () => ({
         data-plan-id={planId ?? ""}
       >
         <button onClick={() => onOpenChange(false)}>close-wizard</button>
+        <button onClick={() => onOpenHistoryRepair?.()}>
+          open-history-repair
+        </button>
       </div>
     ) : null,
+}));
+
+vi.mock("@/components/sessions/SessionManagerPage", () => ({
+  SessionManagerPage: ({
+    appId,
+    initialCodexHistoryRepair,
+    onInitialCodexHistoryRepairConsumed,
+  }: any) => (
+    <div
+      data-testid="session-manager-page"
+      data-app-id={appId}
+      data-initial-history-repair={String(Boolean(initialCodexHistoryRepair))}
+    >
+      <button onClick={() => onInitialCodexHistoryRepairConsumed?.()}>
+        consume-history-repair
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/UsageScriptModal", () => ({
@@ -510,6 +537,37 @@ describe("App integration with MSW", () => {
     const wizard = await screen.findByTestId("codex-multirouter-wizard");
     expect(wizard).toHaveAttribute("data-mode", "create");
     expect(wizard).toHaveAttribute("data-plan-id", "");
+  });
+
+  it("routes the wizard history-repair action to the Codex session manager exactly once", async () => {
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    fireEvent.click(screen.getByText("switch-codex"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "codex-1",
+      ),
+    );
+    fireEvent.click(screen.getByText("open-multirouter-entry"));
+    fireEvent.click(await screen.findByText("创建新配置"));
+    fireEvent.click(await screen.findByText("open-history-repair"));
+
+    const sessionManager = await screen.findByTestId("session-manager-page");
+    expect(sessionManager).toHaveAttribute("data-app-id", "codex");
+    expect(sessionManager).toHaveAttribute(
+      "data-initial-history-repair",
+      "true",
+    );
+    expect(screen.queryByTestId("codex-multirouter-wizard")).toBeNull();
+
+    fireEvent.click(screen.getByText("consume-history-repair"));
+    await waitFor(() =>
+      expect(screen.getByTestId("session-manager-page")).toHaveAttribute(
+        "data-initial-history-repair",
+        "false",
+      ),
+    );
   });
 
   it("edits the exact MultiRouter selected from multiple saved plans", async () => {

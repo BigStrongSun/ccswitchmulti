@@ -294,6 +294,7 @@ function App() {
   ] = useState(false);
   const [isCodexMultiRouterWizardOpen, setIsCodexMultiRouterWizardOpen] =
     useState(false);
+  const [openCodexHistoryRepair, setOpenCodexHistoryRepair] = useState(false);
   const [codexMultiRouterWizardMode, setCodexMultiRouterWizardMode] = useState<
     "create" | "edit"
   >("create");
@@ -1313,6 +1314,12 @@ function App() {
             <SessionManagerPage
               key={sharedFeatureApp}
               appId={sharedFeatureApp}
+              initialCodexHistoryRepair={
+                sharedFeatureApp === "codex" && openCodexHistoryRepair
+              }
+              onInitialCodexHistoryRepairConsumed={() =>
+                setOpenCodexHistoryRepair(false)
+              }
               onCodexHistoryRepairCompleted={
                 sharedFeatureApp === "codex"
                   ? handleCodexHistoryRepairCompleted
@@ -2142,6 +2149,12 @@ function App() {
             setActiveApp("codex");
             setCurrentView("providers");
             setEditingProvider(provider);
+          }}
+          onOpenHistoryRepair={() => {
+            setIsCodexMultiRouterWizardOpen(false);
+            setActiveApp("codex");
+            setOpenCodexHistoryRepair(true);
+            setCurrentView("sessions");
           }}
           onOpenWorkspace={(provider, tab) =>
             openCodexRouterWorkspace(provider, tab)

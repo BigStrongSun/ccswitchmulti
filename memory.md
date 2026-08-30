@@ -4700,3 +4700,10 @@ supported in one streaming turn`。
 - fresh 候选验证：Rust library 3636 passed/0 failed/6 ignored；前端 156 files/1257 tests；`pnpm typecheck`、`pnpm format:check`、`pnpm build:renderer`、`cargo fmt --check`、`cargo check --no-default-features`、`cargo clippy --no-default-features` 全部退出码 0。Clippy 保留 24 条既有非阻断 warning，包括 Provider Set persistence enum 的 large-variant 性能提示。
 - 同一候选树已生成 Windows debug NSIS：`target-staged-closure/debug/bundle/nsis/CCSwitchMulti_3.19.2-18_x64-setup.exe`，大小 23,382,936 bytes，SHA-256 `69C481BABE70DF2126B83E08F207154E4C0825E1C0AAB8C56358B3760D08EBC9`，Authenticode 状态 `NotSigned`。未安装、未替换正式 CCSM、未重启、未推送、未发布。隔离 Tauri QA home 已准备，但 Windows Computer Use helper 报 `failed to write kernel assets ... os error 3`，所以真实窗口视觉验收仍未完成，不能把组件测试或安装器构建冒充安装态 UI 验收。
 - 联网交叉验证使用 Codex 内置搜索与 Matrix WebSearch 两条独立链：内置搜索直接读取 OpenAI Codex 当前 `model-provider-info`，Matrix 搜索无结果后独立打开同一官方 raw 源码；两者一致确认 Codex 外层 `WireApi` 仅接受 Responses，`wire_api = "chat"` 明确报已移除。因此 Chat 继续只能作为 CCSM 内部转换叶子，不能暴露成 Codex 外层可操作 Provider；本轮事务/current 根因与修复结论以本地源码、failure-injection 回归和精确候选树为权威。
+
+## 2026-08-30 MultiRouter 启用成功后的独立设置交接
+
+- Provider Set 后端封口提交已经在 `main`，向导启用成功后不再立即关闭并把用户直接丢到状态页。成功态保留在向导内，明确给出四个互不耦合的后续入口：Codex 历史修复、模型推理强度、Sub-Agent 和模型顺序；只有“稍后完成”才关闭向导。
+- 历史修复入口由 `App` 切换到 Codex 会话管理页，并通过一次性 `initialCodexHistoryRepair` 标记自动展开修复面板；面板消费标记后立即清零，避免以后重复打开。推理强度、Sub-Agent 和模型顺序分别进入既有 Router workspace 的 `sources`、`subagents` 和 `model-order` 标签，不会重新执行协议探测或 Provider Set 事务。
+- 本轮只提交 `src/App.tsx`、`src/components/codex/CodexMultiRouterWizard.tsx`、两份对应前端测试和本项目记忆；既存 Rust 并行修改、`.tmp`、预览文件和构建目录全部保留在未暂存工作区。首次格式门禁准确发现向导新增 JSX 未按 Prettier 换行，使用项目格式化器只机械整理同一新增区域后复验通过。
+- fresh 验证：前端全量 156 files/1259 tests，定向向导与 App 集成 50/50，Rust library 3689 passed/0 failed/6 ignored；`pnpm typecheck`、`pnpm format:check`、`pnpm build:renderer`、`cargo fmt --check`、`cargo check --no-default-features`、`cargo clippy --no-default-features` 全部退出码 0。Clippy 只有既有非阻断 warning；未构建或安装新安装器、未重启、未推送、未发布，因此这次证明的是源码/测试交付，不是安装态视觉验收。
