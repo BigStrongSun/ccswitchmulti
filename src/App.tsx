@@ -297,6 +297,9 @@ function App() {
   ] = useState(false);
   const [isCodexMultiRouterWizardOpen, setIsCodexMultiRouterWizardOpen] =
     useState(false);
+  const [newlyCreatedCodexProviderIds, setNewlyCreatedCodexProviderIds] =
+    useState<string[]>([]);
+  const codexProviderIdsBeforeWizardAddRef = useRef<Set<string> | null>(null);
   const [openCodexHistoryRepair, setOpenCodexHistoryRepair] = useState(false);
   const [codexMultiRouterWizardMode, setCodexMultiRouterWizardMode] = useState<
     "create" | "edit"
@@ -1088,6 +1091,7 @@ function App() {
     setActiveApp("codex");
     setCodexMultiRouterWizardMode("create");
     setCodexMultiRouterWizardPlanId(undefined);
+    setNewlyCreatedCodexProviderIds([]);
     setIsCodexMultiRouterEntryChoiceOpen(false);
     setIsCodexMultiRouterWizardOpen(true);
   };
@@ -1096,6 +1100,7 @@ function App() {
     setActiveApp("codex");
     setCodexMultiRouterWizardMode("edit");
     setCodexMultiRouterWizardPlanId(provider.id);
+    setNewlyCreatedCodexProviderIds([]);
     setIsCodexMultiRouterEntryChoiceOpen(false);
     setIsCodexMultiRouterWizardOpen(true);
   };
@@ -2040,7 +2045,35 @@ function App() {
 
       <AddProviderDialog
         open={isAddOpen}
-        onOpenChange={setIsAddOpen}
+        onOpenChange={(nextOpen) => {
+          setIsAddOpen(nextOpen);
+          if (
+            nextOpen ||
+            !isCodexMultiRouterWizardOpen ||
+            !codexProviderIdsBeforeWizardAddRef.current
+          ) {
+            return;
+          }
+          const beforeIds = codexProviderIdsBeforeWizardAddRef.current;
+          codexProviderIdsBeforeWizardAddRef.current = null;
+          void (async () => {
+            try {
+              const nextProviders = await providersApi.getAll("codex");
+              const createdIds = Object.keys(nextProviders).filter(
+                (providerId) => !beforeIds.has(providerId),
+              );
+              setNewlyCreatedCodexProviderIds(createdIds);
+              await queryClient.invalidateQueries({
+                queryKey: ["providers", "codex"],
+              });
+            } catch (error) {
+              toast.error(
+                `新增模型源后刷新失败：${extractErrorMessage(error)}`,
+                { closeButton: true },
+              );
+            }
+          })();
+        }}
         appId={activeApp}
         panelZIndexClassName={
           isCodexMultiRouterWizardOpen ? "z-[140]" : undefined
@@ -2142,9 +2175,13 @@ function App() {
           providers={codexWizardProviders}
           mode={codexMultiRouterWizardMode}
           planId={codexMultiRouterWizardPlanId}
+          newlyCreatedProviderIds={newlyCreatedCodexProviderIds}
           onOpenChange={setIsCodexMultiRouterWizardOpen}
           onCreateProvider={() => {
             setActiveApp("codex");
+            codexProviderIdsBeforeWizardAddRef.current = new Set(
+              codexWizardProviders.map((provider) => provider.id),
+            );
             setIsAddOpen(true);
           }}
           onOpenProviderConfig={(provider) => {

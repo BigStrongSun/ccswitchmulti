@@ -870,9 +870,7 @@ async function mountWizardFromPersistedPlan() {
     }),
   );
   const user = userEvent.setup();
-  await user.click(
-    await screen.findByRole("button", { name: "自动准备与验证" }),
-  );
+  await user.click(await screen.findByRole("button", { name: "协议深探测" }));
   await user.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
   await user.click(screen.getByRole("button", { name: "确认测试" }));
   await waitFor(() =>
@@ -884,7 +882,7 @@ async function mountWizardFromPersistedPlan() {
     ),
   );
   await user.click(await screen.findByRole("button", { name: "关闭" }));
-  await user.click(await screen.findByRole("button", { name: "启用并验证" }));
+  await user.click(await screen.findByRole("button", { name: "保存并启用" }));
   return { ...result, user };
 }
 
@@ -1216,7 +1214,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     );
   });
 
-  it("keeps V2 preview and status requests out of the four-step routing wizard", async () => {
+  it("keeps V2 preview and status requests out of the guided routing wizard", async () => {
     await mountWizardFromPersistedPlan();
 
     expect(

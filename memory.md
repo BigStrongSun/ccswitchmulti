@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-31 MultiRouter 完整引导向导漏合根因与主线迁移
+
+- 用户安装态看到左侧只有四步不是新设计回退，而是历史分支漏合。Git 祖先关系已经实证：`b495befd`（四步向导）是当前 `main` 祖先；完整重做位于 `bigstrongsun/multirouter-guided-wizard` 的 `8f5465bc -> 48c62cc5 -> 715a3db6`，其中 `715a3db6` 不是 `main` 祖先。不能把旧分支整体 cherry-pick，因为其中的浅探测、逐 Provider 保存与 Split 二次确认已经被主线 Protocol Lab、Provider Set 原子事务和双协议证据替代。
+- 主线迁移保留现有后端架构，只恢复完整页面流程：13 个常规页面（开始、环境、来源就绪、来源选择、目录同步、协议深探测、模型选择、模型顺序、推理、Sub-Agent/工具、路由确认、保存启用、真实请求验收）；没有任何 Provider 时动态插入第 14 页“接入第一个模型源”。后续页可预览但不可编辑，并明确指向缺失的前置步骤。
+- 协议页不再出现“基础探测、1024 输出、不验证工具/流式”的旧语义。普通 Provider/模型必须分别验证 Responses 与 Chat 的基础响应、流式 SSE、推理语义、强制工具调用和工具结果续接；401/403/429、网络错误与 5xx 继续归为认证/可用性错误，不得误判协议不支持。保存仍走统一 Protocol Lab 与批量 prepare/commit，自动 Single/Split 均直接 `accept_auto`。
+- 新建 Provider 回到向导不能按名称、索引或固定草稿 ID 猜测：`App` 在打开新增页前记录真实 Provider ID 集，关闭后重新读取并计算 ID 差集；向导只合并这些新增 ID、自动选中并回到“模型源就绪”。Qwen 深探测若后端漏回来源，前端会生成具名阻塞失败，禁止呈现“0/0/0 但可继续”的矛盾终态。
+- 源码 fresh 门禁：向导/flow/App/Sub-Agent 定向为 5 files / 197 tests；前端全量 165 files / 1301 tests；`pnpm typecheck`、`pnpm format:check` 和 `pnpm build:renderer` 通过；当前包含并行 Rust 工作的工作区 `cargo test --lib` 为 3728 passed / 0 failed / 6 ignored，`cargo check --no-default-features` 通过。`cargo fmt --check` 仍只报告另一任务的 `codex_config_consistency.rs` 格式和并行 `services/provider/mod.rs` 尾部空行，不属于本次向导文件。此记录写入时尚未完成新安装器安装及真实桌面截图验收，不能把源码测试冒充安装态结论。
+
 ## 2026-08-30 Codex Provider 协议适配读模型、统一 workflow 与三入口收口
 
 - 本轮在 `main@75ce07ba` 上落实协议适配计划，没有新开分支。领域判断从页面收回后端：`ProviderMeta` 新增 `codexProtocolMode` 与规范化模型名 Key 的 `codexProtocolOverrides`；旧 `modelCatalog[].apiFormat` 和旧 Provider 级 manual 仅在读取/正常保存时原子迁移，不再作为新数据写入模型目录。

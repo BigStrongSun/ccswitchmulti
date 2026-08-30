@@ -105,12 +105,20 @@ import { codexCatalogOnlyPlanModelFetchMessage } from "@/utils/codexPlanModelFet
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
 import { CodexProtocolProbeProgressDialog } from "@/components/providers/forms/CodexProtocolProbeProgressDialog";
 import { CodexProviderSetPreviewDialog } from "@/components/providers/forms/CodexProviderSetPreviewDialog";
+import {
+  buildWizardPageSequence,
+  canEnterWizardPage,
+  requiredWizardPrerequisite,
+  type WizardFlowContext,
+  type WizardPageKey,
+} from "@/lib/codexMultiRouterWizardFlow";
 
 interface CodexMultiRouterWizardProps {
   open: boolean;
   providers: Provider[];
   mode?: "create" | "edit";
   planId?: string;
+  newlyCreatedProviderIds?: string[];
   onOpenChange: (open: boolean) => void;
   onCreateProvider: () => void;
   onOpenProviderConfig?: (provider: Provider) => void;
@@ -119,10 +127,8 @@ interface CodexMultiRouterWizardProps {
   onEnablePlan: (provider: Provider) => void | Promise<void>;
 }
 
-type WizardStepKey = "sources" | "prepare" | "review" | "activate";
-
 interface WizardStep {
-  key: WizardStepKey;
+  key: WizardPageKey;
   title: string;
   description: string;
   icon: typeof Wand2;
@@ -130,7 +136,7 @@ interface WizardStep {
 
 interface WizardIssue {
   id: string;
-  stage: WizardStepKey;
+  stage: WizardPageKey;
   severity: "error" | "warning";
   title: string;
   detail: string;
@@ -159,7 +165,32 @@ interface ModelFetchCardState {
   diff?: ModelFetchDiff;
 }
 
-const STEPS: WizardStep[] = [
+const ALL_STEPS: WizardStep[] = [
+  {
+    key: "welcome",
+    title: "开始配置",
+    description:
+      "了解向导会检查什么、何时发送测试请求，以及什么时候才会真正启用。",
+    icon: Wand2,
+  },
+  {
+    key: "inventory",
+    title: "环境检查",
+    description: "检查已有 Provider、MultiRouter 和当前配置范围。",
+    icon: Database,
+  },
+  {
+    key: "first-provider",
+    title: "接入第一个模型源",
+    description: "当前没有可用 Provider，先接入一个模型源再返回向导验证。",
+    icon: Server,
+  },
+  {
+    key: "readiness",
+    title: "模型源就绪",
+    description: "逐项确认认证、模型目录、协议档案、能力和可修复问题。",
+    icon: ShieldAlert,
+  },
   {
     key: "sources",
     title: "选择模型源",
@@ -167,23 +198,60 @@ const STEPS: WizardStep[] = [
     icon: Server,
   },
   {
-    key: "prepare",
-    title: "自动准备与验证",
-    description: "同步模型目录、验证协议，并自动处理不同模型源之间的重名。",
+    key: "catalog",
+    title: "同步模型目录",
+    description: "读取各模型源的目录并展示差异；最终确认前只保存在本次草稿。",
     icon: RefreshCw,
   },
   {
-    key: "review",
-    title: "选择模型并预览路由",
+    key: "protocol",
+    title: "协议深探测",
     description:
-      "命名方案，选择要展示给 Codex 的模型，并确认生成的路由与认证策略。",
+      "完整测试 Responses 与 Chat 的流式、推理、工具调用和续接能力。",
+    icon: Route,
+  },
+  {
+    key: "models",
+    title: "选择模型",
+    description: "选择对 Codex 可见的模型，并处理不同模型源之间的重名。",
     icon: GitBranch,
   },
   {
-    key: "activate",
-    title: "启用并验证",
-    description: "保存并启用 MultiRouter，然后在状态页完成一次真实请求验证。",
+    key: "model-order",
+    title: "模型顺序",
+    description: "单独调整 Codex 模型菜单中的显示顺序。",
+    icon: ArrowDown,
+  },
+  {
+    key: "reasoning",
+    title: "推理设置",
+    description: "查看推理能力与默认强度；高级覆盖仍由 Provider 配置维护。",
+    icon: Wand2,
+  },
+  {
+    key: "subagents-tools",
+    title: "Sub-Agent 与工具",
+    description:
+      "配置基础候选模型和 Hosted Tools；高级规则进入 Sub-Agent 工作台。",
+    icon: Bot,
+  },
+  {
+    key: "routing-review",
+    title: "路由确认",
+    description: "只读确认路由、认证所有权、协议选择和所有待写变更。",
+    icon: GitBranch,
+  },
+  {
+    key: "save-enable",
+    title: "保存并启用",
+    description: "原子保存并启用 MultiRouter；成功后继续真实请求验收。",
     icon: CheckCircle2,
+  },
+  {
+    key: "acceptance",
+    title: "真实请求验收",
+    description: "在 Codex 发起一次请求，并在状态页确认收到合法终止事件。",
+    icon: Route,
   },
 ];
 
@@ -215,7 +283,7 @@ type WizardFlowStatus =
 
 interface WizardFlowState {
   status: WizardFlowStatus;
-  stepKey: WizardStepKey;
+  stepKey: WizardPageKey;
   lastError?: string;
   fetchSummary?: {
     successCount: number;
@@ -232,8 +300,8 @@ interface WizardFlowState {
 
 type WizardFlowEvent =
   | { type: "INIT"; hasSources: boolean }
-  | { type: "GOTO_STEP"; stepKey: WizardStepKey }
-  | { type: "NEXT"; nextStatus: WizardFlowStatus; nextStepKey: WizardStepKey }
+  | { type: "GOTO_STEP"; stepKey: WizardPageKey }
+  | { type: "NEXT"; nextStatus: WizardFlowStatus; nextStepKey: WizardPageKey }
   | { type: "FETCH_START" }
   | {
       type: "FETCH_DONE";
@@ -258,20 +326,34 @@ type WizardFlowEvent =
 
 const INITIAL_FLOW_STATE: WizardFlowState = {
   status: "opened",
-  stepKey: "sources",
+  stepKey: "welcome",
 };
 
 // 将左侧教程步骤映射到业务状态；手动跳步也会进入对应的状态分支，避免 UI 步骤和流程状态脱节。
-function statusForStep(stepKey: WizardStepKey): WizardFlowStatus {
+function statusForStep(stepKey: WizardPageKey): WizardFlowStatus {
   switch (stepKey) {
+    case "welcome":
+    case "inventory":
+      return "opened";
+    case "first-provider":
+      return "needSources";
+    case "readiness":
     case "sources":
       return "reviewProviderConfig";
-    case "prepare":
+    case "catalog":
       return "readyToFetchModels";
-    case "review":
+    case "protocol":
+      return "probingConnectivity";
+    case "models":
+    case "model-order":
+    case "reasoning":
+    case "subagents-tools":
+    case "routing-review":
       return "routePreview";
-    case "activate":
+    case "save-enable":
       return "enablePrompt";
+    case "acceptance":
+      return "enabled";
     default:
       return "opened";
   }
@@ -286,7 +368,7 @@ function wizardFlowReducer(
     case "INIT":
       return {
         status: event.hasSources ? "opened" : "needSources",
-        stepKey: "sources",
+        stepKey: "welcome",
       };
     case "GOTO_STEP":
       return {
@@ -308,14 +390,14 @@ function wizardFlowReducer(
       return {
         ...state,
         status: event.partial ? "modelFetchPartial" : "modelsFetched",
-        stepKey: "prepare",
+        stepKey: "catalog",
         fetchSummary: event.summary,
       };
     case "PROBE_START":
       return {
         ...state,
         status: "probingConnectivity",
-        stepKey: "prepare",
+        stepKey: "protocol",
         lastError: undefined,
       };
     case "PROBE_DONE":
@@ -326,29 +408,29 @@ function wizardFlowReducer(
             ? "connectivityPartial"
             : "connectivityPassed"
           : "connectivityFailed",
-        stepKey: event.canContinue ? "review" : "prepare",
+        stepKey: event.canContinue ? "models" : "protocol",
         connectivitySummary: event.summary,
       };
     case "SAVE_START":
       return { ...state, status: "savingPlan", lastError: undefined };
     case "SAVE_SUCCESS":
-      return { ...state, status: "published", stepKey: "activate" };
+      return { ...state, status: "published", stepKey: "save-enable" };
     case "SAVE_ERROR":
       return {
         ...state,
         status: "saveFailed",
-        stepKey: "activate",
+        stepKey: "save-enable",
         lastError: event.error,
       };
     case "ENABLE_START":
       return { ...state, status: "enabling", lastError: undefined };
     case "ENABLE_SUCCESS":
-      return { ...state, status: "enabled", stepKey: "activate" };
+      return { ...state, status: "enabled", stepKey: "acceptance" };
     case "ENABLE_ERROR":
       return {
         ...state,
         status: "enableFailed",
-        stepKey: "activate",
+        stepKey: "save-enable",
         lastError: event.error,
       };
     case "DISMISS":
@@ -597,7 +679,7 @@ function formatWizardError(error: unknown): string {
 }
 
 // 生成稳定但不依赖后端的异常 ID，方便 React 渲染和后续按阶段清理。
-function createWizardIssueId(stage: WizardStepKey, title: string): string {
+function createWizardIssueId(stage: WizardPageKey, title: string): string {
   return `${stage}:${title}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 }
 
@@ -723,11 +805,69 @@ function deepProbeConnectivityResults(
   });
 }
 
+export function buildWizardConnectivityResultsFromBatchOutcome(
+  expectedProviders: Provider[],
+  outcome: CodexProviderSetBatchProbeOutcome,
+  hasCodexOauthAccount: boolean,
+): WizardConnectivityResult[] {
+  const outcomeByProviderId = new Map(
+    outcome.outcomes.map((entry) => [entry.providerId, entry.outcome]),
+  );
+  const outcomeSourceByProviderId = new Map(
+    outcome.sources.map((source) => [source.provider.id, source.provider]),
+  );
+  const results: WizardConnectivityResult[] = [];
+  // 以用户选中的预期来源为权威集合。后端少返回一个 source 时必须形成具名失败，
+  // 不能因为遍历空响应而得到 Verified/Partial/Failed 全为 0 的矛盾终态。
+  for (const expectedProvider of expectedProviders) {
+    const provider =
+      outcomeSourceByProviderId.get(expectedProvider.id) ?? expectedProvider;
+    const models = getWizardConnectivityProbeModels(provider);
+    if (skipsWizardDeepProtocolProbe(provider)) {
+      results.push(
+        skippedWizardDeepProbeResult(
+          provider,
+          provider.meta?.codexProtocolMode === "manual"
+            ? "该 Provider 已在高级模式锁定协议，后端不会用自动探测覆盖用户选择。"
+            : hasCodexOauthAccount
+              ? "官方或托管账号源固定使用 Responses，由账号管理器提供认证，不发送额外计费探测请求。"
+              : "官方或托管账号源固定使用 Responses；当前尚未登录对应账号，保存后仍需先完成账号绑定。",
+        ),
+      );
+      continue;
+    }
+    if (models.length === 0) {
+      results.push(
+        skippedWizardDeepProbeResult(
+          provider,
+          "没有可探测模型，不能生成深度探测请求。",
+        ),
+      );
+      continue;
+    }
+    const probeOutcome = outcomeByProviderId.get(provider.id);
+    if (probeOutcome) {
+      results.push(...deepProbeConnectivityResults(provider, probeOutcome));
+    } else {
+      results.push({
+        providerId: provider.id,
+        providerName: provider.name,
+        model: "*",
+        status: "fail",
+        canContinue: false,
+        detail: "后端没有返回该模型源的兼容性探测结果。",
+      });
+    }
+  }
+  return results;
+}
+
 export function CodexMultiRouterWizard({
   open,
   providers,
   mode,
   planId,
+  newlyCreatedProviderIds = [],
   onOpenChange,
   onCreateProvider,
   onOpenProviderConfig,
@@ -817,10 +957,6 @@ export function CodexMultiRouterWizard({
   );
   const hasUnauthenticatedCodexOAuthSources =
     hasCodexOAuthSources && !isCodexOauthStatusLoading && !hasCodexOauthAccount;
-  const stepIndex = STEPS.findIndex((step) => step.key === flowState.stepKey);
-  // 防御旧状态或异常跳转写入未知步骤，确保向导始终有可渲染的首步。
-  const currentStep = STEPS[stepIndex] ?? STEPS[0];
-  const CurrentStepIcon = currentStep.icon;
   const configIssues = useMemo(
     () => getWizardConfigIssues(draftSources),
     [draftSources],
@@ -854,6 +990,39 @@ export function CodexMultiRouterWizard({
     draftSpawnAgentModels,
     activeCatalogModelOrder,
   );
+  const flowContext: WizardFlowContext = {
+    providerCount: providerModelSources.length,
+    selectedSourceCount: draftSources.length,
+    allSelectedSourcesReady:
+      draftSources.length > 0 && configIssues.length === 0,
+    catalogPrepared:
+      flowState.status === "modelsFetched" ||
+      flowState.status === "modelFetchPartial" ||
+      availableCatalogModels.length > 0,
+    protocolProbeComplete:
+      connectivityResults.length > 0 &&
+      canContinueAfterConnectivity(connectivityResults),
+    hasVisibleModels: activeCatalogModelOrder.length > 0,
+    planSaved: Boolean(savedPlan),
+    planEnabled:
+      flowState.status === "enabled" ||
+      flowState.status === "completed" ||
+      activePlan?.settingsConfig?.codexRouting?.enabled === true,
+    acceptanceStatus: "waiting",
+  };
+  const pageSequence = buildWizardPageSequence(flowContext);
+  const steps = ALL_STEPS.filter((step) => pageSequence.includes(step.key));
+  const stepIndex = steps.findIndex((step) => step.key === flowState.stepKey);
+  // 防御旧状态或条件页消失后的异常跳转，确保向导始终有可渲染页面。
+  const currentStep = steps[stepIndex] ?? steps[0];
+  const CurrentStepIcon = currentStep.icon;
+  const currentStepPrerequisiteKey = requiredWizardPrerequisite(
+    currentStep.key,
+    flowContext,
+  );
+  const currentStepPrerequisite = currentStepPrerequisiteKey
+    ? steps.find((step) => step.key === currentStepPrerequisiteKey)
+    : undefined;
   const isRefreshingModels = flowState.status === "fetchingModels";
   const isProbingConnectivity = batchProtocolLab.state.phase === "probing";
   const isSavingPlan = flowState.status === "savingPlan";
@@ -1001,6 +1170,35 @@ export function CodexMultiRouterWizard({
     });
   }, [existingPlan, open, planId, providerModelSources, resolvedMode]);
 
+  // Add Provider 对话框关闭后，App 会把本次新增 ID 传回。向导只选中真实新增项，
+  // 不根据名称或数组顺序猜测，并回到就绪检查展示下一步。
+  useEffect(() => {
+    if (!open || newlyCreatedProviderIds.length === 0) return;
+    const createdIdSet = new Set(newlyCreatedProviderIds);
+    const createdProviders = providerModelSources.filter((provider) =>
+      createdIdSet.has(provider.id),
+    );
+    if (createdProviders.length === 0) return;
+    setSelectedSourceIds((currentIds) => [
+      ...new Set([
+        ...currentIds,
+        ...createdProviders.map((provider) => provider.id),
+      ]),
+    ]);
+    setDraftSources((currentSources) => {
+      const byId = new Map(
+        [...currentSources, ...createdProviders].map((provider) => [
+          provider.id,
+          provider,
+        ]),
+      );
+      return [...byId.values()];
+    });
+    setConnectivityResults([]);
+    batchProtocolLab.reset();
+    dispatchFlow({ type: "GOTO_STEP", stepKey: "readiness" });
+  }, [newlyCreatedProviderIds, open, providerModelSources]);
+
   // Provider 是模型事实的唯一来源。向导打开期间也必须采用父层查询的最新快照，
   // 否则 Provider 新增模型、上下文或能力变化只会在关闭并重开向导后出现。
   // 向导自己的协议探测结果保存在 connectivityResults，模型刷新又会先持久化 Provider，
@@ -1066,7 +1264,7 @@ export function CodexMultiRouterWizard({
   };
 
   // 重新执行某个阶段时只清理该阶段旧问题，避免旧错误误导当前判断。
-  const clearWizardIssuesForStage = (stage: WizardStepKey) => {
+  const clearWizardIssuesForStage = (stage: WizardPageKey) => {
     setWizardIssues((current) =>
       current.filter((issue) => issue.stage !== stage),
     );
@@ -1112,7 +1310,7 @@ export function CodexMultiRouterWizard({
         },
       });
       recordWizardIssue({
-        stage: "prepare",
+        stage: "protocol",
         severity: "error",
         title: "兼容性深度探测中断",
         detail: message,
@@ -1123,7 +1321,7 @@ export function CodexMultiRouterWizard({
 
     dispatchFlow({ type: "SAVE_ERROR", error: message });
     recordWizardIssue({
-      stage: "activate",
+      stage: "save-enable",
       severity: "error",
       title: "MultiRouter 保存失败",
       detail: message,
@@ -1175,9 +1373,60 @@ export function CodexMultiRouterWizard({
     onOpenChange(false);
   };
 
+  const openWizardStep = (step: WizardStep) => {
+    dispatchFlow({ type: "GOTO_STEP", stepKey: step.key });
+    const prerequisiteKey = requiredWizardPrerequisite(step.key, flowContext);
+    if (!prerequisiteKey) return;
+    const prerequisite = steps.find((item) => item.key === prerequisiteKey);
+    toast.info(
+      `“${step.title}”暂不可编辑，请先完成“${prerequisite?.title ?? "前置步骤"}”。`,
+      { closeButton: true },
+    );
+  };
+
   // 下一步按钮按状态机 gate 推进；配置不完整时停在当前状态并给出可操作提示。
   const advanceWizard = () => {
     switch (currentStep.key) {
+      case "welcome":
+        dispatchFlow({
+          type: "NEXT",
+          nextStatus: "opened",
+          nextStepKey: "inventory",
+        });
+        return;
+      case "inventory":
+        dispatchFlow({
+          type: "NEXT",
+          nextStatus:
+            providerModelSources.length > 0
+              ? "reviewProviderConfig"
+              : "needSources",
+          nextStepKey:
+            providerModelSources.length > 0 ? "readiness" : "first-provider",
+        });
+        return;
+      case "first-provider":
+        if (providerModelSources.length === 0) {
+          toast.info("请先添加至少一个 Codex 模型源。", { closeButton: true });
+          return;
+        }
+        dispatchFlow({
+          type: "NEXT",
+          nextStatus: "reviewProviderConfig",
+          nextStepKey: "readiness",
+        });
+        return;
+      case "readiness":
+        if (providerModelSources.length === 0) {
+          dispatchFlow({ type: "GOTO_STEP", stepKey: "first-provider" });
+          return;
+        }
+        dispatchFlow({
+          type: "NEXT",
+          nextStatus: "reviewProviderConfig",
+          nextStepKey: "sources",
+        });
+        return;
       case "sources":
         if (draftSources.length === 0) {
           dispatchFlow({
@@ -1194,7 +1443,7 @@ export function CodexMultiRouterWizard({
           type: "NEXT",
           nextStatus:
             configIssues.length > 0 ? "configIncomplete" : "readyToFetchModels",
-          nextStepKey: "prepare",
+          nextStepKey: "catalog",
         });
         if (hasUnauthenticatedCodexOAuthSources) {
           toast.warning(
@@ -1213,7 +1462,28 @@ export function CodexMultiRouterWizard({
           );
         }
         return;
-      case "prepare":
+      case "catalog":
+        if (availableCatalogModels.length === 0) {
+          toast.error("请先同步出至少一个可用模型。", { closeButton: true });
+          return;
+        }
+        dispatchFlow({
+          type: "NEXT",
+          nextStatus: "readyToFetchModels",
+          nextStepKey: "protocol",
+        });
+        return;
+      case "protocol":
+        if (
+          flowState.connectivitySummary === undefined ||
+          connectivityResults.length === 0
+        ) {
+          toast.info(
+            "请先运行协议深探测；已有协议配置不能代替本次向导的真实事务测试。",
+            { closeButton: true },
+          );
+          return;
+        }
         if (
           connectivityResults.length > 0 &&
           !canContinueAfterConnectivity(connectivityResults)
@@ -1221,10 +1491,10 @@ export function CodexMultiRouterWizard({
           dispatchFlow({
             type: "NEXT",
             nextStatus: "connectivityFailed",
-            nextStepKey: "prepare",
+            nextStepKey: "protocol",
           });
           recordWizardIssue({
-            stage: "prepare",
+            stage: "protocol",
             severity: "error",
             title: "兼容性深度探测存在阻塞项",
             detail:
@@ -1242,10 +1512,26 @@ export function CodexMultiRouterWizard({
         dispatchFlow({
           type: "NEXT",
           nextStatus: "routePreview",
-          nextStepKey: "review",
+          nextStepKey: "models",
         });
         return;
-      case "review":
+      case "models":
+        if (activeCatalogModelOrder.length === 0) {
+          toast.error("请至少保留一个模型。", { closeButton: true });
+          return;
+        }
+        dispatchFlow({ type: "GOTO_STEP", stepKey: "model-order" });
+        return;
+      case "model-order":
+        dispatchFlow({ type: "GOTO_STEP", stepKey: "reasoning" });
+        return;
+      case "reasoning":
+        dispatchFlow({ type: "GOTO_STEP", stepKey: "subagents-tools" });
+        return;
+      case "subagents-tools":
+        dispatchFlow({ type: "GOTO_STEP", stepKey: "routing-review" });
+        return;
+      case "routing-review":
         if (!draftPlanName.trim()) {
           toast.error("请先填写 MultiRouter 名称。", { closeButton: true });
           return;
@@ -1257,15 +1543,20 @@ export function CodexMultiRouterWizard({
         dispatchFlow({
           type: "NEXT",
           nextStatus: "published",
-          nextStepKey: "activate",
+          nextStepKey: "save-enable",
         });
         return;
-      case "activate":
-        if (savedPlan) {
-          closeWizard(false);
+      case "save-enable":
+        if (flowState.status === "enabled") {
+          dispatchFlow({ type: "GOTO_STEP", stepKey: "acceptance" });
           return;
         }
-        toast.info("请点击“保存并发布”写入 MultiRouter provider。", {
+        toast.info("请先保存方案并启用 MultiRouter。", {
+          closeButton: true,
+        });
+        return;
+      case "acceptance":
+        toast.info("请在 Codex 发送一次真实请求，并在状态页完成验收。", {
           closeButton: true,
         });
         return;
@@ -1276,14 +1567,14 @@ export function CodexMultiRouterWizard({
 
   // 上一步只改变教程步骤和对应状态，不回滚已经抓取/保存的草稿数据。
   const retreatWizard = () => {
-    const previousStep = STEPS[Math.max(0, stepIndex - 1)];
+    const previousStep = steps[Math.max(0, stepIndex - 1)];
     dispatchFlow({ type: "GOTO_STEP", stepKey: previousStep.key });
   };
 
   // 顺序抓取所有可抓模型源；失败不阻塞其它 provider，最终由保存页继续使用已成功目录。
   const refreshModelSources = async () => {
     dispatchFlow({ type: "FETCH_START" });
-    clearWizardIssuesForStage("prepare");
+    clearWizardIssuesForStage("catalog");
     const previousAvailableModels = availableCatalogModels.map(
       (model) => model.model,
     );
@@ -1386,7 +1677,7 @@ export function CodexMultiRouterWizard({
                 nextSources.push(nextProvider);
                 successCount += 1;
                 recordWizardIssue({
-                  stage: "prepare",
+                  stage: "catalog",
                   severity: "warning",
                   title: "OAuth 在线模型列表获取失败，已使用本地缓存",
                   detail: `ChatGPT OAuth 在线模型列表暂时不可用，已用本地 Codex 模型缓存恢复 ${afterModels.length} 个模型。在线错误：${message}`,
@@ -1412,7 +1703,7 @@ export function CodexMultiRouterWizard({
             failedCount += 1;
             nextSources.push(provider);
             recordWizardIssue({
-              stage: "prepare",
+              stage: "catalog",
               severity: "warning",
               title: "OAuth 模型列表获取失败",
               detail: `获取 ChatGPT OAuth 模型列表失败，已保留现有目录：${message}${
@@ -1516,7 +1807,7 @@ export function CodexMultiRouterWizard({
           console.error("[CodexMultiRouterWizard] fetch models failed", error);
           const message = formatWizardError(error);
           recordWizardIssue({
-            stage: "prepare",
+            stage: "catalog",
             severity: "warning",
             title: "模型列表获取失败",
             detail: `获取模型列表失败，请检查当前 provider 配置：${message}`,
@@ -1566,7 +1857,7 @@ export function CodexMultiRouterWizard({
     } catch (error) {
       const message = formatWizardError(error);
       recordWizardIssue({
-        stage: "prepare",
+        stage: "catalog",
         severity: "error",
         title: "模型列表刷新中断",
         detail: message,
@@ -1633,49 +1924,11 @@ export function CodexMultiRouterWizard({
   const applyConnectivityProbeOutcome = (
     outcome: CodexProviderSetBatchProbeOutcome,
   ) => {
-    const outcomeByProviderId = new Map(
-      outcome.outcomes.map((entry) => [entry.providerId, entry.outcome]),
+    const results = buildWizardConnectivityResultsFromBatchOutcome(
+      draftSources,
+      outcome,
+      hasCodexOauthAccount,
     );
-    const results: WizardConnectivityResult[] = [];
-    for (const source of outcome.sources) {
-      const provider = source.provider;
-      const models = getWizardConnectivityProbeModels(provider);
-      if (skipsWizardDeepProtocolProbe(provider)) {
-        results.push(
-          skippedWizardDeepProbeResult(
-            provider,
-            provider.meta?.codexProtocolMode === "manual"
-              ? "该 Provider 已在高级模式锁定协议，后端不会用自动探测覆盖用户选择。"
-              : hasCodexOauthAccount
-                ? "官方或托管账号源固定使用 Responses，由账号管理器提供认证，不发送额外计费探测请求。"
-                : "官方或托管账号源固定使用 Responses；当前尚未登录对应账号，保存后仍需先完成账号绑定。",
-          ),
-        );
-        continue;
-      }
-      if (models.length === 0) {
-        results.push(
-          skippedWizardDeepProbeResult(
-            provider,
-            "没有可探测模型，不能生成深度探测请求。",
-          ),
-        );
-        continue;
-      }
-      const probeOutcome = outcomeByProviderId.get(provider.id);
-      if (probeOutcome) {
-        results.push(...deepProbeConnectivityResults(provider, probeOutcome));
-      } else {
-        results.push({
-          providerId: provider.id,
-          providerName: provider.name,
-          model: "*",
-          status: "fail",
-          canContinue: false,
-          detail: "后端没有返回该模型源的兼容性探测结果。",
-        });
-      }
-    }
     const summary = {
       passCount: results.filter((result) => result.status === "pass").length,
       warnCount: results.filter((result) => result.status === "warn").length,
@@ -1697,7 +1950,7 @@ export function CodexMultiRouterWizard({
   };
 
   const requestConnectivityProbe = () => {
-    clearWizardIssuesForStage("prepare");
+    clearWizardIssuesForStage("protocol");
     const validation = batchProtocolLab.validate(buildBatchDraft(false));
     void validation.then(applyConnectivityProbeOutcome).catch((error) => {
       if (!(error instanceof ProtocolLabCancelled)) {
@@ -1726,7 +1979,7 @@ export function CodexMultiRouterWizard({
   const saveMultiRouterPlan = () => {
     if (saveInFlightRef.current) return;
     dispatchFlow({ type: "SAVE_START" });
-    clearWizardIssuesForStage("activate");
+    clearWizardIssuesForStage("save-enable");
     let draft: CodexProviderSetBatchDraft;
     try {
       draft = buildBatchDraft(true);
@@ -1734,7 +1987,7 @@ export function CodexMultiRouterWizard({
       const message = formatWizardError(error);
       dispatchFlow({ type: "SAVE_ERROR", error: message });
       recordWizardIssue({
-        stage: "activate",
+        stage: "save-enable",
         severity: "error",
         title: "MultiRouter 保存失败",
         detail: message,
@@ -1783,12 +2036,12 @@ export function CodexMultiRouterWizard({
 
   const returnFromBlockedBatch = () => {
     batchProtocolLab.cancel();
-    dispatchFlow({ type: "GOTO_STEP", stepKey: "review" });
+    dispatchFlow({ type: "GOTO_STEP", stepKey: "routing-review" });
   };
 
   const retryBlockedBatchProbe = () => {
     setConnectivityResults([]);
-    dispatchFlow({ type: "GOTO_STEP", stepKey: "prepare" });
+    dispatchFlow({ type: "GOTO_STEP", stepKey: "protocol" });
     setProbeDialogOpen(true);
     batchProtocolLab.retry();
   };
@@ -1797,7 +2050,7 @@ export function CodexMultiRouterWizard({
   const enableSavedPlan = async () => {
     if (!savedPlan) return;
     dispatchFlow({ type: "ENABLE_START" });
-    clearWizardIssuesForStage("activate");
+    clearWizardIssuesForStage("save-enable");
     try {
       await onEnablePlan(savedPlan);
       dispatchFlow({ type: "ENABLE_SUCCESS" });
@@ -1811,7 +2064,7 @@ export function CodexMultiRouterWizard({
     } catch (error) {
       const message = formatWizardError(error);
       recordWizardIssue({
-        stage: "activate",
+        stage: "save-enable",
         severity: "error",
         title: "启用多路路由失败",
         detail: message,
@@ -1886,7 +2139,7 @@ export function CodexMultiRouterWizard({
             </div>
             <div>
               <div className="text-sm text-muted-foreground">
-                第 {stepIndex + 1} / {STEPS.length} 步
+                第 {stepIndex + 1} / {steps.length} 步
               </div>
               <h2
                 id="codex-multirouter-wizard-title"
@@ -1914,8 +2167,9 @@ export function CodexMultiRouterWizard({
           className="grid min-h-0 flex-1 grid-cols-[15rem_minmax(0,1fr)] overflow-hidden"
         >
           <div className="space-y-1 overflow-y-auto border-r border-border/60 bg-gradient-to-b from-blue-500/8 via-muted/25 to-violet-500/8 p-3">
-            {STEPS.map((step, index) => {
+            {steps.map((step, index) => {
               const StepIcon = step.icon;
+              const canEditStep = canEnterWizardPage(step.key, flowContext);
               return (
                 <button
                   key={step.key}
@@ -1925,12 +2179,23 @@ export function CodexMultiRouterWizard({
                       ? "bg-primary text-primary-foreground"
                       : "text-muted-foreground hover:bg-muted"
                   }`}
-                  onClick={() =>
-                    dispatchFlow({ type: "GOTO_STEP", stepKey: step.key })
+                  onClick={() => openWizardStep(step)}
+                  aria-current={index === stepIndex ? "step" : undefined}
+                  data-read-only={canEditStep ? undefined : "true"}
+                  title={
+                    canEditStep ? undefined : "可以查看；完成前置步骤后才能编辑"
                   }
                 >
                   <StepIcon className="h-4 w-4 shrink-0" />
                   <span className="truncate">{step.title}</span>
+                  {!canEditStep && (
+                    <span
+                      aria-hidden="true"
+                      className="ml-auto shrink-0 text-[10px] opacity-70"
+                    >
+                      只读
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -2018,129 +2283,485 @@ export function CodexMultiRouterWizard({
                 </div>
               </div>
             )}
-            {currentStep.key === "sources" && (
-              <div className="space-y-4">
-                <div className="rounded-xl border border-border/60 bg-gradient-to-r from-sky-500/10 via-background to-cyan-500/10 p-4 text-sm leading-6">
-                  <div className="font-medium">这里只选择模型源</div>
-                  <p className="mt-1 text-muted-foreground">
-                    凭据、模型目录、API 协议、推理能力和工具兼容性都在各自
-                    Provider 页面维护。向导只读取就绪结果并组合路由。
-                  </p>
+            {currentStepPrerequisite && (
+              <div
+                role="status"
+                className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100"
+              >
+                <div>
+                  <div className="font-medium">当前步骤暂不可编辑</div>
+                  <div className="mt-1 text-xs leading-5 opacity-90">
+                    请先完成“{currentStepPrerequisite.title}
+                    ”。本页可以查看，完成前置步骤后会自动恢复编辑。
+                  </div>
                 </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => openWizardStep(currentStepPrerequisite)}
+                >
+                  去完成{currentStepPrerequisite.title}
+                </Button>
               </div>
             )}
+            <fieldset
+              disabled={Boolean(currentStepPrerequisite)}
+              aria-disabled={Boolean(currentStepPrerequisite)}
+              className="m-0 min-w-0 border-0 p-0"
+            >
+              {currentStep.key === "welcome" && (
+                <div className="space-y-4">
+                  <div className="rounded-xl border border-blue-500/25 bg-gradient-to-r from-blue-500/10 via-background to-violet-500/10 p-5">
+                    <div className="text-lg font-semibold">
+                      MultiRouter 自动配置向导
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                      向导会先检查本机配置，再读取模型目录，并向你选择的上游发送少量真实请求，分别验证
+                      Responses、Chat、流式、推理、工具调用和续接能力。
+                    </p>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="rounded-lg border p-4 text-sm">
+                      <div className="font-medium">不会提前生效</div>
+                      <p className="mt-2 leading-6 text-muted-foreground">
+                        最终确认前不会启用或覆盖当前 Codex 配置。
+                      </p>
+                    </div>
+                    <div className="rounded-lg border p-4 text-sm">
+                      <div className="font-medium">测试可能计费</div>
+                      <p className="mt-2 leading-6 text-muted-foreground">
+                        深探测会调用真实模型，可能产生少量额度和限流占用。
+                      </p>
+                    </div>
+                    <div className="rounded-lg border p-4 text-sm">
+                      <div className="font-medium">真实请求再验收</div>
+                      <p className="mt-2 leading-6 text-muted-foreground">
+                        保存启用后仍需在 Codex 完成一次真实请求才算配置完成。
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
 
-            {currentStep.key === "sources" && (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm text-muted-foreground">
-                    已选择 {draftSources.length} / {providerModelSources.length}{" "}
-                    个 Codex provider 作为本次模型源；取消选择不会删除
-                    provider。
+              {currentStep.key === "inventory" && (
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="rounded-lg border p-4">
+                    <div className="text-sm font-medium">Codex Provider</div>
+                    <div className="mt-2 text-2xl font-semibold">
+                      {providerModelSources.length}
+                    </div>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      {providerModelSources.length > 0
+                        ? "已有模型源，下一步检查每个源的就绪状态。"
+                        : "尚无模型源，向导会先带你接入一个 Provider。"}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border p-4">
+                    <div className="text-sm font-medium">现有 MultiRouter</div>
+                    <div className="mt-2 text-2xl font-semibold">
+                      {providers.filter(isCodexMultiRouterPlan).length}
+                    </div>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      {activePlan
+                        ? `当前编辑 ${activePlan.name}`
+                        : "将创建独立的新方案，不覆盖已有路由。"}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {currentStep.key === "first-provider" && (
+                <div className="rounded-xl border border-dashed p-6 text-center">
+                  <Server className="mx-auto h-10 w-10 text-primary" />
+                  <div className="mt-3 font-semibold">先接入一个可用模型源</div>
+                  <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
+                    添加页会引导填写模型服务地址、凭据并测试连接。保存后会返回本向导，并自动识别和选中新模型源。
                   </p>
-                  <Button onClick={onCreateProvider}>
-                    <Server className="mr-2 h-4 w-4" />
-                    添加 Provider
+                  <Button className="mt-4" onClick={onCreateProvider}>
+                    打开模型源添加页
                   </Button>
                 </div>
-                <div className="max-h-[min(42vh,28rem)] overflow-y-auto pr-2">
-                  <div className="grid gap-3 md:grid-cols-2">
-                    {providerModelSources.map((provider) => (
-                      <div
-                        key={provider.id}
-                        className="rounded-xl border border-border/60 bg-card/70 p-3 shadow-sm"
-                      >
-                        <label className="flex cursor-pointer items-start gap-3">
+              )}
+
+              {currentStep.key === "readiness" && (
+                <div className="space-y-3">
+                  {providerModelSources.map((provider) => {
+                    const details = modelSourceStatusDetails(provider);
+                    const issues = getWizardConfigIssues([provider]);
+                    return (
+                      <div key={provider.id} className="rounded-lg border p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="font-medium">{provider.name}</div>
+                            <div className="mt-1 text-xs text-muted-foreground">
+                              {provider.id}
+                            </div>
+                          </div>
+                          <Badge
+                            variant={
+                              issues.length === 0 ? "secondary" : "outline"
+                            }
+                          >
+                            {issues.length === 0 ? "可继续" : "需要补全"}
+                          </Badge>
+                        </div>
+                        <div className="mt-3 grid gap-1 text-xs leading-5 text-muted-foreground md:grid-cols-2">
+                          {details.map((detail) => (
+                            <div key={detail}>{detail}</div>
+                          ))}
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="mt-3"
+                          onClick={() => onOpenProviderConfig?.(provider)}
+                        >
+                          {issues.length === 0
+                            ? "查看高级配置"
+                            : "补全 Provider 配置"}
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {currentStep.key === "sources" && (
+                <div className="space-y-4">
+                  <div className="rounded-xl border border-border/60 bg-gradient-to-r from-sky-500/10 via-background to-cyan-500/10 p-4 text-sm leading-6">
+                    <div className="font-medium">这里只选择模型源</div>
+                    <p className="mt-1 text-muted-foreground">
+                      凭据、模型目录、API 协议、推理能力和工具兼容性都在各自
+                      Provider 页面维护。向导只读取就绪结果并组合路由。
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {currentStep.key === "sources" && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm text-muted-foreground">
+                      已选择 {draftSources.length} /{" "}
+                      {providerModelSources.length} 个 Codex provider
+                      作为本次模型源；取消选择不会删除 provider。
+                    </p>
+                    <Button onClick={onCreateProvider}>
+                      <Server className="mr-2 h-4 w-4" />
+                      添加 Provider
+                    </Button>
+                  </div>
+                  <div className="max-h-[min(42vh,28rem)] overflow-y-auto pr-2">
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {providerModelSources.map((provider) => (
+                        <div
+                          key={provider.id}
+                          className="rounded-xl border border-border/60 bg-card/70 p-3 shadow-sm"
+                        >
+                          <label className="flex cursor-pointer items-start gap-3">
+                            <input
+                              type="checkbox"
+                              className="mt-1 h-4 w-4"
+                              checked={selectedSourceIdSet.has(provider.id)}
+                              onChange={(event) =>
+                                toggleSourceProvider(
+                                  provider,
+                                  event.target.checked,
+                                )
+                              }
+                              aria-label={`使用 ${provider.name} 作为模型源`}
+                            />
+                            <span className="min-w-0">
+                              <span className="block font-medium">
+                                {provider.name}
+                              </span>
+                              <span className="mt-1 block text-xs text-muted-foreground">
+                                {provider.id}
+                              </span>
+                            </span>
+                          </label>
+                          <div className="mt-3 flex items-center justify-between gap-3">
+                            <Badge variant="outline">
+                              {modelSourceSummary(provider)}
+                            </Badge>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              aria-label={`配置 ${provider.name}`}
+                              onClick={() => onOpenProviderConfig?.(provider)}
+                            >
+                              配置 Provider
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {draftSources.length === 0 && (
+                    <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                      状态机当前停在 NeedSources。请先添加一个普通 Codex
+                      provider，或关闭向导后从已有配置导入。
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {currentStep.key === "reasoning" && (
+                <div className="space-y-4">
+                  <div className="rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground">
+                    协议页只确认上游实际返回的推理语义；这里展示当前能力和默认强度。模型级覆盖由各
+                    Provider 的高级配置维护，不与协议自动选择混在一起。
+                  </div>
+                  {draftSources.map((provider) => (
+                    <div
+                      key={provider.id}
+                      className="space-y-3 rounded-lg border p-4"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="font-medium">{provider.name}</div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {inferWizardApiFormat(provider)} ·{" "}
+                            {readWizardModelCatalog(provider).length} 个模型
+                          </div>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          aria-label={`编辑 ${provider.name} 的推理高级配置`}
+                          onClick={() => onOpenProviderConfig?.(provider)}
+                        >
+                          编辑推理高级配置
+                        </Button>
+                      </div>
+                      <div className="grid gap-2 md:grid-cols-2">
+                        {readWizardModelCatalog(provider).map((model) => {
+                          const reasoning = model.reasoning;
+                          const support =
+                            reasoning?.supportStatus === "confirmed_supported"
+                              ? "已确认支持推理"
+                              : reasoning?.supportStatus ===
+                                  "confirmed_unsupported"
+                                ? "已确认不支持推理"
+                                : "能力未知，使用服务端默认";
+                          return (
+                            <div
+                              key={model.model}
+                              className="rounded-md border bg-muted/20 p-3 text-xs"
+                            >
+                              <div className="font-medium text-foreground">
+                                {model.displayName ?? model.model}
+                              </div>
+                              <div className="mt-2 space-y-1 text-muted-foreground">
+                                <div>{support}</div>
+                                <div>
+                                  可用强度：
+                                  {reasoning?.supportedEfforts?.join(" / ") ||
+                                    "未声明"}
+                                </div>
+                                <div>
+                                  默认强度：
+                                  {reasoning?.defaultEffort ?? "模型默认"}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {currentStep.key === "subagents-tools" && (
+                <div className="space-y-4">
+                  <div className="rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground">
+                    基础模式设置最多五个可路由 Sub-Agent 候选和 Hosted
+                    Tools。角色、Provider 继承及 V2
+                    规则由独立工作台维护，不会改变主模型推理强度。
+                  </div>
+                  <div className="max-h-72 overflow-auto rounded-lg border">
+                    {activeCatalogModelOrder.map((model) => {
+                      const selected = activeSpawnAgentModels.includes(model);
+                      return (
+                        <label
+                          key={model}
+                          className="flex items-center gap-3 border-b px-3 py-2 text-sm last:border-b-0"
+                        >
                           <input
                             type="checkbox"
-                            className="mt-1 h-4 w-4"
-                            checked={selectedSourceIdSet.has(provider.id)}
+                            checked={selected}
+                            disabled={
+                              !selected && activeSpawnAgentModels.length >= 5
+                            }
                             onChange={(event) =>
-                              toggleSourceProvider(
-                                provider,
-                                event.target.checked,
+                              setDraftSpawnAgentModels((current) =>
+                                event.target.checked
+                                  ? [
+                                      ...current.filter(
+                                        (item) => item !== model,
+                                      ),
+                                      model,
+                                    ].slice(0, 5)
+                                  : current.filter((item) => item !== model),
                               )
                             }
-                            aria-label={`使用 ${provider.name} 作为模型源`}
+                            aria-label={`使用 ${model} 作为 Sub-Agent 候选`}
                           />
-                          <span className="min-w-0">
-                            <span className="block font-medium">
-                              {provider.name}
-                            </span>
-                            <span className="mt-1 block text-xs text-muted-foreground">
-                              {provider.id}
-                            </span>
-                          </span>
+                          <span>{model}</span>
                         </label>
-                        <div className="mt-3 flex items-center justify-between gap-3">
-                          <Badge variant="outline">
-                            {modelSourceSummary(provider)}
-                          </Badge>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            aria-label={`配置 ${provider.name}`}
-                            onClick={() => onOpenProviderConfig?.(provider)}
-                          >
-                            配置 Provider
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
-                </div>
-                {draftSources.length === 0 && (
-                  <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                    状态机当前停在 NeedSources。请先添加一个普通 Codex
-                    provider，或关闭向导后从已有配置导入。
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <label className="flex items-center gap-3 rounded-lg border p-3 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={webSearchEnabled}
+                        onChange={(event) =>
+                          setWebSearchEnabled(event.target.checked)
+                        }
+                      />
+                      Web Search Hosted Tool
+                    </label>
+                    <label className="flex items-center gap-3 rounded-lg border p-3 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={imageGenerationEnabled}
+                        onChange={(event) =>
+                          setImageGenerationEnabled(event.target.checked)
+                        }
+                      />
+                      Image Generation Hosted Tool
+                    </label>
                   </div>
-                )}
-              </div>
-            )}
-
-            {currentStep.key === "review" && (
-              <div className="space-y-4">
-                <div className="rounded-lg border p-4">
-                  <label className="text-sm font-medium" htmlFor="plan-name">
-                    MultiRouter 名称
-                  </label>
-                  <Input
-                    id="plan-name"
-                    className="mt-2"
-                    value={draftPlanName}
-                    onChange={(event) => setDraftPlanName(event.target.value)}
-                    placeholder="例如：Codex MultiRouter - 工作主路由"
-                  />
-                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                    这个名称会保存到 provider
-                    列表、状态页和后续启用提示里。重命名只影响 MultiRouter
-                    方案本身，不会改动单个上游 provider 的名称。
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {currentStep.key === "prepare" && (
-              <div className="space-y-4">
-                <div className="flex flex-wrap gap-3">
                   <Button
-                    onClick={refreshModelSources}
-                    disabled={
-                      isRefreshingModels ||
-                      isProbingConnectivity ||
-                      draftSources.length === 0
+                    type="button"
+                    variant="outline"
+                    disabled={!activePlan}
+                    onClick={() =>
+                      activePlan && onOpenWorkspace(activePlan, "subagents")
                     }
                   >
-                    <RefreshCw
-                      className={`mr-2 h-4 w-4 ${
-                        isRefreshingModels ? "animate-spin" : ""
-                      }`}
-                    />
-                    自动获取模型列表（暂存）
+                    打开 Sub-Agent V2 高级工作台
                   </Button>
+                </div>
+              )}
+
+              {currentStep.key === "routing-review" && (
+                <div className="space-y-4">
+                  <div className="rounded-lg border p-4">
+                    <label className="text-sm font-medium" htmlFor="plan-name">
+                      MultiRouter 名称
+                    </label>
+                    <Input
+                      id="plan-name"
+                      className="mt-2"
+                      value={draftPlanName}
+                      onChange={(event) => setDraftPlanName(event.target.value)}
+                      placeholder="例如：Codex MultiRouter - 工作主路由"
+                    />
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                      这个名称会保存到 provider
+                      列表、状态页和后续启用提示里。重命名只影响 MultiRouter
+                      方案本身，不会改动单个上游 provider 的名称。
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {currentStep.key === "catalog" && (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap gap-3">
+                    <Button
+                      onClick={refreshModelSources}
+                      disabled={
+                        isRefreshingModels ||
+                        isProbingConnectivity ||
+                        draftSources.length === 0
+                      }
+                    >
+                      <RefreshCw
+                        className={`mr-2 h-4 w-4 ${
+                          isRefreshingModels ? "animate-spin" : ""
+                        }`}
+                      />
+                      自动获取模型列表
+                    </Button>
+                  </div>
+                  <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                    这里只同步和比较模型目录，结果保存在本次向导草稿；不会在本页改写协议，也不会启用当前配置。
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {draftSources.map((provider) => {
+                      const cardState =
+                        modelFetchCards[provider.id] ??
+                        defaultModelFetchCardState(provider);
+                      const diffText = formatModelFetchDiff(cardState.diff);
+                      return (
+                        <button
+                          key={provider.id}
+                          type="button"
+                          className="rounded-lg border p-3 text-left transition hover:border-primary/60 hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/40"
+                          onClick={() => onOpenProviderConfig?.(provider)}
+                          aria-label={`打开 ${provider.name} 配置页`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">
+                                {provider.name}
+                              </div>
+                              <div className="mt-2 text-sm text-muted-foreground">
+                                {cardState.modelCount} 个模型
+                              </div>
+                              <div className="mt-2 space-y-0.5 text-xs leading-5 text-muted-foreground">
+                                {modelSourceStatusDetails(provider).map(
+                                  (detail) => (
+                                    <div key={detail}>{detail}</div>
+                                  ),
+                                )}
+                              </div>
+                            </div>
+                            <Badge
+                              variant={modelFetchBadgeVariant(cardState.status)}
+                              className="shrink-0 gap-1"
+                            >
+                              {cardState.status === "loading" && (
+                                <RefreshCw className="h-3 w-3 animate-spin" />
+                              )}
+                              {modelFetchStatusLabel(cardState.status)}
+                            </Badge>
+                          </div>
+                          <div className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                            {cardState.message}
+                          </div>
+                          {diffText && (
+                            <div className="mt-2 line-clamp-2 rounded-md bg-primary/10 px-2 py-1 text-xs leading-5 text-primary">
+                              {diffText}
+                            </div>
+                          )}
+                          <div className="mt-2 text-xs text-muted-foreground">
+                            点击打开 provider 配置页
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {currentStep.key === "protocol" && (
+                <div className="space-y-4">
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900 dark:text-amber-200">
+                    每个普通 Provider/模型会分别验证 Responses 与 Chat
+                    Completions 的基础响应、流式
+                    SSE、推理语义、强制工具调用和工具结果续接。401/403/429、网络错误及
+                    5xx 会标记为认证或上游可用性问题，不会误判成协议不支持。
+                  </div>
                   <Button
-                    variant="outline"
                     onClick={requestConnectivityProbe}
                     disabled={
                       isRefreshingModels ||
@@ -2153,304 +2774,237 @@ export function CodexMultiRouterWizard({
                         isProbingConnectivity ? "animate-pulse" : ""
                       }`}
                     />
-                    开始兼容性深度探测
+                    {isProbingConnectivity
+                      ? "正在运行协议深探测"
+                      : "开始兼容性深度探测"}
                   </Button>
-                </div>
-                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
-                  连通性测试会对每个 provider 的每个可见模型分别发送
-                  /v1/responses 与 /v1/chat/completions 真实请求，输出上限为
-                  1024。测试结果会用来判断该 provider 应走 Responses 还是 Chat
-                  转换路径；通过只代表基础协议入口可用，不代表工具调用、流式输出、长上下文、多模态或真实
-                  Codex 会话一定完整正常。
-                </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  {draftSources.map((provider) => {
-                    const cardState =
-                      modelFetchCards[provider.id] ??
-                      defaultModelFetchCardState(provider);
-                    const diffText = formatModelFetchDiff(cardState.diff);
-                    return (
-                      <button
-                        key={provider.id}
-                        type="button"
-                        className="rounded-lg border p-3 text-left transition hover:border-primary/60 hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/40"
-                        onClick={() => onOpenProviderConfig?.(provider)}
-                        aria-label={`打开 ${provider.name} 配置页`}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate font-medium">
-                              {provider.name}
-                            </div>
-                            <div className="mt-2 text-sm text-muted-foreground">
-                              {cardState.modelCount} 个模型
-                            </div>
-                            <div className="mt-2 space-y-0.5 text-xs leading-5 text-muted-foreground">
-                              {modelSourceStatusDetails(provider).map(
-                                (detail) => (
-                                  <div key={detail}>{detail}</div>
-                                ),
-                              )}
-                            </div>
-                          </div>
-                          <Badge
-                            variant={modelFetchBadgeVariant(cardState.status)}
-                            className="shrink-0 gap-1"
-                          >
-                            {cardState.status === "loading" && (
-                              <RefreshCw className="h-3 w-3 animate-spin" />
-                            )}
-                            {modelFetchStatusLabel(cardState.status)}
-                          </Badge>
-                        </div>
-                        <div className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                          {cardState.message}
-                        </div>
-                        {diffText && (
-                          <div className="mt-2 line-clamp-2 rounded-md bg-primary/10 px-2 py-1 text-xs leading-5 text-primary">
-                            {diffText}
-                          </div>
-                        )}
-                        <div className="mt-2 text-xs text-muted-foreground">
-                          点击打开 provider 配置页
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-                {connectivityResults.length > 0 && (
-                  <div className="max-h-80 overflow-auto rounded-lg border">
-                    {connectivityResults.map((result, index) => (
-                      <div
-                        key={`${result.providerId}:${result.model}:${index}`}
-                        className="grid grid-cols-[7rem_1fr] gap-3 border-b px-3 py-2 text-sm last:border-b-0"
-                      >
-                        <Badge
-                          variant={
-                            result.status === "fail" ? "destructive" : "outline"
-                          }
-                          className="h-fit justify-center"
+                  {connectivityResults.length > 0 && (
+                    <div className="max-h-80 overflow-auto rounded-lg border">
+                      {connectivityResults.map((result, index) => (
+                        <div
+                          key={`${result.providerId}:${result.model}:${index}`}
+                          className="grid grid-cols-[7rem_1fr] gap-3 border-b px-3 py-2 text-sm last:border-b-0"
                         >
-                          {result.status}
-                        </Badge>
-                        <div>
-                          <div className="font-medium">
-                            {result.providerName} / {result.model}
-                          </div>
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            {result.detail}
+                          <Badge
+                            variant={
+                              result.status === "fail"
+                                ? "destructive"
+                                : "outline"
+                            }
+                            className="h-fit justify-center"
+                          >
+                            {result.status}
+                          </Badge>
+                          <div>
+                            <div className="font-medium">
+                              {result.providerName} / {result.model}
+                            </div>
+                            <div className="mt-1 text-xs text-muted-foreground">
+                              {result.detail}
+                            </div>
                           </div>
                         </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {currentStep.key === "models" && (
+                <div className="space-y-4">
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      setDraftSources(
+                        resolveWizardModelNameCollisions(draftSources),
+                      )
+                    }
+                  >
+                    <ShieldAlert className="mr-2 h-4 w-4" />
+                    重新计算重名别名
+                  </Button>
+                  <div className="rounded-lg border p-4 text-sm text-muted-foreground">
+                    同名策略：官方/订阅模型保留原名；中转站或第三方模型显示成
+                    gpt-5.4-mini-relay 这类别名，upstreamModel
+                    仍指向真实上游模型名。
+                  </div>
+                  {modelCollisions.length > 0 && (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
+                      检测到 {modelCollisions.length}{" "}
+                      组上游模型重名。点击下一步时会先应用别名策略，再生成路由。
+                    </div>
+                  )}
+                  <div className="max-h-72 overflow-auto rounded-lg border">
+                    {previewModels.slice(0, 80).map((model) => (
+                      <div
+                        key={`${model.model}:${model.upstreamModel ?? ""}`}
+                        className="flex items-center justify-between border-b px-3 py-2 text-sm last:border-b-0"
+                      >
+                        <span>{model.model}</span>
+                        <span className="text-muted-foreground">
+                          {model.upstreamModel &&
+                          model.upstreamModel !== model.model
+                            ? `上游 ${model.upstreamModel}`
+                            : "原名"}
+                        </span>
                       </div>
                     ))}
                   </div>
-                )}
-              </div>
-            )}
-
-            {currentStep.key === "prepare" && (
-              <div className="space-y-4">
-                <Button
-                  variant="outline"
-                  onClick={() =>
-                    setDraftSources(
-                      resolveWizardModelNameCollisions(draftSources),
-                    )
-                  }
-                >
-                  <ShieldAlert className="mr-2 h-4 w-4" />
-                  重新计算重名别名
-                </Button>
-                <div className="rounded-lg border p-4 text-sm text-muted-foreground">
-                  同名策略：官方/订阅模型保留原名；中转站或第三方模型显示成
-                  gpt-5.4-mini-relay 这类别名，upstreamModel
-                  仍指向真实上游模型名。
                 </div>
-                {modelCollisions.length > 0 && (
-                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
-                    检测到 {modelCollisions.length}{" "}
-                    组上游模型重名。点击下一步时会先应用别名策略，再生成路由。
-                  </div>
-                )}
-                <div className="max-h-72 overflow-auto rounded-lg border">
-                  {previewModels.slice(0, 80).map((model) => (
-                    <div
-                      key={`${model.model}:${model.upstreamModel ?? ""}`}
-                      className="flex items-center justify-between border-b px-3 py-2 text-sm last:border-b-0"
-                    >
-                      <span>{model.model}</span>
-                      <span className="text-muted-foreground">
-                        {model.upstreamModel &&
-                        model.upstreamModel !== model.model
-                          ? `上游 ${model.upstreamModel}`
-                          : "原名"}
-                      </span>
+              )}
+
+              {(currentStep.key === "models" ||
+                currentStep.key === "model-order") && (
+                <div className="space-y-4">
+                  {currentStep.key === "models" && (
+                    <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                      默认自动跟随 Provider
+                      的全部可用模型；只有取消某个模型时才进入固定筛选。模型排序、推理设置和
+                      Sub-Agent 分别在后续独立页面处理。
                     </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {currentStep.key === "review" && (
-              <div className="space-y-4">
-                <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
-                  默认自动跟随 Provider 的全部可用模型；Provider
-                  新增模型、上下文和能力后会直接更新。只有取消某个模型时才进入固定筛选，
-                  固定筛选不会自动接收后续新模型。V4 Pro / Flash 子 Agent
-                  角色会从可路由目录自动注册，无需在向导中手工选模型。
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setCatalogModelOrder(null)}
-                  >
-                    自动跟随全部模型
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => {
-                      setCatalogModelOrder([]);
-                      setDraftSpawnAgentModels([]);
-                    }}
-                  >
-                    全部取消
-                  </Button>
-                  <Badge variant="outline">
-                    已保留 {activeCatalogModelOrder.length} /{" "}
-                    {availableCatalogModels.length}
-                  </Badge>
-                  <Badge
-                    className={
-                      catalogModelOrder === null
-                        ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-500/50 dark:bg-emerald-500/10 dark:text-emerald-100"
-                        : "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-500/50 dark:bg-amber-500/10 dark:text-amber-100"
-                    }
-                  >
-                    {catalogModelOrder === null
-                      ? "自动跟随 Provider"
-                      : "固定模型筛选"}
-                  </Badge>
-                </div>
-                <div className="max-h-[min(50vh,34rem)] overflow-auto rounded-lg border">
-                  {selectModelRows.map((model) => {
-                    const kept = activeCatalogModelOrder.includes(model.model);
-                    const orderIndex = activeCatalogModelOrder.indexOf(
-                      model.model,
-                    );
-                    return (
-                      <div
-                        key={`${model.model}:${model.upstreamModel ?? ""}`}
-                        className="grid grid-cols-[2rem_minmax(0,1fr)_8rem_5rem] items-center gap-3 border-b px-3 py-2 text-sm last:border-b-0"
-                      >
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4"
-                          checked={kept}
-                          onChange={(event) =>
-                            toggleCatalogModel(
-                              model.model,
-                              event.target.checked,
-                            )
-                          }
-                          aria-label={`保留 ${model.model}`}
-                        />
-                        <div className="min-w-0">
-                          <div className="truncate font-medium">
-                            {model.model}
-                          </div>
-                          <div className="truncate text-xs text-muted-foreground">
-                            {model.upstreamModel &&
-                            model.upstreamModel !== model.model
-                              ? `上游 ${model.upstreamModel}`
-                              : model.displayName || "原名"}
-                          </div>
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          {model.contextWindow
-                            ? `${model.contextWindow} ctx`
-                            : "未标注上下文"}
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            disabled={!kept || orderIndex <= 0}
-                            onClick={() => moveCatalogModel(model.model, -1)}
-                            title="上移"
-                          >
-                            <ArrowUp className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            disabled={
-                              !kept ||
-                              orderIndex < 0 ||
-                              orderIndex >= activeCatalogModelOrder.length - 1
-                            }
-                            onClick={() => moveCatalogModel(model.model, 1)}
-                            title="下移"
-                          >
-                            <ArrowDown className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {currentStep.key === "review" && (
-              <div className="space-y-3">
-                <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">
-                      官方 ChatGPT 认证方式
-                    </label>
-                    <Select
-                      value={draftOfficialAuth.mode}
-                      onValueChange={(value) =>
-                        setDraftOfficialAuth({
-                          mode: value as CodexOfficialAuthMode,
-                        })
+                  )}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {currentStep.key === "models" && (
+                      <>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => setCatalogModelOrder(null)}
+                        >
+                          自动跟随全部模型
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => {
+                            setCatalogModelOrder([]);
+                            setDraftSpawnAgentModels([]);
+                          }}
+                        >
+                          全部取消
+                        </Button>
+                      </>
+                    )}
+                    <Badge variant="outline">
+                      已保留 {activeCatalogModelOrder.length} /{" "}
+                      {availableCatalogModels.length}
+                    </Badge>
+                    <Badge
+                      className={
+                        catalogModelOrder === null
+                          ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-500/50 dark:bg-emerald-500/10 dark:text-emerald-100"
+                          : "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-500/50 dark:bg-amber-500/10 dark:text-amber-100"
                       }
                     >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="desktop_current_login">
-                          Codex Desktop 当前登录
-                        </SelectItem>
-                        <SelectItem value="managed_oauth">
-                          CCSM OAuth
-                        </SelectItem>
-                        <SelectItem value="account_pool">
-                          OAuth 账号池
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
+                      {catalogModelOrder === null
+                        ? "自动跟随 Provider"
+                        : "固定模型筛选"}
+                    </Badge>
                   </div>
-                  {draftOfficialAuth.mode === "managed_oauth" ? (
+                  <div className="max-h-[min(50vh,34rem)] overflow-auto rounded-lg border">
+                    {(currentStep.key === "model-order"
+                      ? selectModelRows.filter((model) =>
+                          activeCatalogModelOrder.includes(model.model),
+                        )
+                      : selectModelRows
+                    ).map((model) => {
+                      const kept = activeCatalogModelOrder.includes(
+                        model.model,
+                      );
+                      const orderIndex = activeCatalogModelOrder.indexOf(
+                        model.model,
+                      );
+                      return (
+                        <div
+                          key={`${model.model}:${model.upstreamModel ?? ""}`}
+                          className={`grid items-center gap-3 border-b px-3 py-2 text-sm last:border-b-0 ${
+                            currentStep.key === "models"
+                              ? "grid-cols-[2rem_minmax(0,1fr)_8rem]"
+                              : "grid-cols-[minmax(0,1fr)_8rem_5rem]"
+                          }`}
+                        >
+                          {currentStep.key === "models" && (
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4"
+                              checked={kept}
+                              onChange={(event) =>
+                                toggleCatalogModel(
+                                  model.model,
+                                  event.target.checked,
+                                )
+                              }
+                              aria-label={`保留 ${model.model}`}
+                            />
+                          )}
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">
+                              {model.model}
+                            </div>
+                            <div className="truncate text-xs text-muted-foreground">
+                              {model.upstreamModel &&
+                              model.upstreamModel !== model.model
+                                ? `上游 ${model.upstreamModel}`
+                                : model.displayName || "原名"}
+                            </div>
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {model.contextWindow
+                              ? `${model.contextWindow} ctx`
+                              : "未标注上下文"}
+                          </div>
+                          {currentStep.key === "model-order" && (
+                            <div className="flex items-center gap-1">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8"
+                                disabled={!kept || orderIndex <= 0}
+                                onClick={() =>
+                                  moveCatalogModel(model.model, -1)
+                                }
+                                title="上移"
+                              >
+                                <ArrowUp className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8"
+                                disabled={
+                                  !kept ||
+                                  orderIndex < 0 ||
+                                  orderIndex >=
+                                    activeCatalogModelOrder.length - 1
+                                }
+                                onClick={() => moveCatalogModel(model.model, 1)}
+                                title="下移"
+                              >
+                                <ArrowDown className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {currentStep.key === "routing-review" && (
+                <div className="space-y-3">
+                  <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 md:grid-cols-2">
                     <div className="space-y-2">
                       <label className="text-sm font-medium">
-                        CCSM OAuth 账号
+                        官方 ChatGPT 认证方式
                       </label>
                       <Select
-                        value={draftOfficialAuth.accountId ?? "__default__"}
+                        value={draftOfficialAuth.mode}
                         onValueChange={(value) =>
                           setDraftOfficialAuth({
-                            mode: "managed_oauth",
-                            ...(value !== "__default__"
-                              ? { accountId: value }
-                              : {}),
+                            mode: value as CodexOfficialAuthMode,
                           })
                         }
                       >
@@ -2458,191 +3012,243 @@ export function CodexMultiRouterWizard({
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="__default__">
-                            CCSM 默认账号
+                          <SelectItem value="desktop_current_login">
+                            Codex Desktop 当前登录
                           </SelectItem>
-                          {draftOfficialAuth.accountId &&
-                          !codexOauthAccounts.some(
-                            (account) =>
-                              account.id === draftOfficialAuth.accountId,
-                          ) ? (
-                            <SelectItem value={draftOfficialAuth.accountId}>
-                              已保存账号 ({draftOfficialAuth.accountId})
-                            </SelectItem>
-                          ) : null}
-                          {codexOauthAccounts.map((account) => (
-                            <SelectItem key={account.id} value={account.id}>
-                              {account.login}
-                              {account.is_default ? "（默认）" : ""}
-                            </SelectItem>
-                          ))}
+                          <SelectItem value="managed_oauth">
+                            CCSM OAuth
+                          </SelectItem>
+                          <SelectItem value="account_pool">
+                            OAuth 账号池
+                          </SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
-                  ) : null}
-                  <div className="text-xs leading-5 text-muted-foreground md:col-span-2">
-                    {draftOfficialAuth.mode === "account_pool"
-                      ? "这个 MultiRouter 会按设置 > OAuth 中已启用账号池的顺序、保留额度和冷却状态选择账号。"
-                      : draftOfficialAuth.mode === "managed_oauth"
-                        ? "官方 route 使用 CCSM 保存的 OAuth 账号。"
-                        : "官方 route 复用 Codex Desktop 当前登录。三种方式都通过 CCSM 的 HTTP Responses 接管链路，WebSocket 不参与选路。"}
-                  </div>
-                  {existingPlan &&
-                  existingPlan.settingsConfig?.codexRouting?.schemaVersion !==
-                    2 ? (
-                    <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100 md:col-span-2">
-                      这是升级前的方案，当前选择由原 route
-                      绑定推断。编辑前需要先预览并显式应用 schema v2 迁移。
-                    </div>
-                  ) : null}
-                </div>
-                {previewRoutes.map((route) => (
-                  <div key={route.id} className="rounded-lg border p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="font-medium">
-                        {wizardRouteDisplayLabel(
-                          route,
-                          previewProvidersById.get(route.targetProviderId)
-                            ?.name,
-                        )}
+                    {draftOfficialAuth.mode === "managed_oauth" ? (
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">
+                          CCSM OAuth 账号
+                        </label>
+                        <Select
+                          value={draftOfficialAuth.accountId ?? "__default__"}
+                          onValueChange={(value) =>
+                            setDraftOfficialAuth({
+                              mode: "managed_oauth",
+                              ...(value !== "__default__"
+                                ? { accountId: value }
+                                : {}),
+                            })
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__default__">
+                              CCSM 默认账号
+                            </SelectItem>
+                            {draftOfficialAuth.accountId &&
+                            !codexOauthAccounts.some(
+                              (account) =>
+                                account.id === draftOfficialAuth.accountId,
+                            ) ? (
+                              <SelectItem value={draftOfficialAuth.accountId}>
+                                已保存账号 ({draftOfficialAuth.accountId})
+                              </SelectItem>
+                            ) : null}
+                            {codexOauthAccounts.map((account) => (
+                              <SelectItem key={account.id} value={account.id}>
+                                {account.login}
+                                {account.is_default ? "（默认）" : ""}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       </div>
-                      <Badge
-                        variant="outline"
-                        title={`Provider ID: ${route.targetProviderId}`}
-                      >
-                        {previewProvidersById.get(route.targetProviderId)
-                          ?.name ?? route.targetProviderId}
-                      </Badge>
+                    ) : null}
+                    <div className="text-xs leading-5 text-muted-foreground md:col-span-2">
+                      {draftOfficialAuth.mode === "account_pool"
+                        ? "这个 MultiRouter 会按设置 > OAuth 中已启用账号池的顺序、保留额度和冷却状态选择账号。"
+                        : draftOfficialAuth.mode === "managed_oauth"
+                          ? "官方 route 使用 CCSM 保存的 OAuth 账号。"
+                          : "官方 route 复用 Codex Desktop 当前登录。三种方式都通过 CCSM 的 HTTP Responses 接管链路，WebSocket 不参与选路。"}
                     </div>
-                    <div className="mt-2 text-sm text-muted-foreground">
-                      模型范围：
-                      {route.modelSelection?.mode === "all"
-                        ? "目标 Provider 的全部模型"
-                        : `${(route.modelSelection?.models ?? []).length} 个 canonical 模型`}
-                      ；前缀 {(route.matchPrefixes ?? []).join(", ") || "无"}
-                    </div>
-                    <div className="mt-2 text-xs leading-5 text-muted-foreground">
-                      认证：
-                      {route.authPolicy?.source === "native_codex_auth"
-                        ? "Codex Desktop 当前登录"
-                        : route.authPolicy?.source === "account_pool"
-                          ? "OAuth 账号池"
-                          : route.authPolicy?.source === "managed_codex_oauth"
-                            ? "CCSM OAuth"
-                            : "模型源凭据"}
-                      ；客户端传输：HTTP Responses
-                    </div>
-                    <div className="mt-2 rounded-md bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
-                      协议、连接地址、凭据和模型能力始终读取目标
-                      Provider/模型条目的最新配置；Route 不保存这些字段。
-                    </div>
+                    {existingPlan &&
+                    existingPlan.settingsConfig?.codexRouting?.schemaVersion !==
+                      2 ? (
+                      <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100 md:col-span-2">
+                        这是升级前的方案，当前选择由原 route
+                        绑定推断。编辑前需要先预览并显式应用 schema v2 迁移。
+                      </div>
+                    ) : null}
                   </div>
-                ))}
-                {aliasSelectionIssues.length > 0 ? (
-                  <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-                    <div className="font-medium">别名需要处理</div>
-                    <div className="mt-1 space-y-1 text-xs leading-5">
-                      {aliasSelectionIssues.map((issue) => (
-                        <div key={`${issue.routeId}:${issue.alias}`}>
-                          Route {issue.routeLabel || issue.routeId}
-                          {issue.routeLabel &&
-                          issue.routeLabel !== issue.routeId
-                            ? `（${issue.routeId}）`
-                            : ""}
-                          {issue.providerName
-                            ? ` / Provider ${issue.providerName}`
-                            : ""}
-                          的“{issue.alias}”→“{issue.canonicalModel}”：
-                          {issue.reason}
+                  {previewRoutes.map((route) => (
+                    <div key={route.id} className="rounded-lg border p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="font-medium">
+                          {wizardRouteDisplayLabel(
+                            route,
+                            previewProvidersById.get(route.targetProviderId)
+                              ?.name,
+                          )}
                         </div>
-                      ))}
+                        <Badge
+                          variant="outline"
+                          title={`Provider ID: ${route.targetProviderId}`}
+                        >
+                          {previewProvidersById.get(route.targetProviderId)
+                            ?.name ?? route.targetProviderId}
+                        </Badge>
+                      </div>
+                      <div className="mt-2 text-sm text-muted-foreground">
+                        模型范围：
+                        {route.modelSelection?.mode === "all"
+                          ? "目标 Provider 的全部模型"
+                          : `${(route.modelSelection?.models ?? []).length} 个 canonical 模型`}
+                        ；前缀 {(route.matchPrefixes ?? []).join(", ") || "无"}
+                      </div>
+                      <div className="mt-2 text-xs leading-5 text-muted-foreground">
+                        认证：
+                        {route.authPolicy?.source === "native_codex_auth"
+                          ? "Codex Desktop 当前登录"
+                          : route.authPolicy?.source === "account_pool"
+                            ? "OAuth 账号池"
+                            : route.authPolicy?.source === "managed_codex_oauth"
+                              ? "CCSM OAuth"
+                              : "模型源凭据"}
+                        ；客户端传输：HTTP Responses
+                      </div>
+                      <div className="mt-2 rounded-md bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
+                        协议、连接地址、凭据和模型能力始终读取目标
+                        Provider/模型条目的最新配置；Route 不保存这些字段。
+                      </div>
                     </div>
-                  </div>
-                ) : null}
-              </div>
-            )}
-
-            {currentStep.key === "activate" &&
-              flowState.status !== "enabled" && (
-                <div className="space-y-4">
-                  <div className="rounded-lg border p-4 text-sm text-muted-foreground">
-                    将保存 {previewRoutes.length} 条路由和{" "}
-                    {previewModels.length} 个可见模型到{" "}
-                    {activePlan ? activePlan.name : "新的 MultiRouter"}。
-                  </div>
-                  {draftSources.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-amber-500/40 bg-amber-500/10 p-4 text-sm leading-6 text-amber-900 dark:text-amber-100">
-                      尚未选择模型源，保存入口仍保留；请回到“选择模型源”添加并配置至少一个
-                      Provider 后再保存。
+                  ))}
+                  {aliasSelectionIssues.length > 0 ? (
+                    <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                      <div className="font-medium">别名需要处理</div>
+                      <div className="mt-1 space-y-1 text-xs leading-5">
+                        {aliasSelectionIssues.map((issue) => (
+                          <div key={`${issue.routeId}:${issue.alias}`}>
+                            Route {issue.routeLabel || issue.routeId}
+                            {issue.routeLabel &&
+                            issue.routeLabel !== issue.routeId
+                              ? `（${issue.routeId}）`
+                              : ""}
+                            {issue.providerName
+                              ? ` / Provider ${issue.providerName}`
+                              : ""}
+                            的“{issue.alias}”→“{issue.canonicalModel}”：
+                            {issue.reason}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   ) : null}
-                  <Button
-                    onClick={saveMultiRouterPlan}
-                    disabled={
-                      isSavingPlan ||
-                      editingTargetMissing ||
-                      draftSources.length === 0 ||
-                      aliasSelectionIssues.length > 0 ||
-                      (connectivityResults.length > 0 &&
-                        !canContinueAfterConnectivity(connectivityResults))
-                    }
-                  >
-                    <Database className="mr-2 h-4 w-4" />
-                    {isSavingPlan ? "正在保存..." : "保存并发布"}
-                  </Button>
                 </div>
               )}
 
-            {currentStep.key === "activate" &&
-              flowState.status !== "enabled" && (
-                <div className="space-y-4">
-                  <div className="rounded-lg border p-4 text-sm leading-6 text-muted-foreground">
-                    保存完成后，请显式启用这个多路路由。启用成功后可继续完成独立设置，
-                    也可以稍后关闭向导，再到 MultiRouter
-                    状态页完成真实请求验证。
-                  </div>
-                  <div className="flex flex-wrap gap-3">
+              {currentStep.key === "save-enable" &&
+                flowState.status !== "enabled" && (
+                  <div className="space-y-4">
+                    <div className="rounded-lg border p-4 text-sm text-muted-foreground">
+                      将保存 {previewRoutes.length} 条路由和{" "}
+                      {previewModels.length} 个可见模型到{" "}
+                      {activePlan ? activePlan.name : "新的 MultiRouter"}。
+                    </div>
+                    {draftSources.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-amber-500/40 bg-amber-500/10 p-4 text-sm leading-6 text-amber-900 dark:text-amber-100">
+                        尚未选择模型源，保存入口仍保留；请回到“选择模型源”添加并配置至少一个
+                        Provider 后再保存。
+                      </div>
+                    ) : null}
                     <Button
-                      onClick={enableSavedPlan}
-                      disabled={!savedPlan || isEnablingPlan}
+                      onClick={saveMultiRouterPlan}
+                      disabled={
+                        isSavingPlan ||
+                        editingTargetMissing ||
+                        draftSources.length === 0 ||
+                        aliasSelectionIssues.length > 0 ||
+                        (connectivityResults.length > 0 &&
+                          !canContinueAfterConnectivity(connectivityResults))
+                      }
                     >
-                      <CheckCircle2 className="mr-2 h-4 w-4" />
-                      启用这个多路路由
-                    </Button>
-                    <Button
-                      variant="outline"
-                      disabled={!savedPlan}
-                      onClick={() => {
-                        if (!savedPlan) return;
-                        closeWizard(false);
-                        onOpenWorkspace(savedPlan, "status");
-                      }}
-                    >
-                      <Route className="mr-2 h-4 w-4" />
-                      打开状态页继续验证
+                      <Database className="mr-2 h-4 w-4" />
+                      {isSavingPlan ? "正在保存..." : "保存并发布"}
                     </Button>
                   </div>
-                </div>
-              )}
+                )}
 
-            {currentStep.key === "activate" &&
-              flowState.status === "enabled" &&
-              savedPlan && (
+              {currentStep.key === "save-enable" &&
+                flowState.status !== "enabled" && (
+                  <div className="space-y-4">
+                    <div className="rounded-lg border p-4 text-sm leading-6 text-muted-foreground">
+                      保存完成后，请显式启用这个多路路由。启用成功后可继续完成独立设置，
+                      也可以稍后关闭向导，再到 MultiRouter
+                      状态页完成真实请求验证。
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      <Button
+                        onClick={enableSavedPlan}
+                        disabled={!savedPlan || isEnablingPlan}
+                      >
+                        <CheckCircle2 className="mr-2 h-4 w-4" />
+                        启用这个多路路由
+                      </Button>
+                      <Button
+                        variant="outline"
+                        disabled={!savedPlan}
+                        onClick={() => {
+                          if (!savedPlan) return;
+                          closeWizard(false);
+                          onOpenWorkspace(savedPlan, "status");
+                        }}
+                      >
+                        <Route className="mr-2 h-4 w-4" />
+                        打开状态页继续验证
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+              {currentStep.key === "acceptance" && savedPlan && (
                 <div className="space-y-4">
                   <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4">
                     <div className="flex items-start gap-3">
                       <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
                       <div>
                         <div className="font-medium text-emerald-900 dark:text-emerald-100">
-                          MultiRouter 已启用，继续完成可选设置
+                          MultiRouter 已启用，等待真实请求验收
                         </div>
                         <div className="mt-1 text-sm leading-6 text-emerald-900/80 dark:text-emerald-100/80">
-                          协议探测和路由已经保存。下面的入口彼此独立，不会重新拆分
-                          Provider，也不会把推理强度或 Sub-Agent
-                          设置混进协议事务。
+                          请在 Codex
+                          中发送一次真实请求；只有路由命中、上游返回且下游收到合法终止事件才算完成。
+                          HTTP 200 或只收到响应头不代表请求完整结束。
                         </div>
                       </div>
                     </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-3">
+                    <Button
+                      type="button"
+                      onClick={() => onOpenWorkspace(savedPlan, "status")}
+                    >
+                      <Route className="mr-2 h-4 w-4" />
+                      打开状态页完成验收
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => closeWizard(false)}
+                    >
+                      稍后验收
+                    </Button>
+                  </div>
+
+                  <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                    验收与下面的历史修复、推理强度、Sub-Agent、模型顺序入口彼此独立，不会重新执行协议探测或拆分
+                    Provider。
                   </div>
 
                   <div className="grid gap-3 sm:grid-cols-2">
@@ -2722,14 +3328,9 @@ export function CodexMultiRouterWizard({
                       </span>
                     </Button>
                   </div>
-
-                  <div className="flex justify-end">
-                    <Button type="button" onClick={() => closeWizard(false)}>
-                      稍后完成
-                    </Button>
-                  </div>
                 </div>
               )}
+            </fieldset>
           </div>
         </div>
 
@@ -2899,8 +3500,8 @@ export function CodexMultiRouterWizard({
               上一步
             </Button>
             <Button onClick={advanceWizard}>
-              {stepIndex === STEPS.length - 1 ? "关闭" : "下一步"}
-              {stepIndex !== STEPS.length - 1 && (
+              {stepIndex === steps.length - 1 ? "关闭" : "下一步"}
+              {stepIndex !== steps.length - 1 && (
                 <ArrowRight className="ml-2 h-4 w-4" />
               )}
             </Button>

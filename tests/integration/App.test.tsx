@@ -145,7 +145,9 @@ vi.mock("@/components/codex/CodexMultiRouterWizard", () => ({
     open,
     mode,
     planId,
+    newlyCreatedProviderIds,
     onOpenChange,
+    onCreateProvider,
     onOpenHistoryRepair,
   }: any) =>
     open ? (
@@ -153,8 +155,10 @@ vi.mock("@/components/codex/CodexMultiRouterWizard", () => ({
         data-testid="codex-multirouter-wizard"
         data-mode={mode}
         data-plan-id={planId ?? ""}
+        data-new-provider-ids={(newlyCreatedProviderIds ?? []).join(",")}
       >
         <button onClick={() => onOpenChange(false)}>close-wizard</button>
+        <button onClick={() => onCreateProvider?.()}>add-provider</button>
         <button onClick={() => onOpenHistoryRepair?.()}>
           open-history-repair
         </button>
@@ -538,6 +542,44 @@ describe("App integration with MSW", () => {
     expect(wizard).toHaveAttribute("data-mode", "create");
     expect(wizard).toHaveAttribute("data-plan-id", "");
   });
+
+  it("returns a provider created from the wizard to the same draft by its new id", async () => {
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    fireEvent.click(screen.getByText("switch-codex"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "codex-1",
+      ),
+    );
+    fireEvent.click(screen.getByText("open-multirouter-entry"));
+    fireEvent.click(await screen.findByText("创建新配置"));
+    fireEvent.click(await screen.findByText("add-provider"));
+    expect(screen.getByTestId("add-provider-dialog")).toBeInTheDocument();
+
+    setProviders("codex", {
+      "wizard-new-source": {
+        id: "wizard-new-source",
+        name: "Wizard New Source",
+        settingsConfig: {
+          baseUrl: "https://example.invalid/v1",
+          modelCatalog: { models: [{ model: "wizard-model" }] },
+        },
+        category: "custom",
+        sortIndex: 0,
+        createdAt: Date.now(),
+      },
+    });
+    fireEvent.click(screen.getByText("close-add"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("codex-multirouter-wizard")).toHaveAttribute(
+        "data-new-provider-ids",
+        "wizard-new-source",
+      ),
+    );
+  }, 30_000);
 
   it("routes the wizard history-repair action to the Codex session manager exactly once", async () => {
     const { default: App } = await import("@/App");
