@@ -835,28 +835,76 @@ pub(crate) fn write_codex_config_only_with_common_config(
     db: &Database,
     provider: &Provider,
 ) -> Result<(), AppError> {
-    let mut effective_provider = provider.clone();
-    effective_provider.settings_config =
-        build_effective_settings_with_common_config(db, &AppType::Codex, provider)?;
-    let settings_for_live = codex_settings_for_live_projection(&effective_provider);
-    let settings = settings_for_live
-        .as_object()
-        .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
-    let config_text = settings.get("config").and_then(|value| value.as_str());
-
+    let config_text = build_codex_live_config_for_provider(db, provider)?;
+    let settings_for_live = codex_settings_for_live_projection(provider);
     let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
     crate::codex_config::write_codex_provider_config_only_with_catalog_and_provider_context(
         &settings_for_live,
-        effective_provider.category.as_deref(),
-        config_text,
+        provider.category.as_deref(),
+        Some(&config_text),
         crate::codex_config::CodexCatalogToolProfile::from_api_format(
-            effective_provider
+            provider
                 .meta
                 .as_ref()
                 .and_then(|meta| meta.api_format.as_deref()),
         ),
         &provider_context,
     )
+}
+
+/// Build the exact Codex `config.toml` payload used by CCSM's live writer,
+/// without touching any files. Common Config is merged before schema-v2
+/// projection so callers can compare or persist the same effective settings.
+pub(crate) fn build_codex_live_config_for_provider(
+    db: &Database,
+    provider: &Provider,
+) -> Result<String, AppError> {
+    let mut effective_provider = provider.clone();
+    effective_provider.settings_config =
+        build_effective_settings_with_common_config(db, &AppType::Codex, provider)?;
+
+    let is_v2_router = effective_provider
+        .settings_config
+        .get("codexRouting")
+        .and_then(|routing| crate::codex_multirouter::schema::CodexRoutingDocument::parse(routing).ok())
+        .is_some_and(|document| {
+            matches!(
+                document,
+                crate::codex_multirouter::schema::CodexRoutingDocument::V2(_)
+            )
+        });
+    if is_v2_router {
+        let artifact = crate::codex_multirouter::projection::build_projection_artifact(
+            db,
+            &effective_provider.id,
+        )?;
+        crate::codex_multirouter::projection::apply_projection_owned_settings(
+            &mut effective_provider.settings_config,
+            &artifact.projection_settings,
+        );
+    }
+
+    let settings_for_live = codex_settings_for_live_projection(&effective_provider);
+    let config_text = settings_for_live
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
+    let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(&effective_provider);
+    let prepared = crate::codex_config::prepare_codex_config_text_with_model_catalog_and_provider_context(
+        &settings_for_live,
+        config_text,
+        profile,
+        &provider_context,
+    )?;
+    let prepared = if effective_provider.category.as_deref() == Some("official")
+        && crate::settings::unify_codex_session_history()
+    {
+        crate::codex_config::inject_codex_unified_session_bucket(&prepared)?
+    } else {
+        prepared
+    };
+    Ok(prepared)
 }
 
 pub(crate) fn strip_common_config_from_live_settings(
@@ -1407,6 +1455,38 @@ pub(crate) fn sync_current_provider_for_app_to_live(
     Ok(())
 }
 
+pub(crate) fn sync_codex_router_provider(
+    state: &AppState,
+    provider: &Provider,
+) -> Result<(), AppError> {
+    let has_live_backup = block_on_tauri_runtime(state.db.get_live_backup("codex"))
+        .ok()
+        .flatten()
+        .is_some();
+    let live_taken_over = state
+        .proxy_service
+        .detect_takeover_in_live_config_for_app(&AppType::Codex);
+
+    if has_live_backup || live_taken_over {
+        block_on_tauri_runtime(
+            state
+                .proxy_service
+                .update_live_backup_from_provider("codex", provider),
+        )
+        .map_err(|e| AppError::Message(format!("更新 Codex Live 备份失败: {e}")))?;
+    } else {
+        write_codex_config_only_with_common_config(state.db.as_ref(), provider)?;
+    }
+
+    crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
+        state.db.as_ref(),
+        &provider.id,
+        true,
+    )?;
+
+    Ok(())
+}
+
 fn sync_current_provider_for_app_respecting_takeover(
     state: &AppState,
     app_type: &AppType,
@@ -1430,11 +1510,7 @@ fn sync_current_provider_for_app_respecting_takeover(
             .and_then(Value::as_u64)
             == Some(2)
     {
-        crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
-            state.db.as_ref(),
-            &provider.id,
-            true,
-        )?;
+        sync_codex_router_provider(state, provider)?;
         return Ok(());
     }
 

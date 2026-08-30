@@ -37,7 +37,8 @@ pub(crate) use live::sanitize_claude_settings_for_live;
 pub(crate) use live::{
     build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
     provider_exists_in_live_config, strip_common_config_from_live_settings,
-    sync_current_provider_for_app_to_live, write_codex_config_only_with_common_config,
+    sync_codex_router_provider, sync_current_provider_for_app_to_live,
+    write_codex_config_only_with_common_config,
     write_live_with_common_config,
 };
 
@@ -4942,6 +4943,75 @@ requires_openai_auth = true
             "unexpected error: {error}"
         );
     }
+
+    #[test]
+    #[serial]
+    fn codex_v2_router_common_config_sync_updates_live_toml() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+
+        let target = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "secret"},
+                "config": "model = \"qwen3.8\"\n",
+                "modelCatalog": {"models": [{"model": "qwen3.8"}]}
+            }),
+            None,
+        );
+        let router = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({
+                "auth": {},
+                "config": "model_reasoning_effort = \"high\"\n",
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "routes": [{
+                        "id": "route-qwen",
+                        "enabled": true,
+                        "targetProviderId": "qwen",
+                        "modelSelection": {"mode": "all"},
+                        "authPolicy": {"source": "provider_config"}
+                    }]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &target).expect("save target");
+        db.save_provider("codex", &router).expect("save router");
+        db.set_current_provider("codex", "router")
+            .expect("set current router");
+        crate::settings::set_current_provider(&AppType::Codex, Some("router"))
+            .expect("set local current router");
+        db.set_config_snippet(
+            "codex",
+            Some("model_reasoning_effort = \"medium\"\n".to_string()),
+        )
+        .expect("save common config");
+
+        crate::codex_config::write_codex_live_config_atomic(Some(
+            "model_reasoning_effort = \"high\"\n",
+        ))
+        .expect("seed stale live config");
+
+        ProviderService::sync_current_provider_for_app(&state, AppType::Codex)
+            .expect("sync router");
+
+        let live = crate::codex_config::read_codex_config_text().expect("read live config");
+        let parsed = live.parse::<toml::Value>().expect("parse live config");
+        assert_eq!(
+            parsed
+                .get("model_reasoning_effort")
+                .and_then(toml::Value::as_str),
+            Some("medium"),
+            "V2 Router sync must publish the latest Common Config into live TOML"
+        );
+    }
 }
 
 impl ProviderService {
@@ -6711,11 +6781,7 @@ impl ProviderService {
         };
 
         if Self::is_codex_schema_v2_router(&app_type, provider) {
-            crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
-                state.db.as_ref(),
-                &provider.id,
-                true,
-            )?;
+            sync_codex_router_provider(state, provider)?;
             return Ok(());
         }
 
