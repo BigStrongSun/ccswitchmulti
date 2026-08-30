@@ -1744,10 +1744,21 @@ impl ProxyService {
         }
     }
 
-    /// Refresh a CCSwitchMulti-owned Codex catalog on application startup even
-    /// when the persisted takeover flag has drifted. A user-managed external
-    /// catalog is never rewritten.
+    /// Refresh a CCSwitchMulti-owned Codex catalog on application startup only
+    /// while Codex takeover is enabled. A stale generated-catalog pointer in
+    /// Live config is not ownership proof after takeover has been disabled, so
+    /// it must never trigger a new projection into the user's catalog.
     pub(crate) async fn reconcile_codex_owned_projection_on_startup(&self) -> Result<bool, String> {
+        let takeover_config = self
+            .db
+            .get_proxy_config_for_app(AppType::Codex.as_str())
+            .await
+            .map_err(|e| format!("读取 Codex 启动接管状态失败: {e}"))?;
+        if !takeover_config.enabled {
+            log::debug!("Codex 接管未启用，跳过启动时自有模型目录对账");
+            return Ok(false);
+        }
+
         let live_config = self.read_codex_live()?;
         let config_text = live_config
             .get("config")
@@ -5971,7 +5982,7 @@ wire_api = "responses"
 
     #[tokio::test]
     #[serial]
-    async fn codex_startup_reconciles_owned_catalog_when_takeover_flag_drifted() {
+    async fn codex_startup_skips_owned_catalog_when_takeover_disabled() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
@@ -6014,6 +6025,10 @@ wire_api = "responses"
         db.update_proxy_config_for_app(proxy_config)
             .await
             .expect("simulate drifted takeover flag");
+        service
+            .stop()
+            .await
+            .expect("stop proxy to simulate disabled local hosting");
 
         let catalog_path = crate::codex_config::get_codex_model_catalog_path();
         let mut stale_catalog: Value =
@@ -6029,10 +6044,10 @@ wire_api = "responses"
         crate::config::write_json_file(&catalog_path, &stale_catalog)
             .expect("seed stale generated catalog");
 
-        assert!(service
+        assert!(!service
             .reconcile_codex_owned_projection_on_startup()
             .await
-            .expect("reconcile owned startup projection"));
+            .expect("skip owned startup projection when takeover is disabled"));
         let refreshed: Value =
             crate::config::read_json_file(&catalog_path).expect("read refreshed catalog");
         let qwen = refreshed["models"]
@@ -6041,8 +6056,8 @@ wire_api = "responses"
             .iter()
             .find(|entry| entry["slug"] == "qwen3.8")
             .expect("Qwen entry");
-        assert_eq!(qwen["supports_image_detail_original"], true);
-        assert_eq!(qwen["supportsImageDetailOriginal"], true);
+        assert_eq!(qwen["supports_image_detail_original"], false);
+        assert_eq!(qwen["supportsImageDetailOriginal"], false);
     }
 
     #[tokio::test]
