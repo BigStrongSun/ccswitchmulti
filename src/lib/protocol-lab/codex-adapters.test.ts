@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { CodexProtocolProbeProgressEvent } from "@/lib/api/protocol-compatibility";
+
 import {
   createBatchCodexProtocolLabAdapter,
   createSingleCodexProtocolLabAdapter,
@@ -113,24 +115,38 @@ describe("batch Codex Protocol Lab adapter", () => {
       },
     };
     const normalizedProvider = { ...provider, name: "Provider One Normalized" };
-    const preflightCodexProviderProtocolCompatibility = vi.fn(async () => ({
-      provider: normalizedProvider,
-      adaptationPreview: {
-        persistence: "single" as const,
-        status: "ready" as const,
-        effectiveTransport: "open_ai_responses" as const,
-        models: [],
+    const preflightCodexProviderProtocolCompatibility = vi.fn(
+      async (
+        _provider: unknown,
+        onProgress: (event: CodexProtocolProbeProgressEvent) => void,
+      ) => {
+        onProgress({
+          kind: "candidate_finished",
+          model: "qwen3.8",
+          selectedTransport: "open_ai_responses",
+          readiness: "verified",
+        });
+        return {
+          provider: normalizedProvider,
+          adaptationPreview: {
+            persistence: "single" as const,
+            status: "ready" as const,
+            effectiveTransport: "open_ai_responses" as const,
+            models: [],
+          },
+          records: [],
+          observations: [],
+          receiptIds: ["receipt-one"],
+          protocolApplied: false,
+        };
       },
-      records: [],
-      observations: [],
-      receiptIds: ["receipt-one"],
-      protocolApplied: false,
-    }));
+    );
     const adapter = createBatchCodexProtocolLabAdapter({
       preflightCodexProviderProtocolCompatibility,
     } as never);
     const router = { ...provider, id: "router-one", name: "Router One" };
 
+    const onProgress = vi.fn();
     const result = await adapter.preflight(
       {
         sources: [
@@ -139,12 +155,20 @@ describe("batch Codex Protocol Lab adapter", () => {
         ],
         router,
       },
-      vi.fn(),
+      onProgress,
     );
 
     expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalledTimes(
       1,
     );
+    expect(onProgress).toHaveBeenCalledWith({
+      kind: "candidate_finished",
+      providerId: "provider-one",
+      providerName: "Provider One",
+      model: "qwen3.8",
+      selectedTransport: "open_ai_responses",
+      readiness: "verified",
+    });
     expect(result.outcome.sources).toEqual([
       { provider: normalizedProvider, receiptIds: ["receipt-one"] },
       { provider: manualProvider, receiptIds: [] },

@@ -19,7 +19,6 @@ import {
 import { cn } from "@/lib/utils";
 import type {
   CodexProtocolCompatibilityRecord,
-  CodexProtocolProbeProgressEvent,
   CodexProtocolProbeFailure,
   CodexProtocolProbeReadiness,
   CodexProtocolProbeStage,
@@ -29,6 +28,10 @@ import type {
   CodexReasoningSemantic,
   CodexReasoningSource,
 } from "@/lib/api/protocol-compatibility";
+import type {
+  CodexProviderProtocolProbeTarget,
+  CodexProviderScopedProtocolProbeProgressEvent,
+} from "@/lib/protocol-lab/codex-adapters";
 import type { CodexHistoryReplay, CodexToolSchemaDialect } from "@/types";
 
 type VisibleStageStatus = CodexProtocolProbeStageStatus | "pending" | "running";
@@ -45,7 +48,10 @@ interface BranchProgress {
 }
 
 interface ModelProgress {
+  key: string;
   model: string;
+  providerId: string | null;
+  providerName: string | null;
   branches: Record<CodexProtocolTransport, BranchProgress>;
   selectedTransport: CodexProtocolTransport | null;
   readiness: CodexProtocolProbeReadiness | null;
@@ -55,7 +61,8 @@ interface CodexProtocolProbeProgressDialogProps {
   open: boolean;
   running: boolean;
   expectedModels?: string[];
-  events: CodexProtocolProbeProgressEvent[];
+  expectedTargets?: CodexProviderProtocolProbeTarget[];
+  events: CodexProviderScopedProtocolProbeProgressEvent[];
   outcome: CodexProviderProtocolPreflightOutcome | null;
   error: string;
   onOpenChange: (open: boolean) => void;
@@ -94,9 +101,20 @@ function emptyBranch(): BranchProgress {
   };
 }
 
-function emptyModel(model: string): ModelProgress {
+function progressKey(model: string, providerId?: string | null): string {
+  return providerId ? `${providerId}\u0000${model}` : model;
+}
+
+function emptyModel(
+  model: string,
+  providerId?: string | null,
+  providerName?: string | null,
+): ModelProgress {
   return {
+    key: progressKey(model, providerId),
     model,
+    providerId: providerId ?? null,
+    providerName: providerName ?? null,
     branches: {
       open_ai_responses: emptyBranch(),
       open_ai_chat: emptyBranch(),
@@ -152,21 +170,38 @@ function applyRecord(
 
 function buildProgress(
   expectedModels: string[],
-  events: CodexProtocolProbeProgressEvent[],
+  expectedTargets: CodexProviderProtocolProbeTarget[],
+  events: CodexProviderScopedProtocolProbeProgressEvent[],
   outcome: CodexProviderProtocolPreflightOutcome | null,
 ): ModelProgress[] {
   const models = new Map<string, ModelProgress>();
-  const ensure = (model: string) => {
-    const current = models.get(model) ?? emptyModel(model);
-    models.set(model, current);
+  const scoped =
+    expectedTargets.length > 0 ||
+    events.some((event) => Boolean(event.providerId));
+  const ensure = (
+    model: string,
+    providerId?: string | null,
+    providerName?: string | null,
+  ) => {
+    const key = progressKey(model, scoped ? providerId : null);
+    const current =
+      models.get(key) ??
+      emptyModel(model, scoped ? providerId : null, providerName);
+    models.set(key, current);
     return current;
   };
 
-  for (const model of expectedModels) ensure(model);
+  if (expectedTargets.length > 0) {
+    for (const target of expectedTargets) {
+      ensure(target.model, target.providerId, target.providerName);
+    }
+  } else {
+    for (const model of expectedModels) ensure(model);
+  }
 
   for (const event of events) {
     if (!("model" in event)) continue;
-    const model = ensure(event.model);
+    const model = ensure(event.model, event.providerId, event.providerName);
     if (event.kind === "candidate_started") continue;
     if (event.kind === "candidate_finished") {
       model.selectedTransport = event.selectedTransport;
@@ -200,7 +235,11 @@ function buildProgress(
   }
 
   for (const record of outcome?.records ?? []) {
-    const model = ensure(record.target.public_model);
+    const model = ensure(
+      record.target.public_model,
+      scoped ? outcome?.provider.id : null,
+      scoped ? outcome?.provider.name : null,
+    );
     applyRecord(model, record);
   }
   return [...models.values()];
@@ -303,6 +342,7 @@ export function CodexProtocolProbeProgressDialog({
   open,
   running,
   expectedModels = [],
+  expectedTargets = [],
   events,
   outcome,
   error,
@@ -310,8 +350,8 @@ export function CodexProtocolProbeProgressDialog({
   onRetry,
 }: CodexProtocolProbeProgressDialogProps) {
   const models = useMemo(
-    () => buildProgress(expectedModels, events, outcome),
-    [expectedModels, events, outcome],
+    () => buildProgress(expectedModels, expectedTargets, events, outcome),
+    [expectedModels, expectedTargets, events, outcome],
   );
   const completedModels = models.filter((model) => model.readiness !== null);
   const completed = completedModels.length;
@@ -385,12 +425,21 @@ export function CodexProtocolProbeProgressDialog({
           )}
           {models.map((model) => (
             <article
-              key={model.model}
-              aria-label={`${model.model} 探测进度`}
+              key={model.key}
+              aria-label={`${
+                model.providerName ? `${model.providerName} · ` : ""
+              }${model.model} 探测进度`}
               className="space-y-3 rounded-lg border border-border-default bg-muted/10 p-4"
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="font-medium text-foreground">{model.model}</h3>
+                <div>
+                  <h3 className="font-medium text-foreground">{model.model}</h3>
+                  {model.providerName && (
+                    <p className="text-xs text-muted-foreground">
+                      {model.providerName}
+                    </p>
+                  )}
+                </div>
                 <div className="flex items-center gap-2 text-xs">
                   {model.selectedTransport && (
                     <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-sky-700 dark:text-sky-300">

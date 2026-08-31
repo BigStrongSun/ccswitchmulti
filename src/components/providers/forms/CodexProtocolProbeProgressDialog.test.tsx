@@ -55,6 +55,82 @@ describe("CodexProtocolProbeProgressDialog", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps duplicate public model names distinct across provider batches", () => {
+    const expectedTargets = [
+      {
+        providerId: "kimi-responses",
+        providerName: "Kimi Responses",
+        model: "k3",
+      },
+      {
+        providerId: "kimi-chat",
+        providerName: "Kimi Chat",
+        model: "k3",
+      },
+    ];
+    const events: Array<
+      CodexProtocolProbeProgressEvent & {
+        providerId: string;
+        providerName: string;
+      }
+    > = [
+      {
+        kind: "candidate_finished",
+        providerId: "kimi-responses",
+        providerName: "Kimi Responses",
+        model: "k3",
+        selectedTransport: "open_ai_chat",
+        readiness: "verified",
+      },
+      {
+        kind: "batch_finished",
+        providerId: "kimi-responses",
+        providerName: "Kimi Responses",
+        total: 1,
+        verified: 1,
+        partial: 0,
+        failed: 0,
+      },
+      {
+        kind: "candidate_finished",
+        providerId: "kimi-chat",
+        providerName: "Kimi Chat",
+        model: "k3",
+        selectedTransport: "open_ai_chat",
+        readiness: "verified",
+      },
+      {
+        kind: "batch_finished",
+        providerId: "kimi-chat",
+        providerName: "Kimi Chat",
+        total: 1,
+        verified: 1,
+        partial: 0,
+        failed: 0,
+      },
+    ];
+
+    render(
+      <CodexProtocolProbeProgressDialog
+        open
+        running={false}
+        expectedModels={["k3", "k3"]}
+        {...{ expectedTargets }}
+        events={events}
+        outcome={null}
+        error=""
+        onOpenChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("已完成 2 个模型：Verified 2，Partial 0，Failed 0。"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(screen.getByText("Kimi Responses")).toBeInTheDocument();
+    expect(screen.getByText("Kimi Chat")).toBeInTheDocument();
+  });
+
   it("shows the verified tool schema and history replay strategy for each branch", () => {
     const outcome = {
       provider: {

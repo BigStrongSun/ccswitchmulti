@@ -192,6 +192,18 @@ export interface CodexProviderSetBatchProbeOutcome {
   sources: CodexProviderSetBatchSource[];
 }
 
+export interface CodexProviderProtocolProbeTarget {
+  providerId: string;
+  providerName: string;
+  model: string;
+}
+
+export type CodexProviderScopedProtocolProbeProgressEvent =
+  CodexProtocolProbeProgressEvent & {
+    providerId?: string;
+    providerName?: string;
+  };
+
 interface BatchCodexProtocolLabApi {
   preflightCodexProviderProtocolCompatibility: typeof preflightCodexProviderProtocolCompatibility;
   prepareCodexProviderSetBatch: typeof prepareCodexProviderSetBatch;
@@ -209,7 +221,7 @@ export type BatchCodexProtocolLabAdapter = ProtocolLabAdapter<
   CodexProviderAdaptationView[],
   CodexProviderSetBatchPreview,
   CodexProviderSetBatchCommitOutcome,
-  CodexProtocolProbeProgressEvent,
+  CodexProviderScopedProtocolProbeProgressEvent,
   CodexProviderSetBatchProbeOutcome,
   CodexProviderSetBatchCommitOutcome
 >;
@@ -243,7 +255,12 @@ export function createBatchCodexProtocolLabAdapter(
         }
         const outcome = await api.preflightCodexProviderProtocolCompatibility(
           source.provider,
-          onProgress,
+          (event) =>
+            onProgress({
+              ...event,
+              providerId: source.provider.id,
+              providerName: source.provider.name,
+            }),
         );
         outcomes.push({
           providerId: source.provider.id,

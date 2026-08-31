@@ -3302,9 +3302,16 @@ export function CodexMultiRouterWizard({
         <CodexProtocolProbeProgressDialog
           open={probeDialogOpen}
           running={batchProtocolLab.state.phase === "probing"}
-          expectedModels={(batchProtocolLab.state.draft?.sources ?? []).flatMap(
-            (source) =>
-              codexProviderModelsRequiringProtocolProbe(source.provider),
+          expectedTargets={(
+            batchProtocolLab.state.draft?.sources ?? []
+          ).flatMap((source) =>
+            codexProviderModelsRequiringProtocolProbe(source.provider).map(
+              (model) => ({
+                providerId: source.provider.id,
+                providerName: source.provider.name,
+                model,
+              }),
+            ),
           )}
           events={batchProtocolLab.state.progress}
           outcome={
