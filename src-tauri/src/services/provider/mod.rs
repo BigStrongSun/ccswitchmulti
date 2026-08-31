@@ -21,6 +21,7 @@ use crate::error::AppError;
 use crate::protocol_compatibility::ProtocolCompatibilityRecord;
 use crate::provider::{Provider, UsageResult};
 use crate::services::mcp::McpService;
+use crate::services::profile::{ProfileScope, ProfileService};
 use crate::settings::CustomEndpoint;
 use crate::store::AppState;
 
@@ -2778,6 +2779,25 @@ wire_api = "responses"
             .expect("set current provider");
         crate::settings::set_current_provider(&AppType::Codex, Some("openai"))
             .expect("set local current provider");
+        let profile_id = "active-codex-profile";
+        db.save_profile(&crate::database::Profile {
+            id: profile_id.to_string(),
+            name: "Active Codex".to_string(),
+            payload: json!({
+                "providers": {"codex": "openai"},
+                "mcp": {"codex": ["computer-use"]},
+                "skills": {"codex": ["local:code-review"]},
+                "prompts": {"codex": "codex-prompt"}
+            })
+            .to_string(),
+            sort_order: None,
+            created_at: Some(1),
+            updated_at: Some(1),
+        })
+        .expect("save active profile");
+        db.set_current_profile_id("codex", Some(profile_id))
+            .expect("activate profile");
+
         ProviderService::switch(&state, AppType::Codex, "deepseek")
             .expect("switch to DeepSeek through local proxy");
 
@@ -2812,7 +2832,128 @@ wire_api = "responses"
                 .enabled,
             "switching a Codex Chat Completions provider should enable Codex takeover"
         );
+        let profile = db
+            .get_profile(profile_id)
+            .expect("read active profile")
+            .expect("active profile exists");
+        let payload: Value = serde_json::from_str(&profile.payload).expect("parse profile payload");
+        assert_eq!(
+            payload.pointer("/providers/codex"),
+            Some(&json!("deepseek"))
+        );
+        assert_eq!(
+            payload.pointer("/mcp/codex/0"),
+            Some(&json!("computer-use"))
+        );
+        assert_eq!(
+            payload.pointer("/skills/codex/0"),
+            Some(&json!("local:code-review"))
+        );
+        assert_eq!(
+            payload.pointer("/prompts/codex"),
+            Some(&json!("codex-prompt"))
+        );
+
+        let mut malformed_profile = profile;
+        malformed_profile.payload = "{".to_string();
+        db.save_profile(&malformed_profile)
+            .expect("seed malformed active profile payload");
+        let switch_back = ProviderService::switch(&state, AppType::Codex, "openai")
+            .expect("a completed hot switch must not be reported as failed by profile sync");
+        assert_eq!(
+            switch_back.warnings,
+            vec!["profile_provider_snapshot_sync_failed".to_string()]
+        );
+        assert_eq!(
+            crate::settings::get_effective_current_provider(&db, &AppType::Codex)
+                .expect("read effective current provider")
+                .as_deref(),
+            Some("openai"),
+            "the Provider switch completed before profile synchronization failed"
+        );
+
         state.proxy_service.stop().await.expect("stop proxy");
+    }
+
+    #[test]
+    #[serial]
+    fn updating_the_active_router_repairs_a_stale_profile_before_projection() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+
+        let mut target = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "secret"},
+                "config": "model = \"qwen3.8\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"responses\"\n",
+                "modelCatalog": {"models": [{"model": "qwen3.8"}]}
+            }),
+            None,
+        );
+        target.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        let router = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({
+                "auth": {},
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "routes": [{
+                        "id": "route-qwen",
+                        "enabled": true,
+                        "targetProviderId": "qwen",
+                        "modelSelection": {"mode": "all"},
+                        "authPolicy": {"source": "provider_config"}
+                    }]
+                }
+            }),
+            None,
+        );
+
+        db.save_provider("codex", &target).expect("seed target");
+        db.save_provider("codex", &router).expect("seed router");
+        db.set_current_provider("codex", "router")
+            .expect("mark router current");
+        crate::settings::set_current_provider(&AppType::Codex, Some("router"))
+            .expect("mark local router current");
+        db.save_profile(&crate::database::Profile {
+            id: "workspace".to_string(),
+            name: "Workspace".to_string(),
+            payload: json!({"providers": {"codex": "old-provider"}}).to_string(),
+            sort_order: None,
+            created_at: Some(1),
+            updated_at: Some(1),
+        })
+        .expect("seed stale profile");
+        db.set_current_profile_id("codex", Some("workspace"))
+            .expect("activate stale profile");
+
+        ProviderService::update(&state, AppType::Codex, Some("router"), router)
+            .expect("update active router");
+
+        let profile = db
+            .get_profile("workspace")
+            .expect("read profile")
+            .expect("profile exists");
+        let payload: serde_json::Value =
+            serde_json::from_str(&profile.payload).expect("parse profile payload");
+        assert_eq!(payload["providers"]["codex"], "router");
+        let projection =
+            crate::codex_multirouter::projection::inspect_active_codex_multirouter_projection(&db)
+                .expect("inspect projection")
+                .expect("active projection exists");
+        assert_ne!(
+            projection.last_error_code.as_deref(),
+            Some("codex_multirouter_projection_not_active"),
+            "the repaired profile must no longer reject the active Router: {projection:#?}"
+        );
     }
 
     #[test]
@@ -2992,6 +3133,21 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             .expect("set current provider");
         crate::settings::set_current_provider(&AppType::Codex, Some("openai"))
             .expect("set local current provider");
+        db.save_profile(&crate::database::Profile {
+            id: "active-workspace".to_string(),
+            name: "Active workspace".to_string(),
+            payload: json!({
+                "providers": {"codex": "openai"},
+                "mcp": {"codex": ["matrix"]}
+            })
+            .to_string(),
+            sort_order: None,
+            created_at: Some(1),
+            updated_at: Some(1),
+        })
+        .expect("save stale active profile");
+        db.set_current_profile_id("codex", Some("active-workspace"))
+            .expect("activate stale profile");
         assert_eq!(
             db.get_provider_by_id("openai", "codex")
                 .expect("read target before switch")
@@ -5552,9 +5708,15 @@ impl ProviderService {
             return Ok(true);
         }
 
+        // Resolve current ownership before the domain mutation. A stale active-project
+        // snapshot otherwise makes the projection publisher reject the current Router,
+        // leaving a successful Provider save with a permanently pending live catalog.
         let effective_current =
             crate::settings::get_effective_current_provider(&state.db, &app_type)?;
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
+        if is_current && Self::is_codex_schema_v2_router(&app_type, &provider) {
+            Self::sync_active_profile_provider_snapshot(state, &app_type, &provider.id)?;
+        }
 
         // Save through the Codex domain mutation so Provider edits, catalog refreshes and
         // MultiRouter plan saves all share the same compiler/projection lifecycle.
@@ -5916,6 +6078,18 @@ impl ProviderService {
         if !Self::is_codex_schema_v2_router(app_type, provider) {
             return Ok(Vec::new());
         }
+        if let Err(error) =
+            Self::sync_active_profile_provider_snapshot(state, app_type, &provider.id)
+        {
+            log::warn!(
+                "Codex Router 已切换，但当前项目 Provider 快照同步失败，无法发布新的共享投影，error_kind={}",
+                app_error_diagnostic_kind(&error)
+            );
+            return Ok(vec![
+                "profile_provider_snapshot_sync_failed".to_string(),
+                "codex_multirouter_projection_pending".to_string(),
+            ]);
+        }
         let status = crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
             state.db.as_ref(),
             &provider.id,
@@ -5925,6 +6099,17 @@ impl ProviderService {
             return Ok(vec!["codex_multirouter_projection_pending".to_string()]);
         }
         Ok(Vec::new())
+    }
+
+    pub(crate) fn sync_active_profile_provider_snapshot(
+        state: &AppState,
+        app_type: &AppType,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let Some(scope) = ProfileScope::for_app(app_type) else {
+            return Ok(());
+        };
+        ProfileService::update_current_provider_snapshot(state, scope, provider_id)
     }
 
     fn finish_codex_subagent_v2_mutation(
@@ -6308,6 +6493,40 @@ impl ProviderService {
     ///    d. Write target provider config to live files
     ///    e. Sync MCP configuration
     pub fn switch(state: &AppState, app_type: AppType, id: &str) -> Result<SwitchResult, AppError> {
+        let mut result = Self::switch_inner(state, app_type.clone(), id)?;
+
+        // The device-level provider and active project snapshot are two views
+        // of the same successful switch. Keep them aligned only after every
+        // live/proxy mutation has succeeded. This synchronization is
+        // best-effort because the switch has already happened; reporting an
+        // error here would tell the UI that a successful switch failed.
+        if let Some(scope) = ProfileScope::for_app(&app_type) {
+            if let Err(error) = Self::sync_active_profile_provider_snapshot(state, &app_type, id) {
+                log::warn!(
+                    "切换供应商成功，但同步当前项目 Provider 快照失败，scope={} error_kind={}",
+                    scope.as_str(),
+                    app_error_diagnostic_kind(&error)
+                );
+                if !result
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "profile_provider_snapshot_sync_failed")
+                {
+                    result
+                        .warnings
+                        .push("profile_provider_snapshot_sync_failed".to_string());
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn switch_inner(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<SwitchResult, AppError> {
         // Check if provider exists
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let _provider = providers
@@ -6779,6 +6998,8 @@ impl ProviderService {
         let Some(provider) = providers.get(&current_id) else {
             return Ok(());
         };
+
+        Self::sync_active_profile_provider_snapshot(state, &app_type, &provider.id)?;
 
         if Self::is_codex_schema_v2_router(&app_type, provider) {
             sync_codex_router_provider(state, provider)?;

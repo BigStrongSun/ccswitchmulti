@@ -360,11 +360,29 @@ pub(crate) fn should_emit_startup_event(state: CodexConfigConsistencyState) -> b
     state == CodexConfigConsistencyState::ExternalDrift
 }
 
+fn repair_current_profile_provider_before_inspection(state: &AppState) -> Result<(), AppError> {
+    let Some(provider_id) =
+        crate::settings::get_effective_current_provider(&state.db, &AppType::Codex)?
+    else {
+        return Ok(());
+    };
+    crate::services::provider::ProviderService::sync_active_profile_provider_snapshot(
+        state,
+        &AppType::Codex,
+        &provider_id,
+    )
+}
+
 /// Run the one-shot live-config reconciliation after startup writers and proxy
 /// recovery have settled. Emitting an event is deliberately best-effort for
 /// startup: a UI listener can query the same report as a race-free fallback.
 pub(crate) async fn reconcile_after_startup(app: &tauri::AppHandle) -> Result<(), AppError> {
     let state = app.state::<AppState>();
+    if repair_current_profile_provider_before_inspection(&state).is_err() {
+        log::warn!(
+            "Codex 当前 Provider 已恢复，但活跃项目快照仍无法同步，error_kind=profile_provider_snapshot_sync_failed"
+        );
+    }
     let report = inspect(&state)?;
     if should_emit_startup_event(report.state) {
         app.emit("codex-config-consistency", &report)
@@ -702,12 +720,35 @@ mod tests {
         live["desktop"]["composerPlainTextMode"] = toml_edit::value(true);
         live["mcp_servers"]["node_repl"]["command"] =
             toml_edit::value(r"C:\Program Files\Codex\node_repl.exe");
+        live["mcp_servers"]["cua_repl"]["command"] =
+            toml_edit::value(r"C:\Program Files\Codex\cua_repl.exe");
         live["mcp_servers"]["node_repl"]["env"]["BROWSER_USE_CODEX_APP_VERSION"] =
             toml_edit::value("26.825.6671.0");
+        live["mcp_servers"]["node_repl"]["env"]["BROWSER_USE_TINYSKY_ENABLED"] =
+            toml_edit::value("true");
+        live["mcp_servers"]["node_repl"]["env"]["CODEX_CLI_PATH"] =
+            toml_edit::value(r"C:\Program Files\Codex\codex.exe");
+        live["mcp_servers"]["node_repl"]["env"]["NODE_REPL_NODE_MODULE_DIRS"] =
+            toml_edit::value(r"C:\Program Files\Codex\node_modules");
+        live["mcp_servers"]["node_repl"]["env"]["NODE_REPL_NODE_PATH"] =
+            toml_edit::value(r"C:\Program Files\Codex\node.exe");
+        live["mcp_servers"]["node_repl"]["env"]["NODE_REPL_TRUSTED_CODE_PATHS"] =
+            toml_edit::value(r"C:\Program Files\Codex");
+        live["mcp_servers"]["node_repl"]["env"]["NODE_REPL_TRUSTED_SERVICES"] =
+            toml_edit::value("codex-app");
+        live["mcp_servers"]["node_repl"]["env"]["SKY_CUA_NATIVE_PIPE_DIRECTORY"] =
+            toml_edit::value(r"C:\Users\sunda\AppData\Local\Temp\codex-cua");
         live["mcp_servers"]["cua_repl"]["enabled"] = toml_edit::value(true);
         live["plugins"]["codex-app-tools@openai-bundled"]["enabled"] = toml_edit::value(true);
-        live["projects"][r"c:\users\sunda\documents\new-project"]["trust_level"] =
-            toml_edit::value("trusted");
+        for project in [
+            r"c:\users\sunda\appdata\local\temp\ccsm-qwen-coalesce-canary-20260817-1355",
+            r"c:\users\sunda\documents\chatgpt\acps比赛",
+            r"c:\users\sunda\documents\codex\2026-08-24\w",
+            r"c:\users\sunda\documents\llm-api-protocol-bridge",
+            r"c:\users\sunda\documents\wit和codex与acps adapter",
+        ] {
+            live["projects"][project]["trust_level"] = toml_edit::value("trusted");
+        }
         live["wire_api"] = toml_edit::value("responses");
         codex_config::write_codex_live_config_atomic(Some(&live.to_string()))
             .expect("write Codex-owned changes");
@@ -716,6 +757,85 @@ mod tests {
 
         assert_eq!(result.state, CodexConfigConsistencyState::Consistent);
         assert!(result.changed_keys.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_reports_when_qwen_is_left_on_the_chatgpt_account_provider() {
+        let _home = TestHomeGuard::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let (state, _) = seed_provider();
+        let provider = state
+            .db
+            .get_provider_by_id("consistency-provider", AppType::Codex.as_str())
+            .expect("read provider")
+            .expect("provider exists");
+        let expected = build_codex_live_config_for_provider(&state.db, &provider)
+            .expect("build expected live config");
+        let mut live = expected
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse expected config");
+        live["model_provider"] = toml_edit::value("openai");
+        live["agents"]["max_threads"] = toml_edit::value(16);
+        codex_config::write_codex_live_config_atomic(Some(&live.to_string()))
+            .expect("write provider drift");
+
+        let result = inspect(&state).expect("inspect config consistency");
+
+        assert_eq!(result.state, CodexConfigConsistencyState::ExternalDrift);
+        assert_eq!(result.changed_keys, vec!["model_provider"]);
+    }
+
+    #[test]
+    #[serial]
+    fn startup_inspection_repairs_a_legacy_stale_profile_provider() {
+        let _home = TestHomeGuard::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let (state, _) = seed_provider();
+        state
+            .db
+            .save_provider(
+                AppType::Codex.as_str(),
+                &Provider::with_id(
+                    "old-provider".to_string(),
+                    "Old provider".to_string(),
+                    json!({}),
+                    None,
+                ),
+            )
+            .expect("save old provider");
+        state
+            .db
+            .save_profile(&crate::database::Profile {
+                id: "workspace".to_string(),
+                name: "Workspace".to_string(),
+                payload: json!({
+                    "providers": {"codex": "old-provider"},
+                    "mcp": {"codex": ["matrix"]}
+                })
+                .to_string(),
+                sort_order: None,
+                created_at: Some(1),
+                updated_at: Some(1),
+            })
+            .expect("save stale profile");
+        state
+            .db
+            .set_current_profile_id("codex", Some("workspace"))
+            .expect("activate stale profile");
+
+        repair_current_profile_provider_before_inspection(&state)
+            .expect("repair startup provider ownership");
+
+        let profile = state
+            .db
+            .get_profile("workspace")
+            .expect("read profile")
+            .expect("profile exists");
+        let payload: serde_json::Value =
+            serde_json::from_str(&profile.payload).expect("parse payload");
+        assert_eq!(payload["providers"]["codex"], "consistency-provider");
+        assert_eq!(payload["mcp"]["codex"][0], "matrix");
     }
 
     #[test]

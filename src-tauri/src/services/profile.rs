@@ -246,6 +246,48 @@ impl ProfileService {
         Ok(payload)
     }
 
+    /// Keep the active project's captured Provider slot aligned with a
+    /// successful device-level switch without resnapshotting unrelated state.
+    ///
+    /// A `None` Provider slot means that this profile has never captured the
+    /// scope, so switching outside profile application must not silently create
+    /// ownership for it. MCP, Skills, and Prompt snapshots are intentionally
+    /// left byte-for-byte equivalent after serde normalization.
+    pub(crate) fn update_current_provider_snapshot(
+        state: &AppState,
+        scope: ProfileScope,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let Some(profile_id) = state.db.get_current_profile_id(scope.as_str())? else {
+            return Ok(());
+        };
+        let mut profile = state
+            .db
+            .get_profile(&profile_id)?
+            .ok_or_else(|| AppError::InvalidInput(format!("Profile not found: {profile_id}")))?;
+        let mut payload: ProfilePayload = serde_json::from_str(&profile.payload)
+            .map_err(|e| AppError::Config(format!("解析 profile payload 失败: {e}")))?;
+
+        let mut changed = false;
+        for app in scope.apps() {
+            let Some(slot) = payload.providers.get_mut(app) else {
+                continue;
+            };
+            if slot.is_some() && slot.as_deref() != Some(provider_id) {
+                *slot = Some(provider_id.to_string());
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+
+        profile.payload = serde_json::to_string(&payload)
+            .map_err(|e| AppError::Config(format!("序列化 profile payload 失败: {e}")))?;
+        profile.updated_at = Some(chrono::Utc::now().timestamp());
+        state.db.save_profile(&profile)
+    }
+
     /// 列出所有项目（项目实体全应用共享，current 标记按分组单独读取）
     pub fn list(state: &AppState) -> Result<Vec<Profile>, AppError> {
         state.db.get_all_profiles()
@@ -574,6 +616,52 @@ mod tests {
             )
             .expect("resolve active router"),
             Some("router-new".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_snapshot_sync_does_not_capture_an_uncaptured_profile_slot() {
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+        db.save_profile(&Profile {
+            id: "workspace".to_string(),
+            name: "Workspace".to_string(),
+            payload: serde_json::json!({
+                "providers": {"claude": "claude-existing"},
+                "mcp": {"codex": ["matrix"]},
+                "skills": {"codex": ["review"]},
+                "prompts": {"codex": "codex-prompt"}
+            })
+            .to_string(),
+            sort_order: None,
+            created_at: Some(1),
+            updated_at: Some(1),
+        })
+        .expect("save profile");
+        db.set_current_profile_id("codex", Some("workspace"))
+            .expect("activate profile");
+        let state = AppState::new(db.clone());
+
+        ProfileService::update_current_provider_snapshot(&state, ProfileScope::Codex, "deepseek")
+            .expect("uncaptured provider slot is a no-op");
+
+        let saved = db
+            .get_profile("workspace")
+            .expect("read profile")
+            .expect("profile exists");
+        let payload: ProfilePayload =
+            serde_json::from_str(&saved.payload).expect("parse profile payload");
+        assert_eq!(payload.providers.codex, None);
+        assert_eq!(
+            payload.providers.claude,
+            Some("claude-existing".to_string())
+        );
+        assert_eq!(payload.mcp.codex, Some(ids(&["matrix"])));
+        assert_eq!(payload.skills.codex, Some(ids(&["review"])));
+        assert_eq!(payload.prompts.codex, Some("codex-prompt".to_string()));
+        assert_eq!(
+            saved.updated_at,
+            Some(1),
+            "a no-op must not rewrite metadata"
         );
     }
 

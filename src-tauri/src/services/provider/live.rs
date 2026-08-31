@@ -866,7 +866,9 @@ pub(crate) fn build_codex_live_config_for_provider(
     let is_v2_router = effective_provider
         .settings_config
         .get("codexRouting")
-        .and_then(|routing| crate::codex_multirouter::schema::CodexRoutingDocument::parse(routing).ok())
+        .and_then(|routing| {
+            crate::codex_multirouter::schema::CodexRoutingDocument::parse(routing).ok()
+        })
         .is_some_and(|document| {
             matches!(
                 document,
@@ -891,12 +893,13 @@ pub(crate) fn build_codex_live_config_for_provider(
         .unwrap_or("");
     let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
     let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(&effective_provider);
-    let prepared = crate::codex_config::prepare_codex_config_text_with_model_catalog_and_provider_context(
-        &settings_for_live,
-        config_text,
-        profile,
-        &provider_context,
-    )?;
+    let prepared =
+        crate::codex_config::prepare_codex_config_text_with_model_catalog_and_provider_context(
+            &settings_for_live,
+            config_text,
+            profile,
+            &provider_context,
+        )?;
     let prepared = if effective_provider.category.as_deref() == Some("official")
         && crate::settings::unify_codex_session_history()
     {
@@ -1501,6 +1504,12 @@ fn sync_current_provider_for_app_respecting_takeover(
     let Some(provider) = providers.get(&current_id) else {
         return Ok(());
     };
+
+    // Older versions could leave the active project pointing at a previous
+    // Provider even though device-local current state had already changed.
+    // Repair that ownership view before a Router projection checks which
+    // Provider is allowed to publish the shared Codex catalog.
+    super::ProviderService::sync_active_profile_provider_snapshot(state, app_type, &provider.id)?;
 
     if matches!(app_type, AppType::Codex)
         && provider
