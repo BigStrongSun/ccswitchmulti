@@ -4781,3 +4781,12 @@ supported in one streaming turn`。
 - `apply_ccsm` 保留 managed projection 的 CAS 与可恢复 backup，但写入改为把预期活动路由字段合并进确认时再次读取的 live 文档；所有不属于 CCSM 的表和字段原样保留。`model_catalog_json` 不再把任意路径都规范化成同一占位符，存在但指向其它目录同样属于真实路由漂移。
 - TDD 先稳定复现三类旧行为：Codex/Desktop 字段导致 `ExternalDrift`、changed paths 混入用户字段、应用 CCSM 后 Desktop/MCP/project 状态消失；另补模型目录指针被错误视为一致的 RED。修复后 `codex_config_consistency` 11/11 通过。完整 Rust、安装器和安装态弹窗复验尚未执行，不得把源码定向验证等同于已发布修复。
 - 外部复核使用两条独立链：Codex 内置搜索读取 OpenAI 当前 `ConfigToml`/schema；Matrix WebSearch 搜索无结果后直读同一官方 raw 源码。两链与本地 `codex-source-latest@a9519cbc` 一致确认 `developer_instructions`、MCP、projects、plugins、desktop、agents 和 `model_catalog_json` 均是合法顶层配置，而 `wire_api` 仅属于 `ModelProviderInfo`。
+
+## 2026-08-31 启动提示优先级与可点击性收口
+
+- 根因不是 z-index 太低。异常退出恢复结果由 Sonner 以顶部、永久且可操作的 toast 展示，Sonner 自带 `z-index: 999999999`；Codex 本地路由提醒、首次运行说明和配置一致性提醒则是 Radix modal Dialog。Radix modal 会锁焦点并将 Dialog 外区域设为 inert/禁用指针事件，因此 toast 会出现“视觉在最上层但按钮和关闭键点不了”的矛盾状态。7 月的路由提醒与 8 月的恢复通知各自实现时没有启动级调度，是组合后的领域缺口，继续抬高 z-index 不能修复。
+- `App` 现在先等待 pending recovery outcomes 和 settings 初次读取完成，再统一选择唯一启动提示；优先级固定为“异常恢复通知 → Codex 配置对账 → 首次运行说明 → Codex 本地路由提醒”。低优先级提示只暂停显示，不会清除其 hook/report/settings 状态，前一个处理后会自动继续。运行期新到达的 recovery event 也能抢占低优先级 Dialog，处理后恢复原提示。
+- 非 info 的 recovery outcome 在 toast 创建时加入待处理 ID 集；“打开日志”和关闭 toast 都会原子移出对应 ID 并执行既有 acknowledgement。待处理集合非空时不挂载任何启动 modal，因此可见 toast 不再处于 `body.style.pointerEvents = none` 的不可点击背景里。首次运行 Dialog 新增默认开启的 `enabled` 门控，仅供 App 排队，不改变独立使用语义。
+- 本机安装态日志给出了真实竞态证据：generation 22 在 `2026-08-31T12:02:33+08:00` 同时记录 `uncleanExit` warning 与 Codex `startupTakeoverRestored`，warning 到 `12:19:07` 才被确认；这说明两种提示确实共享一次启动周期。当前安装进程仍是修复前二进制，本条只记录现场，不把它当修复后 UI 验收。
+- TDD 回归在旧代码上先真实 RED：同一启动同时满足 recovery、配置漂移、首次运行和 Codex takeover 时，路由 Dialog 已挂载且 `body.style.pointerEvents` 为 `none`。修复后回归逐个点击四层提示，证明任何时刻只显示一层且最后的路由确认按钮可关闭；相关 19/19、前端全量 165 files/1306 tests、`pnpm typecheck`、Prettier、renderer build 和 `git diff --check` 通过。测试套件仍输出既有的 Tauri window mock、MSW 未注册命令和部分 act warning，但无失败。
+- 外部交叉验证使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链。两者均读取 Radix 官方 Dialog 文档/源码，确认 modal content 会自动 trap focus、overlay 覆盖 inert 区域，且 Portal 渲染到 body；因此本轮采用单一启动提示调度，而不是 CSS 层级补丁。未构建或安装新 installer，修复后真实桌面点击验收仍待新二进制。

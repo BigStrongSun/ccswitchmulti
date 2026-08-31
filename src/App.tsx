@@ -208,6 +208,10 @@ function App() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const shownRecoveryOutcomeIds = useRef(new Set<string>());
+  const [pendingRecoveryOutcomeIds, setPendingRecoveryOutcomeIds] = useState(
+    () => new Set<string>(),
+  );
+  const [recoveryOutcomesLoaded, setRecoveryOutcomesLoaded] = useState(false);
   const codexConfigConsistency = useCodexConfigConsistency();
 
   const acknowledgeRecoveryOutcome = (outcome: RecoveryOutcome) => {
@@ -218,6 +222,16 @@ function App() {
       });
   };
 
+  const completeRecoveryOutcome = (outcome: RecoveryOutcome) => {
+    setPendingRecoveryOutcomeIds((current) => {
+      if (!current.has(outcome.id)) return current;
+      const next = new Set(current);
+      next.delete(outcome.id);
+      return next;
+    });
+    acknowledgeRecoveryOutcome(outcome);
+  };
+
   const showRecoveryOutcome = (outcome: RecoveryOutcome) => {
     if (
       outcome.severity === "info" ||
@@ -226,6 +240,10 @@ function App() {
       return;
     }
     shownRecoveryOutcomeIds.current.add(outcome.id);
+    setPendingRecoveryOutcomeIds((current) => {
+      if (current.has(outcome.id)) return current;
+      return new Set(current).add(outcome.id);
+    });
     const title = t(`notifications.recovery.kind.${outcome.kind}`, {
       defaultValue: t("notifications.recovery.unknown"),
     });
@@ -252,11 +270,11 @@ function App() {
       action: {
         label: t("notifications.recovery.openLogs"),
         onClick: () => {
-          acknowledgeRecoveryOutcome(outcome);
+          completeRecoveryOutcome(outcome);
           void settingsApi.openLogDir();
         },
       },
-      onDismiss: () => acknowledgeRecoveryOutcome(outcome),
+      onDismiss: () => completeRecoveryOutcome(outcome),
     };
     if (outcome.severity === "error") {
       toast.error(title, options);
@@ -276,7 +294,8 @@ function App() {
       .then((outcomes) => outcomes.forEach(showRecoveryOutcome))
       .catch((error) => {
         console.debug("[App] Failed to read recovery outcomes", error);
-      });
+      })
+      .finally(() => setRecoveryOutcomesLoaded(true));
   }, [t]);
 
   const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
@@ -338,7 +357,7 @@ function App() {
     }
   }, [activeApp, currentView]);
 
-  const { data: settingsData } = useSettingsQuery();
+  const { data: settingsData, isFetched: settingsFetched } = useSettingsQuery();
   const useAppWindowControls =
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
@@ -434,6 +453,22 @@ function App() {
   const codexLocalRoutingNotice = useCodexLocalRoutingNotice(
     Boolean(isProxyRunning && takeoverStatus?.codex),
   );
+  const hasCodexConfigConsistencyAttention =
+    codexConfigConsistency.report?.state === "external_drift";
+  const hasFirstRunAttention =
+    settingsData != null && settingsData.firstRunNoticeConfirmed !== true;
+  const activeStartupAttention =
+    !recoveryOutcomesLoaded || !settingsFetched
+      ? null
+      : pendingRecoveryOutcomeIds.size > 0
+        ? "recovery"
+        : hasCodexConfigConsistencyAttention
+          ? "codex-config-consistency"
+          : hasFirstRunAttention
+            ? "first-run"
+            : codexLocalRoutingNotice.isOpen
+              ? "codex-local-routing"
+              : null;
 
   const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
     isProxyRunning,
@@ -2276,7 +2311,7 @@ function App() {
       />
 
       <Dialog
-        open={codexLocalRoutingNotice.isOpen}
+        open={activeStartupAttention === "codex-local-routing"}
         onOpenChange={(open) => {
           if (!open) {
             codexLocalRoutingNotice.dismiss();
@@ -2301,9 +2336,13 @@ function App() {
       </Dialog>
 
       <DeepLinkImportDialog />
-      <FirstRunNoticeDialog />
+      <FirstRunNoticeDialog enabled={activeStartupAttention === "first-run"} />
       <CodexConfigConsistencyDialog
-        report={codexConfigConsistency.report}
+        report={
+          activeStartupAttention === "codex-config-consistency"
+            ? codexConfigConsistency.report
+            : null
+        }
         pending={codexConfigConsistency.pending}
         error={codexConfigConsistency.error}
         onApply={() => void codexConfigConsistency.resolve("apply_ccsm")}

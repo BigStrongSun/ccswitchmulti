@@ -1,6 +1,7 @@
 import { Suspense, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -8,13 +9,16 @@ import {
   fireEvent,
 } from "@testing-library/react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { http, HttpResponse } from "msw";
 import { providersApi } from "@/lib/api/providers";
 import {
   resetProviderState,
   setCurrentProviderId,
   setLiveProviderIds,
   setProviders,
+  setSettings,
 } from "../msw/state";
+import { server } from "../msw/server";
 import { emitTauriEvent } from "../msw/tauriMocks";
 
 const toastSuccessMock = vi.fn();
@@ -383,6 +387,114 @@ describe("App integration with MSW", () => {
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalled();
     });
+  }, 30_000);
+
+  it("serializes startup attention so every visible recovery and routing action stays clickable", async () => {
+    setSettings({ firstRunNoticeConfirmed: false });
+    server.use(
+      http.post("http://tauri.local/get_pending_recovery_outcomes", () =>
+        HttpResponse.json([
+          {
+            id: "unclean-exit-1",
+            generation: 7,
+            operation: "startup",
+            kind: "uncleanExit",
+            severity: "warning",
+            appType: "codex",
+            keptFields: [],
+            lostFields: [],
+            nextStep: "reviewRecoveryResults",
+            timestamp: "2026-08-31T10:00:00Z",
+          },
+        ]),
+      ),
+      http.post("http://tauri.local/acknowledge_recovery_outcomes", () =>
+        HttpResponse.json(true),
+      ),
+      http.post("http://tauri.local/get_proxy_status", () =>
+        HttpResponse.json({
+          running: true,
+          address: "127.0.0.1",
+          port: 17801,
+          active_connections: 0,
+          total_requests: 0,
+          success_requests: 0,
+          failed_requests: 0,
+          success_rate: 0,
+          uptime_seconds: 1,
+          current_provider: "codex-router",
+          current_provider_id: "codex-router",
+          last_request_at: null,
+          last_error: null,
+          failover_count: 0,
+          active_targets: [],
+        }),
+      ),
+      http.post("http://tauri.local/get_proxy_takeover_status", () =>
+        HttpResponse.json({
+          claude: false,
+          codex: true,
+          gemini: false,
+          grokbuild: false,
+        }),
+      ),
+      http.post("http://tauri.local/inspect_codex_config_consistency", () =>
+        HttpResponse.json({
+          state: "external_drift",
+          providerId: "codex-router",
+          expectedFingerprint: "expected",
+          actualFingerprint: "actual",
+          changedKeys: ["model"],
+          reason: null,
+        }),
+      ),
+      http.post("http://tauri.local/resolve_codex_config_consistency", () =>
+        HttpResponse.json({
+          state: "consistent",
+          providerId: "codex-router",
+          expectedFingerprint: "expected",
+          actualFingerprint: "actual",
+          changedKeys: [],
+          reason: null,
+        }),
+      ),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() => expect(toastWarningMock).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("codexConfigConsistency.title")).toBeNull();
+    expect(screen.queryByText("firstRunNotice.title")).toBeNull();
+    expect(screen.queryByText("Codex 本地路由已开启")).toBeNull();
+    expect(document.body.style.pointerEvents).not.toBe("none");
+
+    const recoveryOptions = toastWarningMock.mock.calls[0]?.[1] as
+      | { onDismiss?: () => void }
+      | undefined;
+    expect(recoveryOptions?.onDismiss).toEqual(expect.any(Function));
+    act(() => recoveryOptions?.onDismiss?.());
+
+    expect(
+      await screen.findByText("codexConfigConsistency.title"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("firstRunNotice.title")).toBeNull();
+    expect(screen.queryByText("Codex 本地路由已开启")).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexConfigConsistency.later" }),
+    );
+
+    expect(await screen.findByText("firstRunNotice.title")).toBeInTheDocument();
+    expect(screen.queryByText("Codex 本地路由已开启")).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "firstRunNotice.confirm" }),
+    );
+
+    expect(await screen.findByText("Codex 本地路由已开启")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "我知道了" }));
+    await waitFor(() =>
+      expect(screen.queryByText("Codex 本地路由已开启")).toBeNull(),
+    );
   }, 30_000);
 
   it("duplicates openclaw providers with a generated key that avoids live-only ids", async () => {

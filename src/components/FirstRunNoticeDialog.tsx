@@ -13,15 +13,25 @@ import { Button } from "@/components/ui/button";
 import { useSettingsQuery } from "@/lib/query";
 import { settingsApi } from "@/lib/api";
 
+interface FirstRunNoticeDialogProps {
+  /**
+   * 启动级提示由 App 统一排队。禁用时保留未确认状态，轮到本提示后再打开。
+   */
+  enabled?: boolean;
+}
+
 /** 首次运行欢迎提示：仅当后端启动阶段保留 firstRunNoticeConfirmed 为空时弹出。 */
-export function FirstRunNoticeDialog() {
+export function FirstRunNoticeDialog({
+  enabled = true,
+}: FirstRunNoticeDialogProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { data: settings } = useSettingsQuery();
 
   // 后端启动时已经决定好要不要弹：条件不满足的话字段会立即被写成 true，
   // 所以前端这里只需要判空即可——与其他既有确认标记的模式一致。
-  const isOpen = settings != null && settings.firstRunNoticeConfirmed !== true;
+  const isOpen =
+    enabled && settings != null && settings.firstRunNoticeConfirmed !== true;
 
   const handleAcknowledge = async () => {
     if (!settings) return;
