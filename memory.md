@@ -6,7 +6,9 @@
 - 主线迁移保留现有后端架构，只恢复完整页面流程：13 个常规页面（开始、环境、来源就绪、来源选择、目录同步、协议深探测、模型选择、模型顺序、推理、Sub-Agent/工具、路由确认、保存启用、真实请求验收）；没有任何 Provider 时动态插入第 14 页“接入第一个模型源”。后续页可预览但不可编辑，并明确指向缺失的前置步骤。
 - 协议页不再出现“基础探测、1024 输出、不验证工具/流式”的旧语义。普通 Provider/模型必须分别验证 Responses 与 Chat 的基础响应、流式 SSE、推理语义、强制工具调用和工具结果续接；401/403/429、网络错误与 5xx 继续归为认证/可用性错误，不得误判协议不支持。保存仍走统一 Protocol Lab 与批量 prepare/commit，自动 Single/Split 均直接 `accept_auto`。
 - 新建 Provider 回到向导不能按名称、索引或固定草稿 ID 猜测：`App` 在打开新增页前记录真实 Provider ID 集，关闭后重新读取并计算 ID 差集；向导只合并这些新增 ID、自动选中并回到“模型源就绪”。Qwen 深探测若后端漏回来源，前端会生成具名阻塞失败，禁止呈现“0/0/0 但可继续”的矛盾终态。
-- 源码 fresh 门禁：向导/flow/App/Sub-Agent 定向为 5 files / 197 tests；前端全量 165 files / 1301 tests；`pnpm typecheck`、`pnpm format:check` 和 `pnpm build:renderer` 通过；当前包含并行 Rust 工作的工作区 `cargo test --lib` 为 3728 passed / 0 failed / 6 ignored，`cargo check --no-default-features` 通过。`cargo fmt --check` 仍只报告另一任务的 `codex_config_consistency.rs` 格式和并行 `services/provider/mod.rs` 尾部空行，不属于本次向导文件。此记录写入时尚未完成新安装器安装及真实桌面截图验收，不能把源码测试冒充安装态结论。
+- 首个安装候选 `a72896eb` 已生成并安装 NSIS，真实桌面确认左侧为完整 13 页、后续页可预览但不可编辑、协议页包含 Responses/Chat、流式 SSE、推理、强制工具和续轮，且 Qwen 实测得到 Chat Verified / Responses Partial，不再出现模型明细 0/0/0。该次真实多 Provider 探测同时暴露新的汇总根因：batch adapter 会为每个 Provider 转发一个 `batch_finished`，进度对话框却只读取最后一个事件，导致完整明细上方误报“已完成 1 个模型”；进度分母还把固定 Responses 的 official/OAuth 模型算作待探测目标。
+- 汇总根修不改探测证据：对话框累加同一次 workflow 中全部 Provider 的 `batch_finished`；模型分母改由 Protocol Lab 的统一自动模型选择器生成，只包含启用、未手动覆盖且确实需要探测的模型。完全手工或 official/xAI/Copilot 源不计入分母；逐模型手工覆盖的 Provider 只跳过已覆盖模型，其余“跟随自动”模型继续探测，避免旧向导把整个 Provider 错误跳过。对应两条回归均先在旧实现下真实 RED，再 GREEN。
+- 最新源码 fresh 门禁：前端全量 165 files / 1303 tests；新增汇总、向导分母与 Protocol Lab 定向为 3 files / 28 tests；`pnpm typecheck`、任务文件 Prettier、`pnpm build:renderer` 和 `git diff --check` 通过。此前同一向导候选的 Rust 全量为 3728 passed / 0 failed / 6 ignored，`cargo check --no-default-features` 通过；`cargo fmt --check` 仍只报告并行 Rust 工作。此记录写入时汇总修复后的新安装器尚未完成安装态复验，不能把源码测试冒充最终桌面验收。
 
 ## 2026-08-30 Codex Provider 协议适配读模型、统一 workflow 与三入口收口
 

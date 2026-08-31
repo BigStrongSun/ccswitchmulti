@@ -298,22 +298,29 @@ export function createBatchCodexProtocolLabAdapter(
 
 export function providerHasAutomaticCodexModels(provider: Provider): boolean {
   if (skipsCodexProtocolProbe(provider)) return false;
-  const overrides = provider.meta?.codexProtocolOverrides ?? {};
-  const normalizedOverrides = new Set(
-    Object.keys(overrides).map(normalizeCodexPublicModelKey),
-  );
   const models = enabledPublicModels(provider);
   if (provider.meta?.codexProtocolMode === "manual" && models.length === 0) {
     return false;
   }
+  if (models.length === 0) return true;
+  return codexProviderModelsRequiringProtocolProbe(provider).length > 0;
+}
+
+export function codexProviderModelsRequiringProtocolProbe(
+  provider: Provider,
+): string[] {
+  if (skipsCodexProtocolProbe(provider)) return [];
+  const overrides = provider.meta?.codexProtocolOverrides ?? {};
+  const normalizedOverrides = new Set(
+    Object.keys(overrides).map(normalizeCodexPublicModelKey),
+  );
   if (
     provider.meta?.codexProtocolMode === "manual" &&
     normalizedOverrides.size === 0
   ) {
-    return false;
+    return [];
   }
-  if (models.length === 0) return true;
-  return models.some(
+  return enabledPublicModels(provider).filter(
     (model) => !normalizedOverrides.has(normalizeCodexPublicModelKey(model)),
   );
 }

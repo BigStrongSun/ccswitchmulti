@@ -313,10 +313,34 @@ export function CodexProtocolProbeProgressDialog({
     () => buildProgress(expectedModels, events, outcome),
     [expectedModels, events, outcome],
   );
-  const batch = [...events]
-    .reverse()
-    .find((event) => event.kind === "batch_finished");
-  const completed = models.filter((model) => model.readiness !== null).length;
+  const completedModels = models.filter((model) => model.readiness !== null);
+  const completed = completedModels.length;
+  const modelSummary = {
+    total: completed,
+    verified: completedModels.filter((model) => model.readiness === "verified")
+      .length,
+    partial: completedModels.filter((model) => model.readiness === "partial")
+      .length,
+    failed: completedModels.filter((model) => model.readiness === "unverified")
+      .length,
+  };
+  // Batch Protocol Lab forwards one batch_finished event per Provider. The
+  // dialog owns the cross-Provider view, so its title must aggregate every
+  // batch instead of treating the last Provider as the entire operation.
+  const batchSummaries = events.filter(
+    (event) => event.kind === "batch_finished",
+  );
+  const batchSummary = batchSummaries.reduce(
+    (summary, batch) => ({
+      total: summary.total + batch.total,
+      verified: summary.verified + batch.verified,
+      partial: summary.partial + batch.partial,
+      failed: summary.failed + batch.failed,
+    }),
+    { total: 0, verified: 0, partial: 0, failed: 0 },
+  );
+  const completionSummary =
+    batchSummaries.length > 0 ? batchSummary : modelSummary;
 
   return (
     <Dialog
@@ -335,8 +359,8 @@ export function CodexProtocolProbeProgressDialog({
           <DialogDescription>
             {running
               ? `正在验证模型 ${completed}/${models.length || "…"}。每个模型会依次检查 Responses 与 Chat。`
-              : batch
-                ? `已完成 ${batch.total} 个模型：Verified ${batch.verified}，Partial ${batch.partial}，Failed ${batch.failed}。`
+              : batchSummaries.length > 0 || completed > 0
+                ? `已完成 ${completionSummary.total} 个模型：Verified ${completionSummary.verified}，Partial ${completionSummary.partial}，Failed ${completionSummary.failed}。`
                 : "探测已结束。"}
           </DialogDescription>
         </DialogHeader>

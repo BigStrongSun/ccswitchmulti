@@ -58,7 +58,9 @@ import {
   type CodexProviderSetBatchPreview,
 } from "@/lib/api/protocol-compatibility";
 import {
+  codexProviderModelsRequiringProtocolProbe,
   createBatchCodexProtocolLabAdapter,
+  providerHasAutomaticCodexModels,
   type CodexProviderSetBatchDraft,
   type CodexProviderSetBatchProbeOutcome,
 } from "@/lib/protocol-lab/codex-adapters";
@@ -741,13 +743,7 @@ function protocolProbeProviderSignature(provider: Provider): string {
 }
 
 function skipsWizardDeepProtocolProbe(provider: Provider): boolean {
-  const providerType = provider.meta?.providerType?.trim().toLowerCase();
-  return (
-    provider.meta?.codexProtocolMode === "manual" ||
-    isWizardCodexOAuthSource(provider) ||
-    providerType === "xai_oauth" ||
-    providerType === "github_copilot"
-  );
+  return !providerHasAutomaticCodexModels(provider);
 }
 
 function skippedWizardDeepProbeResult(
@@ -3338,7 +3334,8 @@ export function CodexMultiRouterWizard({
           open={probeDialogOpen}
           running={batchProtocolLab.state.phase === "probing"}
           expectedModels={(batchProtocolLab.state.draft?.sources ?? []).flatMap(
-            (source) => getWizardConnectivityProbeModels(source.provider),
+            (source) =>
+              codexProviderModelsRequiringProtocolProbe(source.provider),
           )}
           events={batchProtocolLab.state.progress}
           outcome={

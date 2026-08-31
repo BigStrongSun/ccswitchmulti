@@ -8,6 +8,53 @@ import type {
 import { CodexProtocolProbeProgressDialog } from "./CodexProtocolProbeProgressDialog";
 
 describe("CodexProtocolProbeProgressDialog", () => {
+  it("aggregates the completed models across every provider batch", () => {
+    const events: CodexProtocolProbeProgressEvent[] = [
+      {
+        kind: "candidate_finished",
+        model: "qwen3.8",
+        selectedTransport: "open_ai_chat",
+        readiness: "verified",
+      },
+      {
+        kind: "batch_finished",
+        total: 1,
+        verified: 1,
+        partial: 0,
+        failed: 0,
+      },
+      {
+        kind: "candidate_finished",
+        model: "glm-5.3",
+        selectedTransport: "open_ai_chat",
+        readiness: "partial",
+      },
+      {
+        kind: "batch_finished",
+        total: 1,
+        verified: 0,
+        partial: 1,
+        failed: 0,
+      },
+    ];
+
+    render(
+      <CodexProtocolProbeProgressDialog
+        open
+        running={false}
+        expectedModels={["qwen3.8", "glm-5.3"]}
+        events={events}
+        outcome={null}
+        error=""
+        onOpenChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("已完成 2 个模型：Verified 1，Partial 1，Failed 0。"),
+    ).toBeInTheDocument();
+  });
+
   it("shows the verified tool schema and history replay strategy for each branch", () => {
     const outcome = {
       provider: {

@@ -203,6 +203,59 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.queryByText(/浅探测|1024/)).not.toBeInTheDocument();
   });
 
+  it("counts only automatic models in the deep-probe progress denominator", async () => {
+    preflightCodexProviderProtocolCompatibility.mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+    const { unmount } = renderWizard([
+      {
+        id: "qwen-local",
+        name: "Qwen Local",
+        category: "custom",
+        settingsConfig: {
+          baseUrl: "https://example.invalid/v1",
+          auth: { OPENAI_API_KEY: "test-only" },
+          modelCatalog: { models: [{ model: "qwen3.8" }] },
+        },
+      },
+      {
+        id: "codex-official",
+        name: "OpenAI Official",
+        category: "official",
+        meta: { providerType: "codex_oauth" },
+        settingsConfig: {
+          modelCatalog: {
+            models: [{ model: "gpt-5.6-sol" }, { model: "gpt-5.6-luna" }],
+          },
+        },
+      },
+      {
+        id: "mixed-manual",
+        name: "Mixed Manual",
+        category: "custom",
+        meta: {
+          codexProtocolMode: "manual",
+          codexProtocolOverrides: { "kimi-k3": "openai_chat" },
+        },
+        settingsConfig: {
+          baseUrl: "https://example.invalid/v1",
+          auth: { OPENAI_API_KEY: "test-only" },
+          modelCatalog: {
+            models: [{ model: "kimi-k3" }, { model: "glm-5.3" }],
+          },
+        },
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    expect(await screen.findByText(/正在验证模型 0\/2/)).toBeInTheDocument();
+    expect(screen.queryByText(/正在验证模型 0\/5/)).not.toBeInTheDocument();
+    unmount();
+  });
+
   it("keeps the final save entry visible when no model source exists", () => {
     renderWizard([]);
 
