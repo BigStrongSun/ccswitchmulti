@@ -42,11 +42,7 @@ pub enum CodexConfigConsistencyAction {
     Later,
 }
 
-fn canonicalize_toml_value(value: &toml::Value, key: Option<&str>) -> JsonValue {
-    if key == Some("model_catalog_json") {
-        return JsonValue::String("<ccsm-managed-model-catalog>".to_string());
-    }
-
+fn canonicalize_toml_value(value: &toml::Value) -> JsonValue {
     match value {
         toml::Value::String(value) => JsonValue::String(value.clone()),
         toml::Value::Integer(value) => JsonValue::Number((*value).into()),
@@ -55,38 +51,125 @@ fn canonicalize_toml_value(value: &toml::Value, key: Option<&str>) -> JsonValue 
             .unwrap_or_else(|| JsonValue::String(value.to_string())),
         toml::Value::Boolean(value) => JsonValue::Bool(*value),
         toml::Value::Datetime(value) => JsonValue::String(value.to_string()),
-        toml::Value::Array(values) => JsonValue::Array(
-            values
-                .iter()
-                .map(|value| canonicalize_toml_value(value, None))
-                .collect(),
-        ),
+        toml::Value::Array(values) => {
+            JsonValue::Array(values.iter().map(canonicalize_toml_value).collect())
+        }
         toml::Value::Table(values) => {
             let mut object = JsonMap::new();
             for (name, value) in values {
-                object.insert(
-                    name.clone(),
-                    canonicalize_toml_value(value, Some(name.as_str())),
-                );
+                object.insert(name.clone(), canonicalize_toml_value(value));
             }
             JsonValue::Object(object)
         }
     }
 }
 
+#[cfg(test)]
 fn canonicalize_toml(text: &str) -> Result<JsonValue, AppError> {
     let value = text.parse::<toml::Value>().map_err(|error| {
         AppError::Config(format!("Codex config.toml semantic parse failed: {error}"))
     })?;
-    Ok(canonicalize_toml_value(&value, None))
+    Ok(canonicalize_toml_value(&value))
 }
 
+#[cfg(test)]
 pub(crate) fn fingerprint_toml(text: &str) -> Result<String, AppError> {
     let canonical = canonicalize_toml(text)?;
     let bytes = serde_json::to_vec(&canonical)
         .map_err(|error| AppError::JsonSerialize { source: error })?;
     let digest = Sha256::digest(bytes);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+const CCSM_MANAGED_TOP_LEVEL_KEYS: &[&str] = &[
+    "model",
+    "model_provider",
+    "model_catalog_json",
+    "openai_base_url",
+    "experimental_bearer_token",
+];
+
+fn active_model_provider_id(value: &toml::Value) -> Option<String> {
+    value
+        .get("model_provider")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn ccsm_owned_projection(
+    text: &str,
+    provider_id_hint: Option<&str>,
+) -> Result<JsonValue, AppError> {
+    let value = text.parse::<toml::Value>().map_err(|error| {
+        AppError::Config(format!("Codex config.toml semantic parse failed: {error}"))
+    })?;
+    let root = value
+        .as_table()
+        .ok_or_else(|| AppError::Config("Codex config.toml root must be a table".to_string()))?;
+    let mut managed = toml::map::Map::new();
+
+    for key in CCSM_MANAGED_TOP_LEVEL_KEYS {
+        if let Some(value) = root.get(*key) {
+            managed.insert((*key).to_string(), value.clone());
+        }
+    }
+
+    if root
+        .get(crate::codex_config::CODEX_WEB_SEARCH_FIELD)
+        .and_then(toml::Value::as_str)
+        == Some(crate::codex_config::CODEX_WEB_SEARCH_DISABLED)
+    {
+        managed.insert(
+            crate::codex_config::CODEX_WEB_SEARCH_FIELD.to_string(),
+            root[crate::codex_config::CODEX_WEB_SEARCH_FIELD].clone(),
+        );
+    }
+
+    let provider_id = provider_id_hint
+        .map(str::to_string)
+        .or_else(|| active_model_provider_id(&value));
+    if provider_id.as_deref() == Some(crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID)
+    {
+        for key in ["model_context_window", "model_auto_compact_token_limit"] {
+            if let Some(value) = root.get(key) {
+                managed.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+
+    if let Some(provider_id) = provider_id {
+        if let Some(provider) = root
+            .get("model_providers")
+            .and_then(toml::Value::as_table)
+            .and_then(|providers| providers.get(&provider_id))
+        {
+            let mut providers = toml::map::Map::new();
+            providers.insert(provider_id, provider.clone());
+            managed.insert("model_providers".to_string(), toml::Value::Table(providers));
+        }
+    }
+
+    Ok(canonicalize_toml_value(&toml::Value::Table(managed)))
+}
+
+fn fingerprint_json(value: &JsonValue) -> Result<String, AppError> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|error| AppError::JsonSerialize { source: error })?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn managed_fingerprint(text: &str, provider_id_hint: Option<&str>) -> Result<String, AppError> {
+    fingerprint_json(&ccsm_owned_projection(text, provider_id_hint)?)
+}
+
+fn active_model_provider_id_from_text(text: &str) -> Result<Option<String>, AppError> {
+    let value = text.parse::<toml::Value>().map_err(|error| {
+        AppError::Config(format!("Codex config.toml semantic parse failed: {error}"))
+    })?;
+    Ok(active_model_provider_id(&value))
 }
 
 fn flatten_json(value: &JsonValue, prefix: &str, output: &mut BTreeMap<String, String>) {
@@ -118,6 +201,7 @@ fn flatten_json(value: &JsonValue, prefix: &str, output: &mut BTreeMap<String, S
     }
 }
 
+#[cfg(test)]
 pub(crate) fn changed_key_paths(before: &str, after: &str) -> Result<Vec<String>, AppError> {
     let before = canonicalize_toml(before)?;
     let after = canonicalize_toml(after)?;
@@ -134,6 +218,124 @@ pub(crate) fn changed_key_paths(before: &str, after: &str) -> Result<Vec<String>
         .take(64)
         .cloned()
         .collect())
+}
+
+fn changed_managed_key_paths(
+    expected: &str,
+    actual: &str,
+    provider_id_hint: Option<&str>,
+) -> Result<Vec<String>, AppError> {
+    let expected = ccsm_owned_projection(expected, provider_id_hint)?;
+    let actual = ccsm_owned_projection(actual, provider_id_hint)?;
+    let mut expected_paths = BTreeMap::new();
+    let mut actual_paths = BTreeMap::new();
+    flatten_json(&expected, "", &mut expected_paths);
+    flatten_json(&actual, "", &mut actual_paths);
+    Ok(expected_paths
+        .keys()
+        .chain(actual_paths.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|key| expected_paths.get(*key) != actual_paths.get(*key))
+        .take(64)
+        .cloned()
+        .collect())
+}
+
+fn copy_or_remove_top_level_item(
+    target: &mut toml_edit::DocumentMut,
+    expected: &toml_edit::DocumentMut,
+    key: &str,
+) {
+    match expected.get(key).cloned() {
+        Some(item) => {
+            target.as_table_mut().insert(key, item);
+        }
+        None => {
+            target.as_table_mut().remove(key);
+        }
+    }
+}
+
+fn merge_ccsm_owned_projection(current: &str, expected: &str) -> Result<String, AppError> {
+    let mut target = current
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| AppError::Config(format!("Invalid live Codex config.toml: {error}")))?;
+    let expected = expected
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| {
+            AppError::Config(format!("Invalid expected Codex config.toml: {error}"))
+        })?;
+
+    for key in CCSM_MANAGED_TOP_LEVEL_KEYS {
+        copy_or_remove_top_level_item(&mut target, &expected, key);
+    }
+
+    match expected
+        .get(crate::codex_config::CODEX_WEB_SEARCH_FIELD)
+        .and_then(toml_edit::Item::as_str)
+    {
+        Some(crate::codex_config::CODEX_WEB_SEARCH_DISABLED) => copy_or_remove_top_level_item(
+            &mut target,
+            &expected,
+            crate::codex_config::CODEX_WEB_SEARCH_FIELD,
+        ),
+        _ => {
+            if target
+                .get(crate::codex_config::CODEX_WEB_SEARCH_FIELD)
+                .and_then(toml_edit::Item::as_str)
+                == Some(crate::codex_config::CODEX_WEB_SEARCH_DISABLED)
+            {
+                target
+                    .as_table_mut()
+                    .remove(crate::codex_config::CODEX_WEB_SEARCH_FIELD);
+            }
+        }
+    }
+
+    let expected_provider_id = expected
+        .get("model_provider")
+        .and_then(toml_edit::Item::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if expected_provider_id.as_deref()
+        == Some(crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID)
+    {
+        for key in ["model_context_window", "model_auto_compact_token_limit"] {
+            copy_or_remove_top_level_item(&mut target, &expected, key);
+        }
+    }
+
+    if let Some(provider_id) = expected_provider_id {
+        let expected_provider = expected
+            .get("model_providers")
+            .and_then(toml_edit::Item::as_table_like)
+            .and_then(|providers| providers.get(&provider_id))
+            .cloned();
+
+        if target.get("model_providers").is_none() {
+            target["model_providers"] = toml_edit::table();
+        }
+        let providers = target
+            .get_mut("model_providers")
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .ok_or_else(|| AppError::Config("Codex model_providers must be a table".to_string()))?;
+        match expected_provider {
+            Some(provider) => {
+                providers.insert(&provider_id, provider);
+            }
+            None => {
+                providers.remove(&provider_id);
+            }
+        }
+        if providers.is_empty() {
+            target.as_table_mut().remove("model_providers");
+        }
+    }
+
+    Ok(target.to_string())
 }
 
 fn report(
@@ -161,14 +363,14 @@ pub(crate) fn should_emit_startup_event(state: CodexConfigConsistencyState) -> b
 /// Run the one-shot live-config reconciliation after startup writers and proxy
 /// recovery have settled. Emitting an event is deliberately best-effort for
 /// startup: a UI listener can query the same report as a race-free fallback.
-pub(crate) async fn reconcile_after_startup(
-    app: &tauri::AppHandle,
-) -> Result<(), AppError> {
+pub(crate) async fn reconcile_after_startup(app: &tauri::AppHandle) -> Result<(), AppError> {
     let state = app.state::<AppState>();
     let report = inspect(&state)?;
     if should_emit_startup_event(report.state) {
         app.emit("codex-config-consistency", &report)
-            .map_err(|error| AppError::Message(format!("Codex config consistency event failed: {error}")))?;
+            .map_err(|error| {
+                AppError::Message(format!("Codex config consistency event failed: {error}"))
+            })?;
     }
     Ok(())
 }
@@ -218,6 +420,9 @@ pub fn inspect(state: &AppState) -> Result<CodexConfigConsistencyReport, AppErro
             ));
         }
     };
+    let expected_provider_id = active_model_provider_id_from_text(&expected_text)?;
+    let expected_fingerprint =
+        managed_fingerprint(&expected_text, expected_provider_id.as_deref())?;
 
     let live_path = codex_config::get_codex_config_path();
     let actual_text = match fs::read_to_string(&live_path) {
@@ -226,7 +431,7 @@ pub fn inspect(state: &AppState) -> Result<CodexConfigConsistencyReport, AppErro
             return Ok(report(
                 CodexConfigConsistencyState::Unavailable,
                 Some(provider_id),
-                Some(fingerprint_toml(&expected_text)?),
+                Some(expected_fingerprint),
                 None,
                 Vec::new(),
                 Some("live_config_missing"),
@@ -235,21 +440,21 @@ pub fn inspect(state: &AppState) -> Result<CodexConfigConsistencyReport, AppErro
         Err(error) => return Err(AppError::io(&live_path, error)),
     };
 
-    let expected_fingerprint = fingerprint_toml(&expected_text)?;
-    let actual_fingerprint = match fingerprint_toml(&actual_text) {
-        Ok(fingerprint) => fingerprint,
-        Err(error) => {
-            log::warn!("Codex config consistency live TOML parse failed: {error}");
-            return Ok(report(
-                CodexConfigConsistencyState::Unavailable,
-                Some(provider_id),
-                Some(expected_fingerprint),
-                None,
-                Vec::new(),
-                Some("invalid_toml"),
-            ));
-        }
-    };
+    let actual_fingerprint =
+        match managed_fingerprint(&actual_text, expected_provider_id.as_deref()) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                log::warn!("Codex config consistency live TOML parse failed: {error}");
+                return Ok(report(
+                    CodexConfigConsistencyState::Unavailable,
+                    Some(provider_id),
+                    Some(expected_fingerprint),
+                    None,
+                    Vec::new(),
+                    Some("invalid_toml"),
+                ));
+            }
+        };
 
     if expected_fingerprint == actual_fingerprint {
         return Ok(report(
@@ -267,7 +472,11 @@ pub fn inspect(state: &AppState) -> Result<CodexConfigConsistencyReport, AppErro
         Some(provider_id),
         Some(expected_fingerprint),
         Some(actual_fingerprint),
-        changed_key_paths(&expected_text, &actual_text)?,
+        changed_managed_key_paths(
+            &expected_text,
+            &actual_text,
+            expected_provider_id.as_deref(),
+        )?,
         Some("live_config_changed"),
     ))
 }
@@ -319,19 +528,20 @@ pub fn resolve(
             ));
             let mut backup_created = false;
             codex_config::reconcile_codex_live_config_atomic(|before| {
-                let observed = fingerprint_toml(before)?;
+                let candidate = build_codex_live_config_for_provider(&state.db, &provider)?;
+                let provider_id_hint = active_model_provider_id_from_text(&candidate)?;
+                let observed = managed_fingerprint(before, provider_id_hint.as_deref())?;
                 if observed != expected_fingerprint {
                     return Err(AppError::InvalidInput(
                         "codex_config_consistency_stale_fingerprint".to_string(),
                     ));
                 }
-                let candidate = build_codex_live_config_for_provider(&state.db, &provider)?;
                 if !backup_created {
                     fs::write(&backup_path, before.as_bytes())
                         .map_err(|error| AppError::io(&backup_path, error))?;
                     backup_created = true;
                 }
-                Ok(candidate)
+                merge_ccsm_owned_projection(before, &candidate)
             })?;
             inspect(state)
         }
@@ -396,7 +606,7 @@ mod tests {
             "Consistency Provider".to_string(),
             json!({
                 "auth": {},
-                "config": "model = \"gpt-5.5\"\nmodel_reasoning_effort = \"medium\"\n",
+                "config": "model = \"gpt-5.5\"\nmodel_provider = \"ccsm-provider\"\nmodel_reasoning_effort = \"medium\"\n\n[model_providers.ccsm-provider]\nname = \"CCSM Provider\"\nbase_url = \"https://example.test/v1\"\nwire_api = \"responses\"\n",
                 "modelCatalog": {"models": [{"model": "gpt-5.5"}]}
             }),
             None,
@@ -439,7 +649,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn inspect_reports_external_drift_with_changed_paths_only() {
+    fn inspect_reports_only_ccsm_owned_route_drift() {
         let _home = TestHomeGuard::new();
         crate::settings::reload_settings().expect("reload settings");
         let (state, _) = seed_provider();
@@ -453,7 +663,11 @@ mod tests {
         let mut live = expected
             .parse::<toml_edit::DocumentMut>()
             .expect("parse expected config");
-        live["model_reasoning_effort"] = toml_edit::value("high");
+        live["model_providers"]["ccsm-provider"]["wire_api"] = toml_edit::value("chat");
+        live["agents"]["max_threads"] = toml_edit::value(16);
+        live["desktop"]["composerPlainTextMode"] = toml_edit::value(true);
+        live["projects"][r"c:\users\sunda\documents\new-project"]["trust_level"] =
+            toml_edit::value("trusted");
         codex_config::write_codex_live_config_atomic(Some(&live.to_string()))
             .expect("write drifted live config");
 
@@ -461,10 +675,73 @@ mod tests {
 
         assert_eq!(result.state, CodexConfigConsistencyState::ExternalDrift);
         assert_eq!(result.provider_id.as_deref(), Some("consistency-provider"));
-        assert!(result
-            .changed_keys
-            .contains(&"model_reasoning_effort".to_string()));
-        assert!(result.changed_keys.iter().all(|key| !key.contains("high")));
+        assert_eq!(
+            result.changed_keys,
+            vec!["model_providers.ccsm-provider.wire_api"]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_ignores_codex_desktop_runtime_and_user_owned_changes() {
+        let _home = TestHomeGuard::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let (state, _) = seed_provider();
+        let provider = state
+            .db
+            .get_provider_by_id("consistency-provider", AppType::Codex.as_str())
+            .expect("read provider")
+            .expect("provider exists");
+        let expected = build_codex_live_config_for_provider(&state.db, &provider)
+            .expect("build expected live config");
+        let mut live = expected
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse expected config");
+        live["developer_instructions"] = toml_edit::value("updated by the user");
+        live["agents"]["max_threads"] = toml_edit::value(16);
+        live["desktop"]["composerPlainTextMode"] = toml_edit::value(true);
+        live["mcp_servers"]["node_repl"]["command"] =
+            toml_edit::value(r"C:\Program Files\Codex\node_repl.exe");
+        live["mcp_servers"]["node_repl"]["env"]["BROWSER_USE_CODEX_APP_VERSION"] =
+            toml_edit::value("26.825.6671.0");
+        live["mcp_servers"]["cua_repl"]["enabled"] = toml_edit::value(true);
+        live["plugins"]["codex-app-tools@openai-bundled"]["enabled"] = toml_edit::value(true);
+        live["projects"][r"c:\users\sunda\documents\new-project"]["trust_level"] =
+            toml_edit::value("trusted");
+        live["wire_api"] = toml_edit::value("responses");
+        codex_config::write_codex_live_config_atomic(Some(&live.to_string()))
+            .expect("write Codex-owned changes");
+
+        let result = inspect(&state).expect("inspect config consistency");
+
+        assert_eq!(result.state, CodexConfigConsistencyState::Consistent);
+        assert!(result.changed_keys.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_reports_a_changed_ccsm_model_catalog_pointer() {
+        let _home = TestHomeGuard::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let (state, _) = seed_provider();
+        let provider = state
+            .db
+            .get_provider_by_id("consistency-provider", AppType::Codex.as_str())
+            .expect("read provider")
+            .expect("provider exists");
+        let expected = build_codex_live_config_for_provider(&state.db, &provider)
+            .expect("build expected live config");
+        let mut live = expected
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse expected config");
+        live["model_catalog_json"] = toml_edit::value(r"C:\other\catalog.json");
+        codex_config::write_codex_live_config_atomic(Some(&live.to_string()))
+            .expect("write changed catalog pointer");
+
+        let result = inspect(&state).expect("inspect config consistency");
+
+        assert_eq!(result.state, CodexConfigConsistencyState::ExternalDrift);
+        assert_eq!(result.changed_keys, vec!["model_catalog_json"]);
     }
 
     #[test]
@@ -500,7 +777,7 @@ mod tests {
         let mut live = expected
             .parse::<toml_edit::DocumentMut>()
             .expect("parse expected config");
-        live["model_reasoning_effort"] = toml_edit::value("high");
+        live["model_providers"]["ccsm-provider"]["wire_api"] = toml_edit::value("chat");
         codex_config::write_codex_live_config_atomic(Some(&live.to_string()))
             .expect("write drifted live config");
         (home, state, provider_id)
@@ -575,6 +852,18 @@ mod tests {
     #[serial]
     fn apply_ccsm_uses_compare_and_swap_and_creates_a_drift_backup() {
         let (_home, state, _) = seed_drifted_state();
+        let live_path = codex_config::get_codex_config_path();
+        let mut live = fs::read_to_string(&live_path)
+            .expect("read drifted live config")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse drifted live config");
+        live["desktop"]["composerPlainTextMode"] = toml_edit::value(true);
+        live["mcp_servers"]["node_repl"]["env"]["BROWSER_USE_CODEX_APP_VERSION"] =
+            toml_edit::value("26.825.6671.0");
+        live["projects"][r"c:\users\sunda\documents\new-project"]["trust_level"] =
+            toml_edit::value("trusted");
+        codex_config::write_codex_live_config_atomic(Some(&live.to_string()))
+            .expect("write unmanaged live fields");
         let before = inspect(&state).expect("inspect drift");
         let actual = before
             .actual_fingerprint
@@ -585,6 +874,42 @@ mod tests {
             .expect("apply CCSM config");
 
         assert_eq!(after.state, CodexConfigConsistencyState::Consistent);
+        let applied = fs::read_to_string(&live_path)
+            .expect("read applied live config")
+            .parse::<toml::Value>()
+            .expect("parse applied live config");
+        assert_eq!(
+            applied
+                .get("desktop")
+                .and_then(|desktop| desktop.get("composerPlainTextMode"))
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            applied
+                .get("mcp_servers")
+                .and_then(|servers| servers.get("node_repl"))
+                .and_then(|server| server.get("env"))
+                .and_then(|env| env.get("BROWSER_USE_CODEX_APP_VERSION"))
+                .and_then(toml::Value::as_str),
+            Some("26.825.6671.0")
+        );
+        assert_eq!(
+            applied
+                .get("projects")
+                .and_then(|projects| projects.get(r"c:\users\sunda\documents\new-project"))
+                .and_then(|project| project.get("trust_level"))
+                .and_then(toml::Value::as_str),
+            Some("trusted")
+        );
+        assert_eq!(
+            applied
+                .get("model_providers")
+                .and_then(|providers| providers.get("ccsm-provider"))
+                .and_then(|provider| provider.get("wire_api"))
+                .and_then(toml::Value::as_str),
+            Some("responses")
+        );
         let backups = std::fs::read_dir(codex_config::get_codex_config_dir())
             .expect("read Codex config directory")
             .filter_map(Result::ok)
@@ -621,7 +946,9 @@ mod tests {
             CodexConfigConsistencyState::NotApplicable,
             CodexConfigConsistencyState::Unavailable,
         ];
-        assert!(states.iter().all(|state| !should_emit_startup_event(*state)));
+        assert!(states
+            .iter()
+            .all(|state| !should_emit_startup_event(*state)));
         assert!(should_emit_startup_event(
             CodexConfigConsistencyState::ExternalDrift
         ));

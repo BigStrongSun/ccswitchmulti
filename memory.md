@@ -4773,3 +4773,11 @@ supported in one streaming turn`。
 - fresh 源码验证：前端完整 `pnpm test:unit` 为 165 files/1301 tests，新增对话框与 hook 3/3，`pnpm typecheck` 与新增文件 Prettier 检查通过；Rust `codex_config_consistency` 9/9、Provider 相关 109/109 通过。完整 Rust/前端之外的 dirty worktree 修改均未纳入本次前端提交。
 - 尚未完成安装态验收：未重启已安装 CCSM、未人工在真实 Codex `config.toml` 外部改写后观察桌面弹窗、未构建/安装/发布。上述结论是源码和测试证据，不等同于安装态 UI 证明。
 - 联网交叉验证沿用本任务前置已完成的 Codex 内置搜索与 `matrix-websearch` 两条独立链；二者未提供比本机源码更直接的字段级实现依据，因此具体故障根因、CAS 边界和测试结论以当前源码、日志/配置调用链与 RED→GREEN 回归为准。
+
+## 2026-08-31 Codex 配置漂移所有权边界修正
+
+- 安装态首次验收暴露了 `137eefb7` 的领域边界错误：一致性检查对完整 `config.toml` 做 fingerprint/diff，并在 `apply_ccsm` 时用 DB 预期文本整份替换 live 文件。Codex Desktop 26.825.6671.0 重启后写入的 `agents`、opaque `desktop`、`developer_instructions`、插件生成的 `mcp_servers`、`plugins` 和 `projects.*.trust_level` 因此被误报；用户点击“应用 CCSM 配置”还会把这些新版/用户字段回滚到旧快照。
+- 当前所有权规则改为只投影 CCSM 的活动路由面：顶层 `model`、`model_provider`、`model_catalog_json`、路由 fallback，以及预期活动的 `model_providers.<id>`；CCSM 自己写入的 `web_search = "disabled"` 和 MultiRouter 必须清除的固定上下文覆盖也仍在管理面。顶层裸 `wire_api` 不属于 OpenAI 当前 `ConfigToml`，有效协议字段只在 `model_providers.<id>.wire_api`，因此裸字段不再触发 Provider 漂移。
+- `apply_ccsm` 保留 managed projection 的 CAS 与可恢复 backup，但写入改为把预期活动路由字段合并进确认时再次读取的 live 文档；所有不属于 CCSM 的表和字段原样保留。`model_catalog_json` 不再把任意路径都规范化成同一占位符，存在但指向其它目录同样属于真实路由漂移。
+- TDD 先稳定复现三类旧行为：Codex/Desktop 字段导致 `ExternalDrift`、changed paths 混入用户字段、应用 CCSM 后 Desktop/MCP/project 状态消失；另补模型目录指针被错误视为一致的 RED。修复后 `codex_config_consistency` 11/11 通过。完整 Rust、安装器和安装态弹窗复验尚未执行，不得把源码定向验证等同于已发布修复。
+- 外部复核使用两条独立链：Codex 内置搜索读取 OpenAI 当前 `ConfigToml`/schema；Matrix WebSearch 搜索无结果后直读同一官方 raw 源码。两链与本地 `codex-source-latest@a9519cbc` 一致确认 `developer_instructions`、MCP、projects、plugins、desktop、agents 和 `model_catalog_json` 均是合法顶层配置，而 `wire_api` 仅属于 `ModelProviderInfo`。
