@@ -756,6 +756,26 @@
       "copy": "ファイルコピー",
       "symlinkHint": "シンボリックリンクはディスク容量を節約し、リアルタイム同期を有効にします。注意：Windowsでは管理者権限または開発者モードが必要な場合があります"
     },
+    "envInjection": {
+      "title": "環境変数の注入",
+      "description": "各 CLI 自身の設定ファイルに変数を書き込みます。システム環境の変更もローカルプロキシも不要です。",
+      "enable": "環境変数の注入を有効にする",
+      "enableDescription": "無効の場合、CCSwitchMulti はどの CLI 設定にも変数を書き込みません。",
+      "targets": "対象",
+      "targetsDescription": "CLI ごとに個別に切り替えられます。",
+      "claude": "Claude Code",
+      "codex": "Codex",
+      "geminiUnsupported": "Gemini CLI の公式設定にはプロセスレベルの環境変数項目がないため、注入はサポートされません。",
+      "variables": "変数",
+      "empty": "まだ変数がありません。追加して保存すると対象 CLI の設定に書き込まれます。",
+      "keyPlaceholder": "変数名",
+      "valuePlaceholder": "値",
+      "add": "変数を追加",
+      "invalidKey": "変数名は空にできず、'='・改行・NUL を含められません。",
+      "duplicateKey": "その変数名は既に存在します。",
+      "mergeHint": "不足分のみ補完し、上書きしません。プロバイダーが既に設定している同名の変数（例: ANTHROPIC_BASE_URL）は元の値を保持するため、プロバイダー切り替えが壊れません。",
+      "codexIncludeAllowlistWarning": "Codex に shell_environment_policy.include_only の許可リストが設定されています。Codex は注入した変数をこのリストでフィルタするため、Codex 側では反映されない可能性があります。"
+    },
     "terminal": {
       "title": "優先ターミナル",
       "description": "ターミナルボタンをクリックした時に使用するターミナルアプリを選択",

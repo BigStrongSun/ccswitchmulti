@@ -764,6 +764,26 @@
       "copy": "文件复制",
       "symlinkHint": "软连接节省磁盘空间并支持实时同步。注意：Windows 可能需要管理员权限或开启开发者模式"
     },
+    "envInjection": {
+      "title": "环境变量注入",
+      "description": "把变量写进各 CLI 自己的配置文件，不改系统环境、不依赖本地代理。",
+      "enable": "启用环境变量注入",
+      "enableDescription": "关闭时 CCSwitchMulti 不会往任何 CLI 配置里写入变量。",
+      "targets": "生效范围",
+      "targetsDescription": "按 CLI 单独开关，互不影响。",
+      "claude": "Claude Code",
+      "codex": "Codex",
+      "geminiUnsupported": "Gemini CLI 官方配置没有进程级环境变量字段，因此不支持注入。",
+      "variables": "变量",
+      "empty": "还没有变量。添加后保存即可写入对应 CLI 的配置。",
+      "keyPlaceholder": "变量名",
+      "valuePlaceholder": "值",
+      "add": "添加变量",
+      "invalidKey": "变量名不能为空，且不能包含 =、换行或 NUL。",
+      "duplicateKey": "变量名已存在。",
+      "mergeHint": "只补缺、不覆盖：供应商配置里已有的同名变量（如 ANTHROPIC_BASE_URL）会保持原值，避免打乱供应商切换。",
+      "codexIncludeAllowlistWarning": "检测到 Codex 配置了 shell_environment_policy.include_only 白名单，官方会用它过滤掉注入的变量，Codex 侧可能不生效。"
+    },
     "terminal": {
       "title": "首选终端",
       "description": "选择点击终端按钮时使用的终端应用",

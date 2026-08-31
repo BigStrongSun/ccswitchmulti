@@ -41,6 +41,7 @@ import { WindowSettings } from "@/components/settings/WindowSettings";
 import { AppVisibilitySettings } from "@/components/settings/AppVisibilitySettings";
 import { SkillStorageLocationSettings } from "@/components/settings/SkillStorageLocationSettings";
 import { SkillSyncMethodSettings } from "@/components/settings/SkillSyncMethodSettings";
+import { EnvInjectionSettings } from "@/components/settings/EnvInjectionSettings";
 import { TerminalSettings } from "@/components/settings/TerminalSettings";
 import { DirectorySettings } from "@/components/settings/DirectorySettings";
 import { ImportExportSection } from "@/components/settings/ImportExportSection";
@@ -288,6 +289,12 @@ export function SettingsPage({
                       value={settings.preferredTerminal}
                       onChange={(terminal) =>
                         handleAutoSave({ preferredTerminal: terminal })
+                      }
+                    />
+                    <EnvInjectionSettings
+                      value={settings.envInjection}
+                      onChange={(envInjection) =>
+                        handleAutoSave({ envInjection })
                       }
                     />
                   </motion.div>

@@ -759,6 +759,26 @@
       "copy": "Copy Files",
       "symlinkHint": "Symlinks save disk space and enable real-time sync. Note: May require admin privileges or Developer Mode on Windows"
     },
+    "envInjection": {
+      "title": "Environment Variable Injection",
+      "description": "Write variables into each CLI's own config file — no system-wide changes, no local proxy required.",
+      "enable": "Enable environment variable injection",
+      "enableDescription": "When disabled, CCSwitchMulti writes no variables into any CLI config.",
+      "targets": "Targets",
+      "targetsDescription": "Toggle each CLI independently.",
+      "claude": "Claude Code",
+      "codex": "Codex",
+      "geminiUnsupported": "Gemini CLI has no process-level env field in its official settings, so injection is not supported.",
+      "variables": "Variables",
+      "empty": "No variables yet. Add one and it will be written to the target CLI config on save.",
+      "keyPlaceholder": "Name",
+      "valuePlaceholder": "Value",
+      "add": "Add variable",
+      "invalidKey": "Name cannot be empty and must not contain '=', newlines, or NUL.",
+      "duplicateKey": "That variable name already exists.",
+      "mergeHint": "Fill gaps only, never overwrite: variables already set by a provider (e.g. ANTHROPIC_BASE_URL) keep their value, so provider switching is not disturbed.",
+      "codexIncludeAllowlistWarning": "Codex is configured with a shell_environment_policy.include_only allowlist. Codex filters injected variables through it, so injection may not take effect for Codex."
+    },
     "terminal": {
       "title": "Preferred Terminal",
       "description": "Choose which terminal app to use when clicking the terminal button",

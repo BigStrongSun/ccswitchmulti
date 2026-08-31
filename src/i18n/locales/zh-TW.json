@@ -756,6 +756,26 @@
       "copy": "檔案複製",
       "symlinkHint": "軟連結節省磁碟空間並支援即時同步。注意：Windows 可能需要管理員權限或開啟開發者模式"
     },
+    "envInjection": {
+      "title": "環境變數注入",
+      "description": "把變數寫進各 CLI 自己的設定檔，不改系統環境、不依賴本機代理。",
+      "enable": "啟用環境變數注入",
+      "enableDescription": "關閉時 CCSwitchMulti 不會往任何 CLI 設定寫入變數。",
+      "targets": "作用範圍",
+      "targetsDescription": "依 CLI 個別開關，互不影響。",
+      "claude": "Claude Code",
+      "codex": "Codex",
+      "geminiUnsupported": "Gemini CLI 官方設定沒有行程層級的環境變數欄位，因此不支援注入。",
+      "variables": "變數",
+      "empty": "還沒有變數。新增並儲存後會寫入對應 CLI 的設定。",
+      "keyPlaceholder": "變數名稱",
+      "valuePlaceholder": "值",
+      "add": "新增變數",
+      "invalidKey": "變數名稱不能為空，且不能包含 =、換行或 NUL。",
+      "duplicateKey": "該變數名稱已存在。",
+      "mergeHint": "只補缺、不覆寫：供應商設定中既有的同名變數（如 ANTHROPIC_BASE_URL）會保留原值，避免打亂供應商切換。",
+      "codexIncludeAllowlistWarning": "偵測到 Codex 設定了 shell_environment_policy.include_only 白名單，官方會用它過濾掉注入的變數，Codex 側可能不會生效。"
+    },
     "terminal": {
       "title": "首選終端機",
       "description": "選擇點擊終端機按鈕時使用的終端機應用程式",

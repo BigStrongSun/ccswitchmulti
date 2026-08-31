@@ -230,13 +230,18 @@ impl ConfigService {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
-        let settings = sanitize_claude_settings_for_live(&provider.settings_config);
+        let mut settings = sanitize_claude_settings_for_live(&provider.settings_config);
+        crate::env_injection::inject_into_claude_live(&mut settings);
         write_json_file(&settings_path, &settings)?;
 
         let live_after = read_json_file::<serde_json::Value>(&settings_path)?;
+        // 回写进供应商记录前把注入的变量摘掉：注入是全局的、由设置单独管理，
+        // 不该被固化到某一条供应商记录里。
+        let mut stored = live_after;
+        crate::env_injection::strip_from_claude_settings(&mut stored);
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
-                target.settings_config = live_after;
+                target.settings_config = stored;
             }
         }
 

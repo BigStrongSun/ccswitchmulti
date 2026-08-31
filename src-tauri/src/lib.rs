@@ -16,6 +16,7 @@ mod commands;
 mod config;
 mod database;
 mod deeplink;
+mod env_injection;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
@@ -1516,6 +1517,7 @@ pub fn run() {
             codex_config::get_codex_subagent_profile_statuses,
             codex_config::preview_codex_subagent_profile,
             commands::save_settings,
+            commands::inspect_env_injection_conflicts,
             commands::has_codex_unify_history_backup,
             commands::restore_codex_unified_history,
             commands::get_rectifier_config,

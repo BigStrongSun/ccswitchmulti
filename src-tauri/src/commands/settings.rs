@@ -841,3 +841,13 @@ pub async fn open_log_dir(app: AppHandle) -> Result<bool, String> {
 
     Ok(true)
 }
+
+/// 检查环境变量注入是否存在已知的失效风险。
+///
+/// 目前只有一种：Codex 的 `[shell_environment_policy] include_only`
+/// allowlist 会过滤掉 `set` 里恢复出来的值，此时注入不生效。
+#[tauri::command]
+pub async fn inspect_env_injection_conflicts(
+) -> Result<crate::env_injection::EnvInjectionConflicts, String> {
+    Ok(crate::env_injection::inspect_conflicts())
+}

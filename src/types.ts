@@ -683,6 +683,9 @@ export interface Settings {
   // ===== Codex 多设备额度协作设置 =====
   quotaCollaboration?: QuotaCollaborationSettings;
 
+  // ===== 环境变量自动注入 =====
+  envInjection?: EnvInjectionSettings;
+
   // ===== 备份策略设置 =====
   // Auto-backup interval in hours (0=disabled, default 24)
   backupIntervalHours?: number;
@@ -706,6 +709,33 @@ export interface Settings {
       migratedStateRows?: number;
     };
   };
+}
+
+/**
+ * 环境变量自动注入设置。
+ *
+ * 变量会写进各 CLI 自己的配置文件，因此**不走本地代理、直接运行官方 CLI**
+ * 时同样生效。合并语义是「只补缺、不覆盖」：provider `settingsConfig.env`
+ * 里已有的同名键不会被顶掉，避免打乱供应商路由。
+ */
+export interface EnvInjectionSettings {
+  /** 总开关，默认关闭。 */
+  enabled: boolean;
+  /** 按 CLI 的独立开关。未列出的 CLI 官方配置没有可写入的位置，因此不提供。 */
+  targets: {
+    /** 写入 `~/.claude/settings.json` 的 `env`（官方文档：无论如何启动 claude 都生效）。 */
+    claude: boolean;
+    /** 写入 `~/.codex/config.toml` 的 `[shell_environment_policy] set`（只作用于 Codex 派生的子进程）。 */
+    codex: boolean;
+  };
+  /** 要注入的键值对。 */
+  variables: Record<string, string>;
+}
+
+/** 当前 live 配置里已知会让注入失效的冲突，仅用于 UI 提示。 */
+export interface EnvInjectionConflicts {
+  /** Codex 配了 include 型 allowlist，官方会用它过滤掉 `set` 恢复出来的值。 */
+  codexIncludeAllowlist: boolean;
 }
 
 /** 多设备额度协作的本机配置，不包含任何 Codex 登录凭据。 */

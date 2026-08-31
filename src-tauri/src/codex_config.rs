@@ -274,7 +274,7 @@ fn write_codex_live_atomic_locked(
     };
     // 准备写入内容
     let cfg_text = match config_text_opt {
-        Some(s) => normalize_codex_config_text_for_live_read(s)?,
+        Some(s) => with_codex_env_injection(&normalize_codex_config_text_for_live_read(s)?)?,
         None => String::new(),
     };
     if !cfg_text.trim().is_empty() {
@@ -528,10 +528,35 @@ fn codex_live_write_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// 把全局环境变量注入补进即将落盘的 Codex `config.toml` 文本。
+///
+/// 之所以放在最底层而不是各个供应商切换入口：Codex 有若干条会**整体重写**
+/// `config.toml` 的路径（例如本地代理接管），只在上层注入会在这些路径上被
+/// 抹掉。放在这里可以保证任何一次落盘都带上注入结果。
+///
+/// 空文本不注入——那代表调用方要清空/删除配置，不该凭空造出内容。
+///
+/// 注入失败时**降级为原样返回**：环境变量注入是增强功能，任何一次解析失败
+/// 都不应该让原本正常的供应商切换失败。
+fn with_codex_env_injection(config_text: &str) -> Result<String, AppError> {
+    if config_text.trim().is_empty() {
+        return Ok(config_text.to_string());
+    }
+    match crate::env_injection::inject_into_codex_live(config_text) {
+        Ok(text) => Ok(text),
+        Err(error) => {
+            log::warn!("注入 Codex 环境变量失败，本次写入保持原样: {error}");
+            Ok(config_text.to_string())
+        }
+    }
+}
+
 fn write_codex_live_config_atomic_locked(config_text_opt: Option<&str>) -> Result<(), AppError> {
     let config_path = get_codex_config_path();
     let cfg_text = match config_text_opt {
-        Some(config_text) => normalize_codex_config_text_for_live_read(config_text)?,
+        Some(config_text) => {
+            with_codex_env_injection(&normalize_codex_config_text_for_live_read(config_text)?)?
+        }
         None => String::new(),
     };
 
@@ -604,7 +629,8 @@ where
             AppError::Config(format!("Codex config.toml is not valid UTF-8: {error}"))
         })?;
         let normalized_before = normalize_codex_config_text_for_live_read(&before_text)?;
-        let candidate = normalize_codex_config_text_for_live_read(&build(&normalized_before)?)?;
+        let built = with_codex_env_injection(&build(&normalized_before)?)?;
+        let candidate = normalize_codex_config_text_for_live_read(&built)?;
         if !candidate.trim().is_empty() {
             toml::from_str::<toml::Table>(&candidate)
                 .map_err(|error| AppError::toml(&config_path, error))?;
@@ -658,7 +684,8 @@ where
             AppError::Config(format!("Codex config.toml is not valid UTF-8: {error}"))
         })?;
         let normalized_before = normalize_codex_config_text_for_live_read(&before_text)?;
-        let candidate = normalize_codex_config_text_for_live_read(&build(&normalized_before)?)?;
+        let built = with_codex_env_injection(&build(&normalized_before)?)?;
+        let candidate = normalize_codex_config_text_for_live_read(&built)?;
         if !candidate.trim().is_empty() {
             toml::from_str::<toml::Table>(&candidate)
                 .map_err(|error| AppError::toml(&config_path, error))?;

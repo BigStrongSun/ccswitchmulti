@@ -1178,7 +1178,10 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
     match app_type {
         AppType::Claude => {
             let path = get_claude_settings_path();
-            let settings = sanitize_claude_settings_for_live(&provider.settings_config);
+            let mut settings = sanitize_claude_settings_for_live(&provider.settings_config);
+            // 供应商切换会整体重写 settings.json，必须在这里补回全局注入的变量，
+            // 否则用户切换一次供应商后注入就失效了。
+            crate::env_injection::inject_into_claude_live(&mut settings);
             write_json_file(&path, &settings)?;
         }
         AppType::ClaudeDesktop => {

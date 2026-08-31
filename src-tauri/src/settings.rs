@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
@@ -407,6 +408,98 @@ pub struct CodexOfficialHistoryUnifyMigration {
     pub codex_config_dir: Option<String>,
 }
 
+/// 环境变量自动注入的目标 CLI。
+///
+/// 只有官方配置原生支持进程级（或子进程级）env 声明的 CLI 才在列。
+/// Gemini CLI 的 `settings.json` 没有等价字段，因此不提供该目标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EnvInjectionTarget {
+    Claude,
+    Codex,
+}
+
+/// 环境变量自动注入的目标开关。
+///
+/// 未列出的 CLI 一律视为禁用——目前 Gemini CLI 官方设置里没有可写入
+/// 进程级环境变量的字段，硬做只会得到「开关打开了但没效果」的错觉。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvInjectionTargets {
+    /// 写入 `~/.claude/settings.json` 的 `env`
+    #[serde(default = "default_true")]
+    pub claude: bool,
+    /// 写入 `~/.codex/config.toml` 的 `[shell_environment_policy] set`
+    #[serde(default = "default_true")]
+    pub codex: bool,
+}
+
+impl Default for EnvInjectionTargets {
+    fn default() -> Self {
+        Self {
+            claude: true,
+            codex: true,
+        }
+    }
+}
+
+/// 环境变量自动注入设置。
+///
+/// 动机示例：让单个 CLI 运行在指定时区（`TZ=Asia/Shanghai`）而不改系统时区。
+/// 注入只写各 CLI 自己的配置文件，因此**不启用本地代理、直连官方**时同样生效。
+///
+/// 合并语义：全局变量**只补缺、不覆盖** provider `settings_config.env`
+/// 里已存在的同名键。provider 的 env 存放路由相关变量
+/// （`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY` 等），一旦允许覆盖，
+/// 用户填一个同名变量就会静默打乱供应商切换。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvInjectionSettings {
+    /// 总开关。默认关闭，保证不影响任何现有行为。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 按 CLI 的独立开关
+    #[serde(default)]
+    pub targets: EnvInjectionTargets,
+    /// 要注入的键值对。用 BTreeMap 保证序列化顺序稳定，
+    /// 避免 Map 顺序抖动造成配置文件无意义 diff。
+    #[serde(default)]
+    pub variables: BTreeMap<String, String>,
+}
+
+impl EnvInjectionSettings {
+    /// 该目标是否启用且至少有一个变量。
+    pub fn is_active_for(&self, target: EnvInjectionTarget) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if self.variables.is_empty() {
+            return false;
+        }
+        match target {
+            EnvInjectionTarget::Claude => self.targets.claude,
+            EnvInjectionTarget::Codex => self.targets.codex,
+        }
+    }
+
+    /// 取该目标生效的变量集合；未启用时返回空。
+    pub fn variables_for(&self, target: EnvInjectionTarget) -> BTreeMap<String, String> {
+        if !self.is_active_for(target) {
+            return BTreeMap::new();
+        }
+        self.variables
+            .iter()
+            .filter(|(key, _)| is_valid_env_key(key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+}
+
+/// 过滤掉空键名与含 `=`/NUL 的非法键名，避免写出损坏的配置。
+pub fn is_valid_env_key(key: &str) -> bool {
+    !key.is_empty() && !key.contains('=') && !key.contains('\0') && !key.contains('\n')
+}
+
 /// 应用设置结构
 ///
 /// 存储设备级别设置，保存在本地 `~/.cc-switch/settings.json`，不随数据库同步。
@@ -572,6 +665,11 @@ pub struct AppSettings {
     #[serde(default)]
     pub quota_collaboration: QuotaCollaborationSettings,
 
+    // ===== 环境变量自动注入 =====
+    /// 注入到各 CLI 官方配置文件的环境变量（独立开关，默认关闭）
+    #[serde(default)]
+    pub env_injection: EnvInjectionSettings,
+
     // ===== 本机自动迁移状态 =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_migrations: Option<LocalMigrations>,
@@ -639,6 +737,7 @@ impl Default for AppSettings {
             backup_retain_count: None,
             preferred_terminal: None,
             quota_collaboration: QuotaCollaborationSettings::default(),
+            env_injection: EnvInjectionSettings::default(),
             local_migrations: None,
         }
     }
@@ -845,13 +944,37 @@ pub fn get_settings_for_frontend() -> AppSettings {
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     new_settings.normalize_paths();
+
+    let previous_env_injection = settings_store()
+        .read()
+        .unwrap_or_else(|e| {
+            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            e.into_inner()
+        })
+        .env_injection
+        .clone();
+    let next_env_injection = new_settings.env_injection.clone();
+
     save_settings_file(&new_settings)?;
 
-    let mut guard = settings_store().write().unwrap_or_else(|e| {
-        log::warn!("设置锁已毒化，使用恢复值: {e}");
-        e.into_inner()
-    });
-    *guard = new_settings;
+    {
+        let mut guard = settings_store().write().unwrap_or_else(|e| {
+            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            e.into_inner()
+        });
+        *guard = new_settings;
+    }
+
+    // 必须在释放设置锁之后再同步：同步过程会读取 live 配置并可能回调
+    // get_settings()，RwLock 不可重入，持锁调用会死锁。
+    if previous_env_injection != next_env_injection {
+        if let Err(error) =
+            crate::env_injection::sync_to_live_configs(&previous_env_injection, &next_env_injection)
+        {
+            // 设置本身已经存盘，不因为某一个 CLI 配置写不动就回滚用户设置
+            log::warn!("设置已保存，但同步环境变量注入到 CLI 配置失败: {error}");
+        }
+    }
     Ok(())
 }
 

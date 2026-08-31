@@ -4,6 +4,7 @@ import type {
   WebDavSyncSettings,
   S3SyncSettings,
   RemoteSnapshotInfo,
+  EnvInjectionConflicts,
 } from "@/types";
 import type { AppId } from "./types";
 
@@ -67,6 +68,21 @@ export const settingsApi = {
 
   async save(settings: Settings): Promise<boolean> {
     return await invoke("save_settings", { settings });
+  },
+
+  /**
+   * 检查环境变量注入是否存在已知的失效风险（只读）。
+   *
+   * 失败一律按「没有冲突」处理，调用方不应让提示信息阻塞 UI。
+   */
+  async inspectEnvInjectionConflicts(): Promise<EnvInjectionConflicts | null> {
+    try {
+      return await invoke<EnvInjectionConflicts>(
+        "inspect_env_injection_conflicts",
+      );
+    } catch {
+      return null;
+    }
   },
 
   /** 是否存在统一 Codex 会话历史的迁移备份（关闭弹窗据此显示"恢复备份"勾选） */
