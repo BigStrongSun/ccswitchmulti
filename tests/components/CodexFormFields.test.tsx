@@ -1137,6 +1137,44 @@ describe("CodexFormFields local model routing", () => {
         }),
       }),
       expect.any(Function),
+      "all_enabled_models",
+    );
+  });
+
+  it("does not present an empty backend outcome as a successful Qwen probe", async () => {
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockImplementationOnce(async (_provider, onProgress) => {
+      onProgress({
+        kind: "batch_finished",
+        total: 0,
+        verified: 0,
+        partial: 0,
+        failed: 0,
+      });
+      return createDeepProbeOutcome([]);
+    });
+    renderCatalogHarness(
+      [{ model: "qwen3.8", upstreamModel: "Qwen/Qwen3.8" }],
+      {
+        shouldShowSpeedTest: true,
+        protocolMode: "manual",
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "后端没有返回已启用模型 qwen3.8 的探测结果",
+    );
+    expect(
+      screen.queryByText("已完成 0 个模型：Verified 0，Partial 0，Failed 0。"),
+    ).not.toBeInTheDocument();
+    expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Function),
+      "all_enabled_models",
     );
   });
 

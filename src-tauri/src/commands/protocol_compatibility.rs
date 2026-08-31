@@ -129,6 +129,19 @@ pub struct CodexProviderProtocolSaveOutcome {
     pub saved: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexProtocolProbeScope {
+    AutomaticModels,
+    AllEnabledModels,
+}
+
+impl Default for CodexProtocolProbeScope {
+    fn default() -> Self {
+        Self::AutomaticModels
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrepareCodexProviderSetRequest {
@@ -738,10 +751,16 @@ pub async fn preflight_codex_provider_protocol_compatibility(
     state: State<'_, AppState>,
     provider: Provider,
     on_event: Channel<ProtocolProbeProgressEvent>,
+    scope: Option<CodexProtocolProbeScope>,
 ) -> Result<CodexProviderProtocolPreflightOutcome, String> {
-    run_provider_preflight(state.inner(), provider, move |event| {
-        let _ = on_event.send(event);
-    })
+    run_provider_preflight(
+        state.inner(),
+        provider,
+        scope.unwrap_or_default(),
+        move |event| {
+            let _ = on_event.send(event);
+        },
+    )
     .await
 }
 
@@ -757,9 +776,14 @@ pub async fn preflight_universal_codex_protocol_compatibility(
     else {
         return Ok(None);
     };
-    run_provider_preflight(state.inner(), codex_provider, move |event| {
-        let _ = on_event.send(event);
-    })
+    run_provider_preflight(
+        state.inner(),
+        codex_provider,
+        CodexProtocolProbeScope::AutomaticModels,
+        move |event| {
+            let _ = on_event.send(event);
+        },
+    )
     .await
     .map(Some)
 }
@@ -812,6 +836,7 @@ pub async fn save_codex_provider_with_protocol_preflight(
 async fn run_provider_preflight<F>(
     state: &AppState,
     provider: Provider,
+    scope: CodexProtocolProbeScope,
     reporter: F,
 ) -> Result<CodexProviderProtocolPreflightOutcome, String>
 where
@@ -823,7 +848,10 @@ where
         .map_err(|error| error.to_string())?
         .into_iter()
         .collect::<HashMap<_, _>>();
-    let (candidates, _is_router) = compile_preflight_candidates(&provider, &providers)?;
+    let (candidates, _is_router) = compile_preflight_candidates(&provider, &providers, scope)?;
+    if scope == CodexProtocolProbeScope::AllEnabledModels && candidates.is_empty() {
+        return Err("codex_protocol_probe_no_enabled_models".to_string());
+    }
     let total = candidates.len();
     let batch = run_candidate_batch_with_observations(candidates, |candidate| {
         run_explicit_candidate_result_with(state, candidate, |candidate| {
@@ -891,7 +919,11 @@ pub(crate) async fn automatic_codex_provider_preflight(
         .map_err(|error| error.to_string())?
         .into_iter()
         .collect::<HashMap<_, _>>();
-    let (candidates, _is_router) = compile_preflight_candidates(&provider, &providers)?;
+    let (candidates, _is_router) = compile_preflight_candidates(
+        &provider,
+        &providers,
+        CodexProtocolProbeScope::AutomaticModels,
+    )?;
     if candidates.is_empty() {
         return Ok((provider, Vec::new(), Vec::new()));
     }
@@ -905,10 +937,14 @@ pub(crate) async fn automatic_codex_provider_preflight(
 fn compile_preflight_candidates(
     provider: &Provider,
     providers: &HashMap<String, Provider>,
+    scope: CodexProtocolProbeScope,
 ) -> Result<(Vec<ProbeCandidate>, bool), String> {
     if provider.settings_config.get("codexRouting").is_some() {
         return compile_codex_router_probe_candidates(provider, providers)
             .map(|candidates| (candidates, true));
+    }
+    if scope == CodexProtocolProbeScope::AllEnabledModels {
+        return compile_provider_probe_candidates(provider).map(|candidates| (candidates, false));
     }
     if provider.uses_manual_codex_protocol() && !provider.has_codex_protocol_overrides() {
         return Ok((Vec::new(), false));
@@ -1439,7 +1475,7 @@ mod tests {
         remember_candidate_batch_receipts, run_automatic_candidate_result_with,
         run_candidate_batch_with, run_candidate_batch_with_observations,
         run_explicit_candidate_result_with, ApplyReasoningOverrideRequest,
-        ClearReasoningOverrideRequest, CodexProviderSetBatchSourceRequest,
+        ClearReasoningOverrideRequest, CodexProtocolProbeScope, CodexProviderSetBatchSourceRequest,
         CodexProviderSetCommitIntent, CodexProviderSetCommitStatus,
         CommitCodexProviderSetBatchRequest, CommitCodexProviderSetRequest,
         PlanReasoningOverrideRequest, PrepareCodexProviderSetBatchRequest,
@@ -2739,8 +2775,12 @@ mod tests {
         let router = router_provider(&target.id);
         let providers = HashMap::from([(target.id.clone(), target)]);
 
-        let (candidates, is_router) =
-            compile_preflight_candidates(&router, &providers).expect("compile routed preflight");
+        let (candidates, is_router) = compile_preflight_candidates(
+            &router,
+            &providers,
+            CodexProtocolProbeScope::AllEnabledModels,
+        )
+        .expect("compile routed preflight");
 
         assert!(is_router);
         assert_eq!(candidates.len(), 2);
@@ -2752,7 +2792,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_preflight_compiles_only_models_that_follow_automatic_protocol_selection() {
+    fn automatic_preflight_compiles_only_models_that_follow_automatic_protocol_selection() {
         let mut provider = ordinary_provider();
         let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
         meta.codex_protocol_mode = Some(CodexProtocolMode::Manual);
@@ -2760,8 +2800,12 @@ mod tests {
             .insert("model-a".to_string(), CodexProtocolOverride::OpenaiChat);
         let original = provider.clone();
 
-        let (candidates, is_router) = compile_preflight_candidates(&provider, &HashMap::new())
-            .expect("compile ordinary Provider preflight");
+        let (candidates, is_router) = compile_preflight_candidates(
+            &provider,
+            &HashMap::new(),
+            CodexProtocolProbeScope::AutomaticModels,
+        )
+        .expect("compile ordinary Provider preflight");
 
         assert!(!is_router);
         assert_eq!(
@@ -2775,6 +2819,31 @@ mod tests {
             serde_json::to_value(provider).expect("serialize Provider after compile"),
             serde_json::to_value(original).expect("serialize original Provider"),
             "preflight candidate compilation must not mutate the Provider draft"
+        );
+    }
+
+    #[test]
+    fn explicit_preflight_compiles_every_enabled_model_despite_manual_overrides() {
+        let mut provider = ordinary_provider();
+        let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+        meta.codex_protocol_mode = Some(CodexProtocolMode::Manual);
+        meta.codex_protocol_overrides
+            .insert("model-a".to_string(), CodexProtocolOverride::OpenaiChat);
+
+        let (candidates, is_router) = compile_preflight_candidates(
+            &provider,
+            &HashMap::new(),
+            CodexProtocolProbeScope::AllEnabledModels,
+        )
+        .expect("compile explicit Provider validation");
+
+        assert!(!is_router);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.public_model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model-a", "model-b"]
         );
     }
 

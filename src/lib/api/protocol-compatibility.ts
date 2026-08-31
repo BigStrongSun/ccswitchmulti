@@ -22,6 +22,7 @@ export type CodexProtocolProbeStageStatus =
   | "failed"
   | "skipped";
 export type CodexProtocolProbeReadiness = "verified" | "partial" | "unverified";
+export type CodexProtocolProbeScope = "automatic_models" | "all_enabled_models";
 export type CodexReasoningSemantic = "readable" | "summary" | "opaque" | "none";
 export type CodexReasoningSource =
   | "reasoning_content"
@@ -325,12 +326,13 @@ export async function commitCodexProviderSetBatch(
 export async function preflightCodexProviderProtocolCompatibility(
   provider: Provider,
   onProgress: (event: CodexProtocolProbeProgressEvent) => void,
+  scope: CodexProtocolProbeScope = "automatic_models",
 ): Promise<CodexProviderProtocolPreflightOutcome> {
   const onEvent = new Channel<CodexProtocolProbeProgressEvent>();
   onEvent.onmessage = onProgress;
   return invoke<CodexProviderProtocolPreflightOutcome>(
     "preflight_codex_provider_protocol_compatibility",
-    { provider, onEvent },
+    { provider, onEvent, scope },
   );
 }
 

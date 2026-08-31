@@ -1294,8 +1294,20 @@ export function CodexFormFields({
           if (!ownsCurrentIdentity()) return;
           setProtocolProbeEvents((current) => [...current, event]);
         },
+        "all_enabled_models",
       );
       if (!ownsCurrentIdentity()) return;
+      const returnedModels = new Set(
+        outcome.records.map((record) => record.target.public_model.trim()),
+      );
+      const missingModels = probeModels
+        .map((model) => model.model.trim())
+        .filter((model) => !returnedModels.has(model));
+      if (missingModels.length > 0) {
+        throw new Error(
+          `后端没有返回已启用模型 ${missingModels.join("、")} 的探测结果`,
+        );
+      }
       setProtocolProbeOutcome(outcome);
       onProtocolProbeReceiptIdsChange(outcome.receiptIds);
       const verifiedRecords = outcome.records.filter(

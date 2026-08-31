@@ -14,6 +14,7 @@ import {
   commitCodexProviderSetBatch,
   getCodexProviderEditorSnapshot,
   listCodexProviderAdaptationSummaries,
+  preflightCodexProviderProtocolCompatibility,
 } from "./protocol-compatibility";
 
 const provider = {
@@ -80,5 +81,22 @@ describe("Codex Provider adaptation API", () => {
         intent: "accept_auto",
       },
     });
+  });
+
+  it("sends an explicit all-enabled-model scope for user-requested validation", async () => {
+    await preflightCodexProviderProtocolCompatibility(
+      provider,
+      vi.fn(),
+      "all_enabled_models",
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "preflight_codex_provider_protocol_compatibility",
+      {
+        provider,
+        onEvent: expect.anything(),
+        scope: "all_enabled_models",
+      },
+    );
   });
 });

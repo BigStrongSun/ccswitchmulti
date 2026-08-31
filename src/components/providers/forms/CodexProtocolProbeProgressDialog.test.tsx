@@ -401,6 +401,36 @@ describe("CodexProtocolProbeProgressDialog", () => {
     expect(onRetry).toHaveBeenCalledOnce();
   });
 
+  it("never reports 0/0/0 as a completed probe when expected models have no result", () => {
+    render(
+      <CodexProtocolProbeProgressDialog
+        open
+        running={false}
+        expectedModels={["qwen3.8"]}
+        events={[
+          {
+            kind: "batch_finished",
+            total: 0,
+            verified: 0,
+            partial: 0,
+            failed: 0,
+          },
+        ]}
+        outcome={null}
+        error="后端没有返回已启用模型 qwen3.8 的探测结果"
+        onOpenChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByText("已完成 0 个模型：Verified 0，Partial 0，Failed 0。"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("探测未完成：1 个模型没有结果。"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("未返回探测结果")).toHaveLength(2);
+  });
+
   it.each([
     [401, "HTTP 401 · 认证失败"],
     [403, "HTTP 403 · 当前凭据无权限"],

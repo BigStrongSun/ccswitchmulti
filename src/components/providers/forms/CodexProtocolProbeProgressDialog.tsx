@@ -381,6 +381,13 @@ export function CodexProtocolProbeProgressDialog({
   );
   const completionSummary =
     batchSummaries.length > 0 ? batchSummary : modelSummary;
+  const missingResultCount = models.filter(
+    (model) => model.readiness === null,
+  ).length;
+  const hasMissingResults =
+    !running &&
+    missingResultCount > 0 &&
+    (Boolean(error) || batchSummaries.length > 0 || outcome !== null);
 
   return (
     <Dialog
@@ -399,9 +406,11 @@ export function CodexProtocolProbeProgressDialog({
           <DialogDescription>
             {running
               ? `正在验证模型 ${completed}/${models.length || "…"}。每个模型会依次检查 Responses 与 Chat。`
-              : batchSummaries.length > 0 || completed > 0
-                ? `已完成 ${completionSummary.total} 个模型：Verified ${completionSummary.verified}，Partial ${completionSummary.partial}，Failed ${completionSummary.failed}。`
-                : "探测已结束。"}
+              : hasMissingResults
+                ? `探测未完成：${missingResultCount} 个模型没有结果。`
+                : batchSummaries.length > 0 || completed > 0
+                  ? `已完成 ${completionSummary.total} 个模型：Verified ${completionSummary.verified}，Partial ${completionSummary.partial}，Failed ${completionSummary.failed}。`
+                  : "探测已结束。"}
           </DialogDescription>
         </DialogHeader>
 
@@ -470,7 +479,9 @@ export function CodexProtocolProbeProgressDialog({
                       </div>
                       {!branch.touched ? (
                         <p className="text-xs text-muted-foreground">
-                          等待开始
+                          {hasMissingResults && model.readiness === null
+                            ? "未返回探测结果"
+                            : "等待开始"}
                         </p>
                       ) : (
                         <div className="space-y-2">

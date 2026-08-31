@@ -4800,3 +4800,11 @@ supported in one streaming turn`。
 - Qwen Responses 历史的“commentary message + 紧随 function_call”合并修复已由主线提交 `5b820624` 提供，不能重复造一套品牌特判，也不能把原始 `reasoning_content`/`reasoning_text` 冒充模型 summary。当前日志证明本机 Qwen 连续请求实际走 `/v1/responses` 且 HTTP 200；数据库中的旧协议档案仍是早期 `partial`，安装态需要用当前深探测重新生成双协议证据，不能靠直接改字段伪造 Verified。
 - TDD 门禁：启动 Profile 修复回归先因 helper 不存在编译失败，实现后通过；Codex TOML consistency 13/13、Provider service 75/75、Profile service 11/11、Responses→Chat 92/92 均通过；完整 Rust library 为 3732 passed/0 failed/6 ignored，`cargo check --lib --no-default-features`、rustfmt、diff 与 5 个本次文本的 UTF-8 strict/no-BOM/no-U+FFFD 检查通过。安装器和安装态深探测/视觉验收仍待执行，不能把源码证据描述为已安装修复。
 - 外部交叉验证使用 Codex 内置检索读取 OpenAI Codex 配置参考、Responses 参考、vLLM 与 Qwen 官方部署文档；Matrix WebSearch 独立搜索结果不足，但直接打开相同官方页面得到一致边界：Codex `model_providers.<id>.wire_api` 外层仅使用 Responses，Qwen/vLLM Chat 的 `reasoning_content` 是扩展字段而不是 Responses summary。具体漂移根因以本地 DB、日志、启动调用链和 RED→GREEN 回归为权威。
+
+## 2026-08-31 Qwen 显式深探测与自动保存探测意图分离
+
+- 安装态实际打开 Qwen Provider 并执行“验证连接”后复现了矛盾终态：`Verified 0，Partial 0，Failed 0`，两个协议分支都停在“等待开始”。同一安装进程的 Router 日志显示普通 Qwen 请求实际走 `/v1/responses` 且 HTTP 200，因此这次故障发生在 runner 发请求前，不是 Qwen/vLLM 521、模型不可用或流式解析失败。
+- 根因是 `compile_preflight_candidates` 同时服务两种不同意图。保存前自动规划只需要探测“跟随自动”的模型，手工协议或逐模型覆盖应当跳过；但用户主动点击“验证连接”承诺验证所有已启用模型和 Chat/Responses 两条协议。旧实现把后一种也按自动规划过滤，Qwen 恰好处于旧 Provider 级手工协议迁移视图，因此候选集被过滤为空。
+- 后端新增显式 `CodexProtocolProbeScope`：`automatic_models` 保持 Provider Set、Wizard、Universal 的原有保存语义；`all_enabled_models` 专供用户显式深探测，普通 Provider 无论 Provider 级手工协议或逐模型覆盖都编译全部已启用模型。显式范围若仍得到空候选会返回稳定错误，不再产生合法的 0/0/0 outcome。
+- Add/Edit 的“验证连接”明确传入 `all_enabled_models`，并对返回记录和期望模型做完整性校验；任一已启用模型缺结果即清空本轮 receipt、保留草稿并报告具名模型。进度弹窗把这种状态显示为“探测未完成”和“未返回探测结果”，不再把空 batch 描述成已完成。
+- TDD 先在旧实现上稳定得到三类 RED：API 未发送 scope、显式手工 Provider 只编译自动模型、空 outcome 仍显示 0/0/0；实现后候选编译 3/3、API/Form/进度弹窗 55/55 与 TypeScript typecheck 通过。完整 detached 候选、Windows 安装器与安装态 Qwen 双协议深探测仍需在本提交后执行，结果必须另行记录，不能把定向源码门禁冒充安装态成功。
