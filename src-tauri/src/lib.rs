@@ -1703,6 +1703,7 @@ pub fn run() {
             commands::stop_proxy_with_restore,
             commands::get_proxy_takeover_status,
             commands::set_proxy_takeover_for_app,
+            commands::force_release_proxy_port_and_restore_takeover,
             commands::get_proxy_status,
             commands::diagnose_codex_multirouter,
             commands::unlock_codex_model_picker,

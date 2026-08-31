@@ -15,6 +15,7 @@ use crate::services::provider::{
     build_effective_settings_with_common_config, write_live_with_common_config,
 };
 use semver::Version;
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -33,6 +34,35 @@ pub(crate) enum PortOwnership {
     CompatibleInstance,
     UnknownOwner,
     Unreachable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForcedPortRecoveryTarget {
+    VerifiedPreviousInstance,
+    CurrentProcess,
+    ForeignOwner,
+}
+
+fn classify_forced_port_recovery_target(
+    current: &crate::process_identity::ProcessIdentity,
+    owner: &crate::process_identity::ProcessIdentity,
+) -> ForcedPortRecoveryTarget {
+    if current.matches(owner) {
+        ForcedPortRecoveryTarget::CurrentProcess
+    } else if current.same_executable(owner) {
+        ForcedPortRecoveryTarget::VerifiedPreviousInstance
+    } else {
+        ForcedPortRecoveryTarget::ForeignOwner
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForcedPortRecoveryResult {
+    pub app_type: String,
+    pub port: u16,
+    pub released_pid: Option<u32>,
+    pub takeover_restored: bool,
 }
 
 fn proxy_identity_matches_verified_process(
@@ -1210,6 +1240,93 @@ impl ProxyService {
         }
 
         Ok(())
+    }
+
+    /// Safely replace a verified previous CCSwitchMulti listener and restore takeover.
+    ///
+    /// This is intentionally stricter than a generic "kill port owner" action: the
+    /// listener must still belong to the exact same executable as this process, and
+    /// its PID/start time are revalidated immediately before termination.
+    pub async fn force_release_proxy_port_and_restore_takeover(
+        &self,
+        app_type: &str,
+    ) -> Result<ForcedPortRecoveryResult, String> {
+        let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+        let port = self
+            .db
+            .get_proxy_config()
+            .await
+            .map_err(|e| format!("获取代理端口失败: {e}"))?
+            .listen_port;
+        let mut released_pid = None;
+
+        if let Some(owner_pid) = crate::process_identity::tcp_listener_owner_pid(port) {
+            let current = crate::process_identity::current_process_identity()
+                .ok_or_else(|| "无法读取当前 CCSM 进程身份，已拒绝强制恢复".to_string())?;
+            let owner = crate::process_identity::process_identity(owner_pid)
+                .ok_or_else(|| format!("无法读取端口 {port} 的监听进程身份，已拒绝强制恢复"))?;
+
+            match classify_forced_port_recovery_target(&current, &owner) {
+                ForcedPortRecoveryTarget::CurrentProcess => {}
+                ForcedPortRecoveryTarget::ForeignOwner => {
+                    return Err(format!(
+                        "端口 {port} 由其他程序占用（PID {}，路径 {}），CCSM 不会终止该进程",
+                        owner.pid, owner.executable_path
+                    ));
+                }
+                ForcedPortRecoveryTarget::VerifiedPreviousInstance => {
+                    let owner_before_stop =
+                        crate::process_identity::tcp_listener_owner_pid(port)
+                            .ok_or_else(|| format!("端口 {port} 的监听进程已变化，请重新检测"))?;
+                    let identity_before_stop =
+                        crate::process_identity::process_identity(owner_before_stop)
+                            .ok_or_else(|| format!("无法再次读取端口 {port} 的监听进程身份"))?;
+                    if owner_before_stop != owner.pid || !owner.matches(&identity_before_stop) {
+                        return Err(format!(
+                            "端口 {port} 的监听进程在确认后发生变化，已拒绝强制恢复"
+                        ));
+                    }
+                    crate::process_identity::terminate_verified_process(&owner)?;
+                    released_pid = Some(owner.pid);
+
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                    loop {
+                        match crate::process_identity::tcp_listener_owner_pid(port) {
+                            None => break,
+                            Some(pid) if tokio::time::Instant::now() < deadline => {
+                                if pid != owner.pid {
+                                    return Err(format!(
+                                        "旧 CCSM 退出后端口 {port} 被新的进程 PID {pid} 占用，已停止恢复"
+                                    ));
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                            Some(pid) => {
+                                return Err(format!(
+                                    "等待旧 CCSM 释放端口 {port} 超时，当前监听 PID {pid}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.set_takeover_for_app(app.as_str(), true).await?;
+        let running = self.is_running().await;
+        let live_matches = self.live_takeover_matches_current_proxy(&app).await?;
+        if !running || !live_matches {
+            return Err(format!(
+                "端口 {port} 已处理，但接管校验失败：proxy_running={running}, live_matches={live_matches}"
+            ));
+        }
+
+        Ok(ForcedPortRecoveryResult {
+            app_type: app.as_str().to_string(),
+            port,
+            released_pid,
+            takeover_restored: true,
+        })
     }
 
     /// 在 provider 切换锁内关闭单个 app 的代理接管。
@@ -4600,6 +4717,38 @@ mod tests {
         assert!(should_run_codex_post_takeover(&AppType::Codex));
         assert!(!should_run_codex_post_takeover(&AppType::Claude));
         assert!(!should_run_codex_post_takeover(&AppType::Gemini));
+    }
+
+    #[test]
+    fn forced_port_recovery_accepts_only_the_same_verified_executable() {
+        let current = crate::process_identity::ProcessIdentity {
+            pid: 200,
+            executable_path: r"C:\Program Files\CCSwitchMulti\cc-switch.exe".to_string(),
+            started_at_ticks: 20,
+        };
+        let old_listener = crate::process_identity::ProcessIdentity {
+            pid: 100,
+            executable_path: r"C:\Program Files\CCSwitchMulti\cc-switch.exe".to_string(),
+            started_at_ticks: 10,
+        };
+        let foreign_listener = crate::process_identity::ProcessIdentity {
+            pid: 300,
+            executable_path: r"C:\Program Files\Other\server.exe".to_string(),
+            started_at_ticks: 30,
+        };
+
+        assert_eq!(
+            classify_forced_port_recovery_target(&current, &old_listener),
+            ForcedPortRecoveryTarget::VerifiedPreviousInstance
+        );
+        assert_eq!(
+            classify_forced_port_recovery_target(&current, &foreign_listener),
+            ForcedPortRecoveryTarget::ForeignOwner
+        );
+        assert_eq!(
+            classify_forced_port_recovery_target(&current, &current),
+            ForcedPortRecoveryTarget::CurrentProcess
+        );
     }
 
     fn verified_proxy_identity_fixture() -> (Value, u16, crate::process_identity::ProcessIdentity) {

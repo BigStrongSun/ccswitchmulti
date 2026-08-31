@@ -277,6 +277,9 @@
       "unknown": "偵測到需要處理的恢復問題",
       "app": "影響範圍：{{app}}。",
       "openLogs": "查看記錄",
+      "forceRestoreTakeover": "解除佔用並恢復接管",
+      "forceRestoreSucceeded": "舊 CCSM 連接埠佔用已解除，代理接管已恢復",
+      "forceRestoreFailed": "無法安全解除連接埠佔用：{{error}}",
       "kind": {
         "activePreviousInstance": "另一個 CCSwitchMulti 執行個體仍在運行，本次啟動已停止代理接管",
         "confirmedCrash": "偵測到上次運行崩潰，請檢查設定恢復結果",
@@ -3246,7 +3249,11 @@
     "applyCcsm": "套用 CCSM 設定",
     "keepCodex": "保留 Codex 變更",
     "later": "稍後處理",
-    "retry": "重試套用"
+    "retry": "重試套用",
+    "runtimeTitle": "Codex 仍在使用舊設定",
+    "runtimeDescription": "磁碟上的 CCSM 設定已正確，但執行中的 Codex app-server 啟動得更早，仍保留舊 Provider 快照。",
+    "runtimeRestartHint": "請完全結束 Codex Desktop/app-server，重新開啟後建立新任務；現有任務仍會保留建立時的 Provider。",
+    "recheck": "重新偵測"
   },
   "managedAuth": {
     "selectedAccountNeedsReauth": "已綁定的帳號不存在或需要重新登入",

@@ -11,6 +11,19 @@ export type CodexConfigConsistencyAction =
   | "keep_codex"
   | "later";
 
+export type CodexConfigRuntimeActivationState =
+  | "not_running"
+  | "current"
+  | "restart_required"
+  | "unknown";
+
+export interface CodexConfigRuntimeActivation {
+  state: CodexConfigRuntimeActivationState;
+  appServerStartedAt: string | null;
+  configModifiedAt: string | null;
+  reason: string | null;
+}
+
 export interface CodexConfigConsistencyReport {
   state: CodexConfigConsistencyState;
   providerId: string | null;
@@ -18,6 +31,7 @@ export interface CodexConfigConsistencyReport {
   actualFingerprint: string | null;
   changedKeys: string[];
   reason: string | null;
+  runtimeActivation: CodexConfigRuntimeActivation;
 }
 
 export const codexConfigConsistencyApi = {

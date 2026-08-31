@@ -7,6 +7,21 @@ function ConvertTo-CcsmGuardianCanonicalPath {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd([char[]]@([char]92, [char]47))
 }
 
+function ConvertTo-CcsmGuardianHostLocalPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $canonical = ConvertTo-CcsmGuardianCanonicalPath -Path $Path
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { return $canonical }
+    $localAppData = ConvertTo-CcsmGuardianCanonicalPath -Path $env:LOCALAPPDATA
+    $escaped = [regex]::Escape($localAppData)
+    $pattern = "^$escaped\\Packages\\OpenAI\.Codex_[^\\]+\\LocalCache\\Local(?:\\(?<relative>.*))?$"
+    $match = [regex]::Match($canonical, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $match.Success) { return $canonical }
+    $relative = [string]$match.Groups["relative"].Value
+    if ([string]::IsNullOrWhiteSpace($relative)) { return $localAppData }
+    return ConvertTo-CcsmGuardianCanonicalPath -Path (Join-Path $localAppData $relative)
+}
+
 function Test-CcsmGuardianSamePath {
     param([string]$Left, [string]$Right)
 
@@ -14,8 +29,8 @@ function Test-CcsmGuardianSamePath {
         return $false
     }
     return [string]::Equals(
-        (ConvertTo-CcsmGuardianCanonicalPath -Path $Left),
-        (ConvertTo-CcsmGuardianCanonicalPath -Path $Right),
+        (ConvertTo-CcsmGuardianHostLocalPath -Path $Left),
+        (ConvertTo-CcsmGuardianHostLocalPath -Path $Right),
         [System.StringComparison]::OrdinalIgnoreCase
     )
 }

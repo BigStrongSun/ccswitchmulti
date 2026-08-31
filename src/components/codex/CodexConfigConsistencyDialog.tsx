@@ -32,7 +32,54 @@ export function CodexConfigConsistencyDialog({
   onRetry,
 }: CodexConfigConsistencyDialogProps) {
   const { t } = useTranslation();
-  if (!report || report.state !== "external_drift") return null;
+  if (!report) return null;
+  const runtimeRestartRequired =
+    report.runtimeActivation?.state === "restart_required";
+  const externalDrift = report.state === "external_drift";
+  const takeoverProjectionDrift = report.reason === "takeover_projection_drift";
+  if (!externalDrift && !runtimeRestartRequired) return null;
+
+  if (!externalDrift && runtimeRestartRequired) {
+    return (
+      <Dialog
+        open
+        onOpenChange={(open) => {
+          if (!open && !pending) onLater();
+        }}
+      >
+        <DialogContent className="max-w-lg" zIndex="top">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              {t("codexConfigConsistency.runtimeTitle")}
+            </DialogTitle>
+            <DialogDescription>
+              {t("codexConfigConsistency.runtimeDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 px-6 py-2 text-sm">
+            <p>{t("codexConfigConsistency.runtimeRestartHint")}</p>
+            {error ? (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                {error}
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={onLater} disabled={pending}>
+              {t("codexConfigConsistency.later")}
+            </Button>
+            <Button onClick={onRetry} disabled={pending}>
+              {pending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              {t("codexConfigConsistency.recheck")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog
@@ -92,9 +139,11 @@ export function CodexConfigConsistencyDialog({
           <Button variant="outline" onClick={onLater} disabled={pending}>
             {t("codexConfigConsistency.later")}
           </Button>
-          <Button variant="outline" onClick={onKeep} disabled={pending}>
-            {t("codexConfigConsistency.keepCodex")}
-          </Button>
+          {!takeoverProjectionDrift ? (
+            <Button variant="outline" onClick={onKeep} disabled={pending}>
+              {t("codexConfigConsistency.keepCodex")}
+            </Button>
+          ) : null}
           <Button onClick={onApply} disabled={pending}>
             {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
             {t("codexConfigConsistency.applyCcsm")}

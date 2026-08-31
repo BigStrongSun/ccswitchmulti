@@ -74,11 +74,26 @@ function ConvertTo-CcsmCanonicalPath {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd([char[]]@([char]92, [char]47))
 }
 
+function ConvertTo-CcsmHostLocalPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $canonical = ConvertTo-CcsmCanonicalPath -Path $Path
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { return $canonical }
+    $localAppData = ConvertTo-CcsmCanonicalPath -Path $env:LOCALAPPDATA
+    $escaped = [regex]::Escape($localAppData)
+    $pattern = "^$escaped\\Packages\\OpenAI\.Codex_[^\\]+\\LocalCache\\Local(?:\\(?<relative>.*))?$"
+    $match = [regex]::Match($canonical, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $match.Success) { return $canonical }
+    $relative = [string]$match.Groups["relative"].Value
+    if ([string]::IsNullOrWhiteSpace($relative)) { return $localAppData }
+    return ConvertTo-CcsmCanonicalPath -Path (Join-Path $localAppData $relative)
+}
+
 function Test-CcsmSamePath {
     param([string]$Left, [string]$Right)
 
-    $leftPath = ConvertTo-CcsmCanonicalPath -Path $Left
-    $rightPath = ConvertTo-CcsmCanonicalPath -Path $Right
+    $leftPath = ConvertTo-CcsmHostLocalPath -Path $Left
+    $rightPath = ConvertTo-CcsmHostLocalPath -Path $Right
     return [string]::Equals($leftPath, $rightPath, [System.StringComparison]::OrdinalIgnoreCase)
 }
 

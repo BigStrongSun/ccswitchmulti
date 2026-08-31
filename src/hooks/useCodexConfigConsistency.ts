@@ -14,6 +14,7 @@ interface CodexConfigConsistencyState {
   error: string | null;
   close: () => void;
   resolve: (action: CodexConfigConsistencyAction) => Promise<void>;
+  recheck: () => Promise<void>;
 }
 
 export function useCodexConfigConsistency(): CodexConfigConsistencyState {
@@ -25,9 +26,19 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
   const seenFingerprintsRef = useRef(new Set<string>());
 
   const acceptReport = useCallback((next: CodexConfigConsistencyReport) => {
-    if (next.state !== "external_drift" || !next.actualFingerprint) return;
-    if (seenFingerprintsRef.current.has(next.actualFingerprint)) return;
-    seenFingerprintsRef.current.add(next.actualFingerprint);
+    const attentionKey =
+      next.state === "external_drift" && next.actualFingerprint
+        ? `drift:${next.actualFingerprint}`
+        : next.runtimeActivation?.state === "restart_required"
+          ? `runtime:${next.runtimeActivation.appServerStartedAt ?? "unknown"}:${next.runtimeActivation.configModifiedAt ?? "unknown"}`
+          : null;
+    if (!attentionKey) {
+      setReport(null);
+      setError(null);
+      return;
+    }
+    if (seenFingerprintsRef.current.has(attentionKey)) return;
+    seenFingerprintsRef.current.add(attentionKey);
     setError(null);
     setReport(next);
   }, []);
@@ -39,16 +50,24 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
 
   useEffect(() => {
     let active = true;
-    void codexConfigConsistencyApi
-      .inspect()
-      .then((next) => {
+    let requestPending = false;
+    const inspect = async () => {
+      if (requestPending) return;
+      requestPending = true;
+      try {
+        const next = await codexConfigConsistencyApi.inspect();
         if (active) acceptReport(next);
-      })
-      .catch((cause) => {
+      } catch (cause) {
         if (active) console.debug("[CodexConsistency] inspect failed", cause);
-      });
+      } finally {
+        requestPending = false;
+      }
+    };
+    void inspect();
+    const interval = window.setInterval(() => void inspect(), 30_000);
     return () => {
       active = false;
+      window.clearInterval(interval);
     };
   }, [acceptReport]);
 
@@ -59,15 +78,34 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
 
   const resolve = useCallback(
     async (action: CodexConfigConsistencyAction) => {
-      if (!report?.actualFingerprint) return;
+      if (!report) return;
+      if (action === "later") {
+        if (report.actualFingerprint) {
+          void codexConfigConsistencyApi
+            .resolve(report.actualFingerprint, action)
+            .catch((cause) =>
+              console.debug("[CodexConsistency] defer failed", cause),
+            );
+        }
+        close();
+        return;
+      }
+      if (!report.actualFingerprint) return;
       setPending(true);
       setError(null);
       try {
-        await codexConfigConsistencyApi.resolve(
+        const next = await codexConfigConsistencyApi.resolve(
           report.actualFingerprint,
           action,
         );
-        close();
+        if (
+          next.state === "external_drift" ||
+          next.runtimeActivation?.state === "restart_required"
+        ) {
+          setReport(next);
+        } else {
+          close();
+        }
       } catch (cause) {
         setError(extractErrorMessage(cause) || "Codex 配置处理失败");
       } finally {
@@ -77,5 +115,25 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
     [close, report],
   );
 
-  return { report, pending, error, close, resolve };
+  const recheck = useCallback(async () => {
+    setPending(true);
+    setError(null);
+    try {
+      const next = await codexConfigConsistencyApi.inspect();
+      if (
+        next.state === "external_drift" ||
+        next.runtimeActivation?.state === "restart_required"
+      ) {
+        setReport(next);
+      } else {
+        close();
+      }
+    } catch (cause) {
+      setError(extractErrorMessage(cause) || "Codex 配置检测失败");
+    } finally {
+      setPending(false);
+    }
+  }, [close]);
+
+  return { report, pending, error, close, resolve, recheck };
 }

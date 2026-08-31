@@ -249,6 +249,18 @@ pub async fn set_proxy_takeover_for_app(
         .await
 }
 
+/// Safely replace a verified previous CCSM listener, then restore takeover.
+#[tauri::command]
+pub async fn force_release_proxy_port_and_restore_takeover(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+) -> Result<crate::services::proxy::ForcedPortRecoveryResult, String> {
+    state
+        .proxy_service
+        .force_release_proxy_port_and_restore_takeover(&app_type)
+        .await
+}
+
 /// 获取代理服务器状态
 #[tauri::command]
 pub async fn get_proxy_status(state: tauri::State<'_, AppState>) -> Result<ProxyStatus, String> {
@@ -1141,7 +1153,7 @@ struct RawWindowsCodexProcess {
 }
 
 /// 通过 Windows CIM 读取 Codex 进程；非 Windows 构建返回空快照。
-fn query_codex_processes() -> (Vec<CodexAppServerProcessDiagnostics>, Option<String>) {
+pub(crate) fn query_codex_processes() -> (Vec<CodexAppServerProcessDiagnostics>, Option<String>) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;

@@ -36,6 +36,7 @@ import type { EnvConflict } from "@/types/env";
 import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
   providersApi,
+  proxyApi,
   settingsApi,
   type AppId,
   type ProviderSwitchEvent,
@@ -262,16 +263,50 @@ function App() {
     ]
       .filter(Boolean)
       .join(" ");
+    const forceRestorePort = async () => {
+      if (!outcome.appType) {
+        toast.error(
+          t("notifications.recovery.forceRestoreFailed", {
+            error: t("common.unknown"),
+          }),
+        );
+        return;
+      }
+      try {
+        await proxyApi.forceReleaseProxyPortAndRestoreTakeover(outcome.appType);
+        completeRecoveryOutcome(outcome);
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: proxyKeys.status }),
+          queryClient.invalidateQueries({
+            queryKey: proxyKeys.takeoverStatus,
+          }),
+        ]);
+        toast.success(t("notifications.recovery.forceRestoreSucceeded"));
+      } catch (cause) {
+        toast.error(
+          t("notifications.recovery.forceRestoreFailed", {
+            error: extractErrorMessage(cause),
+          }),
+        );
+      }
+    };
+    const canForceRestorePort = outcome.kind === "portOwnedByUnknownOwner";
     const options = {
       id: `recovery-${outcome.id}`,
       description,
       duration: Infinity,
       closeButton: true,
       action: {
-        label: t("notifications.recovery.openLogs"),
+        label: canForceRestorePort
+          ? t("notifications.recovery.forceRestoreTakeover")
+          : t("notifications.recovery.openLogs"),
         onClick: () => {
-          completeRecoveryOutcome(outcome);
-          void settingsApi.openLogDir();
+          if (canForceRestorePort) {
+            void forceRestorePort();
+          } else {
+            completeRecoveryOutcome(outcome);
+            void settingsApi.openLogDir();
+          }
         },
       },
       onDismiss: () => completeRecoveryOutcome(outcome),
@@ -454,7 +489,9 @@ function App() {
     Boolean(isProxyRunning && takeoverStatus?.codex),
   );
   const hasCodexConfigConsistencyAttention =
-    codexConfigConsistency.report?.state === "external_drift";
+    codexConfigConsistency.report?.state === "external_drift" ||
+    codexConfigConsistency.report?.runtimeActivation?.state ===
+      "restart_required";
   const hasFirstRunAttention =
     settingsData != null && settingsData.firstRunNoticeConfirmed !== true;
   const activeStartupAttention =
@@ -2348,7 +2385,7 @@ function App() {
         onApply={() => void codexConfigConsistency.resolve("apply_ccsm")}
         onKeep={() => void codexConfigConsistency.resolve("keep_codex")}
         onLater={() => void codexConfigConsistency.resolve("later")}
-        onRetry={() => void codexConfigConsistency.resolve("apply_ccsm")}
+        onRetry={() => void codexConfigConsistency.recheck()}
       />
     </div>
   );

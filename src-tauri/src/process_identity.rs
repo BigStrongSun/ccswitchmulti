@@ -15,6 +15,27 @@ impl ProcessIdentity {
             && self.started_at_ticks == other.started_at_ticks
             && normalized_path(&self.executable_path) == normalized_path(&other.executable_path)
     }
+
+    pub(crate) fn same_executable(&self, other: &Self) -> bool {
+        executable_paths_match(&self.executable_path, &other.executable_path)
+    }
+}
+
+fn executable_paths_match(left: &str, right: &str) -> bool {
+    if normalized_path(left) == normalized_path(right) {
+        return true;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let (Some(left_identity), Some(right_identity)) =
+            (windows_file_identity(left), windows_file_identity(right))
+        {
+            return left_identity == right_identity;
+        }
+    }
+
+    false
 }
 
 pub(crate) fn current_process_identity() -> Option<ProcessIdentity> {
@@ -28,17 +49,48 @@ pub(crate) fn current_executable_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn executable_matches_current(path: &str) -> bool {
-    current_executable_path().is_some_and(|current| {
-        normalized_path(path) == normalized_path(current.to_string_lossy().as_ref())
-    })
+    current_executable_path()
+        .is_some_and(|current| executable_paths_match(path, current.to_string_lossy().as_ref()))
 }
 
 pub(crate) fn executable_fingerprint(path: &str) -> String {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
+    #[cfg(target_os = "windows")]
+    {
+        if let Some((volume, file_id)) = windows_file_identity(path) {
+            hasher.update(b"windows-file:");
+            hasher.update(volume.to_le_bytes());
+            hasher.update(file_id);
+            return format!("{:x}", hasher.finalize())[..16].to_string();
+        }
+    }
     hasher.update(normalized_path(path).as_bytes());
     format!("{:x}", hasher.finalize())[..16].to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_file_identity(path: &str) -> Option<(u64, [u8; 16])> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+    };
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut information = FILE_ID_INFO::default();
+    let succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            std::ptr::addr_of_mut!(information).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    } != 0;
+    succeeded.then_some((
+        information.VolumeSerialNumber,
+        information.FileId.Identifier,
+    ))
 }
 
 pub(crate) fn config_scope_fingerprint() -> String {
@@ -168,6 +220,66 @@ pub(crate) fn tcp_listener_owner_pid(port: u16) -> Option<u32> {
     None
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn terminate_verified_process(expected: &ProcessIdentity) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE,
+    };
+    const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+    let observed = process_identity(expected.pid)
+        .ok_or_else(|| format!("进程 {} 已退出或无法读取身份", expected.pid))?;
+    if !expected.matches(&observed) {
+        return Err(format!(
+            "进程 {} 的身份在终止前发生变化，已拒绝操作",
+            expected.pid
+        ));
+    }
+
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | SYNCHRONIZE_ACCESS | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            expected.pid,
+        )
+    };
+    if handle.is_null() {
+        return Err(format!("无法打开待替换的旧 CCSM 进程 {}", expected.pid));
+    }
+
+    let result = (|| {
+        let final_observed = process_identity(expected.pid)
+            .ok_or_else(|| format!("进程 {} 已在终止前退出", expected.pid))?;
+        if !expected.matches(&final_observed) {
+            return Err(format!(
+                "进程 {} 的身份在最终校验时发生变化，已拒绝操作",
+                expected.pid
+            ));
+        }
+        if unsafe { TerminateProcess(handle, 1) } == 0 {
+            return Err(format!("无法终止待替换的旧 CCSM 进程 {}", expected.pid));
+        }
+        match unsafe { WaitForSingleObject(handle, 10_000) } {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_TIMEOUT => Err(format!("等待旧 CCSM 进程 {} 退出超时", expected.pid)),
+            status => Err(format!(
+                "等待旧 CCSM 进程 {} 退出失败，状态码 {status}",
+                expected.pid
+            )),
+        }
+    })();
+
+    unsafe { CloseHandle(handle) };
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn terminate_verified_process(_expected: &ProcessIdentity) -> Result<(), String> {
+    Err("当前平台尚不支持强制替换旧 CCSM 监听进程".to_string())
+}
+
 #[cfg(all(unix, not(target_os = "windows")))]
 pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     let proc_dir = PathBuf::from("/proc").join(pid.to_string());
@@ -239,6 +351,25 @@ mod tests {
         } else {
             assert_ne!(upper, lower);
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn executable_identity_matches_windows_virtualized_hardlink_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host_path = dir.path().join("cc-switch.exe");
+        let projected_path = dir.path().join("cc-switch-projected.exe");
+        std::fs::write(&host_path, b"same executable").expect("write host executable");
+        std::fs::hard_link(&host_path, &projected_path).expect("create projected hard link");
+
+        assert!(executable_paths_match(
+            host_path.to_string_lossy().as_ref(),
+            projected_path.to_string_lossy().as_ref(),
+        ));
+        assert_eq!(
+            executable_fingerprint(host_path.to_string_lossy().as_ref()),
+            executable_fingerprint(projected_path.to_string_lossy().as_ref())
+        );
     }
 
     #[test]

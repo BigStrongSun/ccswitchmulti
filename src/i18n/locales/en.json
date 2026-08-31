@@ -277,6 +277,9 @@
       "unknown": "A recovery issue needs attention",
       "app": "Affected scope: {{app}}.",
       "openLogs": "Open logs",
+      "forceRestoreTakeover": "Release port and restore takeover",
+      "forceRestoreSucceeded": "The old CCSM listener was released and takeover was restored",
+      "forceRestoreFailed": "The port could not be released safely: {{error}}",
       "kind": {
         "activePreviousInstance": "Another CCSwitchMulti instance is still running, so proxy takeover was skipped",
         "confirmedCrash": "The previous run crashed; review the configuration recovery result",
@@ -3253,7 +3256,11 @@
     "applyCcsm": "Apply CCSM configuration",
     "keepCodex": "Keep Codex changes",
     "later": "Handle later",
-    "retry": "Retry apply"
+    "retry": "Retry apply",
+    "runtimeTitle": "Codex is still using an older configuration",
+    "runtimeDescription": "The CCSM configuration on disk is correct, but the running Codex app-server started earlier and still holds the old provider snapshot.",
+    "runtimeRestartHint": "Fully exit Codex Desktop/app-server, reopen it, and create a new task. Existing tasks retain the provider selected when they were created.",
+    "recheck": "Check again"
   },
   "managedAuth": {
     "selectedAccountNeedsReauth": "The linked account is missing or needs you to sign in again",

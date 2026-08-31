@@ -8,6 +8,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
 
 const LAST_ACTION_KEY: &str = "codex_config_consistency:last_action";
@@ -23,6 +24,24 @@ pub enum CodexConfigConsistencyState {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexConfigRuntimeActivationState {
+    NotRunning,
+    Current,
+    RestartRequired,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexConfigRuntimeActivation {
+    pub state: CodexConfigRuntimeActivationState,
+    pub app_server_started_at: Option<String>,
+    pub config_modified_at: Option<String>,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexConfigConsistencyReport {
@@ -32,6 +51,7 @@ pub struct CodexConfigConsistencyReport {
     pub actual_fingerprint: Option<String>,
     pub changed_keys: Vec<String>,
     pub reason: Option<String>,
+    pub runtime_activation: CodexConfigRuntimeActivation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,11 +373,87 @@ fn report(
         actual_fingerprint,
         changed_keys,
         reason: reason.map(str::to_string),
+        runtime_activation: runtime_activation_from_system(),
     }
+}
+
+fn runtime_activation_from_evidence(
+    app_server_started_at_ms: Option<i64>,
+    config_modified_at_ms: Option<i64>,
+    app_server_started_at: Option<String>,
+    config_modified_at: Option<String>,
+    detection_error: Option<String>,
+) -> CodexConfigRuntimeActivation {
+    let (state, reason) = if detection_error.is_some() {
+        (
+            CodexConfigRuntimeActivationState::Unknown,
+            Some("app_server_detection_failed".to_string()),
+        )
+    } else if app_server_started_at_ms.is_none() {
+        (CodexConfigRuntimeActivationState::NotRunning, None)
+    } else if config_modified_at_ms.is_none() {
+        (
+            CodexConfigRuntimeActivationState::Unknown,
+            Some("managed_config_timestamp_unavailable".to_string()),
+        )
+    } else if app_server_started_at_ms < config_modified_at_ms {
+        (
+            CodexConfigRuntimeActivationState::RestartRequired,
+            Some("app_server_started_before_managed_config".to_string()),
+        )
+    } else {
+        (CodexConfigRuntimeActivationState::Current, None)
+    };
+
+    CodexConfigRuntimeActivation {
+        state,
+        app_server_started_at,
+        config_modified_at,
+        reason,
+    }
+}
+
+fn system_time_to_millis(time: SystemTime) -> Option<i64> {
+    let duration = time.duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(duration.as_millis()).ok()
+}
+
+fn runtime_activation_from_system() -> CodexConfigRuntimeActivation {
+    let (processes, detection_error) = crate::commands::query_codex_processes();
+    let newest_app_server = processes
+        .iter()
+        .filter(|process| process.is_app_server)
+        .filter_map(|process| {
+            let text = process.started_at.as_deref()?;
+            let parsed = chrono::DateTime::parse_from_rfc3339(text).ok()?;
+            Some((parsed.timestamp_millis(), text.to_string()))
+        })
+        .max_by_key(|(timestamp, _)| *timestamp);
+    let config_modified = fs::metadata(codex_config::get_codex_config_path())
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| {
+            let timestamp = system_time_to_millis(time)?;
+            let datetime: chrono::DateTime<chrono::Local> = time.into();
+            Some((timestamp, datetime.to_rfc3339()))
+        });
+
+    runtime_activation_from_evidence(
+        newest_app_server.as_ref().map(|(timestamp, _)| *timestamp),
+        config_modified.as_ref().map(|(timestamp, _)| *timestamp),
+        newest_app_server.map(|(_, text)| text),
+        config_modified.map(|(_, text)| text),
+        detection_error,
+    )
 }
 
 pub(crate) fn should_emit_startup_event(state: CodexConfigConsistencyState) -> bool {
     state == CodexConfigConsistencyState::ExternalDrift
+}
+
+fn should_emit_report(report: &CodexConfigConsistencyReport) -> bool {
+    should_emit_startup_event(report.state)
+        || report.runtime_activation.state == CodexConfigRuntimeActivationState::RestartRequired
 }
 
 fn repair_current_profile_provider_before_inspection(state: &AppState) -> Result<(), AppError> {
@@ -384,7 +480,7 @@ pub(crate) async fn reconcile_after_startup(app: &tauri::AppHandle) -> Result<()
         );
     }
     let report = inspect(&state)?;
-    if should_emit_startup_event(report.state) {
+    if should_emit_report(&report) {
         app.emit("codex-config-consistency", &report)
             .map_err(|error| {
                 AppError::Message(format!("Codex config consistency event failed: {error}"))
@@ -406,10 +502,14 @@ pub fn inspect(state: &AppState) -> Result<CodexConfigConsistencyReport, AppErro
         ));
     };
 
-    if state
+    let live_takeover_active = state
         .proxy_service
-        .detect_takeover_in_live_config_for_app(&AppType::Codex)
-    {
+        .detect_takeover_in_live_config_for_app(&AppType::Codex);
+    let takeover_expected =
+        futures::executor::block_on(state.db.get_proxy_config_for_app(AppType::Codex.as_str()))
+            .map(|config| config.enabled)
+            .unwrap_or(false);
+    if live_takeover_active {
         return Ok(report(
             CodexConfigConsistencyState::NotApplicable,
             Some(provider_id),
@@ -417,6 +517,40 @@ pub fn inspect(state: &AppState) -> Result<CodexConfigConsistencyReport, AppErro
             None,
             Vec::new(),
             Some("proxy_takeover_active"),
+        ));
+    }
+
+    if takeover_expected {
+        let live_path = codex_config::get_codex_config_path();
+        let actual_text = match fs::read_to_string(&live_path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(report(
+                    CodexConfigConsistencyState::Unavailable,
+                    Some(provider_id),
+                    None,
+                    None,
+                    Vec::new(),
+                    Some("live_config_missing"),
+                ));
+            }
+            Err(error) => return Err(AppError::io(&live_path, error)),
+        };
+        let actual_provider_id = active_model_provider_id_from_text(&actual_text)?;
+        let actual_fingerprint = managed_fingerprint(&actual_text, actual_provider_id.as_deref())?;
+        return Ok(report(
+            CodexConfigConsistencyState::ExternalDrift,
+            Some(provider_id),
+            None,
+            Some(actual_fingerprint),
+            vec![
+                "model_provider".to_string(),
+                format!(
+                    "model_providers.{}",
+                    crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID
+                ),
+            ],
+            Some("takeover_projection_drift"),
         ));
     }
 
@@ -515,6 +649,11 @@ pub fn resolve(
 
     match action {
         CodexConfigConsistencyAction::KeepCodex => {
+            if current.reason.as_deref() == Some("takeover_projection_drift") {
+                return Err(AppError::InvalidInput(
+                    "cannot_keep_codex_changes_while_takeover_enabled".to_string(),
+                ));
+            }
             state.db.set_setting(LAST_ACTION_KEY, "keep_codex")?;
             state
                 .db
@@ -567,6 +706,40 @@ pub fn resolve(
     }
 }
 
+async fn resolve_for_command(
+    state: &AppState,
+    expected_fingerprint: String,
+    action: CodexConfigConsistencyAction,
+) -> Result<CodexConfigConsistencyReport, AppError> {
+    let current = inspect(state)?;
+    if current.reason.as_deref() != Some("takeover_projection_drift") {
+        return resolve(state, expected_fingerprint, action);
+    }
+    if action == CodexConfigConsistencyAction::Later {
+        return Ok(current);
+    }
+    if action == CodexConfigConsistencyAction::KeepCodex {
+        return Err(AppError::InvalidInput(
+            "cannot_keep_codex_changes_while_takeover_enabled".to_string(),
+        ));
+    }
+    let actual_fingerprint = current.actual_fingerprint.as_deref().ok_or_else(|| {
+        AppError::Config("Codex live configuration fingerprint is missing".to_string())
+    })?;
+    if actual_fingerprint != expected_fingerprint {
+        return Err(AppError::InvalidInput(
+            "codex_config_consistency_stale_fingerprint".to_string(),
+        ));
+    }
+
+    state
+        .proxy_service
+        .set_takeover_for_app(AppType::Codex.as_str(), true)
+        .await
+        .map_err(AppError::Message)?;
+    inspect(state)
+}
+
 #[tauri::command]
 pub fn inspect_codex_config_consistency(
     state: State<'_, AppState>,
@@ -575,12 +748,14 @@ pub fn inspect_codex_config_consistency(
 }
 
 #[tauri::command]
-pub fn resolve_codex_config_consistency(
+pub async fn resolve_codex_config_consistency(
     state: State<'_, AppState>,
     expected_fingerprint: String,
     action: CodexConfigConsistencyAction,
 ) -> Result<CodexConfigConsistencyReport, String> {
-    resolve(&state, expected_fingerprint, action).map_err(String::from)
+    resolve_for_command(&state, expected_fingerprint, action)
+        .await
+        .map_err(String::from)
 }
 
 #[cfg(test)]
@@ -663,6 +838,40 @@ mod tests {
         let serialized = serde_json::to_string(&changed).expect("serialize paths");
         assert!(!serialized.contains("true"));
         assert!(!serialized.contains("false"));
+    }
+
+    #[test]
+    fn runtime_activation_requires_restart_when_app_server_predates_managed_config() {
+        let activation = runtime_activation_from_evidence(
+            Some(1_788_186_514_000),
+            Some(1_788_189_533_000),
+            Some("2026-08-31T21:48:34+08:00".to_string()),
+            Some("2026-08-31T22:38:53+08:00".to_string()),
+            None,
+        );
+
+        assert_eq!(
+            activation.state,
+            CodexConfigRuntimeActivationState::RestartRequired
+        );
+        assert_eq!(
+            activation.reason.as_deref(),
+            Some("app_server_started_before_managed_config")
+        );
+    }
+
+    #[test]
+    fn runtime_activation_is_current_after_app_server_restart() {
+        let activation = runtime_activation_from_evidence(
+            Some(1_788_190_000_000),
+            Some(1_788_189_533_000),
+            Some("2026-08-31T22:46:40+08:00".to_string()),
+            Some("2026-08-31T22:38:53+08:00".to_string()),
+            None,
+        );
+
+        assert_eq!(activation.state, CodexConfigRuntimeActivationState::Current);
+        assert!(activation.reason.is_none());
     }
 
     #[test]
@@ -784,6 +993,44 @@ mod tests {
 
         assert_eq!(result.state, CodexConfigConsistencyState::ExternalDrift);
         assert_eq!(result.changed_keys, vec!["model_provider"]);
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_treats_missing_live_router_as_takeover_projection_drift() {
+        let _home = TestHomeGuard::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let (state, _) = seed_provider();
+        let provider = state
+            .db
+            .get_provider_by_id("consistency-provider", AppType::Codex.as_str())
+            .expect("read provider")
+            .expect("provider exists");
+        let direct_config = build_codex_live_config_for_provider(&state.db, &provider)
+            .expect("build direct provider config");
+        codex_config::write_codex_live_config_atomic(Some(&direct_config))
+            .expect("write non-router live config");
+        let mut proxy_config =
+            futures::executor::block_on(state.db.get_proxy_config_for_app(AppType::Codex.as_str()))
+                .expect("read proxy config");
+        proxy_config.enabled = true;
+        futures::executor::block_on(state.db.update_proxy_config_for_app(proxy_config))
+            .expect("mark takeover enabled");
+
+        let result = inspect(&state).expect("inspect takeover projection");
+
+        assert_eq!(result.state, CodexConfigConsistencyState::ExternalDrift);
+        assert_eq!(result.reason.as_deref(), Some("takeover_projection_drift"));
+        assert!(result
+            .changed_keys
+            .iter()
+            .any(|key| key == "model_provider"));
+        let actual = result.actual_fingerprint.expect("actual fingerprint");
+        let error = resolve(&state, actual, CodexConfigConsistencyAction::KeepCodex)
+            .expect_err("takeover drift cannot be accepted as an external edit");
+        assert!(error
+            .to_string()
+            .contains("cannot_keep_codex_changes_while_takeover_enabled"));
     }
 
     #[test]
@@ -1060,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_reconciliation_emits_only_for_external_drift() {
+    fn startup_reconciliation_emits_for_disk_drift_or_stale_runtime() {
         let states = [
             CodexConfigConsistencyState::Consistent,
             CodexConfigConsistencyState::NotApplicable,
@@ -1072,5 +1319,20 @@ mod tests {
         assert!(should_emit_startup_event(
             CodexConfigConsistencyState::ExternalDrift
         ));
+        let runtime_only = CodexConfigConsistencyReport {
+            state: CodexConfigConsistencyState::Consistent,
+            provider_id: Some("router".to_string()),
+            expected_fingerprint: Some("same".to_string()),
+            actual_fingerprint: Some("same".to_string()),
+            changed_keys: Vec::new(),
+            reason: None,
+            runtime_activation: CodexConfigRuntimeActivation {
+                state: CodexConfigRuntimeActivationState::RestartRequired,
+                app_server_started_at: Some("2026-08-31T21:48:34+08:00".to_string()),
+                config_modified_at: Some("2026-08-31T22:38:53+08:00".to_string()),
+                reason: Some("app_server_started_before_managed_config".to_string()),
+            },
+        };
+        assert!(should_emit_report(&runtime_only));
     }
 }

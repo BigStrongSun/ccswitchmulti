@@ -1,4 +1,4 @@
-﻿import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import type {
   ProxyStatus,
   ProxyConfig,
@@ -120,6 +120,17 @@ export const proxyApi = {
     enabled: boolean,
   ): Promise<void> {
     return invoke("set_proxy_takeover_for_app", { appType, enabled });
+  },
+
+  async forceReleaseProxyPortAndRestoreTakeover(appType: string): Promise<{
+    appType: string;
+    port: number;
+    releasedPid: number | null;
+    takeoverRestored: boolean;
+  }> {
+    return invoke("force_release_proxy_port_and_restore_takeover", {
+      appType,
+    });
   },
 
   // ========== Legacy 代理配置 API (兼容) ==========

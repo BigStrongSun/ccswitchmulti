@@ -21,6 +21,12 @@ const drift: CodexConfigConsistencyReport = {
   actualFingerprint: "actual",
   changedKeys: ["model_reasoning_effort"],
   reason: "live_config_changed",
+  runtimeActivation: {
+    state: "current",
+    appServerStartedAt: "2026-09-01T00:00:00+08:00",
+    configModifiedAt: "2026-08-31T23:59:00+08:00",
+    reason: null,
+  },
 };
 
 describe("useCodexConfigConsistency", () => {
@@ -37,5 +43,27 @@ describe("useCodexConfigConsistency", () => {
 
     expect(result.current.report).toEqual(drift);
     expect(codexConfigConsistencyApi.inspect).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces a runtime-only restart requirement even when disk config is consistent", async () => {
+    const runtimeStale: CodexConfigConsistencyReport = {
+      ...drift,
+      state: "consistent",
+      changedKeys: [],
+      reason: null,
+      runtimeActivation: {
+        state: "restart_required",
+        appServerStartedAt: "2026-08-31T21:48:34+08:00",
+        configModifiedAt: "2026-08-31T22:38:53+08:00",
+        reason: "app_server_started_before_managed_config",
+      },
+    };
+    vi.mocked(codexConfigConsistencyApi.inspect).mockResolvedValue(
+      runtimeStale,
+    );
+
+    const { result } = renderHook(() => useCodexConfigConsistency());
+
+    await waitFor(() => expect(result.current.report).toEqual(runtimeStale));
   });
 });

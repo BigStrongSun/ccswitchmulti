@@ -497,6 +497,63 @@ describe("App integration with MSW", () => {
     );
   }, 30_000);
 
+  it("offers safe port release from the blocking recovery toast", async () => {
+    let forcedAppType: string | undefined;
+    server.use(
+      http.post("http://tauri.local/get_pending_recovery_outcomes", () =>
+        HttpResponse.json([
+          {
+            id: "port-owner-1",
+            generation: 8,
+            operation: "proxy_listener_ownership",
+            kind: "portOwnedByUnknownOwner",
+            severity: "error",
+            appType: "codex",
+            keptFields: [],
+            lostFields: [],
+            nextStep: "changeProxyPortOrInspectOwner",
+            timestamp: "2026-09-01T10:00:00Z",
+          },
+        ]),
+      ),
+      http.post(
+        "http://tauri.local/force_release_proxy_port_and_restore_takeover",
+        async ({ request }) => {
+          const body = (await request.json()) as { appType?: string };
+          forcedAppType = body.appType;
+          return HttpResponse.json({
+            appType: "codex",
+            port: 15721,
+            releasedPid: 41372,
+            takeoverRestored: true,
+          });
+        },
+      ),
+      http.post("http://tauri.local/acknowledge_recovery_outcomes", () =>
+        HttpResponse.json(true),
+      ),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
+    const recoveryOptions = toastErrorMock.mock.calls[0]?.[1] as
+      | { action?: { label?: string; onClick?: () => void } }
+      | undefined;
+    expect(recoveryOptions?.action?.label).toBe(
+      "notifications.recovery.forceRestoreTakeover",
+    );
+    act(() => recoveryOptions?.action?.onClick?.());
+
+    await waitFor(() => expect(forcedAppType).toBe("codex"));
+    await waitFor(() =>
+      expect(toastSuccessMock).toHaveBeenCalledWith(
+        "notifications.recovery.forceRestoreSucceeded",
+      ),
+    );
+  }, 30_000);
+
   it("duplicates openclaw providers with a generated key that avoids live-only ids", async () => {
     setProviders("openclaw", {
       deepseek: {

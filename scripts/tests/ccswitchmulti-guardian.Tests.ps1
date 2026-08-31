@@ -46,6 +46,20 @@ Describe "CCSwitchMulti guardian maintenance lease" {
         }
     }
 
+    It "treats the Codex AppContainer LocalCache projection as the same LocalAppData executable" {
+        $installed = Join-Path $env:LOCALAPPDATA "CCSwitchMulti\cc-switch.exe"
+        $projected = Join-Path $env:LOCALAPPDATA "Packages\OpenAI.Codex_test\LocalCache\Local\CCSwitchMulti\cc-switch.exe"
+
+        (Test-CcsmGuardianSamePath -Left $projected -Right $installed) | Should Be $true
+    }
+
+    It "does not collapse unrelated AppContainer paths into the installed executable" {
+        $installed = Join-Path $env:LOCALAPPDATA "CCSwitchMulti\cc-switch.exe"
+        $foreign = Join-Path $env:LOCALAPPDATA "Packages\Other.Product_test\LocalCache\Local\CCSwitchMulti\cc-switch.exe"
+
+        (Test-CcsmGuardianSamePath -Left $foreign -Right $installed) | Should Be $false
+    }
+
     It "accepts an unexpired lease only when PID path and start time match" {
         Write-TestLease -Path $script:markerPath -Lease (New-TestLease)
         $getIdentity = {

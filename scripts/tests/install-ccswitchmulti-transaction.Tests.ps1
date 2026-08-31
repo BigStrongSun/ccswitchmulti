@@ -355,6 +355,13 @@ function New-FakeRetainedProcessHandle {
 }
 
 Describe "CCSwitchMulti transactional reinstall orchestration" {
+    It "accepts the Codex AppContainer LocalCache projection of the installed executable" {
+        $installed = Join-Path $env:LOCALAPPDATA "CCSwitchMulti\cc-switch.exe"
+        $projected = Join-Path $env:LOCALAPPDATA "Packages\OpenAI.Codex_test\LocalCache\Local\CCSwitchMulti\cc-switch.exe"
+
+        (Test-CcsmSamePath -Left $projected -Right $installed) | Should Be $true
+    }
+
     It "reports actual and expected hashes when runtime verification fails" {
         $context = [pscustomobject]@{
             InstalledExecutable = "C:\Program Files\CCSwitchMulti\cc-switch.exe"
