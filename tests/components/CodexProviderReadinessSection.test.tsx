@@ -90,6 +90,76 @@ describe("CodexProviderReadinessSection", () => {
     expect(screen.getByText("建议先验证连接")).toBeInTheDocument();
   });
 
+  it("restores ready state from persisted protocol adaptation evidence", () => {
+    render(
+      <CodexProviderReadinessSection
+        models={[{ model: "qwen3.8" }]}
+        defaultModel="qwen3.8"
+        apiFormat="openai_chat"
+        adaptation={{
+          persistence: "single",
+          status: "ready",
+          effectiveTransport: "open_ai_chat",
+          testedAt: Math.floor(Date.now() / 1000) - 60,
+          expiresAt: Math.floor(Date.now() / 1000) + 3600,
+          models: [],
+        }}
+        isMaintainedPreset={false}
+        isSyncingModels={false}
+        isValidatingConnection={false}
+        onSyncModels={vi.fn()}
+        onValidateConnection={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("可加入 MultiRouter")).toBeInTheDocument();
+    expect(screen.queryByText("建议先验证连接")).not.toBeInTheDocument();
+  });
+
+  it("does not let stale evidence hide a current validation failure", () => {
+    const readyAdaptation = {
+      persistence: "single" as const,
+      status: "ready" as const,
+      effectiveTransport: "open_ai_chat" as const,
+      testedAt: Math.floor(Date.now() / 1000) - 60,
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      models: [],
+    };
+    const { rerender } = render(
+      <CodexProviderReadinessSection
+        models={[{ model: "qwen3.8" }]}
+        apiFormat="openai_chat"
+        adaptation={{ ...readyAdaptation, status: "stale" }}
+        isMaintainedPreset={false}
+        isSyncingModels={false}
+        isValidatingConnection={false}
+        onSyncModels={vi.fn()}
+        onValidateConnection={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("建议先验证连接")).toBeInTheDocument();
+    expect(screen.queryByText("可加入 MultiRouter")).not.toBeInTheDocument();
+
+    rerender(
+      <CodexProviderReadinessSection
+        models={[{ model: "qwen3.8" }]}
+        apiFormat="openai_chat"
+        adaptation={readyAdaptation}
+        isMaintainedPreset={false}
+        isSyncingModels={false}
+        isValidatingConnection={false}
+        validationSummary="当前端点不可用"
+        validationTone="error"
+        onSyncModels={vi.fn()}
+        onValidateConnection={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("连接验证失败")).toBeInTheDocument();
+    expect(screen.queryByText("可加入 MultiRouter")).not.toBeInTheDocument();
+  });
+
   it("distinguishes an all-disabled catalog from usable probe models", () => {
     const onValidateConnection = vi.fn();
     render(

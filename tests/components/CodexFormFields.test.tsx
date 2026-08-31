@@ -191,9 +191,7 @@ function createDeepProbeOutcome(
     },
     adaptationPreview: {
       persistence: "single",
-      status: records.every(
-        (record) => record.result.readiness === "verified",
-      )
+      status: records.every((record) => record.result.readiness === "verified")
         ? "ready"
         : "partial",
       effectiveTransport:
@@ -460,6 +458,7 @@ interface ReadinessIdentityState {
 
 function renderReadinessIdentityHarness(
   overrides: Partial<ReadinessIdentityState> = {},
+  editorSnapshot?: CodexProviderEditorSnapshot,
 ) {
   const initial: ReadinessIdentityState = {
     baseUrl: "https://old.example/v1",
@@ -495,6 +494,7 @@ function renderReadinessIdentityHarness(
       <CodexFormFields
         providerId="identity-provider"
         providerName="Identity Provider"
+        codexProviderEditorSnapshot={editorSnapshot}
         selectedXaiAccountId={identity.selectedAccountId}
         onXaiAccountSelect={vi.fn()}
         codexApiKey={identity.apiKey}
@@ -646,52 +646,48 @@ describe("CodexFormFields local model routing", () => {
         },
       },
     };
-    renderCatalogHarness(
-      [{ model: "gpt-5.5" }, { model: "qwen3.8" }],
-      {
-        openAdvancedOptions: false,
-        codexProviderEditorSnapshot: {
-          logicalProvider,
-          adaptation: {
-            persistence: "split",
-            status: "ready",
-            effectiveTransport: "mixed",
-            testedAt: 1_777_777_777,
-            expiresAt: 1_888_888_888,
-            models: [
-              {
-                publicModel: "gpt-5.5",
-                upstreamModel: "gpt-5.5",
-                choice: "follow_auto",
-                choiceSource: "automatic",
-                effectiveTransport: "open_ai_responses",
-                readiness: "verified",
-                responses: null,
-                chat: null,
-              },
-              {
-                publicModel: "qwen3.8",
-                upstreamModel: "qwen3.8",
-                choice: "openai_chat",
-                choiceSource: "manual",
-                effectiveTransport: "open_ai_chat",
-                readiness: "verified",
-                responses: null,
-                chat: null,
-              },
-            ],
-          },
+    renderCatalogHarness([{ model: "gpt-5.5" }, { model: "qwen3.8" }], {
+      openAdvancedOptions: false,
+      codexProviderEditorSnapshot: {
+        logicalProvider,
+        adaptation: {
+          persistence: "split",
+          status: "ready",
+          effectiveTransport: "mixed",
+          testedAt: 1_777_777_777,
+          expiresAt: 1_888_888_888,
+          models: [
+            {
+              publicModel: "gpt-5.5",
+              upstreamModel: "gpt-5.5",
+              choice: "follow_auto",
+              choiceSource: "automatic",
+              effectiveTransport: "open_ai_responses",
+              readiness: "verified",
+              responses: null,
+              chat: null,
+            },
+            {
+              publicModel: "qwen3.8",
+              upstreamModel: "qwen3.8",
+              choice: "openai_chat",
+              choiceSource: "manual",
+              effectiveTransport: "open_ai_chat",
+              readiness: "verified",
+              responses: null,
+              chat: null,
+            },
+          ],
         },
       },
-    );
+    });
     await waitForReasoningResolution();
 
-    expect(
-      screen.getByText("自动适配 · Responses + Chat"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("自动适配 · Responses + Chat")).toBeInTheDocument();
     expect(screen.getByText("gpt-5.5：Responses")).toBeInTheDocument();
     expect(screen.getByText("qwen3.8：Chat")).toBeInTheDocument();
     expect(screen.getByText(/证据时间/)).toBeInTheDocument();
+    expect(screen.getByText("可加入 MultiRouter")).toBeInTheDocument();
   });
 
   it("stores an advanced per-model protocol choice outside modelCatalog", async () => {
@@ -1369,6 +1365,39 @@ describe("CodexFormFields local model routing", () => {
       await expectInvalidated();
       await validateCurrentIdentity();
     }
+  });
+
+  it("marks persisted editor evidence stale when the draft identity changes", async () => {
+    const { updateIdentity } = renderReadinessIdentityHarness(
+      {},
+      {
+        logicalProvider: {
+          id: "identity-provider",
+          name: "Identity Provider",
+          settingsConfig: {
+            modelCatalog: { models: [{ model: "model-a" }] },
+          },
+        },
+        adaptation: {
+          persistence: "single",
+          status: "ready",
+          effectiveTransport: "open_ai_chat",
+          testedAt: Math.floor(Date.now() / 1000) - 60,
+          expiresAt: Math.floor(Date.now() / 1000) + 3600,
+          models: [],
+        },
+      },
+    );
+
+    expect(screen.getByText("可加入 MultiRouter")).toBeInTheDocument();
+
+    updateIdentity({ baseUrl: "https://changed.example/v1" });
+
+    await waitFor(() => {
+      expect(screen.getByText("建议先验证连接")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("可加入 MultiRouter")).not.toBeInTheDocument();
+    expect(screen.getByText(/已过期/)).toBeInTheDocument();
   });
 
   it("retains probe evidence when manual mode overrides the final protocol", async () => {

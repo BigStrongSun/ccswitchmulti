@@ -967,6 +967,22 @@ export function CodexFormFields({
     () => buildReadinessIdentityFor(catalogRows),
     [buildReadinessIdentityFor, catalogRows],
   );
+  const snapshotReadinessIdentityRef = useRef<{
+    snapshot: CodexProviderEditorSnapshot;
+    identity: string;
+  } | null>(null);
+  if (
+    codexProviderEditorSnapshot &&
+    snapshotReadinessIdentityRef.current?.snapshot !==
+      codexProviderEditorSnapshot
+  ) {
+    snapshotReadinessIdentityRef.current = {
+      snapshot: codexProviderEditorSnapshot,
+      identity: readinessIdentity,
+    };
+  } else if (!codexProviderEditorSnapshot) {
+    snapshotReadinessIdentityRef.current = null;
+  }
   const readinessIdentityRef = useRef(readinessIdentity);
   readinessIdentityRef.current = readinessIdentity;
   const bindProtocolProbeIdentity = useCallback((identity: string) => {
@@ -996,6 +1012,15 @@ export function CodexFormFields({
 
   const isProtocolProbeStateCurrent =
     protocolProbeIdentity === readinessIdentity;
+  const snapshotAdaptation = codexProviderEditorSnapshot?.adaptation ?? null;
+  const displayedAdaptation =
+    isProtocolProbeStateCurrent && protocolProbeOutcome?.adaptationPreview
+      ? protocolProbeOutcome.adaptationPreview
+      : snapshotAdaptation
+        ? snapshotReadinessIdentityRef.current?.identity === readinessIdentity
+          ? snapshotAdaptation
+          : { ...snapshotAdaptation, status: "stale" as const }
+        : null;
   const revealModelCatalogFetchAction = useCallback(() => {
     bindProtocolProbeIdentity(readinessIdentity);
     setProtocolProbeTone("warning");
@@ -1770,11 +1795,7 @@ export function CodexFormFields({
           models={catalogRows}
           defaultModel={codexModel}
           apiFormat={apiFormat}
-          adaptation={
-            protocolProbeOutcome?.adaptationPreview ??
-            codexProviderEditorSnapshot?.adaptation ??
-            null
-          }
+          adaptation={displayedAdaptation}
           isMaintainedPreset={isMaintainedPreset}
           isSyncingModels={isFetchingModels}
           isValidatingConnection={

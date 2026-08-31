@@ -65,7 +65,15 @@ export function CodexProviderReadinessSection({
     enabledModels[0]?.model.trim() ||
     (configuredModels.length > 0 ? "尚未启用" : "尚未选择");
   const hasModels = enabledModels.length > 0;
-  const validationPassed = validationTone === "success";
+  const evidenceExpired =
+    adaptation?.status === "stale" ||
+    (adaptation?.expiresAt != null &&
+      adaptation.expiresAt <= Math.floor(Date.now() / 1000));
+  const persistedEvidenceReady =
+    adaptation?.status === "ready" && !evidenceExpired;
+  const validationPassed =
+    validationTone === "success" ||
+    (validationTone !== "error" && persistedEvidenceReady);
   const ready = hasModels && validationPassed;
   const readinessLabel =
     configuredModels.length === 0
@@ -92,10 +100,6 @@ export function CodexProviderReadinessSection({
   const evidenceTime = adaptation?.testedAt
     ? new Date(adaptation.testedAt * 1000).toLocaleString()
     : "尚未验证";
-  const evidenceExpired =
-    adaptation?.status === "stale" ||
-    (adaptation?.expiresAt != null &&
-      adaptation.expiresAt <= Math.floor(Date.now() / 1000));
 
   return (
     <section
