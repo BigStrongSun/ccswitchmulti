@@ -318,8 +318,26 @@ export function EditProviderDialog({
     ],
   );
 
-  if (!provider || (isGeneratedSplitFacade && !codexProviderEditorSnapshot)) {
-    if (!logicalProviderError) return null;
+  if (!provider) return null;
+
+  // Codex 编辑必须从同一个权威快照启动。若先用列表里的持久化旧记录挂载表单，
+  // 再异步替换为已迁移的逻辑 Provider，模型目录的双向同步会把旧
+  // modelCatalog[].apiFormat 回写进草稿，导致用户明明切回“自动探测”，保存时
+  // 后端又把它迁回 manual。等待快照后一次性挂载，也避免网络较慢时覆盖用户已输入内容。
+  if (appId === "codex" && !codexProviderEditorSnapshot) {
+    if (!logicalProviderError) {
+      return (
+        <FullScreenPanel
+          isOpen={open}
+          title={t("provider.editProvider")}
+          onClose={() => onOpenChange(false)}
+        >
+          <div className="rounded-lg border border-border-default bg-muted/30 p-4 text-sm text-muted-foreground">
+            正在读取模型源、协议证据和自动适配状态…
+          </div>
+        </FullScreenPanel>
+      );
+    }
     return (
       <FullScreenPanel
         isOpen={open}
@@ -327,7 +345,7 @@ export function EditProviderDialog({
         onClose={() => onOpenChange(false)}
       >
         <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
-          无法恢复自动拆分模型源的逻辑配置：{logicalProviderError}
+          无法读取模型源的协议适配状态：{logicalProviderError}
         </div>
       </FullScreenPanel>
     );

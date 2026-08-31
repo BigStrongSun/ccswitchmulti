@@ -19,6 +19,26 @@ const provider = {
 };
 
 describe("single Codex Protocol Lab adapter", () => {
+  it("treats missing or mismatched probe receipts as stale evidence that must be re-probed", () => {
+    const adapter = createSingleCodexProtocolLabAdapter({} as never);
+
+    expect(
+      adapter.isDependencyChanged(
+        new Error("codex_provider_set_probe_required: receipt-old"),
+      ),
+    ).toBe(true);
+    expect(
+      adapter.isDependencyChanged(
+        new Error("codex_provider_set_probe_target_mismatch"),
+      ),
+    ).toBe(true);
+    expect(
+      adapter.isDependencyChanged(
+        new Error("codex_provider_set_probe_receipt_in_use: receipt-live"),
+      ),
+    ).toBe(false);
+  });
+
   it("requires a probe only while an enabled model follows automatic selection", () => {
     const adapter = createSingleCodexProtocolLabAdapter({} as never);
 

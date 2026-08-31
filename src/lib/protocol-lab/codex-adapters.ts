@@ -91,7 +91,7 @@ export function createSingleCodexProtocolLabAdapter(
       };
     },
     isDependencyChanged(error) {
-      return errorText(error).includes("codex_provider_set_dependency_changed");
+      return isRetryableCodexEvidenceChange(error);
     },
     async loadSnapshot(providerId) {
       const snapshot = await api.getCodexProviderEditorSnapshot(providerId);
@@ -172,7 +172,7 @@ export function createUniversalCodexProtocolLabAdapter(
       };
     },
     isDependencyChanged(error) {
-      return errorText(error).includes("codex_provider_set_dependency_changed");
+      return isRetryableCodexEvidenceChange(error);
     },
     errorCode: codexProtocolLabErrorCode,
   };
@@ -307,7 +307,7 @@ export function createBatchCodexProtocolLabAdapter(
       };
     },
     isDependencyChanged(error) {
-      return errorText(error).includes("codex_provider_set_dependency_changed");
+      return isRetryableCodexEvidenceChange(error);
     },
     errorCode: codexProtocolLabErrorCode,
   };
@@ -357,8 +357,17 @@ export function codexProtocolLabErrorCode(error: unknown): string | undefined {
   ) {
     return "network_unavailable";
   }
-  if (detail.includes("dependency_changed")) return "dependency_changed";
+  if (isRetryableCodexEvidenceChange(error)) return "dependency_changed";
   return undefined;
+}
+
+function isRetryableCodexEvidenceChange(error: unknown): boolean {
+  const detail = errorText(error);
+  return (
+    detail.includes("codex_provider_set_dependency_changed") ||
+    detail.includes("codex_provider_set_probe_required") ||
+    detail.includes("codex_provider_set_probe_target_mismatch")
+  );
 }
 
 function enabledPublicModels(provider: Provider): string[] {

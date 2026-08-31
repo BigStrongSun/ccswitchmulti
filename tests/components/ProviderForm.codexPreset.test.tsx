@@ -152,6 +152,15 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
       </button>
       <button
         type="button"
+        onClick={() => {
+          onProtocolModeChange?.("auto");
+          onProtocolOverridesChange?.({});
+        }}
+      >
+        mock-set-auto-protocol
+      </button>
+      <button
+        type="button"
         onClick={() =>
           onProtocolOverridesChange?.({ "model-a": "openai_chat" })
         }
@@ -324,6 +333,49 @@ describe("ProviderForm Codex preset selection", () => {
         codexProtocolMode: "manual",
         apiFormat: "openai_chat",
       }),
+    );
+  });
+
+  it("clears legacy manual intent when the user returns a Provider to automatic protocol selection", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Legacy Qwen relay",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "qwen"\nmodel = "qwen3.8"\n[model_providers.qwen]\nbase_url = "https://relay.example/v1"\nwire_api = "responses"\n',
+          modelCatalog: { models: [{ model: "qwen3.8" }] },
+        },
+        meta: {
+          apiFormat: "openai_responses",
+          codexProtocolMode: "manual",
+          codexProtocolOverrides: { "qwen3.8": "openai_responses" },
+        },
+      },
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "mock-set-probe-receipts" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "mock-set-auto-protocol" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit.mock.calls[0][0].protocolProbeReceiptIds).toEqual([
+      "receipt-model-a",
+    ]);
+    expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty(
+      "codexProtocolMode",
+    );
+    expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty(
+      "codexProtocolOverrides",
     );
   });
 

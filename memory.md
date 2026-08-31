@@ -4808,3 +4808,12 @@ supported in one streaming turn`。
 - 后端新增显式 `CodexProtocolProbeScope`：`automatic_models` 保持 Provider Set、Wizard、Universal 的原有保存语义；`all_enabled_models` 专供用户显式深探测，普通 Provider 无论 Provider 级手工协议或逐模型覆盖都编译全部已启用模型。显式范围若仍得到空候选会返回稳定错误，不再产生合法的 0/0/0 outcome。
 - Add/Edit 的“验证连接”明确传入 `all_enabled_models`，并对返回记录和期望模型做完整性校验；任一已启用模型缺结果即清空本轮 receipt、保留草稿并报告具名模型。进度弹窗把这种状态显示为“探测未完成”和“未返回探测结果”，不再把空 batch 描述成已完成。
 - TDD 先在旧实现上稳定得到三类 RED：API 未发送 scope、显式手工 Provider 只编译自动模型、空 outcome 仍显示 0/0/0；实现后候选编译 3/3、API/Form/进度弹窗 55/55 与 TypeScript typecheck 通过。完整 detached 候选、Windows 安装器与安装态 Qwen 双协议深探测仍需在本提交后执行，结果必须另行记录，不能把定向源码门禁冒充安装态成功。
+
+## 2026-08-31 Qwen 自动协议保存漂移与探测证据重试收口
+
+- 在包含显式深探测修复的安装候选中真实验证 Qwen `qwen3.8`：Chat Completions 的基础响应、流式 SSE、推理文本、强制工具调用和工具结果续轮全部通过，最终为 `Verified`；Responses 的基础、SSE 和 raw reasoning 通过，但强制工具不支持、续轮跳过，最终为 `Partial`。因此该 vLLM/Qwen 实例的正确内部上游协议是 Chat；Codex 外层仍保持 CCSM Router 的 Responses，不得把内部 Chat 写成 Codex `wire_api = "chat"`。
+- 保存时出现的 Provider“漂移”不是探测结论错误，而是编辑器初始化竞态：普通 Codex Provider 先用列表中的旧持久化记录挂载表单，随后才异步加载权威 editor snapshot。旧记录仍带 `modelCatalog[].apiFormat=openai_responses`，父子模型目录双向同步在快照到达前把该遗留字段留在草稿；用户即使切回“自动/跟随自动”，后端保存归一化仍会把旧字段再次迁成 manual override，最终报 `codex_provider_set_manual_intent_required`。
+- 根修是所有 Codex Provider 编辑都先进入 `loading_snapshot`，只在权威 snapshot 返回后一次性挂载表单；失败显示读模型错误并保留页面，不再让旧列表记录与已迁移快照竞争。兼容旧数据的 `modelCatalog[].apiFormat` 仍仅在后端读取/保存迁移边界处理，不在前端继续传播。
+- 同一次用户授权中的 stale retry 还缺两个合法证据失效码：已消费、缺失或与当前目标不匹配的 receipt 会分别产生 `codex_provider_set_probe_required` / `codex_provider_set_probe_target_mismatch`，旧 adapter 只识别 `dependency_changed`，第二次保存因此直接失败。三个 adapter 现统一把这两类错误视为依赖/证据变化，触发现有状态机的一次完整重探；`probe_receipt_in_use` 仍不自动重试，避免并发消费循环。
+- TDD 先在旧实现上得到两个稳定 RED：延迟 editor snapshot 时表单已提前挂载；missing/mismatched receipt 未被识别为 stale。修复后 Edit/ProviderForm 定向 20/20、相关六文件 73/73、前端全量 165 files/1311 tests、`pnpm typecheck`、Prettier、renderer build 和 `git diff --check` 均通过。最新编辑器/重探修复仍需重新构建并安装后复验“自动 + 跟随自动”保存最终落为 Chat，不能沿用上一安装候选冒充本次安装态结论。
+- 上一安装候选已验证 TOML 启动对账不会修改 `config.toml`（安装/启动前后 SHA-256 一致），异常退出 toast、首次运行说明和 Codex 路由接管提示按顺序可点击，且没有误报配置漂移。该验收覆盖启动调度与 TOML 所有权修复，但不覆盖本节尚未装入候选的编辑器初始化和 receipt 重探改动。

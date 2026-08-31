@@ -50,8 +50,7 @@ vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => {
     commitCodexProviderSet: apiMocks.commitCodexProviderSet,
     preflightCodexProviderProtocolCompatibility:
       apiMocks.preflightCodexProviderProtocolCompatibility,
-    getCodexProviderEditorSnapshot:
-      apiMocks.getCodexProviderEditorSnapshot,
+    getCodexProviderEditorSnapshot: apiMocks.getCodexProviderEditorSnapshot,
   };
 });
 
@@ -136,6 +135,18 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
 
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 
+function editorSnapshotFor(provider: Provider) {
+  return {
+    logicalProvider: provider,
+    adaptation: {
+      persistence: "single",
+      status: "not_tested",
+      effectiveTransport: null,
+      models: [],
+    },
+  };
+}
+
 describe("EditProviderDialog", () => {
   beforeEach(() => {
     apiMocks.getCurrent.mockReset();
@@ -185,17 +196,12 @@ describe("EditProviderDialog", () => {
         codexProtocolOverrides: { "deepseek-v4": "openai_chat" },
       },
     };
-    apiMocks.getCodexProviderEditorSnapshot.mockResolvedValue({
-      logicalProvider,
-      adaptation: {
-        persistence: "single",
-        status: "ready",
-        effectiveTransport: "open_ai_chat",
-        testedAt: 1_777_777_777,
-        expiresAt: 1_888_888_888,
-        models: [],
-      },
-    });
+    let resolveSnapshot!: (value: unknown) => void;
+    apiMocks.getCodexProviderEditorSnapshot.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSnapshot = resolve;
+      }),
+    );
 
     render(
       <EditProviderDialog
@@ -213,6 +219,21 @@ describe("EditProviderDialog", () => {
         "deepseek",
       ),
     );
+    expect(screen.queryByTestId("settings-config")).not.toBeInTheDocument();
+
+    resolveSnapshot({
+      logicalProvider,
+      adaptation: {
+        persistence: "single",
+        status: "ready",
+        effectiveTransport: "open_ai_chat",
+        testedAt: 1_777_777_777,
+        expiresAt: 1_888_888_888,
+        models: [],
+      },
+    });
+
+    await screen.findByTestId("settings-config");
     expect(
       JSON.parse(screen.getByTestId("codex-editor-snapshot").textContent ?? ""),
     ).toMatchObject({
@@ -273,6 +294,9 @@ describe("EditProviderDialog", () => {
 
     apiMocks.getCurrent.mockResolvedValue(provider.id);
     apiMocks.getLiveProviderSettings.mockResolvedValue(liveSettings);
+    apiMocks.getCodexProviderEditorSnapshot.mockResolvedValue(
+      editorSnapshotFor(provider),
+    );
 
     render(
       <EditProviderDialog
@@ -294,7 +318,7 @@ describe("EditProviderDialog", () => {
       });
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    fireEvent.click(await screen.findByRole("button", { name: "common.save" }));
 
     await waitFor(() => expect(handleSubmit).toHaveBeenCalledTimes(1));
     expect(handleSubmit.mock.calls[0][0].provider.settingsConfig).toEqual({
@@ -326,6 +350,9 @@ describe("EditProviderDialog", () => {
       config:
         'model_provider = "custom"\n[model_providers.custom]\nbase_url = "http://127.0.0.1:15721/v1"\nexperimental_bearer_token = "PROXY_MANAGED"\n',
     });
+    apiMocks.getCodexProviderEditorSnapshot.mockResolvedValue(
+      editorSnapshotFor(provider),
+    );
 
     render(
       <EditProviderDialog
@@ -364,6 +391,9 @@ describe("EditProviderDialog", () => {
     const handleSubmit = vi.fn().mockResolvedValue(undefined);
     const handleOpenChange = vi.fn();
     formSubmission.receiptIds = ["receipt-deepseek-v4"];
+    apiMocks.getCodexProviderEditorSnapshot.mockResolvedValue(
+      editorSnapshotFor(provider),
+    );
 
     render(
       <EditProviderDialog
@@ -376,7 +406,7 @@ describe("EditProviderDialog", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    fireEvent.click(await screen.findByRole("button", { name: "common.save" }));
 
     await waitFor(() =>
       expect(apiMocks.commitCodexProviderSet).toHaveBeenCalledWith(
@@ -410,6 +440,9 @@ describe("EditProviderDialog", () => {
       },
     };
     formSubmission.receiptIds = ["receipt-deepseek-v4"];
+    apiMocks.getCodexProviderEditorSnapshot.mockResolvedValue(
+      editorSnapshotFor(provider),
+    );
 
     render(
       <EditProviderDialog
@@ -421,7 +454,7 @@ describe("EditProviderDialog", () => {
         isProxyTakeover
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    fireEvent.click(await screen.findByRole("button", { name: "common.save" }));
 
     await waitFor(() =>
       expect(apiMocks.commitCodexProviderSet).toHaveBeenCalledWith(
