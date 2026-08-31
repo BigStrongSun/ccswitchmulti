@@ -740,6 +740,54 @@ async fn resolve_for_command(
     inspect(state)
 }
 
+/// 在 Codex 完全退出后重新投影 CCSM 管理的配置片段。
+///
+/// 该入口只更新 CCSM 拥有的键：接管模式复用 `ProxyService` 的正式投影；
+/// 普通 Provider 模式使用与一致性修复相同的合并器，保留 Codex 与用户管理的其余键。
+/// 调用方必须负责先关闭 Codex，以免 app-server 在写入后再次覆盖 live TOML。
+pub(crate) async fn reproject_current_ccsm_config(
+    state: &AppState,
+) -> Result<CodexConfigConsistencyReport, AppError> {
+    let provider_id = crate::settings::get_effective_current_provider(&state.db, &AppType::Codex)?
+        .ok_or_else(|| AppError::Config("Codex current provider is missing".to_string()))?;
+    let takeover_expected = state
+        .db
+        .get_proxy_config_for_app(AppType::Codex.as_str())
+        .await
+        .map(|config| config.enabled)
+        .unwrap_or(false);
+
+    if takeover_expected {
+        state
+            .proxy_service
+            .set_takeover_for_app(AppType::Codex.as_str(), true)
+            .await
+            .map_err(AppError::Message)?;
+        return inspect(state);
+    }
+
+    let provider = state
+        .db
+        .get_provider_by_id(&provider_id, AppType::Codex.as_str())?
+        .ok_or_else(|| AppError::Config("Codex current provider is missing".to_string()))?;
+    let live_path = codex_config::get_codex_config_path();
+    let backup_path = live_path.with_file_name(format!(
+        "config.toml.ccsm-runtime-refresh-{}.bak",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.fZ")
+    ));
+    let mut backup_created = false;
+    codex_config::reconcile_codex_live_config_atomic(|before| {
+        let candidate = build_codex_live_config_for_provider(&state.db, &provider)?;
+        if !backup_created {
+            fs::write(&backup_path, before.as_bytes())
+                .map_err(|error| AppError::io(&backup_path, error))?;
+            backup_created = true;
+        }
+        merge_ccsm_owned_projection(before, &candidate)
+    })?;
+    inspect(state)
+}
+
 #[tauri::command]
 pub fn inspect_codex_config_consistency(
     state: State<'_, AppState>,
@@ -1288,6 +1336,55 @@ mod tests {
             })
             .count();
         assert_eq!(backups, 1, "apply must create one recoverable drift backup");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn runtime_refresh_reprojection_preserves_unmanaged_codex_settings() {
+        let (_home, state, _) = seed_drifted_state();
+        let live_path = codex_config::get_codex_config_path();
+        let mut live = fs::read_to_string(&live_path)
+            .expect("read drifted live config")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse drifted config");
+        live["desktop"]["composerPlainTextMode"] = toml_edit::value(true);
+        live["projects"][r"c:\users\sunda\documents\runtime-refresh"]["trust_level"] =
+            toml_edit::value("trusted");
+        codex_config::write_codex_live_config_atomic(Some(&live.to_string()))
+            .expect("write unmanaged settings");
+
+        let report = reproject_current_ccsm_config(&state)
+            .await
+            .expect("reproject CCSM config");
+
+        assert_eq!(report.state, CodexConfigConsistencyState::Consistent);
+        let applied = fs::read_to_string(&live_path)
+            .expect("read reprojected config")
+            .parse::<toml::Value>()
+            .expect("parse reprojected config");
+        assert_eq!(
+            applied
+                .get("desktop")
+                .and_then(|desktop| desktop.get("composerPlainTextMode"))
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            applied
+                .get("projects")
+                .and_then(|projects| { projects.get(r"c:\users\sunda\documents\runtime-refresh") })
+                .and_then(|project| project.get("trust_level"))
+                .and_then(toml::Value::as_str),
+            Some("trusted")
+        );
+        assert_eq!(
+            applied
+                .get("model_providers")
+                .and_then(|providers| providers.get("ccsm-provider"))
+                .and_then(|provider| provider.get("wire_api"))
+                .and_then(toml::Value::as_str),
+            Some("responses")
+        );
     }
 
     #[test]

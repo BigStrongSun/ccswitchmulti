@@ -11,6 +11,7 @@ mod codex_desktop;
 mod codex_guardian;
 pub mod codex_history_migration;
 pub mod codex_multirouter;
+pub mod codex_runtime_refresh;
 mod codex_state_db;
 pub(crate) mod codex_subagent_profiles;
 mod commands;
@@ -1519,6 +1520,8 @@ pub fn run() {
             commands::get_settings,
             codex_config_consistency::inspect_codex_config_consistency,
             codex_config_consistency::resolve_codex_config_consistency,
+            codex_runtime_refresh::inspect_codex_runtime_refresh,
+            codex_runtime_refresh::refresh_codex_runtime_state,
             codex_config::get_codex_subagent_reasoning_capabilities,
             codex_config::resolve_codex_model_reasoning_capability,
             codex_config::trigger_codex_model_reasoning_detection,

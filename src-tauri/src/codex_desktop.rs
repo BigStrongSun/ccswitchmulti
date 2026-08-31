@@ -994,7 +994,10 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
 }
 
 /// 启动 Codex Desktop，并传入 remote debugging 参数。
-fn launch_codex_with_debug_port(executable: &Path, debug_port: u16) -> Result<(), String> {
+pub(crate) fn launch_codex_with_debug_port(
+    executable: &Path,
+    debug_port: u16,
+) -> Result<(), String> {
     if let Some(running) = detect_running_codex_main_process() {
         return Err(format!(
             "Codex Desktop is already running at {}. Fully quit Codex, then launch it from CCSwitchMulti so the model picker patch can be installed.",
@@ -1092,7 +1095,7 @@ pub(crate) fn detect_running_codex_main_process() -> Option<PathBuf> {
 }
 
 /// 按常见安装位置寻找 Codex Desktop 可执行文件。
-fn resolve_codex_executable() -> Option<PathBuf> {
+pub(crate) fn resolve_codex_executable() -> Option<PathBuf> {
     detect_running_codex_main_process()
         .filter(|path| path.exists())
         .and_then(|path| remember_codex_desktop_executable(&path).ok().or(Some(path)))

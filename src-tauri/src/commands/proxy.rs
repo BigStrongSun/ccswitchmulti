@@ -1159,7 +1159,23 @@ pub(crate) fn query_codex_processes() -> (Vec<CodexAppServerProcessDiagnostics>,
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         let script = r#"
-Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'codex.exe'" |
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$all = @(Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'codex.exe' OR Name = 'ChatGPT.exe'")
+$desktopShellPids = @($all |
+  Where-Object {
+    ($_.Name -ceq 'ChatGPT.exe' -and $_.ExecutablePath -match '\\WindowsApps\\OpenAI\.Codex(?:\.Preview)?_' -and $_.CommandLine -notmatch ' --type=') -or
+    ($_.Name -ceq 'Codex.exe' -and $_.CommandLine -notmatch ' --type=')
+  } | Select-Object -ExpandProperty ProcessId)
+$all | Where-Object {
+    if ($_.Name -ceq 'ChatGPT.exe') {
+      return $_.ExecutablePath -and $_.ExecutablePath -match '\\WindowsApps\\OpenAI\.Codex(?:\.Preview)?_'
+    }
+    if ($_.Name -ceq 'Codex.exe') { return $true }
+    return $_.Name -ceq 'codex.exe' -and
+      $_.CommandLine -match '(?i)(^|\s)app-server(\s|$)' -and
+      (($_.ExecutablePath -and $_.ExecutablePath -match '\\AppData\\Local\\OpenAI\\Codex\\bin\\') -or
+       ($desktopShellPids -contains $_.ParentProcessId))
+  } |
   Select-Object ProcessId,Name,ExecutablePath,CommandLine,@{Name='StartedAt';Expression={$_.CreationDate.ToLocalTime().ToString('o')}} |
   ConvertTo-Json -Compress
 "#;
@@ -1172,7 +1188,10 @@ Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'codex.exe'"
             Err(err) => return (Vec::new(), Some(format!("PowerShell failed: {err}"))),
         };
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr = String::from_utf8(output.stderr)
+                .unwrap_or_else(|error| format!("PowerShell stderr was not UTF-8: {error}"))
+                .trim()
+                .to_string();
             return (
                 Vec::new(),
                 Some(if stderr.is_empty() {
@@ -1182,7 +1201,15 @@ Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'codex.exe'"
                 }),
             );
         }
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stdout = match String::from_utf8(output.stdout) {
+            Ok(stdout) => stdout.trim_start_matches('\u{feff}').trim().to_string(),
+            Err(error) => {
+                return (
+                    Vec::new(),
+                    Some(format!("PowerShell output was not UTF-8: {error}")),
+                )
+            }
+        };
         if stdout.is_empty() {
             return (Vec::new(), None);
         }

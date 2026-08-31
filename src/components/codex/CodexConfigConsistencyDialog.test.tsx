@@ -24,6 +24,25 @@ vi.mock("react-i18next", () => ({
         "codexConfigConsistency.runtimeRestartHint":
           "请完全退出 Codex Desktop/app-server，重新打开后新建任务。",
         "codexConfigConsistency.recheck": "重新检测",
+        "codexConfigConsistency.refreshCodex": "刷新 Codex 状态",
+        "codexConfigConsistency.refreshConfirmTitle": "确认刷新 Codex 状态",
+        "codexConfigConsistency.refreshConfirmDescription":
+          "将关闭所有 Codex 窗口并中断正在运行的任务。",
+        "codexConfigConsistency.desktopProcesses": "桌面主进程：",
+        "codexConfigConsistency.appServerProcesses": "app-server：",
+        "codexConfigConsistency.confirmRefresh": "关闭、重写并重新打开",
+        "codexConfigConsistency.cancelRefresh": "取消",
+        "codexConfigConsistency.refreshingTitle": "正在刷新 Codex 状态",
+        "codexConfigConsistency.refreshingDescription":
+          "请保持 CCSM 运行，Codex 将自动重新打开。",
+        "codexConfigConsistency.stageClosing": "关闭 Codex",
+        "codexConfigConsistency.stageApplyingConfig": "应用 CCSM 配置",
+        "codexConfigConsistency.stageLaunching": "重新打开 Codex",
+        "codexConfigConsistency.stageVerifying": "验证新运行态",
+        "codexConfigConsistency.failedStage": "失败阶段：",
+        "codexConfigConsistency.refreshFailedTitle": "Codex 状态刷新失败",
+        "codexConfigConsistency.refreshFailedDescription":
+          "流程已停在失败阶段。",
         "common.unknown": "未知",
       })[key] ?? key,
   }),
@@ -160,5 +179,151 @@ describe("CodexConfigConsistencyDialog", () => {
     expect(screen.queryByText("应用 CCSM 配置")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "重新检测" }));
     expect(onRetry).toHaveBeenCalledOnce();
+  });
+
+  it("checks the exact Codex runtime before offering the destructive refresh", () => {
+    const onInspectRefresh = vi.fn();
+    const onConfirmRefresh = vi.fn();
+    const runtimeReport: CodexConfigConsistencyReport = {
+      ...report,
+      state: "consistent",
+      changedKeys: [],
+      reason: null,
+      runtimeActivation: {
+        state: "restart_required",
+        appServerStartedAt: "2026-08-31T21:48:34+08:00",
+        configModifiedAt: "2026-08-31T22:38:53+08:00",
+        reason: "app_server_started_before_managed_config",
+      },
+    };
+    const { rerender } = render(
+      <CodexConfigConsistencyDialog
+        report={runtimeReport}
+        pending={false}
+        error={null}
+        refresh={{ phase: "idle", preflight: null, progress: null }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={onInspectRefresh}
+        onConfirmRefresh={onConfirmRefresh}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新 Codex 状态" }));
+    expect(onInspectRefresh).toHaveBeenCalledOnce();
+
+    rerender(
+      <CodexConfigConsistencyDialog
+        report={runtimeReport}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "confirm",
+          progress: null,
+          preflight: {
+            supported: true,
+            canRefresh: true,
+            snapshotToken: "snapshot",
+            desktopProcessCount: 1,
+            appServerProcessCount: 1,
+            processCount: 2,
+            launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+            warning: "active_tasks_will_be_interrupted",
+          },
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={onInspectRefresh}
+        onConfirmRefresh={onConfirmRefresh}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    const confirmation = screen.getByRole("dialog", {
+      name: "确认刷新 Codex 状态",
+    });
+    expect(
+      within(confirmation).getByText(/桌面主进程：.*1/),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText(/app-server：.*1/),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(confirmation).getByRole("button", {
+        name: "关闭、重写并重新打开",
+      }),
+    );
+    expect(onConfirmRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("shows the four refresh stages in one modal instead of stacking another dialog", () => {
+    render(
+      <CodexConfigConsistencyDialog
+        report={report}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "refreshing",
+          preflight: {
+            supported: true,
+            canRefresh: true,
+            snapshotToken: "snapshot",
+            desktopProcessCount: 1,
+            appServerProcessCount: 1,
+            processCount: 2,
+            launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+            warning: "active_tasks_will_be_interrupted",
+          },
+          progress: { stage: "applying_config" },
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={vi.fn()}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog", {
+      name: "正在刷新 Codex 状态",
+    });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(within(dialog).getByText("关闭 Codex")).toBeInTheDocument();
+    expect(within(dialog).getByText("应用 CCSM 配置")).toBeInTheDocument();
+    expect(within(dialog).getByText("重新打开 Codex")).toBeInTheDocument();
+    expect(within(dialog).getByText("验证新运行态")).toBeInTheDocument();
+  });
+
+  it("keeps the exact failed stage visible for a retry", () => {
+    render(
+      <CodexConfigConsistencyDialog
+        report={report}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "failed",
+          preflight: null,
+          progress: { stage: "launching" },
+          error: "AUMID 启动失败",
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={vi.fn()}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("失败阶段： 重新打开 Codex")).toBeInTheDocument();
+    expect(screen.getByText("AUMID 启动失败")).toBeInTheDocument();
   });
 });

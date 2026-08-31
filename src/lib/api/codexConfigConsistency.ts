@@ -34,6 +34,34 @@ export interface CodexConfigConsistencyReport {
   runtimeActivation: CodexConfigRuntimeActivation;
 }
 
+export type CodexRuntimeRefreshStage =
+  | "closing"
+  | "force_closing"
+  | "applying_config"
+  | "launching"
+  | "verifying"
+  | "completed";
+
+export interface CodexRuntimeRefreshProgress {
+  stage: CodexRuntimeRefreshStage;
+}
+
+export interface CodexRuntimeRefreshPreflight {
+  supported: boolean;
+  canRefresh: boolean;
+  snapshotToken: string;
+  desktopProcessCount: number;
+  appServerProcessCount: number;
+  processCount: number;
+  launchTarget: string | null;
+  warning: string | null;
+}
+
+export interface CodexRuntimeRefreshResult {
+  forceTerminated: boolean;
+  closedProcessCount: number;
+}
+
 export const codexConfigConsistencyApi = {
   inspect(): Promise<CodexConfigConsistencyReport> {
     return invoke("inspect_codex_config_consistency");
@@ -46,5 +74,13 @@ export const codexConfigConsistencyApi = {
       expectedFingerprint,
       action,
     });
+  },
+  inspectRuntimeRefresh(): Promise<CodexRuntimeRefreshPreflight> {
+    return invoke("inspect_codex_runtime_refresh");
+  },
+  refreshRuntimeState(
+    snapshotToken: string,
+  ): Promise<CodexRuntimeRefreshResult> {
+    return invoke("refresh_codex_runtime_state", { snapshotToken });
   },
 };

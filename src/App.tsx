@@ -2386,6 +2386,14 @@ function App() {
         onKeep={() => void codexConfigConsistency.resolve("keep_codex")}
         onLater={() => void codexConfigConsistency.resolve("later")}
         onRetry={() => void codexConfigConsistency.recheck()}
+        refresh={codexConfigConsistency.refresh}
+        onInspectRefresh={() =>
+          void codexConfigConsistency.inspectRuntimeRefresh()
+        }
+        onConfirmRefresh={() =>
+          void codexConfigConsistency.confirmRuntimeRefresh()
+        }
+        onCancelRefresh={codexConfigConsistency.cancelRuntimeRefresh}
       />
     </div>
   );
