@@ -203,6 +203,32 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.queryByText(/浅探测|1024/)).not.toBeInTheDocument();
   });
 
+  it("previews a blocked future page without mutating workflow progress", () => {
+    renderWizard([
+      {
+        id: "codex-deepseek",
+        name: "DeepSeek",
+        category: "custom",
+        settingsConfig: {
+          baseUrl: "https://example.invalid/v1",
+          auth: { OPENAI_API_KEY: "test-only" },
+          modelCatalog: {
+            models: [{ model: "deepseek-v4-flash" }],
+          },
+        },
+      },
+    ]);
+
+    expect(screen.getByText("状态机：opened")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
+
+    expect(screen.getByRole("heading", { name: "保存并启用" })).toBeVisible();
+    expect(screen.getByText("当前步骤暂不可编辑")).toBeVisible();
+    expect(screen.getByText("状态机：opened")).toBeVisible();
+    expect(screen.queryByText("状态机：enablePrompt")).not.toBeInTheDocument();
+  });
+
   it("counts only automatic models in the deep-probe progress denominator", async () => {
     preflightCodexProviderProtocolCompatibility.mockImplementationOnce(
       () => new Promise(() => undefined),

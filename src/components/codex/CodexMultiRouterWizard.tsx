@@ -331,36 +331,6 @@ const INITIAL_FLOW_STATE: WizardFlowState = {
   stepKey: "welcome",
 };
 
-// 将左侧教程步骤映射到业务状态；手动跳步也会进入对应的状态分支，避免 UI 步骤和流程状态脱节。
-function statusForStep(stepKey: WizardPageKey): WizardFlowStatus {
-  switch (stepKey) {
-    case "welcome":
-    case "inventory":
-      return "opened";
-    case "first-provider":
-      return "needSources";
-    case "readiness":
-    case "sources":
-      return "reviewProviderConfig";
-    case "catalog":
-      return "readyToFetchModels";
-    case "protocol":
-      return "probingConnectivity";
-    case "models":
-    case "model-order":
-    case "reasoning":
-    case "subagents-tools":
-    case "routing-review":
-      return "routePreview";
-    case "save-enable":
-      return "enablePrompt";
-    case "acceptance":
-      return "enabled";
-    default:
-      return "opened";
-  }
-}
-
 // reducer 是向导的状态机核心；所有异步动作只发事件，不直接改流程状态。
 function wizardFlowReducer(
   state: WizardFlowState,
@@ -375,7 +345,6 @@ function wizardFlowReducer(
     case "GOTO_STEP":
       return {
         ...state,
-        status: statusForStep(event.stepKey),
         stepKey: event.stepKey,
         lastError: undefined,
       };
