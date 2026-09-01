@@ -168,6 +168,10 @@ function New-FakeOperations {
             param($Context)
             $script:events.Add("wait-port-release") | Out-Null
         }
+        RetireRunMarker = {
+            param($Context, $ExpectedIdentity)
+            $script:events.Add("retire-run-marker:$([int]$ExpectedIdentity.ProcessId)") | Out-Null
+        }
         SnapshotConfig = {
             param($Context, $Backup)
             $script:events.Add("snapshot-config") | Out-Null
@@ -362,6 +366,76 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         (Test-CcsmSamePath -Left $projected -Right $installed) | Should Be $true
     }
 
+    It "retires only the run marker owned by the exact stopped CCSwitchMulti process" {
+        $fixture = New-Task3ATestDirectory
+        try {
+            $logs = Join-Path $fixture "logs"
+            New-Item -ItemType Directory -Path $logs -Force | Out-Null
+            $markerPath = Join-Path $logs "app-run-marker.json"
+            $projected = Join-Path $env:LOCALAPPDATA "Packages\OpenAI.Codex_test\LocalCache\Local\CCSwitchMulti\cc-switch.exe"
+            $marker = [ordered]@{
+                startedAt = "2026-08-09 16:00:00.000"
+                pid = 4242
+                version = "1.0.0"
+                os = "windows"
+                arch = "x86_64"
+                cwd = $fixture
+                executablePath = $projected
+                processStartedAtTicks = 134307360000000000
+                configScope = "fixture"
+            }
+            [System.IO.File]::WriteAllText(
+                $markerPath,
+                ($marker | ConvertTo-Json -Depth 4),
+                [System.Text.UTF8Encoding]::new($false)
+            )
+
+            Remove-CcsmVerifiedRunMarker -ConfigPath $fixture -ExpectedIdentity @{
+                ProcessId = 4242
+                Path = (Join-Path $env:LOCALAPPDATA "CCSwitchMulti\cc-switch.exe")
+                StartTime = "2026-08-09T08:00:00.0000000Z"
+            } -ExpectedVersion "1.0.0"
+
+            (Test-Path -LiteralPath $markerPath) | Should Be $false
+        } finally {
+            Remove-Task3ATestTree -Path $fixture
+        }
+    }
+
+    It "keeps a mismatched run marker and fails closed before installation" {
+        $fixture = New-Task3ATestDirectory
+        try {
+            $logs = Join-Path $fixture "logs"
+            New-Item -ItemType Directory -Path $logs -Force | Out-Null
+            $markerPath = Join-Path $logs "app-run-marker.json"
+            $marker = [ordered]@{
+                startedAt = "2026-08-09 16:00:00.000"
+                pid = 9999
+                version = "1.0.0"
+                os = "windows"
+                arch = "x86_64"
+                cwd = $fixture
+                executablePath = (Join-Path $env:LOCALAPPDATA "CCSwitchMulti\cc-switch.exe")
+                processStartedAtTicks = 134307360000000000
+                configScope = "fixture"
+            }
+            [System.IO.File]::WriteAllText(
+                $markerPath,
+                ($marker | ConvertTo-Json -Depth 4),
+                [System.Text.UTF8Encoding]::new($false)
+            )
+
+            { Remove-CcsmVerifiedRunMarker -ConfigPath $fixture -ExpectedIdentity @{
+                    ProcessId = 4242
+                    Path = (Join-Path $env:LOCALAPPDATA "CCSwitchMulti\cc-switch.exe")
+                    StartTime = "2026-08-09T08:00:00.0000000Z"
+                } -ExpectedVersion "1.0.0" } | Should Throw
+            (Test-Path -LiteralPath $markerPath) | Should Be $true
+        } finally {
+            Remove-Task3ATestTree -Path $fixture
+        }
+    }
+
     It "reports actual and expected hashes when runtime verification fails" {
         $context = [pscustomobject]@{
             InstalledExecutable = "C:\Program Files\CCSwitchMulti\cc-switch.exe"
@@ -400,7 +474,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
     It "exposes a non-mutating plan with the complete transaction and rollback boundary" {
         $plan = Get-CcsmReinstallPlan
 
-        ($plan.Forward -join ",") | Should Be "preflight,backup,stop-verified-pid,wait-port-release,quiescent-config-snapshot,uninstall-silent,install-silent,start-hidden,wait-listener-health,verify-version-hash-path"
+        ($plan.Forward -join ",") | Should Be "preflight,backup,stop-verified-pid,wait-port-release,retire-owned-run-marker,quiescent-config-snapshot,uninstall-silent,install-silent,start-hidden,wait-listener-health,verify-version-hash-path"
         ($plan.Rollback -join ",") | Should Be "verify-and-stop-new-process,restore-app-config-registry,start-previous-hidden,wait-listener-health,verify-previous-runtime"
     }
 
@@ -808,7 +882,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
         $mutations = @($script:events | Where-Object { $_ -notlike "log:*" })
 
-        ($mutations -join ",") | Should Be "backup,stop:4242,wait-port-release,snapshot-config,verify-config-snapshot,uninstall,install,start:new,wait-ready:5000"
+        ($mutations -join ",") | Should Be "backup,stop:4242,wait-port-release,retire-run-marker:4242,snapshot-config,verify-config-snapshot,uninstall,install,start:new,wait-ready:5000"
         ($script:checks -contains "process-path:5000") | Should Be $true
         ($script:checks -contains "health:http://127.0.0.1:15721/health") | Should Be $true
         $result.NewPid | Should Be 5000
@@ -820,7 +894,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $mutations = @($script:events | Where-Object { $_ -notlike "log:*" })
 
         $result.Status | Should Be "RolledBack"
-        ($mutations -join ",") | Should Be "backup,stop:4242,wait-port-release,snapshot-config,verify-config-snapshot,uninstall,install,start:new,wait-ready:5000,stop:5000,validate-backup:,restore-app-config,registry-delete:HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CCSwitchMulti,registry-import,registry-verify,verify-restored-state,start:previous,wait-ready:6000"
+        ($mutations -join ",") | Should Be "backup,stop:4242,wait-port-release,retire-run-marker:4242,snapshot-config,verify-config-snapshot,uninstall,install,start:new,wait-ready:5000,stop:5000,validate-backup:,restore-app-config,registry-delete:HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CCSwitchMulti,registry-import,registry-verify,verify-restored-state,start:previous,wait-ready:6000"
         ($script:checks -contains "process-identity:5000") | Should Be $true
         ($script:checks -contains "process-path:6000") | Should Be $true
     }

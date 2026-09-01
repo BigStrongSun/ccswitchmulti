@@ -50,6 +50,7 @@ function Get-CcsmReinstallPlan {
             "backup",
             "stop-verified-pid",
             "wait-port-release",
+            "retire-owned-run-marker",
             "quiescent-config-snapshot",
             "uninstall-silent",
             "install-silent",
@@ -141,6 +142,45 @@ function Test-CcsmStrictDescendant {
 
     return (Test-CcsmPathInside -Candidate $Candidate -Parent $Parent) -and
         -not (Test-CcsmSamePath -Left $Candidate -Right $Parent)
+}
+
+function Remove-CcsmVerifiedRunMarker {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ConfigPath,
+        [Parameter(Mandatory = $true)]$ExpectedIdentity,
+        [Parameter(Mandatory = $true)][string]$ExpectedVersion
+    )
+
+    $configRoot = [System.IO.Path]::GetFullPath($ConfigPath)
+    $markerPath = [System.IO.Path]::GetFullPath((Join-Path $configRoot "logs\app-run-marker.json"))
+    if (-not (Test-CcsmStrictDescendant -Candidate $markerPath -Parent $configRoot)) {
+        throw "run marker escaped the validated config root"
+    }
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return }
+
+    $marker = [System.IO.File]::ReadAllText($markerPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    foreach ($field in @("pid", "version", "executablePath", "processStartedAtTicks")) {
+        if ($marker.PSObject.Properties.Name -notcontains $field) {
+            throw "run marker is missing required identity field '$field'"
+        }
+    }
+
+    $expectedPid = [int]$ExpectedIdentity.ProcessId
+    $expectedPath = [string]$ExpectedIdentity.Path
+    $expectedStartTicks = [datetimeoffset]::Parse(
+        [string]$ExpectedIdentity.StartTime,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind
+    ).UtcDateTime.ToFileTimeUtc()
+    if ([int]$marker.pid -ne $expectedPid -or
+        -not [string]::Equals([string]$marker.version, $ExpectedVersion, [System.StringComparison]::Ordinal) -or
+        -not (Test-CcsmSamePath -Left ([string]$marker.executablePath) -Right $expectedPath) -or
+        [int64]$marker.processStartedAtTicks -ne [int64]$expectedStartTicks) {
+        throw "run marker does not belong to the exact stopped CCSwitchMulti process"
+    }
+
+    Remove-Item -LiteralPath $markerPath -Force -ErrorAction Stop
 }
 
 function Get-CcsmExistingFileSystemItem {
@@ -313,7 +353,7 @@ function Assert-CcsmRequiredOperations {
     $required = @(
         "ResolvePath", "TestPath", "GetFileHash", "GetFileVersion",
         "GetProcessPath", "GetProcessIdentity", "GetListenerOwner", "GetHealth", "WriteLog",
-        "Backup", "StopVerifiedProcess", "WaitPortReleased", "SnapshotConfig", "VerifyConfigSnapshot",
+        "Backup", "StopVerifiedProcess", "WaitPortReleased", "RetireRunMarker", "SnapshotConfig", "VerifyConfigSnapshot",
         "RunUninstaller", "RunInstaller", "StartProcess", "WaitReady", "ValidateRestoreBackup",
         "RestoreAppAndConfig", "DeleteRegistryKey", "ImportRegistry", "VerifyRegistryRestore", "VerifyRestoredState"
     )
@@ -626,6 +666,7 @@ function Invoke-CcsmReinstallTransaction {
         $verifiedStopIdentity = Assert-CcsmVerifiedStopTarget -Context $context -Operations $Operations
         & $Operations.StopVerifiedProcess $context $verifiedStopIdentity
         & $Operations.WaitPortReleased $context
+        & $Operations.RetireRunMarker $context $verifiedStopIdentity
         [void](& $Operations.SnapshotConfig $context $backup)
         & $Operations.VerifyConfigSnapshot $context $backup
         & $Operations.RunUninstaller $context
@@ -1355,6 +1396,13 @@ function New-CcsmRealOperations {
                 & $operations.StopVerifiedProcess $Context $identity
             }
             return $false
+        }
+    }
+    $operations.RetireRunMarker = {
+        param($Context, $ExpectedIdentity)
+        foreach ($configPath in $Context.ConfigPaths) {
+            Remove-CcsmVerifiedRunMarker -ConfigPath $configPath -ExpectedIdentity $ExpectedIdentity `
+                -ExpectedVersion $Context.ExpectedCurrentVersion
         }
     }
     $operations.RunUninstaller = {
