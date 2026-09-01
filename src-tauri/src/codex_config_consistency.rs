@@ -531,7 +531,9 @@ fn should_emit_report(report: &CodexConfigConsistencyReport) -> bool {
         || report.runtime_activation.state == CodexConfigRuntimeActivationState::RestartRequired
 }
 
-fn repair_current_profile_provider_before_inspection(state: &AppState) -> Result<(), AppError> {
+pub(crate) fn repair_current_profile_provider_before_inspection(
+    state: &AppState,
+) -> Result<(), AppError> {
     let Some(provider_id) =
         crate::settings::get_effective_current_provider(&state.db, &AppType::Codex)?
     else {

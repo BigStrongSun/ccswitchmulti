@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-02 Codex 启动门禁与 config.toml 写入边界
+
+- `launchCodexDesktopWithCcswitch` 在 `a8870050` 引入时被放在 `lib.rs` 数据库初始化之前；后续新增的异常恢复、Codex 模型目录投影、15721 接管恢复和配置一致性检查均位于异步启动尾段，旧启动点没有随架构演进迁移。本机 `2026-09-01 12:24`、`16:20` 日志实证都是“先启动 Codex，后恢复代理并写接管配置”，会让 app-server 在 CCSM 修复磁盘前固化旧 Provider/目录状态。
+- 根修新增 `codex_startup` 启动事务：显式开关关闭时完全不触碰 Codex；Codex 已运行时保持幂等并交给独立运行态刷新；Codex 未运行时只在模型目录对账、代理接管恢复成功后检查托管投影，发现可修复漂移则重新投影并二次检查，任何接管失败、无效 TOML、修复失败或复检不通过都禁止启动。早期同步启动调用已删除，启动只能发生在恢复与验证之后。
+- Codex 新版频繁改写 `config.toml` 主要是官方行为而非托管路由随机损坏：官方 app-server 的 `thread/start` 会在 workspace-write/full-access 工作区持久化 `projects.<path>.trust_level`，`config/value/write` 与 `config/batchWrite` 供 Desktop 保存 `desktop.*`、插件等用户字段。不得把整个文件设为只读；CCSM 只拥有模型、活动 Provider、目录指针和受管路由字段，当前一致性指纹明确忽略 `agents.*`、`desktop.*`、MCP、插件和项目信任，同时托管写入使用最新快照合并与 compare-and-swap 重试。
+- TDD 先让“修复并复检后启动、复检失败禁止启动、接管失败禁止启动、已运行不重配、关闭开关零副作用”在旧实现下失败，再实现门禁。fresh 验证：启动门禁 8/8、配置一致性 20/20、启动幂等与 Desktop 字段恢复 2/2；Rust lib 全量 `3765 passed / 0 failed / 6 ignored`，`cargo check --lib`、rustfmt 和 `git diff --check` 通过。此记录时尚未升版、构建或替换安装，不能把源码结果当作安装态验收。
+
 ## 2026-09-02 v3.19.2-20 可回滚替换与异常退出误报根修
 
 - `v3.19.2-19@ce23b42d` 的首轮事务安装本身成功，但新进程 PID `5932` 在 `2026-09-02 02:59:54.089` 新增了一条 `uncleanExit`。根因不是 Codex 或 CCSM 再次崩溃，而是升级包装器只持有 guardian maintenance lease；事务强制停止旧 CCSM PID `57040` 后仍留下 `logs/app-run-marker.json`，而 app exit monitor 不读取 guardian lease，因此下一实例把这次计划内替换误判为异常退出。

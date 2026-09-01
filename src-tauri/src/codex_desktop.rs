@@ -196,7 +196,7 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
 /// 这个入口不属于系统自启注册流程；调用方必须先读取独立设置。已有 Codex
 /// 主进程时保持幂等，不重复拉起或干扰现有会话。
 pub(crate) fn launch_codex_desktop_with_ccswitch(enabled: bool) -> Result<bool, String> {
-    let codex_running = detect_running_codex_main_process().is_some();
+    let codex_running = is_codex_desktop_running();
     if !should_launch_codex_desktop_with_ccswitch(enabled, codex_running) {
         return Ok(false);
     }
@@ -205,6 +205,10 @@ pub(crate) fn launch_codex_desktop_with_ccswitch(enabled: bool) -> Result<bool, 
         resolve_codex_executable().ok_or_else(codex_desktop_executable_not_found_message)?;
     launch_codex_with_debug_port(&executable, DEFAULT_CODEX_DEBUG_PORT)?;
     Ok(true)
+}
+
+pub(crate) fn is_codex_desktop_running() -> bool {
+    detect_running_codex_main_process().is_some()
 }
 
 fn should_launch_codex_desktop_with_ccswitch(enabled: bool, codex_running: bool) -> bool {
