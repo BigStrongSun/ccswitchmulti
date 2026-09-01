@@ -469,17 +469,25 @@ fn request_windows_close(pid: u32) {
 #[cfg(not(target_os = "windows"))]
 fn request_windows_close(_pid: u32) {}
 
+fn force_terminate_process_arguments(pid: u32) -> Vec<String> {
+    vec!["/PID".to_string(), pid.to_string(), "/F".to_string()]
+}
+
+fn required_runtime_compatibility_is_ready(
+    injected: bool,
+    all_provider_history_patched: bool,
+    history_refresh_requested: bool,
+) -> bool {
+    injected && all_provider_history_patched && history_refresh_requested
+}
+
 #[cfg(target_os = "windows")]
-fn force_terminate_process_tree(pid: u32, include_descendants: bool) -> Result<(), String> {
+fn force_terminate_process(pid: u32) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let mut command = Command::new("taskkill.exe");
-    command.args(["/PID", &pid.to_string()]);
-    if include_descendants {
-        command.arg("/T");
-    }
+    command.args(force_terminate_process_arguments(pid));
     let status = command
-        .arg("/F")
         .creation_flags(CREATE_NO_WINDOW)
         .status()
         .map_err(|error| format!("codex_taskkill_start_failed_for_pid_{pid}: {error}"))?;
@@ -493,7 +501,7 @@ fn force_terminate_process_tree(pid: u32, include_descendants: bool) -> Result<(
 }
 
 #[cfg(not(target_os = "windows"))]
-fn force_terminate_process_tree(_pid: u32, _include_descendants: bool) -> Result<(), String> {
+fn force_terminate_process(_pid: u32) -> Result<(), String> {
     Err("codex_runtime_refresh_windows_only".to_string())
 }
 
@@ -600,7 +608,7 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
                 .iter()
                 .any(|candidate| same_process_identity(process, candidate))
             {
-                if let Err(error) = force_terminate_process_tree(process.pid, true) {
+                if let Err(error) = force_terminate_process(process.pid) {
                     let after = tokio::task::spawn_blocking(query_codex_runtime_processes)
                         .await
                         .map_err(|join_error| {
@@ -626,7 +634,7 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
                 .iter()
                 .any(|candidate| same_process_identity(process, candidate))
             {
-                if let Err(error) = force_terminate_process_tree(process.pid, false) {
+                if let Err(error) = force_terminate_process(process.pid) {
                     let after = tokio::task::spawn_blocking(query_codex_runtime_processes)
                         .await
                         .map_err(|join_error| {
@@ -660,6 +668,7 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
 
     async fn verify_fresh_runtime(&mut self, config_written_at_ms: i64) -> Result<(), String> {
         let deadline = Instant::now() + CODEX_RUNTIME_READY_TIMEOUT;
+        let mut last_compatibility_error = None;
         loop {
             let targets = query_refresh_targets().await?;
             let fresh_app_server = targets.app_servers.iter().any(|process| {
@@ -674,11 +683,34 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
                     && consistency.runtime_activation.state
                         == CodexConfigRuntimeActivationState::Current
                 {
-                    return Ok(());
+                    match crate::codex_desktop::unlock_codex_model_picker().await {
+                        Ok(result)
+                            if required_runtime_compatibility_is_ready(
+                                result.injected,
+                                result.all_provider_history_patched,
+                                result.history_refresh_requested,
+                            ) =>
+                        {
+                            return Ok(());
+                        }
+                        Ok(result) => {
+                            last_compatibility_error = Some(format!(
+                                "codex_history_compatibility_not_ready: {}",
+                                result.message
+                            ));
+                        }
+                        Err(error) => {
+                            last_compatibility_error = Some(format!(
+                                "codex_history_compatibility_install_failed: {error}"
+                            ));
+                        }
+                    }
                 }
             }
             if Instant::now() >= deadline {
-                return Err("codex_runtime_did_not_become_current_before_timeout".to_string());
+                return Err(last_compatibility_error.unwrap_or_else(|| {
+                    "codex_runtime_did_not_become_current_before_timeout".to_string()
+                }));
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -860,6 +892,22 @@ mod tests {
             refresh_target_fingerprint(&first),
             refresh_target_fingerprint(&second)
         );
+    }
+
+    #[test]
+    fn forced_close_targets_only_the_revalidated_pid_without_descendant_tree_kill() {
+        assert_eq!(
+            force_terminate_process_arguments(4242),
+            vec!["/PID", "4242", "/F"]
+        );
+    }
+
+    #[test]
+    fn runtime_verification_requires_the_all_provider_history_query_patch() {
+        assert!(!required_runtime_compatibility_is_ready(true, false, true));
+        assert!(!required_runtime_compatibility_is_ready(false, true, true));
+        assert!(!required_runtime_compatibility_is_ready(true, true, false));
+        assert!(required_runtime_compatibility_is_ready(true, true, true));
     }
 
     #[derive(Default)]

@@ -35,6 +35,8 @@ pub struct CodexModelPickerUnlockResult {
     pub history_sync_requested: bool,
     pub history_catalog_complete: Option<bool>,
     pub history_catalog_count: Option<usize>,
+    pub all_provider_history_patched: bool,
+    pub history_refresh_requested: bool,
     pub message: String,
 }
 
@@ -44,6 +46,8 @@ pub(crate) struct CodexAppCompatibilityEvidence {
     history_sync_requested: bool,
     history_catalog_complete: Option<bool>,
     history_catalog_count: Option<usize>,
+    all_provider_history_patched: bool,
+    history_refresh_requested: bool,
 }
 
 /// 注入脚本需要的模型目录投影，避免把整个 catalog 私有字段泄漏到 renderer。
@@ -123,6 +127,8 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
             history_sync_requested: false,
             history_catalog_complete: None,
             history_catalog_count: None,
+            all_provider_history_patched: false,
+            history_refresh_requested: false,
             message: "Codex App is already running without an injectable CDP port. Fully quit Codex, then launch it from CCSwitchMulti so the history catalog and model compatibility layer can be installed.".to_string(),
         });
     }
@@ -156,6 +162,8 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
             history_sync_requested: false,
             history_catalog_complete: None,
             history_catalog_count: None,
+            all_provider_history_patched: false,
+            history_refresh_requested: false,
             message: "Codex was launched with remote debugging; waiting for the renderer target."
                 .to_string(),
         });
@@ -176,6 +184,8 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
         history_sync_requested: false,
         history_catalog_complete: None,
         history_catalog_count: None,
+        all_provider_history_patched: false,
+        history_refresh_requested: false,
         message: "Codex was launched, but no injectable renderer target appeared before timeout."
             .to_string(),
     }))
@@ -393,7 +403,10 @@ pub(crate) async fn try_inject_on_candidate_ports(
                 continue;
             };
             if let Ok(evidence) = install_script(websocket_url, &script).await {
-                if evidence.history_sync_requested {
+                if evidence.history_sync_requested
+                    || evidence.history_catalog_complete.is_some()
+                    || evidence.all_provider_history_patched
+                {
                     compatibility_evidence = evidence;
                 }
                 injected_target.get_or_insert(target);
@@ -417,10 +430,14 @@ pub(crate) async fn try_inject_on_candidate_ports(
             history_sync_requested: compatibility_evidence.history_sync_requested,
             history_catalog_complete: compatibility_evidence.history_catalog_complete,
             history_catalog_count: compatibility_evidence.history_catalog_count,
-            message: if compatibility_evidence.history_sync_requested {
+            all_provider_history_patched: compatibility_evidence.all_provider_history_patched,
+            history_refresh_requested: compatibility_evidence.history_refresh_requested,
+            message: if compatibility_evidence.all_provider_history_patched {
+                "Codex App compatibility layer was injected; all-provider history queries were restored and the native history catalog was refreshed without rewriting history data.".to_string()
+            } else if compatibility_evidence.history_sync_requested {
                 "Codex App compatibility layer was injected; the native history catalog sync was requested and model visibility was refreshed.".to_string()
             } else {
-                "Codex App compatibility layer was injected, but the native localThreadCatalog service was not available in this renderer; model visibility was refreshed without rewriting history metadata.".to_string()
+                "Codex App compatibility layer was injected, but the all-provider history query patch was not installed in this renderer; model visibility was refreshed without rewriting history metadata.".to_string()
             },
         });
     }
@@ -553,6 +570,7 @@ fn codex_app_compatibility_evidence_from_evaluation(
         .pointer("/result/result/value")
         .ok_or_else(|| "Codex App compatibility script returned no value".to_string())?;
     let history_sync = value.get("historySync").unwrap_or(&Value::Null);
+    let history_query_patch = value.get("historyQueryPatch").unwrap_or(&Value::Null);
     Ok(CodexAppCompatibilityEvidence {
         history_sync_requested: history_sync
             .get("requested")
@@ -563,6 +581,14 @@ fn codex_app_compatibility_evidence_from_evaluation(
             .get("afterCount")
             .and_then(Value::as_u64)
             .and_then(|count| usize::try_from(count).ok()),
+        all_provider_history_patched: history_query_patch
+            .get("patched")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        history_refresh_requested: history_query_patch
+            .get("refreshRequested")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -771,6 +797,11 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   state.requestIds = state.requestIds || new Set();
   state.modulePromises = state.modulePromises || new Map();
   state.failures = state.failures || [];
+  const recordFailure = (error) => {{
+    const message = String(error?.message || error);
+    if (state.failures.at(-1) !== message) state.failures.push(message);
+    state.failures = state.failures.slice(-20);
+  }};
   window[patchKey] = state;
 {model_patch_core}
   const patchStatsigConfig = (config) => {{
@@ -812,18 +843,40 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       try {{ patchStatsigConfig(client.getDynamicConfig("107580212", {{ disableExposureLog: true }})); }} catch {{}}
     }}
   }};
-  const assetUrl = (namePart) => {{
-    const urls = [
+  const visibleAssetUrls = () => [
       ...Array.from(document.scripts || []).map((script) => script.src),
       ...Array.from(document.querySelectorAll("link[href]") || []).map((link) => link.href),
       ...performance.getEntriesByType("resource").map((entry) => entry.name),
-    ].filter(Boolean);
-    return urls.find((url) => url.includes("/assets/") && url.includes(namePart) && url.split("?")[0].endsWith(".js")) || "";
+    ].filter((url, index, urls) => Boolean(url) && urls.indexOf(url) === index);
+  const assetUrl = async (namePart) => {{
+    const urls = visibleAssetUrls();
+    const direct = urls.find((url) => url.includes("/assets/") && url.includes(namePart) && url.split("?")[0].endsWith(".js"));
+    if (direct) return direct;
+
+    // Newer Codex builds keep only index-*.js visible and reference rpc/app chunks
+    // from the Vite dependency table. Follow those same-origin module references
+    // instead of depending on one hashed filename or Performance API behavior.
+    const inspected = new Set();
+    for (let index = 0; index < urls.length && index < 32; index += 1) {{
+      const url = urls[index];
+      if (!url || inspected.has(url) || !url.split("?")[0].endsWith(".js")) continue;
+      inspected.add(url);
+      let source = "";
+      try {{
+        source = await fetch(url).then((response) => response.ok ? response.text() : "");
+      }} catch {{}}
+      for (const match of source.matchAll(/["'](\.\/[^"']+\.js)["']/g)) {{
+        const candidate = new URL(match[1], url).href;
+        if (candidate.includes(namePart)) return candidate;
+        if (!urls.includes(candidate)) urls.push(candidate);
+      }}
+    }}
+    return "";
   }};
   const loadAppModule = async (namePart) => {{
     if (!state.modulePromises.has(namePart)) {{
       state.modulePromises.set(namePart, Promise.resolve().then(async () => {{
-        const url = assetUrl(namePart);
+        const url = await assetUrl(namePart);
         if (!url) throw new Error(`Codex App asset not found: ${{namePart}}`);
         return await import(url);
       }}).catch((error) => {{
@@ -833,17 +886,57 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }}
     return await state.modulePromises.get(namePart);
   }};
+  const localCatalogFromModule = (module) => {{
+    const roots = Object.values(module).filter((item) => item && (typeof item === "object" || typeof item === "function"));
+    for (const root of roots) {{
+      const catalog = root.localThreadCatalog;
+      if (catalog) return catalog;
+    }}
+    return null;
+  }};
+  const summarizeCatalogStatus = (status, requested) => {{
+    const local = Array.isArray(status?.hosts) ? status.hosts.find((host) => host?.hostId === "local") : null;
+    return {{
+      requested,
+      complete: local?.isComplete ?? null,
+      revision: local?.revision ?? status?.revision ?? null,
+      source: "status",
+    }};
+  }};
   // 新版 Codex/ChatGPT App 用 localThreadCatalog 保存统一侧边栏目录。这里只调用
   // App 自己的 RPC 同步服务，不直接改 codex-dev.db 或历史 provider 元数据。
   const triggerLocalThreadCatalogSync = async () => {{
     if (state.historySyncPromise) return await state.historySyncPromise;
     state.historySyncPromise = Promise.resolve().then(async () => {{
       const module = await loadAppModule("rpc-");
-      const roots = Object.values(module).filter((item) => item && (typeof item === "object" || typeof item === "function"));
-      for (const root of roots) {{
-        try {{
-          const catalog = root.localThreadCatalog;
-          if (!catalog || typeof catalog.requestStartupSync !== "function") continue;
+      const catalog = localCatalogFromModule(module);
+      if (!catalog || typeof catalog.requestStartupSync !== "function") throw new Error("Codex App localThreadCatalog RPC service was not found");
+
+      // 26.825+ exposes readStatus and can report a complete local catalog before
+      // requestStartupSync. Do not wait on a redundant startup sync RPC forever.
+      try {{
+        const status = await catalog.readStatus();
+        const summary = summarizeCatalogStatus(status, false);
+        if (summary.complete === true) {{
+          state.historySync = summary;
+          return summary;
+        }}
+        state.historySync = summarizeCatalogStatus(status, true);
+        Promise.resolve(catalog.requestStartupSync()).then(async () => {{
+          try {{
+            state.historySync = summarizeCatalogStatus(await catalog.readStatus(), true);
+          }} catch (error) {{
+            recordFailure(error);
+          }}
+        }}).catch(recordFailure);
+        return state.historySync;
+      }} catch (error) {{
+        recordFailure(error);
+      }}
+
+      // Older builds expose readSnapshot instead of readStatus. Preserve that
+      // official cold-sweep path as a capability fallback.
+      try {{
           const before = typeof catalog.readSnapshot === "function" ? await catalog.readSnapshot() : null;
           await catalog.requestStartupSync();
           const after = typeof catalog.readSnapshot === "function" ? await catalog.readSnapshot() : null;
@@ -852,19 +945,19 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
             beforeCount: Array.isArray(before?.entries) ? before.entries.length : null,
             afterCount: Array.isArray(after?.entries) ? after.entries.length : null,
             complete: after?.isComplete ?? null,
+            source: "snapshot",
           }};
           if (after?.isComplete !== true) {{
             setTimeout(() => {{ state.historySyncPromise = null; }}, 10000);
           }}
           return state.historySync;
-        }} catch (error) {{
-          state.failures.push(String(error?.message || error));
-        }}
+      }} catch (error) {{
+        recordFailure(error);
       }}
       throw new Error("Codex App localThreadCatalog RPC service was not found");
     }}).catch((error) => {{
       state.historySync = {{ requested: false, error: String(error?.message || error) }};
-      state.failures.push(state.historySync.error);
+      recordFailure(error);
       state.historySyncPromise = null;
       return state.historySync;
     }});
@@ -892,29 +985,122 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     patchModelListResult(result);
     return result;
   }};
+  const normalizeAppServerRequestParams = (method, params) => {{
+    const actualMethod = appServerMethod(method, params);
+    if (actualMethod !== "thread/list") return params;
+    if (method === "send-cli-request-for-host" && params?.params?.modelProviders == null) {{
+      return {{ ...params, params: {{ ...(params?.params || {{}}), modelProviders: [] }} }};
+    }}
+    if (params == null) return {{ modelProviders: [] }};
+    return params?.modelProviders == null ? {{ ...params, modelProviders: [] }} : params;
+  }};
   const patchRequestClient = (client) => {{
     if (!client || typeof client.sendRequest !== "function") return false;
-    if (client.__ccSwitchModelRequestPatch === "2") return true;
+    if (client.__ccSwitchModelRequestPatch === "3") return true;
     const original = client.__ccSwitchOriginalSendRequest || client.sendRequest.bind(client);
     client.__ccSwitchOriginalSendRequest = original;
     client.sendRequest = async function ccSwitchPatchedSendRequest(method, params, options) {{
-      const result = await original(method, params, options);
+      const normalizedParams = normalizeAppServerRequestParams(method, params);
+      const result = await original(method, normalizedParams, options);
       return patchAppServerResult(appServerMethod(method, params), result);
     }};
-    client.__ccSwitchModelRequestPatch = "2";
+    client.__ccSwitchModelRequestPatch = "3";
     return true;
   }};
+  const looksLikeAppServerRequestClient = (value) => {{
+    try {{
+      return value
+        && typeof value.sendRequest === "function"
+        && typeof value.getCompatibleThreadSortKey === "function"
+        && typeof value.supportsPaginatedThreadHistory === "function";
+    }} catch {{
+      return false;
+    }}
+  }};
+  const reactRoots = () => {{
+    const root = document.getElementById("root") || document.body;
+    return Object.keys(root || {{}})
+      .filter((key) => key.startsWith("__reactContainer") || key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance"))
+      .map((key) => root[key])
+      .filter(Boolean);
+  }};
+  const patchReactAppServerClients = () => {{
+    if (state.reactRequestClientPatchVersion === "3") return state.historyQueryPatch?.clientCount || 1;
+    const queue = reactRoots().map((value) => ({{ value, depth: 0 }}));
+    const seen = new Set();
+    let cursor = 0;
+    let patched = 0;
+    while (cursor < queue.length && seen.size < 140000) {{
+      const {{ value, depth }} = queue[cursor++];
+      if (!value || (typeof value !== "object" && typeof value !== "function") || seen.has(value)) continue;
+      seen.add(value);
+
+      if (looksLikeAppServerRequestClient(value) && patchRequestClient(value)) patched += 1;
+      const nestedClient = value?.requestClient;
+      if (looksLikeAppServerRequestClient(nestedClient) && patchRequestClient(nestedClient)) {{
+        patched += 1;
+        if (!state.historyQueryRefreshPromise && typeof value?.threadStore?.refreshRecentConversations === "function") {{
+          state.historyQueryRefreshPromise = Promise.resolve().then(() =>
+            value.threadStore.refreshRecentConversations({{ mode: "expanded" }})
+          ).then(() => {{
+            state.historyQueryRefreshCompleted = true;
+          }}).catch((error) => {{
+            state.historyQueryRefreshPromise = null;
+            state.historyQueryRefreshCompleted = false;
+            recordFailure(error);
+            throw error;
+          }});
+        }}
+      }}
+
+      if (depth >= 14) continue;
+      let descriptors = {{}};
+      try {{ descriptors = Object.getOwnPropertyDescriptors(value); }} catch {{}}
+      for (const [key, descriptor] of Object.entries(descriptors)) {{
+        if (!["window", "ownerDocument", "parentNode", "parentElement", "nextSibling", "previousSibling"].includes(key) && "value" in descriptor) {{
+          const child = descriptor.value;
+          if (child && ((typeof child === "object" && !(typeof Node !== "undefined" && child instanceof Node)) || typeof child === "function")) {{
+            queue.push({{ value: child, depth: depth + 1 }});
+          }}
+        }}
+      }}
+    }}
+    state.reactRequestClientPatched = patched > 0;
+    state.historyQueryPatch = {{
+      patched: patched > 0,
+      clientCount: patched,
+      refreshRequested: Boolean(state.historyQueryRefreshCompleted),
+    }};
+    return patched;
+  }};
   const installAppServerPatch = async () => {{
+    if (state.appServerPatchVersion === "3") return;
+    let patched = 0;
     try {{
       const module = await loadAppModule("app-server-manager-signals-");
       for (const candidate of Object.values(module).filter((item) => item && typeof item === "object")) {{
-        patchRequestClient(candidate);
+        if (patchRequestClient(candidate)) patched += 1;
         if (typeof candidate.sendRequest !== "function" && typeof candidate.get === "function") {{
-          try {{ patchRequestClient(candidate.get()); }} catch {{}}
+          try {{ if (patchRequestClient(candidate.get())) patched += 1; }} catch {{}}
         }}
       }}
     }} catch (error) {{
-      state.failures.push(String(error?.message || error));
+      recordFailure(error);
+    }}
+    patched += patchReactAppServerClients();
+    if (state.historyQueryRefreshPromise) {{
+      try {{
+        await state.historyQueryRefreshPromise;
+      }} catch {{}}
+    }}
+    state.historyQueryPatch = {{
+      ...(state.historyQueryPatch || {{}}),
+      refreshRequested: Boolean(state.historyQueryRefreshCompleted),
+    }};
+    state.appServerPatchInstalled = patched > 0;
+    if (patched > 0 && state.historyQueryRefreshCompleted) {{
+      state.reactRequestClientPatchVersion = "3";
+      state.appServerPatchVersion = "3";
     }}
   }};
   const patchMcpModelResponseData = (data) => {{
@@ -939,12 +1125,12 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
         }}
         if (event?.type === "message") patchMcpModelResponseData(event.data);
       }} catch (error) {{
-        state.failures.push(String(error?.message || error));
+        recordFailure(error);
       }}
       return originalDispatchEvent.call(this, event);
     }};
     window.addEventListener("message", (event) => {{
-      try {{ patchMcpModelResponseData(event?.data); }} catch (error) {{ state.failures.push(String(error?.message || error)); }}
+      try {{ patchMcpModelResponseData(event?.data); }} catch (error) {{ recordFailure(error); }}
     }}, true);
   }};
   const reactFiberKeys = (element) => Object.keys(element || {{}}).filter((key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance") || key.startsWith("__reactProps"));
@@ -967,7 +1153,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       auth.setAuthMethod("chatgpt");
       return true;
     }} catch (error) {{
-      state.failures.push(String(error?.message || error));
+      recordFailure(error);
       return false;
     }}
   }};
@@ -987,7 +1173,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   await run();
   if (!state.interval) state.interval = setInterval(() => {{ void run(); }}, 1500);
   const historySync = await triggerLocalThreadCatalogSync();
-  return {{ status: "ok", modelCount: modelNames().length, available_models: modelNames(), historySync, patchKey }};
+  return {{ status: "ok", modelCount: modelNames().length, available_models: modelNames(), historySync, historyQueryPatch: state.historyQueryPatch || null, patchKey }};
 }})()
 "#
     )
@@ -2171,20 +2357,28 @@ JSON.stringify({
         assert!(script.contains("await installAppServerPatch()"));
         assert!(script.contains("!state.requestIds.has(requestId)"));
         assert!(script.contains("__ccSwitchCodexAppCompatibilityV5"));
-        assert!(script.contains("__ccSwitchModelRequestPatch === \"2\""));
+        assert!(script.contains("__ccSwitchModelRequestPatch === \"3\""));
         assert!(script.contains("auth.setAuthMethod(\"chatgpt\")"));
     }
 
-    /// 验证新版历史修复只调用 App 官方目录同步，不改写 thread/list 的查询语义。
+    /// 验证新版历史兼容层同时恢复官方目录同步，并把 Desktop 的全量历史查询
+    /// 明确投影为 `modelProviders: []`，不再受活动 Provider 桶影响。
     #[test]
     fn codex_app_compatibility_script_repairs_native_history_catalog() {
         let script = build_model_picker_unlock_script(&CodexModelCatalogProjection::empty());
 
         assert!(script.contains("localThreadCatalog"));
         assert!(script.contains("requestStartupSync"));
-        assert!(script.contains("readSnapshot"));
+        assert!(script.contains("readStatus"));
         assert!(script.contains("const historySync = await triggerLocalThreadCatalogSync()"));
-        assert!(!script.contains("modelProviders: []"));
+        assert!(script.contains("params?.modelProviders == null"));
+        assert!(script.contains("if (params == null) return { modelProviders: [] }"));
+        assert!(script.contains("modelProviders: []"));
+        assert!(script.contains("getCompatibleThreadSortKey"));
+        assert!(script.contains("document.getElementById(\"root\")"));
+        assert!(script.contains("fetch(url)"));
+        assert!(script.contains("await state.historyQueryRefreshPromise"));
+        assert!(script.contains("state.historyQueryRefreshCompleted = true"));
     }
 
     /// 验证 CDP 返回值能准确区分“脚本已安装”和“原生历史同步已请求”。
@@ -2198,6 +2392,10 @@ JSON.stringify({
                             "requested": true,
                             "complete": false,
                             "afterCount": 17
+                        },
+                        "historyQueryPatch": {
+                            "patched": true,
+                            "refreshRequested": true
                         }
                     }
                 }
@@ -2209,6 +2407,8 @@ JSON.stringify({
         assert!(evidence.history_sync_requested);
         assert_eq!(evidence.history_catalog_complete, Some(false));
         assert_eq!(evidence.history_catalog_count, Some(17));
+        assert!(evidence.all_provider_history_patched);
+        assert!(evidence.history_refresh_requested);
     }
 
     /// 验证 Desktop 可执行文件缺失时，错误信息不会被误读成不支持 CLI/app-server。

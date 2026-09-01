@@ -30,6 +30,8 @@ vi.mock("react-i18next", () => ({
           "将关闭所有 Codex 窗口并中断正在运行的任务。",
         "codexConfigConsistency.desktopProcesses": "桌面主进程：",
         "codexConfigConsistency.appServerProcesses": "app-server：",
+        "codexConfigConsistency.historyCompatibilityCheck":
+          "重开后会恢复跨 Provider 历史查询并刷新 Codex 原生目录；不会改写历史数据库。",
         "codexConfigConsistency.confirmRefresh": "关闭、重写并重新打开",
         "codexConfigConsistency.cancelRefresh": "取消",
         "codexConfigConsistency.refreshingTitle": "正在刷新 Codex 状态",
@@ -252,6 +254,11 @@ describe("CodexConfigConsistencyDialog", () => {
     ).toBeInTheDocument();
     expect(
       within(confirmation).getByText(/app-server：.*1/),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText(
+        "重开后会恢复跨 Provider 历史查询并刷新 Codex 原生目录；不会改写历史数据库。",
+      ),
     ).toBeInTheDocument();
     fireEvent.click(
       within(confirmation).getByRole("button", {

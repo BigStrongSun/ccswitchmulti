@@ -154,6 +154,9 @@ export function CodexConfigConsistencyDialog({
                 <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-amber-800 dark:text-amber-200">
                   {t("codexConfigConsistency.activeTasksWarning")}
                 </div>
+                <p className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-blue-800 dark:text-blue-200">
+                  {t("codexConfigConsistency.historyCompatibilityCheck")}
+                </p>
                 <p className="break-all text-xs text-muted-foreground">
                   {t("codexConfigConsistency.launchTarget")}{" "}
                   {refresh.preflight.launchTarget || t("common.unknown")}
