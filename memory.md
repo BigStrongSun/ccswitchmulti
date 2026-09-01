@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-02 Guardian V2 FeatureToml 与 Statsig 补丁越界根修
+
+- 截图中的 `data did not match any variant of untagged enum FeatureToml in features.guardianv2` 不是磁盘 `~/.codex/config.toml` 仍然无效。现场磁盘 TOML 不含 Guardian 键，本机随包 `codex.exe features list` 返回 0；但同一 Desktop renderer 的 Statsig `2553103476` 动态配置在 CCSM V5 兼容层运行后，从原始 `{ enabled: false }` 变成了同时含 `available_models`、`default_model`、`use_hidden_models` 的四字段对象，随后被 Desktop 作为请求级 `features.guardianv2` 转发并由 app-server 严格拒绝。
+- 根因是 `build_model_picker_unlock_script` 的 V5 `patchStatsigConfig` 没有检查动态配置 ID，把仅属于模型白名单 `107580212` 的三个字段写进了所有 Statsig 动态配置。旧日志只在 `thread/resume` 显示通用“无法加载 config.toml”，所以此前反复重投影 TOML或重启只能处理表象，不能消除 renderer 每次请求时重新制造的坏对象。
+- V6 把模型白名单变换严格限制到 `107580212`。若检测到已有 V5 wrapper，会在其外层只清理由旧补丁加入的三个字段，并保留 Guardian 的 `enabled` 与其它未知字段；其它干净动态配置不改写。请求边界另有 fail-safe：只有 app-server 明确返回同时含 `FeatureToml` 和 `features.guardianv2` 的错误时，才把该次请求的 Guardian 对象按 `enabled` 降级为布尔并重试一次；网络错误、其它 feature、其它请求字段和原始对象均不重试/不变更。
+- TDD/验证：新增 Guardian 直接/host-wrapped 请求降级、精确错误分类、V5 污染清理、Statsig ID 隔离与原对象不变回归；`codex_desktop::tests` 31/31，通过完整 Rust lib `3769 passed / 0 failed / 6 ignored`，`cargo check --lib --no-default-features`、单文件 rustfmt 和 diff check 通过。现场临时加载同构 V6 canary 后，Guardian 动态值只剩 `enabled`；对原报错任务 `01a05e1e-a8a4-7d31-81fd-e3098d45b106` 人工携带同样污染对象执行 `thread/resume` 已成功返回 thread 结构，证明修复点位于 renderer 请求适配而非 TOML 写入。该 canary 只对当前 renderer 生效，正式安装态仍须由新版注入标记与再次 resume 验证。
+
 ## 2026-09-02 Codex 启动门禁与 config.toml 写入边界
 
 - `launchCodexDesktopWithCcswitch` 在 `a8870050` 引入时被放在 `lib.rs` 数据库初始化之前；后续新增的异常恢复、Codex 模型目录投影、15721 接管恢复和配置一致性检查均位于异步启动尾段，旧启动点没有随架构演进迁移。本机 `2026-09-01 12:24`、`16:20` 日志实证都是“先启动 Codex，后恢复代理并写接管配置”，会让 app-server 在 CCSM 修复磁盘前固化旧 Provider/目录状态。

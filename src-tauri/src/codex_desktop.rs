@@ -14,7 +14,7 @@ pub(crate) const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
 pub(crate) const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
-const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV5";
+const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV6";
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
 #[cfg(any(target_os = "macos", test))]
 const CODEX_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.openai.codex";
@@ -787,10 +787,80 @@ fn model_picker_patch_core_script() -> &'static str {
 "#
 }
 
+/// The V5 renderer patch accidentally added model-whitelist fields to every
+/// Statsig dynamic config instead of only the model catalog config. When those
+/// fields reached Guardian V2, the bundled app-server rejected the request as
+/// an invalid `FeatureToml` even though the on-disk `config.toml` was valid.
+/// Keep the repair and exact-error fallback independent from model/history code
+/// so the compatibility boundary can be executed directly in QuickJS tests.
+fn guardian_v2_compatibility_patch_core_script() -> &'static str {
+    r#"
+  const guardianV2DynamicConfigName = "2553103476";
+  const guardianV2FlatFeatureKey = "features.guardianv2";
+  const statsigModelWhitelistConfigName = "107580212";
+  const legacyModelWhitelistFields = ["available_models", "use_hidden_models", "default_model"];
+  const guardianV2Enabled = (value) => value?.enabled === true;
+  const isGuardianV2StructuredValue = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  const stripLegacyModelWhitelistPollution = (config) => {
+    const value = config?.value;
+    if (!isGuardianV2StructuredValue(value) || !legacyModelWhitelistFields.some((key) => Object.prototype.hasOwnProperty.call(value, key))) return config;
+    const nextValue = { ...value };
+    for (const key of legacyModelWhitelistFields) delete nextValue[key];
+    return { ...config, value: nextValue };
+  };
+  const patchGuardianV2DynamicConfig = (name, config) => {
+    if (String(name || "") !== guardianV2DynamicConfigName) return config;
+    return stripLegacyModelWhitelistPollution(config);
+  };
+  const prepareStatsigDynamicConfig = (name, config, repairLegacyPollution = false) => {
+    const normalizedName = String(name || "");
+    config = patchGuardianV2DynamicConfig(normalizedName, config);
+    if (normalizedName === statsigModelWhitelistConfigName) {
+      return { config, patchModelWhitelist: true };
+    }
+    return {
+      config: repairLegacyPollution ? stripLegacyModelWhitelistPollution(config) : config,
+      patchModelWhitelist: false,
+    };
+  };
+  const isGuardianV2FeatureTomlError = (error) => {
+    const message = String(error?.message || error || "");
+    return message.includes("FeatureToml") && message.includes("features.guardianv2");
+  };
+  const downgradeGuardianV2Config = (config) => {
+    if (!config || typeof config !== "object" || Array.isArray(config)) return config;
+    let next = config;
+    let changed = false;
+    const flat = config[guardianV2FlatFeatureKey];
+    if (isGuardianV2StructuredValue(flat)) {
+      next = { ...next, [guardianV2FlatFeatureKey]: guardianV2Enabled(flat) };
+      changed = true;
+    }
+    const features = config.features;
+    if (isGuardianV2StructuredValue(features) && isGuardianV2StructuredValue(features.guardianv2)) {
+      if (!changed) next = { ...next };
+      next.features = { ...features, guardianv2: guardianV2Enabled(features.guardianv2) };
+      changed = true;
+    }
+    return changed ? next : config;
+  };
+  const guardianV2FallbackRequestParams = (method, params) => {
+    const wrapped = method === "send-cli-request-for-host" && params?.params && typeof params.params === "object";
+    const requestParams = wrapped ? params.params : params;
+    if (!requestParams || typeof requestParams !== "object" || Array.isArray(requestParams)) return params;
+    const nextConfig = downgradeGuardianV2Config(requestParams.config);
+    if (nextConfig === requestParams.config) return params;
+    const nextRequestParams = { ...requestParams, config: nextConfig };
+    return wrapped ? { ...params, params: nextRequestParams } : nextRequestParams;
+  };
+"#
+}
+
 /// 构造 renderer 注入脚本：触发新版本地历史目录同步，并修复模型白名单和缓存。
 fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> String {
     let payload = serde_json::to_string(catalog).unwrap_or_else(|_| "{}".to_string());
     let model_patch_core = model_picker_patch_core_script();
+    let guardian_v2_patch_core = guardian_v2_compatibility_patch_core_script();
     format!(
         r#"
 (async () => {{
@@ -808,7 +878,11 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   }};
   window[patchKey] = state;
 {model_patch_core}
-  const patchStatsigConfig = (config) => {{
+{guardian_v2_patch_core}
+  const patchStatsigConfig = (name, config, repairLegacyPollution = false) => {{
+    const prepared = prepareStatsigDynamicConfig(name, config, repairLegacyPollution);
+    config = prepared.config;
+    if (!prepared.patchModelWhitelist) return config;
     const value = config?.value;
     if (!value || typeof value !== "object") return config;
     const available = Array.isArray(value.available_models) ? [...value.available_models] : [];
@@ -839,12 +913,15 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   const patchStatsig = () => {{
     for (const client of statsigClients()) {{
       if (typeof client.getDynamicConfig !== "function") continue;
-      if (!client.__ccSwitchModelWhitelistPatched) {{
-        const original = client.getDynamicConfig.bind(client);
-        client.getDynamicConfig = (name, options) => patchStatsigConfig(original(name, options));
-        client.__ccSwitchModelWhitelistPatched = true;
+      if (client.__ccSwitchStatsigPatchVersion !== "2") {{
+        const repairingLegacyPatch = client.__ccSwitchModelWhitelistPatched === true;
+        const original = client.__ccSwitchOriginalGetDynamicConfig || client.getDynamicConfig.bind(client);
+        client.__ccSwitchOriginalGetDynamicConfig = original;
+        client.getDynamicConfig = (name, options) => patchStatsigConfig(name, original(name, options), repairingLegacyPatch);
+        client.__ccSwitchStatsigPatchVersion = "2";
       }}
-      try {{ patchStatsigConfig(client.getDynamicConfig("107580212", {{ disableExposureLog: true }})); }} catch {{}}
+      try {{ patchStatsigConfig("107580212", client.getDynamicConfig("107580212", {{ disableExposureLog: true }})); }} catch {{}}
+      try {{ patchStatsigConfig(guardianV2DynamicConfigName, client.getDynamicConfig(guardianV2DynamicConfigName, {{ disableExposureLog: true }})); }} catch {{}}
     }}
   }};
   const visibleAssetUrls = () => [
@@ -1006,16 +1083,26 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   }};
   const patchRequestClient = (client) => {{
     if (!client || typeof client.sendRequest !== "function") return false;
-    if (client.__ccSwitchModelRequestPatch === "4") return true;
+    if (client.__ccSwitchModelRequestPatch === "5") return true;
     try {{
       const original = client.__ccSwitchOriginalSendRequest || client.sendRequest.bind(client);
       client.__ccSwitchOriginalSendRequest = original;
       client.sendRequest = async function ccSwitchPatchedSendRequest(method, params, options) {{
         const normalizedParams = normalizeAppServerRequestParams(method, params);
-        const result = await original(method, normalizedParams, options);
-        return patchAppServerResult(appServerMethod(method, params), result);
+        const actualMethod = appServerMethod(method, params);
+        try {{
+          const result = await original(method, normalizedParams, options);
+          return patchAppServerResult(actualMethod, result);
+        }} catch (error) {{
+          if (!isGuardianV2FeatureTomlError(error)) throw error;
+          const fallbackParams = guardianV2FallbackRequestParams(method, normalizedParams);
+          if (fallbackParams === normalizedParams) throw error;
+          state.guardianV2FallbackCount = (state.guardianV2FallbackCount || 0) + 1;
+          const result = await original(method, fallbackParams, options);
+          return patchAppServerResult(actualMethod, result);
+        }}
       }};
-      client.__ccSwitchModelRequestPatch = "4";
+      client.__ccSwitchModelRequestPatch = "5";
       return true;
     }} catch (error) {{
       // rpc-BaVz... also exposes immutable RpcStub objects whose method shape
@@ -1052,7 +1139,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return values;
   }};
   const patchReactAppServerClients = () => {{
-    if (state.reactRequestClientPatchVersion === "4") return state.historyQueryPatch?.clientCount || 1;
+    if (state.reactRequestClientPatchVersion === "5") return state.historyQueryPatch?.clientCount || 1;
     const queue = reactRoots().map((value) => ({{ value, depth: 0 }}));
     const seen = new Set();
     let cursor = 0;
@@ -1101,7 +1188,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return patched;
   }};
   const installAppServerPatch = async () => {{
-    if (state.appServerPatchVersion === "4") return;
+    if (state.appServerPatchVersion === "5") return;
     let patched = 0;
     try {{
       const module = await loadAppModule("app-server-manager-signals-");
@@ -1126,8 +1213,8 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }};
     state.appServerPatchInstalled = patched > 0;
     if (patched > 0 && state.historyQueryRefreshCompleted) {{
-      state.reactRequestClientPatchVersion = "4";
-      state.appServerPatchVersion = "4";
+      state.reactRequestClientPatchVersion = "5";
+      state.appServerPatchVersion = "5";
     }}
   }};
   const patchMcpModelResponseData = (data) => {{
@@ -2255,6 +2342,163 @@ mod tests {
         })
     }
 
+    fn run_guardian_v2_compatibility_probe(probe: &str) -> serde_json::Value {
+        let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
+        let script = format!(
+            "{}\n{}",
+            guardian_v2_compatibility_patch_core_script(),
+            probe
+        );
+
+        context.with(|ctx| {
+            let json_text: String = ctx
+                .eval(script)
+                .expect("execute Guardian V2 compatibility core");
+            serde_json::from_str(&json_text).expect("parse Guardian V2 compatibility result")
+        })
+    }
+
+    #[test]
+    fn guardian_v2_compatibility_downgrades_only_the_rejected_request_override() {
+        let result = run_guardian_v2_compatibility_probe(
+            r#"
+const direct = {
+  threadId: "thread-1",
+  config: {
+    "features.guardianv2": { enabled: true, future_field: "unsupported" },
+    "features.memories": true,
+  },
+};
+const wrapped = {
+  method: "thread/resume",
+  params: {
+    threadId: "thread-2",
+    config: { features: { guardianv2: { enabled: false, future_field: 1 }, goals: true } },
+  },
+};
+const directFallback = guardianV2FallbackRequestParams("thread/resume", direct);
+const wrappedFallback = guardianV2FallbackRequestParams("send-cli-request-for-host", wrapped);
+JSON.stringify({
+  directValue: directFallback.config["features.guardianv2"],
+  directMemories: directFallback.config["features.memories"],
+  directOriginalStillObject: typeof direct.config["features.guardianv2"] === "object",
+  wrappedValue: wrappedFallback.params.config.features.guardianv2,
+  wrappedGoals: wrappedFallback.params.config.features.goals,
+  wrappedOriginalStillObject: typeof wrapped.params.config.features.guardianv2 === "object",
+  unrelatedIdentityPreserved: guardianV2FallbackRequestParams("thread/resume", {config: {"features.memories": true}}).config["features.memories"],
+});
+"#,
+        );
+
+        assert_eq!(result["directValue"], true);
+        assert_eq!(result["directMemories"], true);
+        assert_eq!(result["directOriginalStillObject"], true);
+        assert_eq!(result["wrappedValue"], false);
+        assert_eq!(result["wrappedGoals"], true);
+        assert_eq!(result["wrappedOriginalStillObject"], true);
+        assert_eq!(result["unrelatedIdentityPreserved"], true);
+    }
+
+    #[test]
+    fn guardian_v2_compatibility_retries_only_the_exact_feature_schema_failure() {
+        let result = run_guardian_v2_compatibility_probe(
+            r#"
+JSON.stringify({
+  exact: isGuardianV2FeatureTomlError({message: "failed to load configuration: data did not match any variant of untagged enum FeatureToml\nin `features.guardianv2`"}),
+  otherFeature: isGuardianV2FeatureTomlError({message: "FeatureToml in `features.memories`"}),
+  network: isGuardianV2FeatureTomlError({message: "connection reset"}),
+});
+"#,
+        );
+
+        assert_eq!(result["exact"], true);
+        assert_eq!(result["otherFeature"], false);
+        assert_eq!(result["network"], false);
+    }
+
+    #[test]
+    fn guardian_v2_statsig_config_removes_only_the_legacy_model_whitelist_pollution() {
+        let result = run_guardian_v2_compatibility_probe(
+            r#"
+const source = {value: {
+  enabled: true,
+  mode: "future",
+  nested: {unknown: true},
+  available_models: ["qwen3.8"],
+  use_hidden_models: false,
+  default_model: "qwen3.8",
+}};
+const patched = patchGuardianV2DynamicConfig("2553103476", source);
+const unrelated = {value: {enabled: true, mode: "keep"}};
+JSON.stringify({
+  patchedValue: patched.value,
+  sourceValue: source.value,
+  unrelatedIdentity: patchGuardianV2DynamicConfig("other", unrelated) === unrelated,
+});
+"#,
+        );
+
+        assert_eq!(
+            result["patchedValue"],
+            json!({ "enabled": true, "mode": "future", "nested": { "unknown": true } })
+        );
+        assert_eq!(
+            result["sourceValue"],
+            json!({
+                "enabled": true,
+                "mode": "future",
+                "nested": { "unknown": true },
+                "available_models": ["qwen3.8"],
+                "use_hidden_models": false,
+                "default_model": "qwen3.8"
+            })
+        );
+        assert_eq!(result["unrelatedIdentity"], true);
+    }
+
+    #[test]
+    fn statsig_model_whitelist_fields_are_scoped_to_their_own_dynamic_config() {
+        let result = run_guardian_v2_compatibility_probe(
+            r#"
+const model = {value: {available_models: []}};
+const unrelated = {value: {enabled: true}};
+const legacy = {value: {enabled: true, available_models: ["qwen3.8"], default_model: "qwen3.8", use_hidden_models: false}};
+const modelPrepared = prepareStatsigDynamicConfig("107580212", model, false);
+const unrelatedPrepared = prepareStatsigDynamicConfig("unrelated", unrelated, false);
+const repairedPrepared = prepareStatsigDynamicConfig("unrelated", legacy, true);
+JSON.stringify({
+  modelPatch: modelPrepared.patchModelWhitelist,
+  unrelatedPatch: unrelatedPrepared.patchModelWhitelist,
+  unrelatedIdentity: unrelatedPrepared.config === unrelated,
+  repairedPatch: repairedPrepared.patchModelWhitelist,
+  repairedValue: repairedPrepared.config.value,
+  legacyOriginalKeys: Object.keys(legacy.value).sort(),
+});
+"#,
+        );
+        assert_eq!(result["modelPatch"], true);
+        assert_eq!(result["unrelatedPatch"], false);
+        assert_eq!(result["unrelatedIdentity"], true);
+        assert_eq!(result["repairedPatch"], false);
+        assert_eq!(result["repairedValue"], json!({ "enabled": true }));
+        assert_eq!(
+            result["legacyOriginalKeys"],
+            json!([
+                "available_models",
+                "default_model",
+                "enabled",
+                "use_hidden_models"
+            ])
+        );
+
+        let script = build_model_picker_unlock_script(&CodexModelCatalogProjection::empty());
+
+        assert!(script.contains("const prepared = prepareStatsigDynamicConfig"));
+        assert!(script.contains("client.__ccSwitchStatsigPatchVersion !== \"2\""));
+        assert!(script.contains("client.__ccSwitchModelWhitelistPatched === true"));
+    }
+
     #[test]
     fn model_picker_fallback_descriptor_does_not_invent_reasoning_capability() {
         let result = run_model_picker_patch_core_probe_with_payload(
@@ -2383,8 +2627,11 @@ JSON.stringify({
         assert!(script.contains("isModelListMethod(method)"));
         assert!(script.contains("await installAppServerPatch()"));
         assert!(script.contains("!state.requestIds.has(requestId)"));
-        assert!(script.contains("__ccSwitchCodexAppCompatibilityV5"));
-        assert!(script.contains("__ccSwitchModelRequestPatch === \"4\""));
+        assert!(script.contains("__ccSwitchCodexAppCompatibilityV6"));
+        assert!(script.contains("__ccSwitchModelRequestPatch === \"5\""));
+        assert!(script.contains("2553103476"));
+        assert!(script.contains("isGuardianV2FeatureTomlError(error)"));
+        assert!(script.contains("guardianV2FallbackRequestParams"));
         assert!(script.contains("auth.setAuthMethod(\"chatgpt\")"));
     }
 
