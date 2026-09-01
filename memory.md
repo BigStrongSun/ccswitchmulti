@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-02 v3.19.2-20 可回滚替换与异常退出误报根修
+
+- `v3.19.2-19@ce23b42d` 的首轮事务安装本身成功，但新进程 PID `5932` 在 `2026-09-02 02:59:54.089` 新增了一条 `uncleanExit`。根因不是 Codex 或 CCSM 再次崩溃，而是升级包装器只持有 guardian maintenance lease；事务强制停止旧 CCSM PID `57040` 后仍留下 `logs/app-run-marker.json`，而 app exit monitor 不读取 guardian lease，因此下一实例把这次计划内替换误判为异常退出。
+- 根修提交 `e5844dc4` 让安装事务在“旧进程身份已验证、进程已退出、15721 已释放”之后退休其精确拥有的 run marker，再做静默卸载/安装。所有权同时核验 PID、版本、规范化可执行路径（含 Codex AppContainer LocalCache 投影）和 Windows process start FILETIME；任一字段不匹配都 fail-closed 并保留 marker。事务计划固定为 `stop -> wait-port-release -> retire-owned-run-marker -> quiescent-config-snapshot -> uninstall/install`，不是通过屏蔽异常检测绕过问题。Windows PowerShell 5.1 Pester fresh 结果为 `90 passed / 0 failed`。
+- 最终版本提交为 `5f956239`，版本 `3.19.2-20`。干净 detached worktree 构建产物位于 `releases/ccswitchmulti/v3.19.2-20`；NSIS SHA-256 为 `9E7FBF349596A2CDD56B04876BFE8B27A17F305D41C8F72B5C1E6E4FD1F971FB`，预期/实际 installed payload SHA-256 均为 `98CBFA1D39AF4EB46013BE016BCCC4FE1CC933A1F0C0D09B0316353B48054CB5`。
+- 外层升级 `ccsm-20260902-032705-58b80a5c76bd453788661f0398f7195e`、内层事务 `ccsm-20260902-032706-b253cba509a543b7a77c89159c72a5ae` 均成功，把 PID `5932` 替换为 PID `47612`。fresh 安装态读回：15721 只有一个 listener，路径为 `%LOCALAPPDATA%\\CCSwitchMulti\\cc-switch.exe`，file/registry/status/marker 均为 `3.19.2-20`，`/health=healthy`、`listener_role=takeover`，数据库只读 `PRAGMA integrity_check=ok`，`~/.codex/config.toml` 用 smol-toml 解析成功且有 26 个顶层键，Codex Desktop 主进程与 app-server 均保持运行。
+- 修复后的事务没有制造新的异常退出：`app-exit-events.jsonl` 仍为 187 条，末条仍是上述 `02:59:54.089` 的旧事件。安装后顶部黄条来自 generation 40 的旧记录 `164313b3-6864-4f3c-a67b-65c3e601c800`，不是 generation 41 的新失败；视觉验收确认后于 `03:33:04.074+08:00` 通过 toast 关闭动作按 ID 写入 `acknowledgedAt`，当前未确认 warning 为 0，记录本身仍保留以便审计。
+- Computer Use 对最终安装版确认：Provider 列表和 `New Codex MultiRouter` 使用状态保留；“Codex 状态与修复”把三项独立呈现为“配置与运行态：正常”“分页历史：需要处理（历史文件 3、重复序号 3）”“历史查询兼容层：重启后验证”，一项不会覆盖另一项。为避免中断承载本次工作的 Codex，没有点击会关闭并重启 Codex 的“刷新 Codex 状态”；因此本次证明的是安全安装、运行态与入口/UI 状态，不把分页历史写入修复或兼容层重启后验证冒充已完成。
+
 ## 2026-08-31 MultiRouter 完整引导向导漏合根因与主线迁移
 
 - 用户安装态看到左侧只有四步不是新设计回退，而是历史分支漏合。Git 祖先关系已经实证：`b495befd`（四步向导）是当前 `main` 祖先；完整重做位于 `bigstrongsun/multirouter-guided-wizard` 的 `8f5465bc -> 48c62cc5 -> 715a3db6`，其中 `715a3db6` 不是 `main` 祖先。不能把旧分支整体 cherry-pick，因为其中的浅探测、逐 Provider 保存与 Split 二次确认已经被主线 Protocol Lab、Provider Set 原子事务和双协议证据替代。
