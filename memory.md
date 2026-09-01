@@ -4859,3 +4859,12 @@ supported in one streaming turn`。
 - 新兼容脚本会从可见 `index-*.js` 解析同源动态 JS 依赖，兼容新 `readStatus` 和旧 `readSnapshot`，通过 React root 能力扫描定位真实 request client；失败记录去重并只保留最近 20 条，不再每 1.5 秒无限增长。补丁和历史刷新 Promise 都成功后才写版本标记；刷新事务只有在新 app-server 已读取当前配置、全 Provider 查询补丁已安装且原生列表刷新成功后才报告完成，否则停在“验证新运行态”并保留错误。
 - 确认弹窗明确说明只逐个关闭身份已复核的 Codex Desktop/app-server，不递归结束 CCSM 或其它子进程；同时提示重开后会恢复跨 Provider 历史查询并刷新原生目录、不改写历史数据库。定向后端 37/37、前端 10/10、全量 Rust 3749 passed/0 failed/6 ignored、全量前端 165 files/1322 tests、TypeScript 均通过。当前运行中的历史已用临时兼容注入恢复，但生产源码尚未构建、安装或执行完整破坏性刷新，因此不得把运行时临时验证冒充新安装版验收。
 - 外部检索的 Codex 内置链读取 OpenAI 官方 app-server README 及相关官方 issue，确认 `modelProviders` 契约并发现相同的 custom-provider 历史隐藏报告；Matrix WebSearch 独立链本轮经固定入口调用返回 HTTP 521，未能形成第二条外部交叉确认。最终根因以官方契约、本机 A/B、数据库计数、renderer 对象图和侧边栏恢复结果共同确定，并明确保留 Matrix 不可用这一不确定性。
+
+## 2026-09-01 Codex 配置激活误报与单任务分页历史停滞根修
+
+- “刚刷新 Codex 又提示仍在使用旧配置”不是路由再次漂移，而是旧实现把整个 `~/.codex/config.toml` 的 mtime 当成 CCSM 路由配置的生效时间。Codex Desktop/app-server 启动后会写入项目 trust、桌面和插件等非 CCSM 所有字段，只要文件 mtime 晚于 app-server 启动时间就会误判。根修新增独立的 managed activation receipt，仅记录 CCSM 所有投影的规范化指纹和最后一次实质变化时间；Codex 自己改写非托管字段不会让 receipt 失效，CCSM 管理投影真正变化才要求刷新。所有中央配置写入口统一更新 receipt；投影内容未变时保留原激活时间。
+- 用户所指的“历史消失”发生在单个超长任务内部，不是侧边栏 Provider 过滤。现场任务 `01a02da5-70c7-73e1-9587-9cd9fdaf3634` 的活动 continuation JSONL 仍约 1.13 GB，包含 8 月 24 日之后直到当前的完整原始记录；缺失来自 app-server 的分页历史物化在 ordinal 10307 重复后停滞，projection cursor 仍期待 10308。该行为与 OpenAI 官方 `thread_history_materialization.rs` 以及 issue #41079 的“重复 ordinal 让分页投影停止推进”完全一致。
+- 修复只处理已有 projection cursor 且序列为正常递增或相邻重复的 rollout：流式扫描大文件，每遇到重复 ordinal 就对当前及后续 ordinal 累加偏移，保留每一条 JSON 记录和其它字节；在同目录保留原文件备份后使用 Windows 原子替换。不会删除/重置 `thread_history_1.sqlite`，也不会用重拍 mtime 伪造恢复。非重复型回退或断档 fail closed，并作为“跳过、保持不变”显示，不能阻塞其它安全文件的恢复。
+- 当前只读预检识别 3 个可安全修复的 rollout、5 个重复 ordinal，另有 1 个 `3882 -> 3881` 的非重复型回退文件被明确跳过。刷新事务在关闭 Codex 后执行安全历史修复，重开后等待每个已修复来源的 projection ordinal 与 byte offset 追到规范化文件末尾；任何配置/历史阶段失败都会尽力重开 Codex，避免把用户留在关闭状态。真实历史文件尚未执行写入式修复，安装态按钮也尚未完成端到端验收。
+- TDD 锁定了 Codex 非托管写入不触发旧配置提示、CCSM 管理变化触发刷新、receipt 无实质变化不重写，以及重复 metadata/task_started 保留、累计偏移、游标位置兼容、断档/回退零写入和失败后重开等边界。前端全量为 165 files / 1323 tests，TypeScript 与 renderer production build 已通过；Rust 最终全量门禁和安装候选状态须以随后提交记录为准，不能把源码实现描述成已安装修复。
+- 外部检索使用 Codex 内置链读取官方 app-server README、分页历史源码和官方 issue #41079/#41566/#41353；Matrix WebSearch 按固定入口独立调用仍返回 HTTP 521，第二条外部链没有成功结果。关键根因由官方源码/issue与本机 JSONL、projection SQLite cursor、进程及配置时间线交叉确认。

@@ -45,6 +45,7 @@ interface CodexConfigConsistencyDialogProps {
 
 const REFRESH_STAGE_ORDER = [
   "closing",
+  "repairing_history",
   "applying_config",
   "launching",
   "verifying",
@@ -89,6 +90,7 @@ export function CodexConfigConsistencyDialog({
     const currentStageIndex = refreshStageIndex(refresh.progress?.stage);
     const stageLabels = [
       t("codexConfigConsistency.stageClosing"),
+      t("codexConfigConsistency.stageRepairingHistory"),
       t("codexConfigConsistency.stageApplyingConfig"),
       t("codexConfigConsistency.stageLaunching"),
       t("codexConfigConsistency.stageVerifying"),
@@ -154,6 +156,26 @@ export function CodexConfigConsistencyDialog({
                 <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-amber-800 dark:text-amber-200">
                   {t("codexConfigConsistency.activeTasksWarning")}
                 </div>
+                {refresh.preflight.paginatedHistory.affectedRolloutCount > 0 ? (
+                  <div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-blue-800 dark:text-blue-200">
+                    <p className="font-medium">
+                      {t("codexConfigConsistency.paginatedHistoryRepair")}
+                    </p>
+                    <p className="mt-1 text-xs">
+                      {t("codexConfigConsistency.paginatedHistoryFiles")}{" "}
+                      {refresh.preflight.paginatedHistory.affectedRolloutCount}
+                      {" · "}
+                      {t("codexConfigConsistency.duplicateOrdinals")}{" "}
+                      {refresh.preflight.paginatedHistory.duplicateOrdinalCount}
+                    </p>
+                  </div>
+                ) : null}
+                {refresh.preflight.paginatedHistory.blockedRolloutCount > 0 ? (
+                  <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-amber-800 dark:text-amber-200">
+                    {t("codexConfigConsistency.paginatedHistorySkipped")}{" "}
+                    {refresh.preflight.paginatedHistory.blockedRolloutCount}
+                  </div>
+                ) : null}
                 <p className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-blue-800 dark:text-blue-200">
                   {t("codexConfigConsistency.historyCompatibilityCheck")}
                 </p>
@@ -201,6 +223,15 @@ export function CodexConfigConsistencyDialog({
                 {refresh.result?.forceTerminated ? (
                   <p className="mt-2 text-xs">
                     {t("codexConfigConsistency.forcedCloseUsed")}
+                  </p>
+                ) : null}
+                {(refresh.result?.repairedHistoryRolloutCount ?? 0) > 0 ? (
+                  <p className="mt-2 text-xs">
+                    {t("codexConfigConsistency.historyRepairCompleted")}{" "}
+                    {refresh.result?.repairedHistoryRolloutCount}
+                    {" · "}
+                    {t("codexConfigConsistency.duplicateOrdinals")}{" "}
+                    {refresh.result?.repairedHistoryDuplicateCount}
                   </p>
                 ) : null}
               </div>

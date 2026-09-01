@@ -14,6 +14,15 @@ use tauri::{Emitter, Manager, State};
 const LAST_ACTION_KEY: &str = "codex_config_consistency:last_action";
 const LAST_ACTUAL_FINGERPRINT_KEY: &str = "codex_config_consistency:last_actual_fingerprint";
 const LAST_PROVIDER_ID_KEY: &str = "codex_config_consistency:last_provider_id";
+const MANAGED_ACTIVATION_RECEIPT_FILENAME: &str = "codex-managed-config-activation.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexManagedConfigActivationReceipt {
+    managed_fingerprint: String,
+    written_at_ms: i64,
+    written_at: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -366,6 +375,7 @@ fn report(
     changed_keys: Vec<String>,
     reason: Option<&str>,
 ) -> CodexConfigConsistencyReport {
+    let runtime_activation = runtime_activation_from_system(actual_fingerprint.as_deref());
     CodexConfigConsistencyReport {
         state,
         provider_id,
@@ -373,15 +383,17 @@ fn report(
         actual_fingerprint,
         changed_keys,
         reason: reason.map(str::to_string),
-        runtime_activation: runtime_activation_from_system(),
+        runtime_activation,
     }
 }
 
-fn runtime_activation_from_evidence(
+fn runtime_activation_from_managed_receipt_evidence(
     app_server_started_at_ms: Option<i64>,
-    config_modified_at_ms: Option<i64>,
+    managed_config_written_at_ms: Option<i64>,
+    receipt_managed_fingerprint: Option<&str>,
+    actual_managed_fingerprint: Option<&str>,
     app_server_started_at: Option<String>,
-    config_modified_at: Option<String>,
+    managed_config_written_at: Option<String>,
     detection_error: Option<String>,
 ) -> CodexConfigRuntimeActivation {
     let (state, reason) = if detection_error.is_some() {
@@ -391,12 +403,17 @@ fn runtime_activation_from_evidence(
         )
     } else if app_server_started_at_ms.is_none() {
         (CodexConfigRuntimeActivationState::NotRunning, None)
-    } else if config_modified_at_ms.is_none() {
+    } else if managed_config_written_at_ms.is_none() {
         (
             CodexConfigRuntimeActivationState::Unknown,
-            Some("managed_config_timestamp_unavailable".to_string()),
+            Some("managed_config_activation_receipt_unavailable".to_string()),
         )
-    } else if app_server_started_at_ms < config_modified_at_ms {
+    } else if receipt_managed_fingerprint != actual_managed_fingerprint {
+        (
+            CodexConfigRuntimeActivationState::Unknown,
+            Some("managed_config_activation_receipt_mismatch".to_string()),
+        )
+    } else if app_server_started_at_ms < managed_config_written_at_ms {
         (
             CodexConfigRuntimeActivationState::RestartRequired,
             Some("app_server_started_before_managed_config".to_string()),
@@ -408,7 +425,7 @@ fn runtime_activation_from_evidence(
     CodexConfigRuntimeActivation {
         state,
         app_server_started_at,
-        config_modified_at,
+        config_modified_at: managed_config_written_at,
         reason,
     }
 }
@@ -418,7 +435,53 @@ fn system_time_to_millis(time: SystemTime) -> Option<i64> {
     i64::try_from(duration.as_millis()).ok()
 }
 
-fn runtime_activation_from_system() -> CodexConfigRuntimeActivation {
+fn managed_activation_receipt_path() -> std::path::PathBuf {
+    crate::config::get_app_config_dir().join(MANAGED_ACTIVATION_RECEIPT_FILENAME)
+}
+
+fn read_managed_activation_receipt() -> Result<Option<CodexManagedConfigActivationReceipt>, AppError>
+{
+    let path = managed_activation_receipt_path();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(AppError::io(&path, error)),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|source| AppError::Json {
+            path: path.display().to_string(),
+            source,
+        })
+}
+
+pub(crate) fn record_managed_config_write(config_text: &str) -> Result<(), AppError> {
+    let provider_id = active_model_provider_id_from_text(config_text)?;
+    let managed_fingerprint = managed_fingerprint(config_text, provider_id.as_deref())?;
+    if read_managed_activation_receipt()?
+        .as_ref()
+        .is_some_and(|receipt| receipt.managed_fingerprint == managed_fingerprint)
+    {
+        return Ok(());
+    }
+
+    let now = SystemTime::now();
+    let written_at_ms = system_time_to_millis(now)
+        .ok_or_else(|| AppError::Config("managed config write timestamp overflow".to_string()))?;
+    let written_at: chrono::DateTime<chrono::Local> = now.into();
+    let receipt = CodexManagedConfigActivationReceipt {
+        managed_fingerprint,
+        written_at_ms,
+        written_at: written_at.to_rfc3339(),
+    };
+    let bytes =
+        serde_json::to_vec_pretty(&receipt).map_err(|source| AppError::JsonSerialize { source })?;
+    crate::config::atomic_write(&managed_activation_receipt_path(), &bytes)
+}
+
+fn runtime_activation_from_system(
+    actual_managed_fingerprint: Option<&str>,
+) -> CodexConfigRuntimeActivation {
     let (processes, detection_error) = crate::commands::query_codex_processes();
     let newest_app_server = processes
         .iter()
@@ -429,20 +492,32 @@ fn runtime_activation_from_system() -> CodexConfigRuntimeActivation {
             Some((parsed.timestamp_millis(), text.to_string()))
         })
         .max_by_key(|(timestamp, _)| *timestamp);
-    let config_modified = fs::metadata(codex_config::get_codex_config_path())
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(|time| {
-            let timestamp = system_time_to_millis(time)?;
-            let datetime: chrono::DateTime<chrono::Local> = time.into();
-            Some((timestamp, datetime.to_rfc3339()))
-        });
+    let (receipt, receipt_error) = match read_managed_activation_receipt() {
+        Ok(receipt) => (receipt, None),
+        Err(error) => (
+            None,
+            Some(format!("managed_activation_receipt_read_failed: {error}")),
+        ),
+    };
+    let detection_error = detection_error.or(receipt_error);
+    let discovered_actual_fingerprint = actual_managed_fingerprint.is_none().then(|| {
+        let live = fs::read_to_string(codex_config::get_codex_config_path()).ok()?;
+        let provider_id = active_model_provider_id_from_text(&live).ok()?;
+        managed_fingerprint(&live, provider_id.as_deref()).ok()
+    });
+    let discovered_actual_fingerprint = discovered_actual_fingerprint.flatten();
+    let actual_managed_fingerprint =
+        actual_managed_fingerprint.or(discovered_actual_fingerprint.as_deref());
 
-    runtime_activation_from_evidence(
+    runtime_activation_from_managed_receipt_evidence(
         newest_app_server.as_ref().map(|(timestamp, _)| *timestamp),
-        config_modified.as_ref().map(|(timestamp, _)| *timestamp),
+        receipt.as_ref().map(|receipt| receipt.written_at_ms),
+        receipt
+            .as_ref()
+            .map(|receipt| receipt.managed_fingerprint.as_str()),
+        actual_managed_fingerprint,
         newest_app_server.map(|(_, text)| text),
-        config_modified.map(|(_, text)| text),
+        receipt.as_ref().map(|receipt| receipt.written_at.clone()),
         detection_error,
     )
 }
@@ -890,9 +965,11 @@ mod tests {
 
     #[test]
     fn runtime_activation_requires_restart_when_app_server_predates_managed_config() {
-        let activation = runtime_activation_from_evidence(
+        let activation = runtime_activation_from_managed_receipt_evidence(
             Some(1_788_186_514_000),
             Some(1_788_189_533_000),
+            Some("managed-fingerprint"),
+            Some("managed-fingerprint"),
             Some("2026-08-31T21:48:34+08:00".to_string()),
             Some("2026-08-31T22:38:53+08:00".to_string()),
             None,
@@ -910,9 +987,11 @@ mod tests {
 
     #[test]
     fn runtime_activation_is_current_after_app_server_restart() {
-        let activation = runtime_activation_from_evidence(
+        let activation = runtime_activation_from_managed_receipt_evidence(
             Some(1_788_190_000_000),
             Some(1_788_189_533_000),
+            Some("managed-fingerprint"),
+            Some("managed-fingerprint"),
             Some("2026-08-31T22:46:40+08:00".to_string()),
             Some("2026-08-31T22:38:53+08:00".to_string()),
             None,
@@ -920,6 +999,83 @@ mod tests {
 
         assert_eq!(activation.state, CodexConfigRuntimeActivationState::Current);
         assert!(activation.reason.is_none());
+    }
+
+    #[test]
+    fn codex_owned_rewrite_after_startup_does_not_invalidate_managed_activation_receipt() {
+        let activation = runtime_activation_from_managed_receipt_evidence(
+            Some(1_788_190_000_000),
+            Some(1_788_189_533_000),
+            Some("managed-fingerprint"),
+            Some("managed-fingerprint"),
+            Some("2026-08-31T22:46:40+08:00".to_string()),
+            Some("2026-08-31T22:38:53+08:00".to_string()),
+            None,
+        );
+
+        assert_eq!(activation.state, CodexConfigRuntimeActivationState::Current);
+        assert!(activation.reason.is_none());
+    }
+
+    #[test]
+    fn managed_write_after_app_server_start_still_requires_refresh() {
+        let activation = runtime_activation_from_managed_receipt_evidence(
+            Some(1_788_186_514_000),
+            Some(1_788_189_533_000),
+            Some("managed-fingerprint"),
+            Some("managed-fingerprint"),
+            Some("2026-08-31T21:48:34+08:00".to_string()),
+            Some("2026-08-31T22:38:53+08:00".to_string()),
+            None,
+        );
+
+        assert_eq!(
+            activation.state,
+            CodexConfigRuntimeActivationState::RestartRequired
+        );
+        assert_eq!(
+            activation.reason.as_deref(),
+            Some("app_server_started_before_managed_config")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn activation_receipt_changes_only_when_ccsm_owned_projection_changes() {
+        let _home = TestHomeGuard::new();
+        crate::settings::reload_settings().expect("reload isolated settings");
+        let first = r#"
+model = "qwen3.8"
+model_provider = "router"
+[model_providers.router]
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+"#;
+        codex_config::write_codex_live_config_atomic(Some(first))
+            .expect("write initial managed projection");
+        let initial = read_managed_activation_receipt()
+            .expect("read initial receipt")
+            .expect("initial receipt exists");
+
+        let codex_owned_change =
+            format!("developer_instructions = \"written by Codex Desktop\"\n{first}");
+        codex_config::write_codex_live_config_atomic(Some(&codex_owned_change))
+            .expect("write Codex-owned change");
+        let after_codex_change = read_managed_activation_receipt()
+            .expect("read receipt after Codex-owned change")
+            .expect("receipt remains");
+        assert_eq!(after_codex_change, initial);
+
+        let managed_change = codex_owned_change.replace("qwen3.8", "deepseek-v4-flash");
+        codex_config::write_codex_live_config_atomic(Some(&managed_change))
+            .expect("write changed managed projection");
+        let after_managed_change = read_managed_activation_receipt()
+            .expect("read changed receipt")
+            .expect("changed receipt exists");
+        assert_ne!(
+            after_managed_change.managed_fingerprint,
+            initial.managed_fingerprint
+        );
     }
 
     #[test]

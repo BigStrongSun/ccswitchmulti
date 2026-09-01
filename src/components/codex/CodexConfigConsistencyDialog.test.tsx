@@ -30,14 +30,21 @@ vi.mock("react-i18next", () => ({
           "将关闭所有 Codex 窗口并中断正在运行的任务。",
         "codexConfigConsistency.desktopProcesses": "桌面主进程：",
         "codexConfigConsistency.appServerProcesses": "app-server：",
+        "codexConfigConsistency.paginatedHistoryRepair":
+          "检测到可安全恢复的分页历史投影",
+        "codexConfigConsistency.paginatedHistoryFiles": "历史文件",
+        "codexConfigConsistency.duplicateOrdinals": "重复序号",
+        "codexConfigConsistency.paginatedHistorySkipped":
+          "其他异常历史保持原样：",
         "codexConfigConsistency.historyCompatibilityCheck":
-          "重开后会恢复跨 Provider 历史查询并刷新 Codex 原生目录；不会改写历史数据库。",
+          "会备份原始 JSONL、保留全部对话并恢复分页投影。",
         "codexConfigConsistency.confirmRefresh": "关闭、重写并重新打开",
         "codexConfigConsistency.cancelRefresh": "取消",
         "codexConfigConsistency.refreshingTitle": "正在刷新 Codex 状态",
         "codexConfigConsistency.refreshingDescription":
           "请保持 CCSM 运行，Codex 将自动重新打开。",
         "codexConfigConsistency.stageClosing": "关闭 Codex",
+        "codexConfigConsistency.stageRepairingHistory": "恢复分页历史",
         "codexConfigConsistency.stageApplyingConfig": "应用 CCSM 配置",
         "codexConfigConsistency.stageLaunching": "重新打开 Codex",
         "codexConfigConsistency.stageVerifying": "验证新运行态",
@@ -45,6 +52,11 @@ vi.mock("react-i18next", () => ({
         "codexConfigConsistency.refreshFailedTitle": "Codex 状态刷新失败",
         "codexConfigConsistency.refreshFailedDescription":
           "流程已停在失败阶段。",
+        "codexConfigConsistency.refreshCompletedTitle": "Codex 状态已刷新",
+        "codexConfigConsistency.refreshCompletedDescription": "刷新完成。",
+        "codexConfigConsistency.newTaskHint": "请新建任务。",
+        "codexConfigConsistency.historyRepairCompleted": "已恢复分页历史文件",
+        "codexConfigConsistency.finish": "完成",
         "common.unknown": "未知",
       })[key] ?? key,
   }),
@@ -234,6 +246,13 @@ describe("CodexConfigConsistencyDialog", () => {
             processCount: 2,
             launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
             warning: "active_tasks_will_be_interrupted",
+            paginatedHistory: {
+              affectedRolloutCount: 1,
+              duplicateOrdinalCount: 3,
+              affectedBytes: 1_100_000_000,
+              blockedRolloutCount: 1,
+              blockedReason: "unsafe_rollout_ordinal_sequence",
+            },
           },
         }}
         onApply={vi.fn()}
@@ -257,8 +276,16 @@ describe("CodexConfigConsistencyDialog", () => {
     ).toBeInTheDocument();
     expect(
       within(confirmation).getByText(
-        "重开后会恢复跨 Provider 历史查询并刷新 Codex 原生目录；不会改写历史数据库。",
+        "会备份原始 JSONL、保留全部对话并恢复分页投影。",
       ),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText("检测到可安全恢复的分页历史投影"),
+    ).toBeInTheDocument();
+    expect(within(confirmation).getByText(/历史文件.*1/)).toBeInTheDocument();
+    expect(within(confirmation).getByText(/重复序号.*3/)).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText(/其他异常历史保持原样：.*1/),
     ).toBeInTheDocument();
     fireEvent.click(
       within(confirmation).getByRole("button", {
@@ -268,7 +295,7 @@ describe("CodexConfigConsistencyDialog", () => {
     expect(onConfirmRefresh).toHaveBeenCalledOnce();
   });
 
-  it("shows the four refresh stages in one modal instead of stacking another dialog", () => {
+  it("shows all five refresh stages in one modal instead of stacking another dialog", () => {
     render(
       <CodexConfigConsistencyDialog
         report={report}
@@ -285,6 +312,13 @@ describe("CodexConfigConsistencyDialog", () => {
             processCount: 2,
             launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
             warning: "active_tasks_will_be_interrupted",
+            paginatedHistory: {
+              affectedRolloutCount: 1,
+              duplicateOrdinalCount: 3,
+              affectedBytes: 1_100_000_000,
+              blockedRolloutCount: 0,
+              blockedReason: null,
+            },
           },
           progress: { stage: "applying_config" },
         }}
@@ -303,6 +337,7 @@ describe("CodexConfigConsistencyDialog", () => {
     });
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     expect(within(dialog).getByText("关闭 Codex")).toBeInTheDocument();
+    expect(within(dialog).getByText("恢复分页历史")).toBeInTheDocument();
     expect(within(dialog).getByText("应用 CCSM 配置")).toBeInTheDocument();
     expect(within(dialog).getByText("重新打开 Codex")).toBeInTheDocument();
     expect(within(dialog).getByText("验证新运行态")).toBeInTheDocument();
@@ -332,5 +367,36 @@ describe("CodexConfigConsistencyDialog", () => {
 
     expect(screen.getByText("失败阶段： 重新打开 Codex")).toBeInTheDocument();
     expect(screen.getByText("AUMID 启动失败")).toBeInTheDocument();
+  });
+
+  it("reports the exact paginated history repair outcome after completion", () => {
+    render(
+      <CodexConfigConsistencyDialog
+        report={report}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "completed",
+          preflight: null,
+          progress: { stage: "completed" },
+          result: {
+            forceTerminated: false,
+            closedProcessCount: 2,
+            repairedHistoryRolloutCount: 3,
+            repairedHistoryDuplicateCount: 5,
+          },
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={vi.fn()}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/已恢复分页历史文件.*3/)).toBeInTheDocument();
+    expect(screen.getByText(/重复序号.*5/)).toBeInTheDocument();
   });
 });

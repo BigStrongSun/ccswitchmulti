@@ -295,6 +295,8 @@ fn write_codex_live_atomic_locked(
         return Err(e);
     }
 
+    record_codex_managed_config_write(&cfg_text);
+
     Ok(())
 }
 
@@ -503,6 +505,12 @@ fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
         .map(str::to_string)
 }
 
+fn record_codex_managed_config_write(config_text: &str) {
+    if let Err(error) = crate::codex_config_consistency::record_managed_config_write(config_text) {
+        log::warn!("Codex managed-config activation receipt could not be updated: {error}");
+    }
+}
+
 pub(crate) fn is_custom_codex_model_provider_id(id: &str) -> bool {
     let id = id.trim();
     !id.is_empty()
@@ -539,7 +547,9 @@ fn write_codex_live_config_atomic_locked(config_text_opt: Option<&str>) -> Resul
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
 
-    write_text_file(&config_path, &cfg_text)
+    write_text_file(&config_path, &cfg_text)?;
+    record_codex_managed_config_write(&cfg_text);
+    Ok(())
 }
 
 fn read_codex_live_config_bytes(path: &Path) -> Result<Vec<u8>, AppError> {
@@ -623,6 +633,7 @@ where
         atomic_write(&config_path, candidate.as_bytes())?;
         let after = read_codex_live_config_bytes(&config_path)?;
         if after == candidate.as_bytes() {
+            record_codex_managed_config_write(&candidate);
             return Ok(candidate);
         }
         log::warn!(

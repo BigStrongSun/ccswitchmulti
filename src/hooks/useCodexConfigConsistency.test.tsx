@@ -98,10 +98,19 @@ describe("useCodexConfigConsistency", () => {
       processCount: 2,
       launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
       warning: "active_tasks_will_be_interrupted",
+      paginatedHistory: {
+        affectedRolloutCount: 1,
+        duplicateOrdinalCount: 3,
+        affectedBytes: 1_100_000_000,
+        blockedRolloutCount: 0,
+        blockedReason: null,
+      },
     });
     vi.mocked(codexConfigConsistencyApi.refreshRuntimeState).mockResolvedValue({
       forceTerminated: false,
       closedProcessCount: 2,
+      repairedHistoryRolloutCount: 1,
+      repairedHistoryDuplicateCount: 3,
     });
     const { result } = renderHook(() => useCodexConfigConsistency());
     await waitFor(() => expect(result.current.report).toEqual(runtimeStale));

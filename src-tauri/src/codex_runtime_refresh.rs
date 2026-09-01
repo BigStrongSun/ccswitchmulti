@@ -10,12 +10,15 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 
+#[path = "codex_paginated_history_repair.rs"]
+mod paginated_history;
+
 static CODEX_RUNTIME_REFRESH_LOCK: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
 
 const CODEX_RUNTIME_REFRESH_EVENT: &str = "codex-runtime-refresh-progress";
 const CODEX_GRACEFUL_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
-const CODEX_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct RawCodexRuntimeProcess {
@@ -71,6 +74,7 @@ pub struct CodexRuntimeRefreshPreflight {
     pub process_count: usize,
     pub launch_target: Option<String>,
     pub warning: Option<String>,
+    pub paginated_history: paginated_history::PaginatedHistoryRepairPreflight,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -78,6 +82,7 @@ pub struct CodexRuntimeRefreshPreflight {
 pub enum CodexRuntimeRefreshStage {
     Closing,
     ForceClosing,
+    RepairingHistory,
     ApplyingConfig,
     Launching,
     Verifying,
@@ -95,6 +100,8 @@ pub struct CodexRuntimeRefreshProgress {
 pub struct CodexRuntimeRefreshResult {
     pub force_terminated: bool,
     pub closed_process_count: usize,
+    pub repaired_history_rollout_count: usize,
+    pub repaired_history_duplicate_count: usize,
 }
 
 trait CodexRuntimeRefreshOperations {
@@ -109,6 +116,9 @@ trait CodexRuntimeRefreshOperations {
     ) -> Result<Vec<RawCodexRuntimeProcess>, String>;
     async fn force_terminate(&mut self, survivors: &[RawCodexRuntimeProcess])
         -> Result<(), String>;
+    async fn repair_paginated_history(
+        &mut self,
+    ) -> Result<paginated_history::PaginatedHistoryRepairOutcome, String>;
     async fn apply_ccsm_config(&mut self) -> Result<i64, String>;
     async fn launch_codex(&mut self) -> Result<(), String>;
     async fn verify_fresh_runtime(&mut self, config_written_at_ms: i64) -> Result<(), String>;
@@ -147,6 +157,25 @@ where
     }
 
     emit(CodexRuntimeRefreshProgress {
+        stage: CodexRuntimeRefreshStage::RepairingHistory,
+    });
+    let history_repair = match operations.repair_paginated_history().await {
+        Ok(result) => result,
+        Err(error) => {
+            emit(CodexRuntimeRefreshProgress {
+                stage: CodexRuntimeRefreshStage::Launching,
+            });
+            let relaunch = operations.launch_codex().await;
+            return match relaunch {
+                Ok(()) => Err(error),
+                Err(launch_error) => Err(format!(
+                    "{error}; codex_relaunch_after_history_repair_failure_failed: {launch_error}"
+                )),
+            };
+        }
+    };
+
+    emit(CodexRuntimeRefreshProgress {
         stage: CodexRuntimeRefreshStage::ApplyingConfig,
     });
     let config_written_at_ms = match operations.apply_ccsm_config().await {
@@ -182,6 +211,8 @@ where
     Ok(CodexRuntimeRefreshResult {
         force_terminated,
         closed_process_count,
+        repaired_history_rollout_count: history_repair.repaired_rollout_count,
+        repaired_history_duplicate_count: history_repair.repaired_duplicate_count,
     })
 }
 
@@ -387,6 +418,7 @@ async fn build_preflight() -> Result<CodexRuntimeRefreshPreflight, String> {
             process_count: 0,
             launch_target: None,
             warning: Some("codex_runtime_refresh_windows_only".to_string()),
+            paginated_history: Default::default(),
         });
     }
 
@@ -394,6 +426,10 @@ async fn build_preflight() -> Result<CodexRuntimeRefreshPreflight, String> {
     {
         let targets = query_refresh_targets().await?;
         let launch_target = resolve_launch_target();
+        let paginated_history =
+            tokio::task::spawn_blocking(paginated_history::inspect_paginated_history_repair)
+                .await
+                .map_err(|error| format!("paginated_history_inspection_join_failed: {error}"))??;
         Ok(CodexRuntimeRefreshPreflight {
             supported: true,
             can_refresh: launch_target.is_some(),
@@ -404,6 +440,7 @@ async fn build_preflight() -> Result<CodexRuntimeRefreshPreflight, String> {
             launch_target: launch_target.as_ref().map(CodexRuntimeLaunchTarget::label),
             warning: (targets.process_count() > 0)
                 .then(|| "active_tasks_will_be_interrupted".to_string()),
+            paginated_history,
         })
     }
 }
@@ -559,6 +596,7 @@ fn system_time_to_millis(time: SystemTime) -> Result<i64, String> {
 struct SystemCodexRuntimeRefreshOperations<'a> {
     state: &'a AppState,
     launch_target: CodexRuntimeLaunchTarget,
+    history_repair_outcome: Option<paginated_history::PaginatedHistoryRepairOutcome>,
 }
 
 impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
@@ -652,6 +690,18 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
         Ok(())
     }
 
+    async fn repair_paginated_history(
+        &mut self,
+    ) -> Result<paginated_history::PaginatedHistoryRepairOutcome, String> {
+        let outcome = tokio::task::spawn_blocking(
+            paginated_history::repair_paginated_history_after_codex_exit,
+        )
+        .await
+        .map_err(|error| format!("paginated_history_repair_join_failed: {error}"))??;
+        self.history_repair_outcome = Some(outcome.clone());
+        Ok(outcome)
+    }
+
     async fn apply_ccsm_config(&mut self) -> Result<i64, String> {
         crate::codex_config_consistency::reproject_current_ccsm_config(self.state)
             .await
@@ -691,7 +741,18 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
                                 result.history_refresh_requested,
                             ) =>
                         {
-                            return Ok(());
+                            let history_ready = self
+                                .history_repair_outcome
+                                .as_ref()
+                                .map(paginated_history::repaired_projections_caught_up)
+                                .transpose()?
+                                .unwrap_or(true);
+                            if history_ready {
+                                return Ok(());
+                            }
+                            last_compatibility_error = Some(
+                                "codex_paginated_history_projection_not_caught_up".to_string(),
+                            );
                         }
                         Ok(result) => {
                             last_compatibility_error = Some(format!(
@@ -736,6 +797,7 @@ pub async fn refresh_codex_runtime_state(
     let mut operations = SystemCodexRuntimeRefreshOperations {
         state: &state,
         launch_target,
+        history_repair_outcome: None,
     };
     execute_refresh_transaction(&mut operations, &snapshot_token, |progress| {
         if let Err(error) = app.emit(CODEX_RUNTIME_REFRESH_EVENT, &progress) {
@@ -915,6 +977,9 @@ mod tests {
         targets: CodexRuntimeRefreshTargets,
         wait_results: VecDeque<Vec<RawCodexRuntimeProcess>>,
         log: Vec<&'static str>,
+        history_repair_error: Option<String>,
+        repaired_history_rollout_count: usize,
+        repaired_history_duplicate_count: usize,
         apply_error: Option<String>,
     }
 
@@ -946,6 +1011,20 @@ mod tests {
         ) -> Result<(), String> {
             self.log.push("force_terminate");
             Ok(())
+        }
+
+        async fn repair_paginated_history(
+            &mut self,
+        ) -> Result<paginated_history::PaginatedHistoryRepairOutcome, String> {
+            self.log.push("repair_history");
+            match self.history_repair_error.take() {
+                Some(error) => Err(error),
+                None => Ok(paginated_history::PaginatedHistoryRepairOutcome {
+                    repaired_rollout_count: self.repaired_history_rollout_count,
+                    repaired_duplicate_count: self.repaired_history_duplicate_count,
+                    ..Default::default()
+                }),
+            }
         }
 
         async fn apply_ccsm_config(&mut self) -> Result<i64, String> {
@@ -984,6 +1063,8 @@ mod tests {
         let mut operations = FakeRefreshOperations {
             targets: targets.clone(),
             wait_results: VecDeque::from([targets.desktop_shells.clone(), Vec::new()]),
+            repaired_history_rollout_count: 1,
+            repaired_history_duplicate_count: 3,
             ..Default::default()
         };
         let mut stages = Vec::new();
@@ -1003,6 +1084,7 @@ mod tests {
                 "wait_for_exit",
                 "force_terminate",
                 "wait_for_exit",
+                "repair_history",
                 "apply_config",
                 "launch",
                 "verify",
@@ -1013,12 +1095,15 @@ mod tests {
             vec![
                 CodexRuntimeRefreshStage::Closing,
                 CodexRuntimeRefreshStage::ForceClosing,
+                CodexRuntimeRefreshStage::RepairingHistory,
                 CodexRuntimeRefreshStage::ApplyingConfig,
                 CodexRuntimeRefreshStage::Launching,
                 CodexRuntimeRefreshStage::Verifying,
                 CodexRuntimeRefreshStage::Completed,
             ]
         );
+        assert_eq!(result.repaired_history_rollout_count, 1);
+        assert_eq!(result.repaired_history_duplicate_count, 3);
     }
 
     #[tokio::test]
@@ -1058,7 +1143,36 @@ mod tests {
                 "inspect",
                 "graceful_close",
                 "wait_for_exit",
+                "repair_history",
                 "apply_config",
+                "launch",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn history_repair_failure_reopens_codex_before_returning_the_error() {
+        let targets = one_shell_target();
+        let token = refresh_target_fingerprint(&targets);
+        let mut operations = FakeRefreshOperations {
+            targets,
+            wait_results: VecDeque::from([Vec::new()]),
+            history_repair_error: Some("history repair refused unsafe gap".to_string()),
+            ..Default::default()
+        };
+
+        let error = execute_refresh_transaction(&mut operations, &token, |_| {})
+            .await
+            .expect_err("history repair failure should be reported");
+
+        assert!(error.contains("history repair refused unsafe gap"));
+        assert_eq!(
+            operations.log,
+            vec![
+                "inspect",
+                "graceful_close",
+                "wait_for_exit",
+                "repair_history",
                 "launch",
             ]
         );

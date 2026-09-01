@@ -37,6 +37,7 @@ export interface CodexConfigConsistencyReport {
 export type CodexRuntimeRefreshStage =
   | "closing"
   | "force_closing"
+  | "repairing_history"
   | "applying_config"
   | "launching"
   | "verifying"
@@ -55,11 +56,20 @@ export interface CodexRuntimeRefreshPreflight {
   processCount: number;
   launchTarget: string | null;
   warning: string | null;
+  paginatedHistory: {
+    affectedRolloutCount: number;
+    duplicateOrdinalCount: number;
+    affectedBytes: number;
+    blockedRolloutCount: number;
+    blockedReason: string | null;
+  };
 }
 
 export interface CodexRuntimeRefreshResult {
   forceTerminated: boolean;
   closedProcessCount: number;
+  repairedHistoryRolloutCount: number;
+  repairedHistoryDuplicateCount: number;
 }
 
 export const codexConfigConsistencyApi = {
