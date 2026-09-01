@@ -66,6 +66,11 @@ export interface CodexRuntimeRefreshPreflight {
 }
 
 export interface CodexRuntimeRefreshResult {
+  outcome: "completed" | "completed_with_warnings";
+  configStatus: "ready" | "warning";
+  paginatedHistoryStatus: "ready" | "warning";
+  rendererCompatibilityStatus: "ready" | "warning";
+  rendererCompatibilityMessage: string | null;
   forceTerminated: boolean;
   closedProcessCount: number;
   repairedHistoryRolloutCount: number;

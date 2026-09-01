@@ -887,10 +887,16 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return await state.modulePromises.get(namePart);
   }};
   const localCatalogFromModule = (module) => {{
+    // 26.825+ exports both an unresolved RpcPromise (`appHost`) and the
+    // initialized RpcStub (`appServices`). Prefer the initialized service;
+    // otherwise the first shallow export looks valid but fails inside
+    // readStatus/readSnapshot.
+    const initialized = module?.appServices?.localThreadCatalog;
+    if (initialized && typeof initialized.requestStartupSync === "function") return initialized;
     const roots = Object.values(module).filter((item) => item && (typeof item === "object" || typeof item === "function"));
     for (const root of roots) {{
       const catalog = root.localThreadCatalog;
-      if (catalog) return catalog;
+      if (catalog && typeof catalog.requestStartupSync === "function") return catalog;
     }}
     return null;
   }};
@@ -996,16 +1002,23 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   }};
   const patchRequestClient = (client) => {{
     if (!client || typeof client.sendRequest !== "function") return false;
-    if (client.__ccSwitchModelRequestPatch === "3") return true;
-    const original = client.__ccSwitchOriginalSendRequest || client.sendRequest.bind(client);
-    client.__ccSwitchOriginalSendRequest = original;
-    client.sendRequest = async function ccSwitchPatchedSendRequest(method, params, options) {{
-      const normalizedParams = normalizeAppServerRequestParams(method, params);
-      const result = await original(method, normalizedParams, options);
-      return patchAppServerResult(appServerMethod(method, params), result);
-    }};
-    client.__ccSwitchModelRequestPatch = "3";
-    return true;
+    if (client.__ccSwitchModelRequestPatch === "4") return true;
+    try {{
+      const original = client.__ccSwitchOriginalSendRequest || client.sendRequest.bind(client);
+      client.__ccSwitchOriginalSendRequest = original;
+      client.sendRequest = async function ccSwitchPatchedSendRequest(method, params, options) {{
+        const normalizedParams = normalizeAppServerRequestParams(method, params);
+        const result = await original(method, normalizedParams, options);
+        return patchAppServerResult(appServerMethod(method, params), result);
+      }};
+      client.__ccSwitchModelRequestPatch = "4";
+      return true;
+    }} catch (error) {{
+      // rpc-BaVz... also exposes immutable RpcStub objects whose method shape
+      // resembles AppServerRequestClient. Skip them and keep scanning React.
+      recordFailure(error);
+      return false;
+    }}
   }};
   const looksLikeAppServerRequestClient = (value) => {{
     try {{
@@ -1019,13 +1032,23 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   }};
   const reactRoots = () => {{
     const root = document.getElementById("root") || document.body;
-    return Object.keys(root || {{}})
-      .filter((key) => key.startsWith("__reactContainer") || key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance"))
-      .map((key) => root[key])
-      .filter(Boolean);
+    const nodes = [root, ...document.querySelectorAll("*")].filter(Boolean);
+    const values = [];
+    const seen = new Set();
+    for (const node of nodes) {{
+      for (const key of Object.keys(node || {{}})) {{
+        if (!key.startsWith("__reactContainer") && !key.startsWith("__reactFiber") && !key.startsWith("__reactInternalInstance")) continue;
+        const value = node[key];
+        if (value && !seen.has(value)) {{
+          seen.add(value);
+          values.push(value);
+        }}
+      }}
+    }}
+    return values;
   }};
   const patchReactAppServerClients = () => {{
-    if (state.reactRequestClientPatchVersion === "3") return state.historyQueryPatch?.clientCount || 1;
+    if (state.reactRequestClientPatchVersion === "4") return state.historyQueryPatch?.clientCount || 1;
     const queue = reactRoots().map((value) => ({{ value, depth: 0 }}));
     const seen = new Set();
     let cursor = 0;
@@ -1074,7 +1097,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return patched;
   }};
   const installAppServerPatch = async () => {{
-    if (state.appServerPatchVersion === "3") return;
+    if (state.appServerPatchVersion === "4") return;
     let patched = 0;
     try {{
       const module = await loadAppModule("app-server-manager-signals-");
@@ -1099,8 +1122,8 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }};
     state.appServerPatchInstalled = patched > 0;
     if (patched > 0 && state.historyQueryRefreshCompleted) {{
-      state.reactRequestClientPatchVersion = "3";
-      state.appServerPatchVersion = "3";
+      state.reactRequestClientPatchVersion = "4";
+      state.appServerPatchVersion = "4";
     }}
   }};
   const patchMcpModelResponseData = (data) => {{
@@ -2357,7 +2380,7 @@ JSON.stringify({
         assert!(script.contains("await installAppServerPatch()"));
         assert!(script.contains("!state.requestIds.has(requestId)"));
         assert!(script.contains("__ccSwitchCodexAppCompatibilityV5"));
-        assert!(script.contains("__ccSwitchModelRequestPatch === \"3\""));
+        assert!(script.contains("__ccSwitchModelRequestPatch === \"4\""));
         assert!(script.contains("auth.setAuthMethod(\"chatgpt\")"));
     }
 
@@ -2376,6 +2399,8 @@ JSON.stringify({
         assert!(script.contains("modelProviders: []"));
         assert!(script.contains("getCompatibleThreadSortKey"));
         assert!(script.contains("document.getElementById(\"root\")"));
+        assert!(script.contains("document.querySelectorAll(\"*\")"));
+        assert!(script.contains("module?.appServices?.localThreadCatalog"));
         assert!(script.contains("fetch(url)"));
         assert!(script.contains("await state.historyQueryRefreshPromise"));
         assert!(script.contains("state.historyQueryRefreshCompleted = true"));

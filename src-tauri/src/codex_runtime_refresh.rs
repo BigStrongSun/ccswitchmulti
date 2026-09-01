@@ -98,10 +98,38 @@ pub struct CodexRuntimeRefreshProgress {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexRuntimeRefreshResult {
+    pub outcome: CodexRuntimeRefreshOutcome,
+    pub config_status: CodexRuntimeCheckStatus,
+    pub paginated_history_status: CodexRuntimeCheckStatus,
+    pub renderer_compatibility_status: CodexRuntimeCheckStatus,
+    pub renderer_compatibility_message: Option<String>,
     pub force_terminated: bool,
     pub closed_process_count: usize,
     pub repaired_history_rollout_count: usize,
     pub repaired_history_duplicate_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexRuntimeRefreshOutcome {
+    Completed,
+    CompletedWithWarnings,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexRuntimeCheckStatus {
+    Ready,
+    Warning,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CodexRuntimeVerification {
+    outcome: CodexRuntimeRefreshOutcome,
+    config_status: CodexRuntimeCheckStatus,
+    paginated_history_status: CodexRuntimeCheckStatus,
+    renderer_compatibility_status: CodexRuntimeCheckStatus,
+    renderer_compatibility_message: Option<String>,
 }
 
 trait CodexRuntimeRefreshOperations {
@@ -121,7 +149,10 @@ trait CodexRuntimeRefreshOperations {
     ) -> Result<paginated_history::PaginatedHistoryRepairOutcome, String>;
     async fn apply_ccsm_config(&mut self) -> Result<i64, String>;
     async fn launch_codex(&mut self) -> Result<(), String>;
-    async fn verify_fresh_runtime(&mut self, config_written_at_ms: i64) -> Result<(), String>;
+    async fn verify_fresh_runtime(
+        &mut self,
+        config_written_at_ms: i64,
+    ) -> Result<CodexRuntimeVerification, String>;
 }
 
 async fn execute_refresh_transaction<O, F>(
@@ -201,7 +232,7 @@ where
     emit(CodexRuntimeRefreshProgress {
         stage: CodexRuntimeRefreshStage::Verifying,
     });
-    operations
+    let verification = operations
         .verify_fresh_runtime(config_written_at_ms)
         .await?;
     emit(CodexRuntimeRefreshProgress {
@@ -209,6 +240,11 @@ where
     });
 
     Ok(CodexRuntimeRefreshResult {
+        outcome: verification.outcome,
+        config_status: verification.config_status,
+        paginated_history_status: verification.paginated_history_status,
+        renderer_compatibility_status: verification.renderer_compatibility_status,
+        renderer_compatibility_message: verification.renderer_compatibility_message,
         force_terminated,
         closed_process_count,
         repaired_history_rollout_count: history_repair.repaired_rollout_count,
@@ -510,12 +546,41 @@ fn force_terminate_process_arguments(pid: u32) -> Vec<String> {
     vec!["/PID".to_string(), pid.to_string(), "/F".to_string()]
 }
 
-fn required_runtime_compatibility_is_ready(
+fn runtime_verification_result(
+    config_ready: bool,
+    paginated_history_ready: bool,
     injected: bool,
     all_provider_history_patched: bool,
     history_refresh_requested: bool,
-) -> bool {
-    injected && all_provider_history_patched && history_refresh_requested
+    renderer_message: Option<String>,
+) -> Result<CodexRuntimeVerification, String> {
+    if !config_ready {
+        return Err("codex_runtime_config_not_current".to_string());
+    }
+    if !paginated_history_ready {
+        return Err("codex_paginated_history_projection_not_caught_up".to_string());
+    }
+
+    let renderer_ready = injected && all_provider_history_patched && history_refresh_requested;
+    Ok(CodexRuntimeVerification {
+        outcome: if renderer_ready {
+            CodexRuntimeRefreshOutcome::Completed
+        } else {
+            CodexRuntimeRefreshOutcome::CompletedWithWarnings
+        },
+        config_status: CodexRuntimeCheckStatus::Ready,
+        paginated_history_status: CodexRuntimeCheckStatus::Ready,
+        renderer_compatibility_status: if renderer_ready {
+            CodexRuntimeCheckStatus::Ready
+        } else {
+            CodexRuntimeCheckStatus::Warning
+        },
+        renderer_compatibility_message: if renderer_ready {
+            None
+        } else {
+            renderer_message
+        },
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -716,9 +781,12 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
         launch_codex_target(&self.launch_target)
     }
 
-    async fn verify_fresh_runtime(&mut self, config_written_at_ms: i64) -> Result<(), String> {
+    async fn verify_fresh_runtime(
+        &mut self,
+        config_written_at_ms: i64,
+    ) -> Result<CodexRuntimeVerification, String> {
         let deadline = Instant::now() + CODEX_RUNTIME_READY_TIMEOUT;
-        let mut last_compatibility_error = None;
+        let mut last_core_error = None;
         loop {
             let targets = query_refresh_targets().await?;
             let fresh_app_server = targets.app_servers.iter().any(|process| {
@@ -733,43 +801,41 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
                     && consistency.runtime_activation.state
                         == CodexConfigRuntimeActivationState::Current
                 {
-                    match crate::codex_desktop::unlock_codex_model_picker().await {
-                        Ok(result)
-                            if required_runtime_compatibility_is_ready(
+                    let history_ready = self
+                        .history_repair_outcome
+                        .as_ref()
+                        .map(paginated_history::repaired_projections_caught_up)
+                        .transpose()?
+                        .unwrap_or(true);
+                    if !history_ready {
+                        last_core_error =
+                            Some("codex_paginated_history_projection_not_caught_up".to_string());
+                    } else {
+                        return match crate::codex_desktop::unlock_codex_model_picker().await {
+                            Ok(result) => runtime_verification_result(
+                                true,
+                                true,
                                 result.injected,
                                 result.all_provider_history_patched,
                                 result.history_refresh_requested,
-                            ) =>
-                        {
-                            let history_ready = self
-                                .history_repair_outcome
-                                .as_ref()
-                                .map(paginated_history::repaired_projections_caught_up)
-                                .transpose()?
-                                .unwrap_or(true);
-                            if history_ready {
-                                return Ok(());
-                            }
-                            last_compatibility_error = Some(
-                                "codex_paginated_history_projection_not_caught_up".to_string(),
-                            );
-                        }
-                        Ok(result) => {
-                            last_compatibility_error = Some(format!(
-                                "codex_history_compatibility_not_ready: {}",
-                                result.message
-                            ));
-                        }
-                        Err(error) => {
-                            last_compatibility_error = Some(format!(
-                                "codex_history_compatibility_install_failed: {error}"
-                            ));
-                        }
+                                Some(result.message),
+                            ),
+                            Err(error) => runtime_verification_result(
+                                true,
+                                true,
+                                false,
+                                false,
+                                false,
+                                Some(format!(
+                                    "codex_history_compatibility_install_failed: {error}"
+                                )),
+                            ),
+                        };
                     }
                 }
             }
             if Instant::now() >= deadline {
-                return Err(last_compatibility_error.unwrap_or_else(|| {
+                return Err(last_core_error.unwrap_or_else(|| {
                     "codex_runtime_did_not_become_current_before_timeout".to_string()
                 }));
             }
@@ -965,11 +1031,37 @@ mod tests {
     }
 
     #[test]
-    fn runtime_verification_requires_the_all_provider_history_query_patch() {
-        assert!(!required_runtime_compatibility_is_ready(true, false, true));
-        assert!(!required_runtime_compatibility_is_ready(false, true, true));
-        assert!(!required_runtime_compatibility_is_ready(true, true, false));
-        assert!(required_runtime_compatibility_is_ready(true, true, true));
+    fn renderer_compatibility_is_reported_independently_from_core_runtime_readiness() {
+        let warning = runtime_verification_result(
+            true,
+            true,
+            true,
+            false,
+            false,
+            Some("renderer request client was not found".to_string()),
+        )
+        .expect("config and paginated history are ready");
+
+        assert_eq!(
+            warning.outcome,
+            CodexRuntimeRefreshOutcome::CompletedWithWarnings
+        );
+        assert_eq!(warning.config_status, CodexRuntimeCheckStatus::Ready);
+        assert_eq!(
+            warning.paginated_history_status,
+            CodexRuntimeCheckStatus::Ready
+        );
+        assert_eq!(
+            warning.renderer_compatibility_status,
+            CodexRuntimeCheckStatus::Warning
+        );
+        assert_eq!(
+            warning.renderer_compatibility_message.as_deref(),
+            Some("renderer request client was not found")
+        );
+
+        assert!(runtime_verification_result(true, false, true, true, true, None).is_err());
+        assert!(runtime_verification_result(false, true, true, true, true, None).is_err());
     }
 
     #[derive(Default)]
@@ -1040,9 +1132,12 @@ mod tests {
             Ok(())
         }
 
-        async fn verify_fresh_runtime(&mut self, _config_written_at_ms: i64) -> Result<(), String> {
+        async fn verify_fresh_runtime(
+            &mut self,
+            _config_written_at_ms: i64,
+        ) -> Result<CodexRuntimeVerification, String> {
             self.log.push("verify");
-            Ok(())
+            runtime_verification_result(true, true, true, true, true, None)
         }
     }
 

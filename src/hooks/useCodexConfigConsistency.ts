@@ -9,11 +9,13 @@ import {
   type CodexRuntimeRefreshResult,
 } from "@/lib/api/codexConfigConsistency";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { proxyApi } from "@/lib/api/proxy";
 import { useTauriEvent } from "./useTauriEvent";
 
 export type CodexRuntimeRefreshPhase =
   | "idle"
   | "inspecting"
+  | "status"
   | "confirm"
   | "refreshing"
   | "completed"
@@ -25,6 +27,7 @@ export interface CodexRuntimeRefreshWorkflow {
   progress: CodexRuntimeRefreshProgress | null;
   result: CodexRuntimeRefreshResult | null;
   error: string | null;
+  rendererRetryPending?: boolean;
 }
 
 interface CodexConfigConsistencyState {
@@ -35,8 +38,10 @@ interface CodexConfigConsistencyState {
   close: () => void;
   resolve: (action: CodexConfigConsistencyAction) => Promise<void>;
   recheck: () => Promise<void>;
+  openStatusPanel: () => Promise<void>;
   inspectRuntimeRefresh: () => Promise<void>;
   confirmRuntimeRefresh: () => Promise<void>;
+  retryRendererCompatibility: () => Promise<void>;
   cancelRuntimeRefresh: () => void;
 }
 
@@ -223,6 +228,40 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
     }
   }, []);
 
+  const openStatusPanel = useCallback(async () => {
+    runtimeRefreshActiveRef.current = true;
+    setRefresh({
+      phase: "inspecting",
+      preflight: null,
+      progress: null,
+      result: null,
+      error: null,
+    });
+    setError(null);
+    try {
+      const [nextReport, preflight] = await Promise.all([
+        codexConfigConsistencyApi.inspect(),
+        codexConfigConsistencyApi.inspectRuntimeRefresh(),
+      ]);
+      setReport(nextReport);
+      setRefresh({
+        phase: "status",
+        preflight,
+        progress: null,
+        result: null,
+        error: null,
+      });
+    } catch (cause) {
+      setRefresh({
+        phase: "failed",
+        preflight: null,
+        progress: null,
+        result: null,
+        error: extractErrorMessage(cause) || "Codex 状态检查失败",
+      });
+    }
+  }, []);
+
   const confirmRuntimeRefresh = useCallback(async () => {
     const preflight = refresh.preflight;
     if (!preflight || refresh.phase !== "confirm") return;
@@ -261,6 +300,48 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
     if (completed) close();
   }, [close, refresh.phase]);
 
+  const retryRendererCompatibility = useCallback(async () => {
+    if (!refresh.result) return;
+    setRefresh((current) => ({
+      ...current,
+      rendererRetryPending: true,
+    }));
+    try {
+      const retry = await proxyApi.unlockCodexModelPicker();
+      const ready = Boolean(
+        retry.injected &&
+          retry.allProviderHistoryPatched &&
+          retry.historyRefreshRequested,
+      );
+      setRefresh((current) => ({
+        ...current,
+        rendererRetryPending: false,
+        result: current.result
+          ? {
+              ...current.result,
+              outcome: ready ? "completed" : "completed_with_warnings",
+              rendererCompatibilityStatus: ready ? "ready" : "warning",
+              rendererCompatibilityMessage: ready ? null : retry.message,
+            }
+          : null,
+      }));
+    } catch (cause) {
+      setRefresh((current) => ({
+        ...current,
+        rendererRetryPending: false,
+        result: current.result
+          ? {
+              ...current.result,
+              outcome: "completed_with_warnings",
+              rendererCompatibilityStatus: "warning",
+              rendererCompatibilityMessage:
+                extractErrorMessage(cause) || "Codex 历史查询兼容层重试失败",
+            }
+          : null,
+      }));
+    }
+  }, [refresh.result]);
+
   return {
     report,
     pending,
@@ -269,8 +350,10 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
     close,
     resolve,
     recheck,
+    openStatusPanel,
     inspectRuntimeRefresh,
     confirmRuntimeRefresh,
+    retryRendererCompatibility,
     cancelRuntimeRefresh,
   };
 }

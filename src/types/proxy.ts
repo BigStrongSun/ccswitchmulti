@@ -1,4 +1,4 @@
-﻿import type { SessionMessage } from "@/types";
+import type { SessionMessage } from "@/types";
 
 export interface ProxyConfig {
   listen_address: string;
@@ -166,6 +166,8 @@ export interface CodexModelPickerUnlockResult {
   historySyncRequested?: boolean;
   historyCatalogComplete?: boolean | null;
   historyCatalogCount?: number | null;
+  allProviderHistoryPatched?: boolean;
+  historyRefreshRequested?: boolean;
   message: string;
 }
 

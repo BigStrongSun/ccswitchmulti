@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { CodexConfigConsistencyReport } from "@/lib/api/codexConfigConsistency";
 import { codexConfigConsistencyApi } from "@/lib/api/codexConfigConsistency";
+import { proxyApi } from "@/lib/api/proxy";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { useCodexConfigConsistency } from "./useCodexConfigConsistency";
 
@@ -13,6 +14,11 @@ vi.mock("@/lib/api/codexConfigConsistency", () => ({
     resolve: vi.fn(),
     inspectRuntimeRefresh: vi.fn(),
     refreshRuntimeState: vi.fn(),
+  },
+}));
+vi.mock("@/lib/api/proxy", () => ({
+  proxyApi: {
+    unlockCodexModelPicker: vi.fn(),
   },
 }));
 
@@ -107,6 +113,11 @@ describe("useCodexConfigConsistency", () => {
       },
     });
     vi.mocked(codexConfigConsistencyApi.refreshRuntimeState).mockResolvedValue({
+      outcome: "completed_with_warnings",
+      configStatus: "ready",
+      paginatedHistoryStatus: "ready",
+      rendererCompatibilityStatus: "warning",
+      rendererCompatibilityMessage: "old renderer path",
       forceTerminated: false,
       closedProcessCount: 2,
       repairedHistoryRolloutCount: 1,
@@ -123,5 +134,70 @@ describe("useCodexConfigConsistency", () => {
       "checked-snapshot",
     );
     expect(result.current.refresh.phase).toBe("completed");
+
+    vi.mocked(proxyApi.unlockCodexModelPicker).mockResolvedValue({
+      attemptedPorts: [9229],
+      debugPort: 9229,
+      targetId: "renderer",
+      targetTitle: "ChatGPT",
+      targetUrl: "app://-/index.html",
+      modelCount: 1,
+      modelNames: ["qwen3.8"],
+      injected: true,
+      launched: false,
+      codexExecutable: "ChatGPT.exe",
+      historySyncRequested: true,
+      historyCatalogComplete: true,
+      historyCatalogCount: 100,
+      allProviderHistoryPatched: true,
+      historyRefreshRequested: true,
+      message: "ready",
+    });
+    await act(async () => result.current.retryRendererCompatibility());
+    expect(result.current.refresh.result?.outcome).toBe("completed");
+    expect(result.current.refresh.result?.rendererCompatibilityStatus).toBe(
+      "ready",
+    );
+  });
+
+  it("opens a persistent status overview even when config is already consistent", async () => {
+    const consistent: CodexConfigConsistencyReport = {
+      ...drift,
+      state: "consistent",
+      changedKeys: [],
+      reason: null,
+    };
+    vi.mocked(codexConfigConsistencyApi.inspect).mockResolvedValue(consistent);
+    vi.mocked(
+      codexConfigConsistencyApi.inspectRuntimeRefresh,
+    ).mockResolvedValue({
+      supported: true,
+      canRefresh: true,
+      snapshotToken: "status-snapshot",
+      desktopProcessCount: 1,
+      appServerProcessCount: 1,
+      processCount: 2,
+      launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+      warning: null,
+      paginatedHistory: {
+        affectedRolloutCount: 0,
+        duplicateOrdinalCount: 0,
+        affectedBytes: 0,
+        blockedRolloutCount: 0,
+        blockedReason: null,
+      },
+    });
+    const { result } = renderHook(() => useCodexConfigConsistency());
+    await waitFor(() =>
+      expect(codexConfigConsistencyApi.inspect).toHaveBeenCalled(),
+    );
+
+    await act(async () => result.current.openStatusPanel());
+
+    expect(result.current.report).toEqual(consistent);
+    expect(result.current.refresh.phase).toBe("status");
+    expect(result.current.refresh.preflight?.snapshotToken).toBe(
+      "status-snapshot",
+    );
   });
 });

@@ -2028,6 +2028,19 @@ function App() {
                                   >
                                     <BarChart2 className="w-4 h-4" />
                                   </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() =>
+                                      void codexConfigConsistency.openStatusPanel()
+                                    }
+                                    className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
+                                    title={t(
+                                      "codexConfigConsistency.statusTitle",
+                                    )}
+                                  >
+                                    <RefreshCw className="w-4 h-4" />
+                                  </Button>
                                 </>
                               )}
                               <Button
@@ -2376,7 +2389,8 @@ function App() {
       <FirstRunNoticeDialog enabled={activeStartupAttention === "first-run"} />
       <CodexConfigConsistencyDialog
         report={
-          activeStartupAttention === "codex-config-consistency"
+          activeStartupAttention === "codex-config-consistency" ||
+          codexConfigConsistency.refresh.phase !== "idle"
             ? codexConfigConsistency.report
             : null
         }
@@ -2394,6 +2408,9 @@ function App() {
           void codexConfigConsistency.confirmRuntimeRefresh()
         }
         onCancelRefresh={codexConfigConsistency.cancelRuntimeRefresh}
+        onRetryRendererCompatibility={() =>
+          void codexConfigConsistency.retryRendererCompatibility()
+        }
       />
     </div>
   );

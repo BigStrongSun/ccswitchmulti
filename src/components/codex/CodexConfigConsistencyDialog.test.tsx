@@ -25,6 +25,19 @@ vi.mock("react-i18next", () => ({
           "请完全退出 Codex Desktop/app-server，重新打开后新建任务。",
         "codexConfigConsistency.recheck": "重新检测",
         "codexConfigConsistency.refreshCodex": "刷新 Codex 状态",
+        "codexConfigConsistency.statusTitle": "Codex 状态与修复",
+        "codexConfigConsistency.statusDescription":
+          "配置、分页历史与界面兼容性分别检查。",
+        "codexConfigConsistency.configStatus": "配置与运行态",
+        "codexConfigConsistency.paginatedHistoryStatus": "分页历史",
+        "codexConfigConsistency.rendererCompatibilityStatus": "历史查询兼容层",
+        "codexConfigConsistency.statusReady": "正常",
+        "codexConfigConsistency.statusWarning": "需要处理",
+        "codexConfigConsistency.statusPending": "重启后验证",
+        "codexConfigConsistency.noPaginatedHistoryIssue":
+          "未发现可安全修复的重复序号。",
+        "codexConfigConsistency.rendererIndependentHint":
+          "此项失败不会撤销配置与分页历史修复。",
         "codexConfigConsistency.refreshConfirmTitle": "确认刷新 Codex 状态",
         "codexConfigConsistency.refreshConfirmDescription":
           "将关闭所有 Codex 窗口并中断正在运行的任务。",
@@ -54,6 +67,16 @@ vi.mock("react-i18next", () => ({
           "流程已停在失败阶段。",
         "codexConfigConsistency.refreshCompletedTitle": "Codex 状态已刷新",
         "codexConfigConsistency.refreshCompletedDescription": "刷新完成。",
+        "codexConfigConsistency.refreshCompletedWithWarningsTitle":
+          "Codex 核心状态已刷新",
+        "codexConfigConsistency.refreshCompletedWithWarningsDescription":
+          "配置和分页历史已完成，界面兼容层仍需处理。",
+        "codexConfigConsistency.configApplied": "配置与运行态已生效",
+        "codexConfigConsistency.paginatedHistoryReady": "分页历史已校验",
+        "codexConfigConsistency.rendererCompatibilityWarning":
+          "历史查询兼容层未就绪",
+        "codexConfigConsistency.retryRendererCompatibility":
+          "重试历史查询兼容层",
         "codexConfigConsistency.newTaskHint": "请新建任务。",
         "codexConfigConsistency.historyRepairCompleted": "已恢复分页历史文件",
         "codexConfigConsistency.finish": "完成",
@@ -380,6 +403,11 @@ describe("CodexConfigConsistencyDialog", () => {
           preflight: null,
           progress: { stage: "completed" },
           result: {
+            outcome: "completed",
+            configStatus: "ready",
+            paginatedHistoryStatus: "ready",
+            rendererCompatibilityStatus: "ready",
+            rendererCompatibilityMessage: null,
             forceTerminated: false,
             closedProcessCount: 2,
             repairedHistoryRolloutCount: 3,
@@ -398,5 +426,102 @@ describe("CodexConfigConsistencyDialog", () => {
 
     expect(screen.getByText(/已恢复分页历史文件.*3/)).toBeInTheDocument();
     expect(screen.getByText(/重复序号.*5/)).toBeInTheDocument();
+  });
+
+  it("keeps config and paginated history successful when renderer compatibility warns", () => {
+    const onRetryRendererCompatibility = vi.fn();
+    render(
+      <CodexConfigConsistencyDialog
+        report={null}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "completed",
+          preflight: null,
+          progress: { stage: "completed" },
+          result: {
+            outcome: "completed_with_warnings",
+            configStatus: "ready",
+            paginatedHistoryStatus: "ready",
+            rendererCompatibilityStatus: "warning",
+            rendererCompatibilityMessage:
+              "renderer request client was not found",
+            forceTerminated: false,
+            closedProcessCount: 2,
+            repairedHistoryRolloutCount: 1,
+            repairedHistoryDuplicateCount: 4,
+          },
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={vi.fn()}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+        onRetryRendererCompatibility={onRetryRendererCompatibility}
+      />,
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "Codex 核心状态已刷新" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("配置与运行态已生效")).toBeInTheDocument();
+    expect(screen.getByText("分页历史已校验")).toBeInTheDocument();
+    expect(screen.getByText("历史查询兼容层未就绪")).toBeInTheDocument();
+    expect(
+      screen.getByText("renderer request client was not found"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Codex 状态刷新失败")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "重试历史查询兼容层" }));
+    expect(onRetryRendererCompatibility).toHaveBeenCalledOnce();
+  });
+
+  it("opens a manual status overview without requiring an inconsistency report", () => {
+    const onInspectRefresh = vi.fn();
+    render(
+      <CodexConfigConsistencyDialog
+        report={null}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "status",
+          progress: null,
+          preflight: {
+            supported: true,
+            canRefresh: true,
+            snapshotToken: "snapshot",
+            desktopProcessCount: 1,
+            appServerProcessCount: 1,
+            processCount: 2,
+            launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+            warning: null,
+            paginatedHistory: {
+              affectedRolloutCount: 0,
+              duplicateOrdinalCount: 0,
+              affectedBytes: 0,
+              blockedRolloutCount: 0,
+              blockedReason: null,
+            },
+          },
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={onInspectRefresh}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "Codex 状态与修复" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("配置与运行态")).toBeInTheDocument();
+    expect(screen.getByText("分页历史")).toBeInTheDocument();
+    expect(screen.getByText("历史查询兼容层")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "刷新 Codex 状态" }));
+    expect(onInspectRefresh).toHaveBeenCalledOnce();
   });
 });

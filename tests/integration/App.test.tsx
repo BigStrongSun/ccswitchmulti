@@ -883,6 +883,71 @@ describe("App integration with MSW", () => {
     );
   });
 
+  it("opens the persistent Codex status and repair entry when no drift dialog exists", async () => {
+    server.use(
+      http.post("http://tauri.local/inspect_codex_config_consistency", () =>
+        HttpResponse.json({
+          state: "consistent",
+          providerId: "codex-1",
+          expectedFingerprint: "expected",
+          actualFingerprint: "actual",
+          changedKeys: [],
+          reason: null,
+          runtimeActivation: {
+            state: "current",
+            appServerStartedAt: "2026-09-02T01:00:00+08:00",
+            configModifiedAt: "2026-09-02T00:59:00+08:00",
+            reason: null,
+          },
+        }),
+      ),
+      http.post("http://tauri.local/inspect_codex_runtime_refresh", () =>
+        HttpResponse.json({
+          supported: true,
+          canRefresh: true,
+          snapshotToken: "status-snapshot",
+          desktopProcessCount: 1,
+          appServerProcessCount: 1,
+          processCount: 2,
+          launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+          warning: null,
+          paginatedHistory: {
+            affectedRolloutCount: 0,
+            duplicateOrdinalCount: 0,
+            affectedBytes: 0,
+            blockedRolloutCount: 0,
+            blockedReason: null,
+          },
+        }),
+      ),
+    );
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    fireEvent.click(screen.getByText("switch-codex"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "codex-1",
+      ),
+    );
+    fireEvent.click(screen.getByTitle("codexConfigConsistency.statusTitle"));
+
+    expect(
+      await screen.findByRole("dialog", {
+        name: "codexConfigConsistency.statusTitle",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("codexConfigConsistency.configStatus"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("codexConfigConsistency.paginatedHistoryStatus"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("codexConfigConsistency.rendererCompatibilityStatus"),
+    ).toBeInTheDocument();
+  });
+
   it("shows toast when duplicate cannot load live provider ids", async () => {
     setProviders("openclaw", {
       deepseek: {

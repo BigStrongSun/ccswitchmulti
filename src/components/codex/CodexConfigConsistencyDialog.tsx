@@ -27,7 +27,12 @@ type CodexRuntimeRefreshView = Pick<
   CodexRuntimeRefreshWorkflow,
   "phase" | "preflight" | "progress"
 > &
-  Partial<Pick<CodexRuntimeRefreshWorkflow, "error" | "result">>;
+  Partial<
+    Pick<
+      CodexRuntimeRefreshWorkflow,
+      "error" | "result" | "rendererRetryPending"
+    >
+  >;
 
 interface CodexConfigConsistencyDialogProps {
   report: CodexConfigConsistencyReport | null;
@@ -41,6 +46,7 @@ interface CodexConfigConsistencyDialogProps {
   onInspectRefresh?: () => void;
   onConfirmRefresh?: () => void;
   onCancelRefresh?: () => void;
+  onRetryRendererCompatibility?: () => void;
 }
 
 const REFRESH_STAGE_ORDER = [
@@ -71,22 +77,19 @@ export function CodexConfigConsistencyDialog({
   onInspectRefresh,
   onConfirmRefresh,
   onCancelRefresh,
+  onRetryRendererCompatibility,
 }: CodexConfigConsistencyDialogProps) {
   const { t } = useTranslation();
-  if (!report) return null;
-  const runtimeRestartRequired =
-    report.runtimeActivation?.state === "restart_required";
-  const externalDrift = report.state === "external_drift";
-  const takeoverProjectionDrift = report.reason === "takeover_projection_drift";
-  if (!externalDrift && !runtimeRestartRequired) return null;
-
   const refreshPhase: CodexRuntimeRefreshPhase = refresh.phase;
   if (refreshPhase !== "idle") {
     const inspecting = refreshPhase === "inspecting";
+    const showingStatus = refreshPhase === "status";
     const confirming = refreshPhase === "confirm";
     const refreshing = refreshPhase === "refreshing";
     const completed = refreshPhase === "completed";
     const failed = refreshPhase === "failed";
+    const completedWithWarnings =
+      completed && refresh.result?.outcome === "completed_with_warnings";
     const currentStageIndex = refreshStageIndex(refresh.progress?.stage);
     const stageLabels = [
       t("codexConfigConsistency.stageClosing"),
@@ -103,6 +106,8 @@ export function CodexConfigConsistencyDialog({
             <DialogTitle className="flex items-center gap-2">
               {failed ? (
                 <XCircle className="h-5 w-5 text-destructive" />
+              ) : completedWithWarnings || showingStatus ? (
+                <AlertTriangle className="h-5 w-5 text-amber-500" />
               ) : completed ? (
                 <CheckCircle2 className="h-5 w-5 text-emerald-500" />
               ) : inspecting || refreshing ? (
@@ -112,24 +117,38 @@ export function CodexConfigConsistencyDialog({
               )}
               {inspecting
                 ? t("codexConfigConsistency.refreshInspectingTitle")
-                : confirming
-                  ? t("codexConfigConsistency.refreshConfirmTitle")
-                  : refreshing
-                    ? t("codexConfigConsistency.refreshingTitle")
-                    : completed
-                      ? t("codexConfigConsistency.refreshCompletedTitle")
-                      : t("codexConfigConsistency.refreshFailedTitle")}
+                : showingStatus
+                  ? t("codexConfigConsistency.statusTitle")
+                  : confirming
+                    ? t("codexConfigConsistency.refreshConfirmTitle")
+                    : refreshing
+                      ? t("codexConfigConsistency.refreshingTitle")
+                      : completed
+                        ? completedWithWarnings
+                          ? t(
+                              "codexConfigConsistency.refreshCompletedWithWarningsTitle",
+                            )
+                          : t("codexConfigConsistency.refreshCompletedTitle")
+                        : t("codexConfigConsistency.refreshFailedTitle")}
             </DialogTitle>
             <DialogDescription>
               {inspecting
                 ? t("codexConfigConsistency.refreshInspectingDescription")
-                : confirming
-                  ? t("codexConfigConsistency.refreshConfirmDescription")
-                  : refreshing
-                    ? t("codexConfigConsistency.refreshingDescription")
-                    : completed
-                      ? t("codexConfigConsistency.refreshCompletedDescription")
-                      : t("codexConfigConsistency.refreshFailedDescription")}
+                : showingStatus
+                  ? t("codexConfigConsistency.statusDescription")
+                  : confirming
+                    ? t("codexConfigConsistency.refreshConfirmDescription")
+                    : refreshing
+                      ? t("codexConfigConsistency.refreshingDescription")
+                      : completed
+                        ? completedWithWarnings
+                          ? t(
+                              "codexConfigConsistency.refreshCompletedWithWarningsDescription",
+                            )
+                          : t(
+                              "codexConfigConsistency.refreshCompletedDescription",
+                            )
+                        : t("codexConfigConsistency.refreshFailedDescription")}
             </DialogDescription>
           </DialogHeader>
 
@@ -138,6 +157,72 @@ export function CodexConfigConsistencyDialog({
               <div className="flex items-center gap-3 rounded-md border bg-muted/20 p-4">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 <span>{t("codexConfigConsistency.inspectingProcesses")}</span>
+              </div>
+            ) : null}
+
+            {showingStatus && refresh.preflight ? (
+              <div className="space-y-3">
+                <div className="rounded-md border bg-muted/20 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-medium">
+                      {t("codexConfigConsistency.configStatus")}
+                    </p>
+                    <span
+                      className={
+                        report?.state === "external_drift" ||
+                        report?.runtimeActivation?.state === "restart_required"
+                          ? "text-amber-600 dark:text-amber-300"
+                          : "text-emerald-600 dark:text-emerald-300"
+                      }
+                    >
+                      {report?.state === "external_drift" ||
+                      report?.runtimeActivation?.state === "restart_required"
+                        ? t("codexConfigConsistency.statusWarning")
+                        : t("codexConfigConsistency.statusReady")}
+                    </span>
+                  </div>
+                </div>
+                <div className="rounded-md border bg-muted/20 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-medium">
+                      {t("codexConfigConsistency.paginatedHistoryStatus")}
+                    </p>
+                    <span
+                      className={
+                        refresh.preflight.paginatedHistory
+                          .affectedRolloutCount > 0 ||
+                        refresh.preflight.paginatedHistory.blockedRolloutCount >
+                          0
+                          ? "text-amber-600 dark:text-amber-300"
+                          : "text-emerald-600 dark:text-emerald-300"
+                      }
+                    >
+                      {refresh.preflight.paginatedHistory.affectedRolloutCount >
+                        0 ||
+                      refresh.preflight.paginatedHistory.blockedRolloutCount > 0
+                        ? t("codexConfigConsistency.statusWarning")
+                        : t("codexConfigConsistency.statusReady")}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {refresh.preflight.paginatedHistory.affectedRolloutCount > 0
+                      ? `${t("codexConfigConsistency.paginatedHistoryFiles")} ${refresh.preflight.paginatedHistory.affectedRolloutCount} · ${t("codexConfigConsistency.duplicateOrdinals")} ${refresh.preflight.paginatedHistory.duplicateOrdinalCount}`
+                      : t("codexConfigConsistency.noPaginatedHistoryIssue")}
+                  </p>
+                </div>
+                <div className="rounded-md border bg-muted/20 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-medium">
+                      {t("codexConfigConsistency.rendererCompatibilityStatus")}
+                    </p>
+                    <span className="text-muted-foreground">
+                      {t("codexConfigConsistency.statusPending")}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {t("codexConfigConsistency.rendererIndependentHint")}
+                  </p>
+                </div>
               </div>
             ) : null}
 
@@ -218,22 +303,45 @@ export function CodexConfigConsistencyDialog({
             ) : null}
 
             {completed ? (
-              <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-emerald-800 dark:text-emerald-200">
-                {t("codexConfigConsistency.newTaskHint")}
-                {refresh.result?.forceTerminated ? (
-                  <p className="mt-2 text-xs">
-                    {t("codexConfigConsistency.forcedCloseUsed")}
+              <div className="space-y-2">
+                <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-emerald-800 dark:text-emerald-200">
+                  <p>{t("codexConfigConsistency.configApplied")}</p>
+                  <p className="mt-1 text-xs">
+                    {t("codexConfigConsistency.paginatedHistoryReady")}
                   </p>
+                </div>
+                {refresh.result?.rendererCompatibilityStatus === "warning" ? (
+                  <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-amber-800 dark:text-amber-200">
+                    <p className="font-medium">
+                      {t("codexConfigConsistency.rendererCompatibilityWarning")}
+                    </p>
+                    {refresh.result.rendererCompatibilityMessage ? (
+                      <p className="mt-1 break-words text-xs">
+                        {refresh.result.rendererCompatibilityMessage}
+                      </p>
+                    ) : null}
+                    <p className="mt-1 text-xs">
+                      {t("codexConfigConsistency.rendererIndependentHint")}
+                    </p>
+                  </div>
                 ) : null}
-                {(refresh.result?.repairedHistoryRolloutCount ?? 0) > 0 ? (
-                  <p className="mt-2 text-xs">
-                    {t("codexConfigConsistency.historyRepairCompleted")}{" "}
-                    {refresh.result?.repairedHistoryRolloutCount}
-                    {" · "}
-                    {t("codexConfigConsistency.duplicateOrdinals")}{" "}
-                    {refresh.result?.repairedHistoryDuplicateCount}
-                  </p>
-                ) : null}
+                <div className="rounded-md border bg-muted/20 p-3">
+                  {t("codexConfigConsistency.newTaskHint")}
+                  {refresh.result?.forceTerminated ? (
+                    <p className="mt-2 text-xs">
+                      {t("codexConfigConsistency.forcedCloseUsed")}
+                    </p>
+                  ) : null}
+                  {(refresh.result?.repairedHistoryRolloutCount ?? 0) > 0 ? (
+                    <p className="mt-2 text-xs">
+                      {t("codexConfigConsistency.historyRepairCompleted")}{" "}
+                      {refresh.result?.repairedHistoryRolloutCount}
+                      {" · "}
+                      {t("codexConfigConsistency.duplicateOrdinals")}{" "}
+                      {refresh.result?.repairedHistoryDuplicateCount}
+                    </p>
+                  ) : null}
+                </div>
               </div>
             ) : null}
 
@@ -255,7 +363,20 @@ export function CodexConfigConsistencyDialog({
           </div>
 
           <DialogFooter className="gap-2">
-            {confirming ? (
+            {showingStatus ? (
+              <>
+                <Button variant="outline" onClick={onCancelRefresh}>
+                  {t("codexConfigConsistency.back")}
+                </Button>
+                {refresh.preflight?.supported &&
+                refresh.preflight.canRefresh ? (
+                  <Button onClick={onInspectRefresh}>
+                    <RotateCcw className="mr-2 h-4 w-4" />
+                    {t("codexConfigConsistency.refreshCodex")}
+                  </Button>
+                ) : null}
+              </>
+            ) : confirming ? (
               <>
                 <Button variant="outline" onClick={onCancelRefresh}>
                   {t("codexConfigConsistency.cancelRefresh")}
@@ -275,15 +396,39 @@ export function CodexConfigConsistencyDialog({
                 </Button>
               </>
             ) : completed ? (
-              <Button onClick={onCancelRefresh}>
-                {t("codexConfigConsistency.finish")}
-              </Button>
+              <>
+                {refresh.result?.rendererCompatibilityStatus === "warning" &&
+                onRetryRendererCompatibility ? (
+                  <Button
+                    variant="outline"
+                    onClick={onRetryRendererCompatibility}
+                    disabled={refresh.rendererRetryPending}
+                  >
+                    {refresh.rendererRetryPending ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <RotateCcw className="mr-2 h-4 w-4" />
+                    )}
+                    {t("codexConfigConsistency.retryRendererCompatibility")}
+                  </Button>
+                ) : null}
+                <Button onClick={onCancelRefresh}>
+                  {t("codexConfigConsistency.finish")}
+                </Button>
+              </>
             ) : null}
           </DialogFooter>
         </DialogContent>
       </Dialog>
     );
   }
+
+  if (!report) return null;
+  const runtimeRestartRequired =
+    report.runtimeActivation?.state === "restart_required";
+  const externalDrift = report.state === "external_drift";
+  const takeoverProjectionDrift = report.reason === "takeover_projection_drift";
+  if (!externalDrift && !runtimeRestartRequired) return null;
 
   if (!externalDrift && runtimeRestartRequired) {
     return (
