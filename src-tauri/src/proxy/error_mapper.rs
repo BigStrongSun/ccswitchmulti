@@ -70,7 +70,11 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
 pub fn get_error_message(error: &ProxyError) -> String {
     match error {
         ProxyError::UpstreamError { status, body } => {
-            if let Some(body) = body {
+            if let Some(body) = body
+                .as_deref()
+                .map(str::trim)
+                .filter(|body| !body.is_empty())
+            {
                 format!("上游错误 ({status}): {body}")
             } else {
                 format!("上游错误 ({status})")
@@ -162,5 +166,15 @@ mod tests {
         assert!(msg.contains("上游错误"));
         assert!(msg.contains("500"));
         assert!(msg.contains("Internal Server Error"));
+    }
+
+    #[test]
+    fn empty_upstream_error_body_does_not_render_a_dangling_cause_separator() {
+        for body in [Some(String::new()), Some("   ".to_string()), None] {
+            assert_eq!(
+                get_error_message(&ProxyError::UpstreamError { status: 502, body }),
+                "上游错误 (502)"
+            );
+        }
     }
 }

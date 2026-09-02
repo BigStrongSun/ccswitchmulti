@@ -50,6 +50,32 @@ pub struct VolcengineModelListRequest<'a> {
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Option<Vec<ModelEntry>>,
+    #[serde(default)]
+    msg: Option<String>,
+    #[serde(default)]
+    error: Option<ModelFetchError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelFetchError {
+    #[serde(default)]
+    message: Option<String>,
+}
+
+impl ModelsResponse {
+    fn error_message(&self) -> Option<&str> {
+        self.msg
+            .as_deref()
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .or_else(|| {
+                self.error
+                    .as_ref()
+                    .and_then(|error| error.message.as_deref())
+                    .map(str::trim)
+                    .filter(|message| !message.is_empty())
+            })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +111,7 @@ const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
     "/api/anthropic",
     "/apps/anthropic",
     "/api/coding",
+    "/api/v1",
     "/claudecode",
     "/anthropic",
     "/step_plan",
@@ -208,23 +235,8 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
         let status = response.status();
 
         if status.is_success() {
-            let resp: ModelsResponse = response
-                .json()
-                .await
-                .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-            let mut models: Vec<FetchedModel> = resp
-                .data
-                .unwrap_or_default()
-                .into_iter()
-                .map(|m| FetchedModel {
-                    context_window: extract_context_window(&m.extra),
-                    id: m.id,
-                    input_modalities: extract_input_modalities(&m.extra),
-                    owned_by: m.owned_by,
-                    supports_image: extract_supports_image(&m.extra),
-                })
-                .collect();
+            let body = response.text().await.unwrap_or_default();
+            let mut models = parse_models_response(&body, &log_secrets)?;
 
             enrich_missing_context_windows(&client, url, &mut models).await;
             models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -232,12 +244,16 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
         }
 
         if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
-            let body = truncate_body(response.text().await.unwrap_or_default());
+            let body = redact_model_fetch_error_body(
+                response.text().await.unwrap_or_default(),
+                &log_secrets,
+            );
             last_err = Some(format!("HTTP {status}: {body}"));
             continue;
         }
 
-        let body = truncate_body(response.text().await.unwrap_or_default());
+        let body =
+            redact_model_fetch_error_body(response.text().await.unwrap_or_default(), &log_secrets);
         return Err(format!("HTTP {status}: {body}"));
     }
 
@@ -245,6 +261,36 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
         "All candidates failed: {}",
         last_err.unwrap_or_else(|| "no candidates".to_string())
     ))
+}
+
+fn parse_models_response(
+    body: &str,
+    known_secrets: &[String],
+) -> Result<Vec<FetchedModel>, String> {
+    let response: ModelsResponse =
+        serde_json::from_str(body).map_err(|error| format!("Failed to parse response: {error}"))?;
+    let Some(entries) = response.data else {
+        let detail = response
+            .error_message()
+            .map(|message| crate::redact_known_secrets(message, known_secrets))
+            .unwrap_or_else(|| redact_model_fetch_error_body(body.to_string(), known_secrets));
+        return Err(format!("Model fetch failed: {detail}"));
+    };
+
+    Ok(entries
+        .into_iter()
+        .map(|entry| FetchedModel {
+            context_window: extract_context_window(&entry.extra),
+            id: entry.id,
+            input_modalities: extract_input_modalities(&entry.extra),
+            owned_by: entry.owned_by,
+            supports_image: extract_supports_image(&entry.extra),
+        })
+        .collect())
+}
+
+fn redact_model_fetch_error_body(body: String, known_secrets: &[String]) -> String {
+    truncate_body(crate::redact_known_secrets(&body, known_secrets))
 }
 
 /// 构造「模型列表端点」的候选 URL 列表
@@ -1100,6 +1146,20 @@ mod tests {
     }
 
     #[test]
+    fn test_candidates_zhipu_native_responses_strip_api_v1_for_model_discovery() {
+        let candidates =
+            build_models_url_candidates("https://open.bigmodel.cn/api/v1", false, None).unwrap();
+        assert_eq!(
+            candidates,
+            vec![
+                "https://open.bigmodel.cn/api/v1/models",
+                "https://open.bigmodel.cn/v1/models",
+                "https://open.bigmodel.cn/models",
+            ]
+        );
+    }
+
+    #[test]
     fn test_ends_with_version_segment() {
         assert!(ends_with_version_segment("https://x.com/v1"));
         assert!(ends_with_version_segment(
@@ -1283,6 +1343,34 @@ mod tests {
         let data = resp.data.unwrap();
         assert_eq!(data[0].id, "my-model");
         assert!(data[0].owned_by.is_none());
+    }
+
+    #[test]
+    fn parse_models_response_rejects_and_redacts_http_200_error_envelopes() {
+        let secret = "sk-test-secret-1234567890";
+        let body =
+            format!(r#"{{"code":1001,"msg":"Invalid Authorization: {secret}","success":false}}"#);
+
+        let error = parse_models_response(&body, &[secret.to_string()])
+            .expect_err("a 2xx provider error envelope is not an empty model list");
+
+        assert!(error.contains("Invalid Authorization"));
+        assert!(!error.contains(secret));
+    }
+
+    #[test]
+    fn parse_models_response_keeps_model_metadata_on_the_success_path() {
+        let models = parse_models_response(
+            r#"{"object":"list","data":[{"id":"glm-5.2","owned_by":"zhipu","context_window":200000,"input_modalities":["text"]}]}"#,
+            &[],
+        )
+        .expect("parse a valid OpenAI-compatible model list");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "glm-5.2");
+        assert_eq!(models[0].owned_by.as_deref(), Some("zhipu"));
+        assert_eq!(models[0].context_window, Some(200_000));
+        assert_eq!(models[0].input_modalities, Some(vec!["text".to_string()]));
     }
 
     #[test]

@@ -75,10 +75,12 @@ pub(crate) fn is_confirmed_text_only_model(model: &str) -> bool {
         "deepseek-reasoner",
         "deepseek-v4-flash",
         "deepseek-v4-pro",
+        "glm-5",
         "glm-5.1",
         // Exact rather than prefix matching: GLM visual models use a `v`
         // suffix (for example glm-5.2v), which must remain image-capable.
         "glm-5.2",
+        "glm-5.3",
         "kat-coder",
         "kat-coder-pro",
         "kat-coder-pro v1",
@@ -224,6 +226,23 @@ mod tests {
         assert!(is_confirmed_text_only_model("MiniMax-M2.7-Highspeed"));
         assert!(is_confirmed_text_only_model("step-3.5-flash-2603"));
         assert!(!is_confirmed_text_only_model("glm-5.2v"));
+    }
+
+    #[test]
+    fn glm_five_text_models_do_not_advertise_vision_variants_as_text_only() {
+        for model in ["glm-5", "glm-5.1", "glm-5.2", "glm-5.3"] {
+            assert!(
+                is_confirmed_text_only_model(model),
+                "confirmed text model {model} must not advertise image input"
+            );
+        }
+
+        for model in ["glm-5v-turbo", "glm-5.2v", "glm-5.3v"] {
+            assert!(
+                !is_confirmed_text_only_model(model),
+                "vision-shaped model {model} must remain eligible for image input"
+            );
+        }
     }
 
     #[test]

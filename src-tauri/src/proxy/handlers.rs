@@ -43,7 +43,8 @@ use super::{
             StreamReconnector,
         },
         transform, transform_codex_anthropic, transform_codex_chat,
-        transform_codex_responses_namespace, transform_gemini, transform_responses,
+        transform_codex_responses_namespace, transform_codex_responses_xai_sanitize,
+        transform_gemini, transform_responses,
     },
     response_processor::{
         create_logged_passthrough_stream, create_usage_collector, process_response,
@@ -3036,19 +3037,17 @@ async fn handle_responses_for_app(
         .await;
     }
 
-    // Native Responses passthrough to a strict gateway (xAI): the request-side
-    // flatten (in the forwarder) turned Codex `namespace` tools into flat
-    // function tools, so the upstream returns flat function-call names. Restore
-    // them to `{name, namespace}` so the Codex client matches them against its
-    // namespaced tool registry.
-    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
-        && !namespace_restore_map.is_empty()
-    {
-        return handle_codex_responses_namespace_restore(
+    // xAI native Responses accepts namespace/custom tools only after they are
+    // projected to ordinary functions. Always run the inverse on this provider,
+    // even when the request had no namespace: custom tool calls still need their
+    // event and item semantics restored for Codex.
+    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider) {
+        return handle_codex_xai_native_responses_rewrite(
             response,
             &ctx,
             &state,
             connection_guard,
+            codex_tool_context,
             namespace_restore_map,
         )
         .await;
@@ -3242,14 +3241,13 @@ async fn handle_responses_compact_for_app(
         .await;
     }
 
-    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
-        && !namespace_restore_map.is_empty()
-    {
-        return handle_codex_responses_namespace_restore(
+    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider) {
+        return handle_codex_xai_native_responses_rewrite(
             response,
             &ctx,
             &state,
             connection_guard,
+            codex_tool_context,
             namespace_restore_map,
         )
         .await;
@@ -3273,17 +3271,16 @@ async fn handle_responses_compact_for_app(
     .await
 }
 
-/// Response handler for the native Responses passthrough to a strict gateway
-/// (xAI), restoring the flattened `function_call` names produced by the
-/// request-side namespace flatten. Success bodies only carry a light rename;
-/// error bodies and everything unrelated pass through unchanged. Usage is
-/// collected exactly as `process_response` would (same `CODEX_PARSER_CONFIG`).
-async fn handle_codex_responses_namespace_restore(
+/// Response handler for xAI native Responses, restoring namespace identities
+/// and custom-tool semantics projected on the request side. Error bodies pass
+/// through unchanged. Usage is collected exactly as `process_response` would.
+async fn handle_codex_xai_native_responses_rewrite(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
     state: &ProxyState,
     connection_guard: Option<ActiveConnectionGuard>,
-    restore_map: std::collections::HashMap<
+    tool_context: transform_codex_chat::CodexToolContext,
+    namespace_map: std::collections::HashMap<
         String,
         transform_codex_responses_namespace::NamespacedName,
     >,
@@ -3308,9 +3305,10 @@ async fn handle_codex_responses_namespace_restore(
         }
 
         let restore_stream =
-            transform_codex_responses_namespace::create_namespace_restore_sse_stream(
+            transform_codex_responses_xai_sanitize::create_xai_native_responses_sse_stream(
                 response.bytes_stream(),
-                restore_map,
+                tool_context,
+                namespace_map,
             );
         let usage_collector =
             create_usage_collector(ctx, state, status.as_u16(), &CODEX_PARSER_CONFIG);
@@ -3324,7 +3322,7 @@ async fn handle_codex_responses_namespace_restore(
 
         let body = axum::body::Body::from_stream(logged_stream);
         return builder.body(body).map_err(|e| {
-            log::error!("[{}] 构建 namespace 还原流式响应失败: {e}", ctx.tag);
+            log::error!("[{}] 构建 xAI Responses 兼容流失败: {e}", ctx.tag);
             ProxyError::Internal(format!("Failed to build streaming response: {e}"))
         });
     }
@@ -3347,9 +3345,10 @@ async fn handle_codex_responses_namespace_restore(
     // this only guards against a malformed upstream).
     let restored_bytes = match serde_json::from_slice::<Value>(&body_bytes) {
         Ok(mut value) => {
-            transform_codex_responses_namespace::restore_response_namespaces(
+            transform_codex_responses_xai_sanitize::rewrite_xai_native_response_value(
                 &mut value,
-                &restore_map,
+                &tool_context,
+                &namespace_map,
             );
             if let Some(usage) =
                 TokenUsage::from_codex_response_auto(&value).filter(TokenUsage::has_billable_tokens)

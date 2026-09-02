@@ -9,7 +9,10 @@ use super::codex_chat_common::{
     response_function_call_item, response_function_call_item_with_namespace,
     split_leading_think_block,
 };
-use super::codex_terminal::{classify_chat_terminal, ChatTerminalEvidence, TerminalDisposition};
+use super::codex_terminal::{
+    chat_tool_arguments_are_complete, classify_chat_terminal, ChatTerminalEvidence,
+    TerminalDisposition,
+};
 use super::hosted_tools::{
     image_generation::{self, HostedImageGenerationConfig, IMAGE_GENERATION_FUNCTION_NAME},
     web_search::{self, HostedWebSearchConfig},
@@ -141,23 +144,33 @@ pub(crate) fn normalize_replayed_item_ids_for_openai(body: &mut Value) -> usize 
             continue;
         }
 
-        let Some(required_prefix) =
-            item.get("type")
-                .and_then(Value::as_str)
-                .and_then(|item_type| match item_type {
-                    "message" => Some("msg_"),
-                    "function_call" => Some("fc_"),
-                    "custom_tool_call" => Some("ctc_"),
-                    "web_search_call" => Some("ws_"),
-                    _ => None,
-                })
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(required_prefix) = (match item_type {
+            "message" => Some("msg_"),
+            "function_call" => Some("fc_"),
+            "custom_tool_call" => Some("ctc_"),
+            "web_search_call" => Some("ws_"),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let Some(id) = item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
         else {
             continue;
         };
-        let Some(id) = item.get("id").and_then(Value::as_str) else {
-            continue;
-        };
         if id.starts_with(required_prefix) {
+            continue;
+        }
+        if item_type == "message" {
+            if let Some(object) = item.as_object_mut() {
+                object.remove("id");
+                changed += 1;
+            }
             continue;
         }
         item["id"] = json!(format!(
@@ -1216,6 +1229,78 @@ fn append_responses_input_as_chat_messages(
         &mut pending.reasoning,
     );
     backfill_tool_call_reasoning_placeholders(messages);
+    validate_chat_tool_history(messages)?;
+    Ok(())
+}
+
+fn validate_chat_tool_history(messages: &[Value]) -> Result<(), ProxyError> {
+    let mut awaiting_outputs = HashSet::new();
+
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if role == "tool" {
+            let call_id = message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProxyError::TransformError(
+                        "tool output history is incomplete: tool_call_id is missing".to_string(),
+                    )
+                })?;
+            if !awaiting_outputs.remove(call_id) {
+                return Err(ProxyError::TransformError(format!(
+                    "tool output history is incomplete: orphan tool output call_id={call_id}"
+                )));
+            }
+            continue;
+        }
+
+        if !awaiting_outputs.is_empty() {
+            let mut call_ids = awaiting_outputs.into_iter().collect::<Vec<_>>();
+            call_ids.sort_unstable();
+            return Err(ProxyError::TransformError(format!(
+                "tool output history is incomplete before role={role}: missing outputs for {}",
+                call_ids.join(",")
+            )));
+        }
+
+        if role != "assistant" {
+            continue;
+        }
+        let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for tool_call in tool_calls {
+            let call_id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProxyError::TransformError(
+                        "tool output history is incomplete: assistant tool call id is missing"
+                            .to_string(),
+                    )
+                })?;
+            if !awaiting_outputs.insert(call_id) {
+                return Err(ProxyError::TransformError(format!(
+                    "tool output history is incomplete: duplicate assistant tool call id={call_id}"
+                )));
+            }
+        }
+    }
+
+    if !awaiting_outputs.is_empty() {
+        let mut call_ids = awaiting_outputs.into_iter().collect::<Vec<_>>();
+        call_ids.sort_unstable();
+        return Err(ProxyError::TransformError(format!(
+            "tool output history is incomplete: missing outputs for {}",
+            call_ids.join(",")
+        )));
+    }
     Ok(())
 }
 
@@ -1442,16 +1527,6 @@ fn append_responses_item_as_chat_message(
                 );
                 update_last_assistant_index(messages, &message, &mut pending.last_assistant_index);
                 messages.push(message);
-            } else if pending.media.is_empty() {
-                // Preserve legacy no-media ordering: inert message-like items
-                // used to close a pending tool-call batch.
-                flush_pending_tool_calls(
-                    messages,
-                    &mut pending.tool_calls,
-                    &mut pending.media,
-                    &mut pending.reasoning,
-                    &mut pending.last_assistant_index,
-                );
             }
         }
         Some("compaction") => {
@@ -1496,16 +1571,6 @@ fn append_responses_item_as_chat_message(
                 );
                 update_last_assistant_index(messages, &message, &mut pending.last_assistant_index);
                 messages.push(message);
-            } else if pending.media.is_empty() {
-                // Preserve legacy no-media ordering without letting an inert
-                // unknown item flush a media-bearing result batch.
-                flush_pending_tool_calls(
-                    messages,
-                    &mut pending.tool_calls,
-                    &mut pending.media,
-                    &mut pending.reasoning,
-                    &mut pending.last_assistant_index,
-                );
             }
         }
     }
@@ -2464,15 +2529,15 @@ fn chat_tool_calls_to_response_output_items(
             let function = tool_call.get("function").unwrap_or(&Value::Null);
             let name = function.get("name").and_then(|v| v.as_str()).unwrap_or("");
             // 纯空白名同样对应不到任何已发布工具，与空名同等对待。
-            if name.trim().is_empty() {
+            let arguments = function.get("arguments");
+            if name.trim().is_empty() || !chat_tool_arguments_are_complete(arguments) {
                 dropped += 1;
                 // 只记结构信息，不记 arguments 内容（可能包含用户代码）。
                 let call_id_empty = tool_call
                     .get("id")
                     .and_then(|v| v.as_str())
                     .is_none_or(str::is_empty);
-                let args_bytes = function
-                    .get("arguments")
+                let args_bytes = arguments
                     .and_then(|v| v.as_str())
                     .map(str::len)
                     .unwrap_or(0);
@@ -2552,10 +2617,10 @@ fn chat_legacy_function_call_to_response_item(
     // Skip legacy function calls with missing names (defensive: some models
     // may generate function_call without providing a valid name)。
     // 纯空白名同样对应不到任何已发布工具，与空名同等对待。
-    if name.trim().is_empty() {
+    let arguments = function_call.get("arguments");
+    if name.trim().is_empty() || !chat_tool_arguments_are_complete(arguments) {
         // 只记结构信息，不记 arguments 内容（可能包含用户代码）。
-        let args_bytes = function_call
-            .get("arguments")
+        let args_bytes = arguments
             .and_then(|v| v.as_str())
             .map(str::len)
             .unwrap_or(0);
@@ -3153,6 +3218,11 @@ mod tests {
                     "call_id": "call_1",
                     "name": "lookup",
                     "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "lookup complete"
                 }
             ],
             "tools": [{
@@ -3903,13 +3973,20 @@ mod tests {
                 "description": "Apply a patch to files."
             }],
             "tool_choice": {"type": "custom", "name": "apply_patch"},
-            "input": [{
-                "type": "custom_tool_call",
-                "id": "ctc_1",
-                "call_id": "call_patch",
-                "name": "apply_patch",
-                "input": "*** Begin Patch\n*** End Patch"
-            }]
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_patch",
+                    "output": "patched"
+                }
+            ]
         });
 
         let result = responses_to_chat_completions(input).unwrap();
@@ -4704,6 +4781,11 @@ mod tests {
                     "call_id": "call_1",
                     "name": "lookup",
                     "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "lookup complete"
                 }
             ]
         });
@@ -5033,6 +5115,68 @@ mod tests {
     }
 
     #[test]
+    fn responses_request_to_chat_deduplicates_identical_trailing_reasoning() {
+        let input = json!({
+            "model": "deepseek-v4-pro",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "reasoning_content": "Inspect the repository.",
+                    "content": "I will inspect it now."
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [
+                        {"type": "summary_text", "text": "Inspect the repository."}
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Continue"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["reasoning_content"], "Inspect the repository.");
+    }
+
+    #[test]
+    fn responses_request_to_chat_replaces_tool_call_reasoning_placeholder() {
+        let input = json!({
+            "model": "kimi-k3",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "reasoning_content": "tool call",
+                    "content": "I will inspect it now."
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [
+                        {"type": "summary_text", "text": "Inspect the repository."}
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Continue"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["reasoning_content"], "Inspect the repository.");
+    }
+
+    #[test]
     fn responses_request_to_chat_attaches_reasoning_to_tool_call_message() {
         let input = json!({
             "model": "gpt-5.4",
@@ -5155,50 +5299,66 @@ mod tests {
     fn responses_request_to_chat_converts_all_structured_custom_tool_modalities() {
         let input = json!({
             "model": "vision-model",
-            "input": [{
-                "type": "custom_tool_call_output",
-                "call_id": "custom_1",
-                "output": [
-                    {"type":"input_text","text":"inspection complete"},
-                    {"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"high"},
-                    {"type":"input_audio","audio_url":"data:audio/wav;base64,QVVESU8="},
-                    {"type":"encrypted_content","encrypted_content":"opaque-secret"},
-                    {"type":"future_binary","data":"SHOULD_NOT_LEAK"}
-                ]
-            }]
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "custom_1",
+                    "name": "inspect_media",
+                    "input": "inspect"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "custom_1",
+                    "output": [
+                        {"type":"input_text","text":"inspection complete"},
+                        {"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"high"},
+                        {"type":"input_audio","audio_url":"data:audio/wav;base64,QVVESU8="},
+                        {"type":"encrypted_content","encrypted_content":"opaque-secret"},
+                        {"type":"future_binary","data":"SHOULD_NOT_LEAK"}
+                    ]
+                }
+            ]
         });
 
         let result = responses_to_chat_completions(input).unwrap();
         let messages = result["messages"].as_array().unwrap();
-        let tool_text = messages[0]["content"].as_str().unwrap();
+        let tool_text = messages[1]["content"].as_str().unwrap();
         assert!(tool_text.contains("inspection complete"));
         assert!(tool_text.contains("encrypted content"));
         assert!(tool_text.contains("unsupported structured"));
         assert!(!tool_text.contains("opaque-secret"));
         assert!(!tool_text.contains("SHOULD_NOT_LEAK"));
-        assert_eq!(messages[1]["content"][1]["image_url"]["detail"], "high");
-        assert_eq!(messages[1]["content"][2]["input_audio"]["format"], "wav");
-        assert_eq!(messages[1]["content"][2]["input_audio"]["data"], "QVVESU8=");
+        assert_eq!(messages[2]["content"][1]["image_url"]["detail"], "high");
+        assert_eq!(messages[2]["content"][2]["input_audio"]["format"], "wav");
+        assert_eq!(messages[2]["content"][2]["input_audio"]["data"], "QVVESU8=");
     }
 
     #[test]
     fn responses_request_to_chat_bounds_tool_modalities_for_text_only_models() {
         let input = json!({
             "model": "deepseek-v4-pro",
-            "input": [{
-                "type": "function_call_output",
-                "call_id": "call_1",
-                "output": [
-                    {"type":"input_image","image_url":"data:image/png;base64,VERY_LARGE_IMAGE"},
-                    {"type":"input_audio","audio_url":"data:audio/wav;base64,VERY_LARGE_AUDIO"}
-                ]
-            }]
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "inspect_media",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [
+                        {"type":"input_image","image_url":"data:image/png;base64,VERY_LARGE_IMAGE"},
+                        {"type":"input_audio","audio_url":"data:audio/wav;base64,VERY_LARGE_AUDIO"}
+                    ]
+                }
+            ]
         });
 
         let result = responses_to_chat_completions(input).unwrap();
         let messages = result["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1);
-        let content = messages[0]["content"].as_str().unwrap();
+        assert_eq!(messages.len(), 2);
+        let content = messages[1]["content"].as_str().unwrap();
         assert!(content.contains("omitted for text-only model"));
         assert!(!content.contains("VERY_LARGE"));
     }
@@ -5445,6 +5605,132 @@ mod tests {
         assert_eq!(messages[0]["reasoning_content"], "need to update the file");
         assert_eq!(messages[1]["role"], "tool");
         assert_eq!(messages[1]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn chat_response_round_trip_keeps_text_and_tool_call_in_one_assistant_turn() {
+        let chat_response = json!({
+            "id": "chatcmpl_round_trip",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "Inspect the repository before editing.",
+                    "content": "I will inspect the repository now.",
+                    "tool_calls": [{
+                        "id": "call_round_trip",
+                        "type": "function",
+                        "function": {
+                            "name": "list_files",
+                            "arguments": "{\"path\":\"src\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let responses = chat_completion_to_response(chat_response).unwrap();
+        let mut replay_input = responses["output"]
+            .as_array()
+            .expect("response output")
+            .clone();
+        replay_input.push(json!({
+            "type": "function_call_output",
+            "call_id": "call_round_trip",
+            "output": "src/lib.rs"
+        }));
+        let replay = json!({
+            "model": "deepseek-v4-pro",
+            "input": replay_input
+        });
+
+        let result = responses_to_chat_completions(replay).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "I will inspect the repository now.");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_round_trip");
+        assert_eq!(
+            messages[0]["reasoning_content"],
+            "Inspect the repository before editing."
+        );
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call_round_trip");
+    }
+
+    #[test]
+    fn responses_request_to_chat_never_merges_tool_call_across_user_boundary() {
+        let input = json!({
+            "model": "qwen3.8",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "The previous turn is complete."
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Inspect the new file."
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "Need a fresh tool turn."}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_after_user",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"src/main.rs\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_after_user",
+                    "output": "file contents"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(
+            message_roles(&result),
+            vec!["assistant", "user", "assistant", "tool"]
+        );
+        assert!(messages[0].get("tool_calls").is_none());
+        assert_eq!(messages[0]["content"], "The previous turn is complete.");
+        assert_eq!(messages[1]["content"], "Inspect the new file.");
+        assert!(messages[2]["content"].is_null());
+        assert_eq!(messages[2]["tool_calls"][0]["id"], "call_after_user");
+        assert_eq!(messages[2]["reasoning_content"], "Need a fresh tool turn.");
+    }
+
+    #[test]
+    fn responses_request_to_chat_rejects_orphan_tool_outputs_before_upstream() {
+        for (item_type, call_id) in [
+            ("function_call_output", "call_function"),
+            ("custom_tool_call_output", "call_custom"),
+            ("tool_search_output", "call_search"),
+        ] {
+            let input = json!({
+                "model": "deepseek-v4-flash",
+                "input": [{
+                    "type": item_type,
+                    "call_id": call_id,
+                    "output": "ok"
+                }]
+            });
+
+            let error = responses_to_chat_completions(input)
+                .expect_err("an orphan tool result must not reach a Chat upstream");
+            let message = error.to_string();
+            assert!(message.contains("tool output history is incomplete"));
+            assert!(message.contains(call_id));
+        }
     }
 
     #[test]
@@ -6125,13 +6411,29 @@ mod tests {
             }),
         ] {
             let expected = canonical_json_string(&item);
-            let result = convert_test_input(vec![item]);
-            assert_eq!(result["messages"][0]["content"], expected);
+            let call_id = item["call_id"].as_str().unwrap();
+            let call = if item["type"] == "custom_tool_call_output" {
+                json!({
+                    "type": "custom_tool_call",
+                    "call_id": call_id,
+                    "name": "render",
+                    "input": "render"
+                })
+            } else {
+                json!({
+                    "type": "tool_search_call",
+                    "call_id": call_id,
+                    "status": "completed",
+                    "arguments": {"query": "tools"}
+                })
+            };
+            let result = convert_test_input(vec![call, item]);
+            assert_eq!(result["messages"][1]["content"], expected);
         }
     }
 
     #[test]
-    fn responses_request_to_chat_preserves_legacy_unknown_item_batch_boundary_without_media() {
+    fn responses_request_to_chat_keeps_inert_unknown_items_inside_parallel_tool_batch() {
         let result = convert_test_input(vec![
             test_function_call("call_1"),
             json!({"type": "future_metadata", "value": 1}),
@@ -6145,16 +6447,11 @@ mod tests {
         ]);
         let messages = result_messages(&result);
 
-        assert_eq!(
-            message_roles(&result),
-            vec!["assistant", "assistant", "tool", "tool"]
-        );
-        assert_eq!(messages[0]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(message_roles(&result), vec!["assistant", "tool", "tool"]);
+        assert_eq!(messages[0]["tool_calls"].as_array().unwrap().len(), 2);
         assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
-        assert_eq!(messages[0]["reasoning_content"], "tool call");
-        assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 1);
-        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_2");
-        assert_eq!(messages[1]["reasoning_content"], "second batch reasoning");
+        assert_eq!(messages[0]["tool_calls"][1]["id"], "call_2");
+        assert_eq!(messages[0]["reasoning_content"], "second batch reasoning");
     }
 
     #[test]
@@ -6267,7 +6564,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_request_normalizes_noncanonical_replayed_message_ids() {
+    fn openai_request_drops_noncanonical_replayed_message_ids() {
         let mut body = json!({
             "model": "gpt-5.6-sol",
             "input": [
@@ -6289,9 +6586,7 @@ mod tests {
         });
 
         assert_eq!(normalize_replayed_item_ids_for_openai(&mut body), 1);
-        assert!(body["input"][0]["id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("msg_")));
+        assert!(body["input"][0].get("id").is_none());
         assert_eq!(body["input"][1]["id"], "msg_official_unchanged");
     }
 
@@ -6902,6 +7197,38 @@ mod tests {
     }
 
     #[test]
+    fn chat_response_terminal_malformed_tool_arguments_is_an_error() {
+        let chat = json!({
+            "id": "chatcmpl_malformed_tool",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_partial",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": "{"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
+            .unwrap_err();
+
+        assert!(matches!(err, ProxyError::TransformError(_)));
+        assert!(err.to_string().contains("tool call"));
+        assert!(!err.to_string().contains("raw_arguments"));
+    }
+
+    #[test]
     fn chat_response_terminal_reasoning_only_stop_is_an_error() {
         let chat = json!({
             "id": "chatcmpl_reasoning_only",
@@ -7347,23 +7674,31 @@ mod tests {
         let input = json!({
             "model": "gpt-5.4",
             "tool_choice": "auto",
-            "input": [{
-                "type": "tool_search_output",
-                "call_id": "call_ts_1",
-                "status": "completed",
-                "execution": "client",
-                "tools": [{
-                    "type": "function",
-                    "name": "search_docs",
-                    "description": "Search documentation.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string"}
+            "input": [
+                {
+                    "type": "tool_search_call",
+                    "call_id": "call_ts_1",
+                    "status": "completed",
+                    "arguments": {"query": "search tools"}
+                },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_ts_1",
+                    "status": "completed",
+                    "execution": "client",
+                    "tools": [{
+                        "type": "function",
+                        "name": "search_docs",
+                        "description": "Search documentation.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"}
+                            }
                         }
-                    }
-                }]
-            }]
+                    }]
+                }
+            ]
         });
 
         let result = responses_to_chat_completions(input).unwrap();

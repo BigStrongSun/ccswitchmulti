@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 ///
 pub(crate) fn project_codex_agent_messages_for_third_party(
     body: &mut Value,
+    managed_plaintext_policy: bool,
 ) -> Result<usize, ProxyError> {
     let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
         return Ok(0);
@@ -30,7 +31,10 @@ pub(crate) fn project_codex_agent_messages_for_third_party(
                         .get("encrypted_content")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    if looks_like_codex_opaque_encrypted_content(encrypted_content) {
+                    if looks_like_codex_fernet_content(encrypted_content)
+                        || (!managed_plaintext_policy
+                            && looks_like_codex_opaque_encrypted_content(encrypted_content))
+                    {
                         return Err(opaque_agent_payload_error());
                     }
                     if !encrypted_content.is_empty() {
@@ -83,9 +87,13 @@ pub(crate) fn looks_like_codex_opaque_encrypted_content(value: &str) -> bool {
     })
 }
 
+fn looks_like_codex_fernet_content(value: &str) -> bool {
+    value.starts_with("gAAAAA") && looks_like_codex_opaque_encrypted_content(value)
+}
+
 fn opaque_agent_payload_error() -> ProxyError {
     ProxyError::InvalidRequest(
-        "third-party child cannot read encrypted Codex agent payload; use a mixed-router non-reserved agents namespace so the official parent emits plaintext"
+        "third-party child cannot read opaque Codex agent payload; the parent turn did not use the managed agents.* plaintext schema or the task predates it; refresh the mixed-router configuration and start a new task"
             .to_string(),
     )
 }
@@ -121,7 +129,7 @@ mod tests {
             ]
         });
 
-        let changed = project_codex_agent_messages_for_third_party(&mut request).unwrap();
+        let changed = project_codex_agent_messages_for_third_party(&mut request, false).unwrap();
 
         assert_eq!(changed, 1);
         assert_eq!(request["input"][0]["role"], "developer");
@@ -149,7 +157,7 @@ mod tests {
             }]
         });
 
-        let changed = project_codex_agent_messages_for_third_party(&mut request).unwrap();
+        let changed = project_codex_agent_messages_for_third_party(&mut request, false).unwrap();
 
         assert_eq!(changed, 1);
         assert_eq!(request["input"][0]["type"], "message");
@@ -184,12 +192,77 @@ mod tests {
             }]
         });
 
-        let error = project_codex_agent_messages_for_third_party(&mut request)
+        let error = project_codex_agent_messages_for_third_party(&mut request, false)
             .expect_err("opaque OpenAI task content must fail closed");
         let message = error.to_string();
 
-        assert!(message.contains("third-party child cannot read encrypted Codex agent payload"));
+        assert!(message.contains("third-party child cannot read opaque Codex agent payload"));
         assert!(!message.contains(&opaque));
+    }
+
+    #[test]
+    fn managed_plaintext_policy_accepts_base64_like_task_payload() {
+        let base64_task = base64::engine::general_purpose::STANDARD.encode([42_u8; 48]);
+        assert!(looks_like_codex_opaque_encrypted_content(&base64_task));
+        let mut request = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/qwen",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Message Type: NEW_TASK\nTask name: /root/qwen\nSender: /root\nPayload:\n"
+                    },
+                    {"type": "encrypted_content", "encrypted_content": base64_task}
+                ]
+            }]
+        });
+
+        let changed = project_codex_agent_messages_for_third_party(
+            &mut request,
+            /* managed_plaintext_policy */ true,
+        )
+        .expect("the managed mixed-router path already proved the payload is plaintext");
+
+        assert_eq!(changed, 1);
+        assert_eq!(
+            request["input"][0]["content"][1],
+            json!({"type": "input_text", "text": base64_task})
+        );
+    }
+
+    #[test]
+    fn managed_plaintext_policy_still_rejects_known_fernet_ciphertext() {
+        let mut fernet_token = vec![0_u8; 96];
+        fernet_token[0] = 0x80;
+        let opaque = URL_SAFE_NO_PAD.encode(fernet_token);
+        assert!(opaque.starts_with("gAAAAA"));
+        let mut request = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/qwen",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Message Type: NEW_TASK\nTask name: /root/qwen\nSender: /root\nPayload:\n"
+                    },
+                    {"type": "encrypted_content", "encrypted_content": opaque}
+                ]
+            }]
+        });
+
+        let error = project_codex_agent_messages_for_third_party(
+            &mut request,
+            /* managed_plaintext_policy */ true,
+        )
+        .expect_err("a known Fernet token remains unreadable even on the managed agents path");
+
+        assert!(error
+            .to_string()
+            .contains("third-party child cannot read opaque Codex agent payload"));
+        assert!(!error.to_string().contains(&opaque));
     }
 
     #[test]
@@ -205,7 +278,7 @@ mod tests {
             }]
         });
 
-        project_codex_agent_messages_for_third_party(&mut request).unwrap();
+        project_codex_agent_messages_for_third_party(&mut request, false).unwrap();
         let chat = super::super::transform_codex_chat::responses_to_chat_completions(request)
             .expect("projected request should convert to Chat");
 

@@ -406,7 +406,23 @@ impl RequestForwarder {
         }
         let Some(target_provider_id) = super::providers::codex_route_target_provider_id(provider)
         else {
-            return Ok(provider.clone());
+            let mut effective_provider = provider.clone();
+            let public_model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mut mapped_body = body.clone();
+            let upstream_model =
+                super::providers::apply_codex_upstream_model(provider, &mut mapped_body)
+                    .unwrap_or_else(|| public_model.to_string());
+            super::providers::apply_detected_codex_transport_to_effective_provider(
+                &mut effective_provider,
+                public_model,
+                &upstream_model,
+                self.router.database(),
+                chrono::Utc::now().timestamp(),
+            );
+            return Ok(effective_provider);
         };
         let target_provider = self
             .router
@@ -2259,17 +2275,17 @@ impl RequestForwarder {
         // 与 CCH 对齐：请求前不做 thinking 主动改写（仅保留兼容入口）
         let mut mapped_body = normalize_thinking_type(mapped_body);
 
-        if should_project_codex_agent_messages_for_provider(app_type, provider, endpoint) {
-            let projected =
-                super::providers::codex_multi_agent::project_codex_agent_messages_for_third_party(
-                    &mut mapped_body,
-                )?;
-            if projected > 0 {
-                log::debug!(
-                    "[CodexRouter] Projected {projected} plaintext agent message(s) for third-party provider={} route",
-                    provider.id
-                );
-            }
+        let projected = project_codex_agent_messages_for_effective_provider(
+            app_type,
+            provider,
+            endpoint,
+            &mut mapped_body,
+        )?;
+        if projected > 0 {
+            log::debug!(
+                "[CodexRouter] Projected {projected} managed agent message(s) for third-party provider={} route",
+                provider.id
+            );
         }
 
         // Grok Build exposes a stable client-side model profile in config.toml.
@@ -3344,6 +3360,13 @@ impl RequestForwarder {
             let key_str = key.as_str();
 
             if outbound_header_is_local_only(key) {
+                continue;
+            }
+
+            // Managed OAuth replaces the whole identity tuple. In particular,
+            // never retain the Desktop account id alongside the managed token
+            // and managed account id injected through `auth_headers` below.
+            if should_strip_inbound_codex_account_header(is_codex_oauth, key) {
                 continue;
             }
 
@@ -6321,6 +6344,19 @@ fn replace_with_native_codex_auth_headers(
     }
 }
 
+/// A managed OAuth route owns both halves of the upstream identity. The
+/// Desktop's inbound account id belongs to its own bearer, so forwarding it
+/// together with a CCSM-managed bearer can produce conflicting account ids.
+fn should_strip_inbound_codex_account_header(
+    is_managed_codex_oauth: bool,
+    header_name: &http::HeaderName,
+) -> bool {
+    is_managed_codex_oauth
+        && header_name
+            .as_str()
+            .eq_ignore_ascii_case("chatgpt-account-id")
+}
+
 fn reject_proxy_placeholder_for_managed_account_upstream(
     url: &str,
     headers: &http::HeaderMap,
@@ -7754,12 +7790,14 @@ fn codex_provider_has_v2_routing(provider: &Provider) -> bool {
         == Some(2)
 }
 
-/// 判断本次 Codex 请求是否应把非保留 `agents.*` V2 协作工具的 `message.encrypted`
-/// 剥离为明文投递。
+/// 判断本次 Codex 请求是否应从非保留 `agents.*` V2 协作工具移除
+/// `message.encrypted`，让模型工具参数保持可跨 Provider 投递的文本。
 ///
 /// 只要 Router 含启用的第三方/来源歧义路由（`codex_multirouter_needs_plaintext_v2_collaboration`），
-/// 无论父出站是官方 OAuth 还是第三方中转，都必须剥离：第三方中转背后的官方 backend
-/// 仍会按 schema 加密 `message`，不剥离则 child 收到不可解密的 Fernet 密文。
+/// 无论父出站是官方 OAuth 还是第三方中转，都必须剥离。Codex 后续仍可能通过
+/// `AgentMessage::new_encrypted` 把这段明文放入名为 `encrypted_content` 的容器；
+/// CCSwitchMulti 会在第三方 child 请求边界恢复为标准 user message。若不先剥离，
+/// child 收到的才会是真正不可解密的 Fernet 密文。
 /// 纯官方 Router 与非 Router provider 返回 false，行为不变。
 fn should_make_codex_v2_agents_plaintext(app_type: &AppType, router_provider: &Provider) -> bool {
     matches!(app_type, AppType::Codex)
@@ -7777,6 +7815,21 @@ fn should_project_codex_agent_messages_for_provider(
         && super::providers::is_codex_responses_endpoint(endpoint)
         && !provider.is_codex_oauth()
         && !super::providers::is_codex_official_provider(provider)
+}
+
+fn project_codex_agent_messages_for_effective_provider(
+    app_type: &AppType,
+    provider: &Provider,
+    endpoint: &str,
+    body: &mut Value,
+) -> Result<usize, ProxyError> {
+    if !should_project_codex_agent_messages_for_provider(app_type, provider, endpoint) {
+        return Ok(0);
+    }
+    super::providers::codex_multi_agent::project_codex_agent_messages_for_third_party(
+        body,
+        super::providers::codex_multirouter_needs_plaintext_v2_collaboration(provider),
+    )
 }
 
 /// 判断 effective base_url 是否精确指向当前 CC Switch 代理入口。
@@ -8305,6 +8358,55 @@ mod tests {
         ))
         .expect("save profile");
         provider
+    }
+
+    fn save_verified_transport_profile(
+        db: &Database,
+        provider: &Provider,
+        public_model: &str,
+        upstream_model: &str,
+        transport: TransportKind,
+    ) {
+        let target = compile_provider_probe_candidate_for_model(
+            provider,
+            public_model.to_string(),
+            upstream_model.to_string(),
+        )
+        .expect("compile per-model request policy")
+        .target_key(transport)
+        .expect("build per-model target");
+        let transport_json = match transport {
+            TransportKind::OpenAiChat => "open_ai_chat",
+            TransportKind::OpenAiResponses => "open_ai_responses",
+        };
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": transport_json,
+            "readiness": "verified",
+            "branches": [{
+                "assessment": {
+                    "transport": transport_json,
+                    "baseline": "passed",
+                    "streaming": "passed",
+                    "forced_tool": "passed",
+                    "continuation": "passed"
+                },
+                "reasoning_shape": {
+                    "semantic": "summary",
+                    "source": "native_responses",
+                    "pre_tool_visible_content": "absent"
+                },
+                "evidence": []
+            }]
+        }))
+        .expect("verified per-model profile");
+        let now = chrono::Utc::now().timestamp();
+        db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
+            target,
+            result,
+            now,
+            now + 3_600,
+        ))
+        .expect("save per-model profile");
     }
 
     #[tokio::test]
@@ -9198,6 +9300,89 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_provider_materializes_the_requested_models_verified_transport() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let mut provider = Provider::with_id(
+            "mixed-provider".to_string(),
+            "Mixed Provider".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "probe-secret"},
+                "base_url": "https://mixed.example/v1",
+                "config": "model = \"chat-upstream\"\nbase_url = \"https://mixed.example/v1\"\nwire_api = \"responses\"\n",
+                "apiFormat": "openai_responses",
+                "modelCatalog": {"models": [
+                    {"model": "chat-visible", "upstreamModel": "chat-upstream", "apiFormat": "openai_chat"},
+                    {"model": "responses-visible", "upstreamModel": "responses-upstream", "apiFormat": "openai_responses"}
+                ]}
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..ProviderMeta::default()
+        });
+        save_verified_transport_profile(
+            db.as_ref(),
+            &provider,
+            "chat-visible",
+            "chat-upstream",
+            TransportKind::OpenAiChat,
+        );
+        save_verified_transport_profile(
+            db.as_ref(),
+            &provider,
+            "responses-visible",
+            "responses-upstream",
+            TransportKind::OpenAiResponses,
+        );
+        let forwarder = RequestForwarder {
+            router: Arc::new(ProviderRouter::new(db.clone())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            gemini_shadow: Arc::new(GeminiShadowStore::new()),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            app_handle: None,
+            current_provider_id_at_start: String::new(),
+            session_id: String::new(),
+            session_client_provided: false,
+            preserve_codex_client_originator: false,
+            rectifier_config: RectifierConfig::default(),
+            optimizer_config: OptimizerConfig::default(),
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
+            non_streaming_timeout: Duration::ZERO,
+            streaming_first_byte_timeout: Duration::ZERO,
+            max_attempts: 1,
+        };
+
+        let chat = forwarder
+            .materialize_codex_forward_attempt_provider(
+                &AppType::Codex,
+                &provider,
+                &json!({"model": "chat-visible"}),
+            )
+            .expect("materialize Chat model");
+        let responses = forwarder
+            .materialize_codex_forward_attempt_provider(
+                &AppType::Codex,
+                &provider,
+                &json!({"model": "responses-visible"}),
+            )
+            .expect("materialize Responses model");
+
+        assert!(
+            crate::proxy::providers::should_convert_codex_responses_to_chat(&chat, "/v1/responses")
+        );
+        assert!(
+            !crate::proxy::providers::should_convert_codex_responses_to_chat(
+                &responses,
+                "/v1/responses"
+            )
+        );
+    }
+
+    #[test]
     fn materialized_official_route_keeps_mixed_router_plaintext_delivery_policy() {
         let db = Arc::new(Database::memory().expect("memory db"));
         let official_target = test_codex_official_provider();
@@ -9294,7 +9479,7 @@ mod tests {
             &mixed
         ));
         // 第三方父（官方中转）也必须剥离 message.encrypted，否则中转背后的
-        // 官方 backend 会按 schema 加密 message，child 收到不可解密的 Fernet 密文。
+        // 官方 backend 会按原 schema 产生不可跨 Provider 读取的 Fernet 参数。
         assert!(should_make_codex_v2_agents_plaintext(
             &AppType::Codex,
             &mixed
@@ -9304,7 +9489,7 @@ mod tests {
             &mixed
         ));
 
-        // 纯第三方 Router：所有路由都非官方，第三方父同样需要明文投递。
+        // 纯第三方 Router：所有路由都非官方，父请求同样需要托管 agents schema。
         let mut third_party_only = test_provider_with_type(None);
         third_party_only.settings_config = json!({
             "codexRouting": {
@@ -9367,6 +9552,85 @@ mod tests {
             &managed_official,
             "/v1/responses"
         ));
+    }
+
+    #[test]
+    fn managed_agents_schema_plaintext_reaches_third_party_child_and_official_stays_native() {
+        let task = "Message Type: NEW_TASK\nTask name: /root/qwen\nSender: /root\nPayload:\nREAD_PACKAGE_JSON_7F3";
+        let mut parent_request = json!({
+            "tools": [{
+                "type": "namespace",
+                "name": "agents",
+                "tools": [{
+                    "type": "function",
+                    "name": "spawn_agent",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string", "encrypted": true}
+                        },
+                        "required": ["message"]
+                    }
+                }]
+            }]
+        });
+        assert_eq!(
+            super::super::providers::openai_compat::make_codex_v2_agents_messages_plaintext(
+                &mut parent_request
+            ),
+            1
+        );
+        assert!(
+            parent_request["tools"][0]["tools"][0]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+
+        // Codex's AgentMessage::new_encrypted keeps using the encrypted_content
+        // container even though the tool argument itself is now plaintext.
+        let child_request = json!({
+            "model": "qwen3.8",
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/qwen",
+                "content": [{"type": "encrypted_content", "encrypted_content": task}]
+            }]
+        });
+
+        let mut third_party = test_provider_with_type(None);
+        third_party.settings_config = json!({
+            "codexRouterPlaintextV2Collaboration": true
+        });
+        let mut projected = child_request.clone();
+        assert_eq!(
+            project_codex_agent_messages_for_effective_provider(
+                &AppType::Codex,
+                &third_party,
+                "/v1/responses",
+                &mut projected,
+            )
+            .expect("managed third-party child projection"),
+            1
+        );
+        let chat =
+            super::super::providers::transform_codex_chat::responses_to_chat_completions(projected)
+                .expect("projected child request converts to Chat");
+        assert_eq!(chat["messages"], json!([{"role": "user", "content": task}]));
+
+        let official = test_codex_official_provider();
+        let mut untouched = child_request.clone();
+        assert_eq!(
+            project_codex_agent_messages_for_effective_provider(
+                &AppType::Codex,
+                &official,
+                "/v1/responses",
+                &mut untouched,
+            )
+            .expect("official Responses keeps native agent messages"),
+            0
+        );
+        assert_eq!(untouched, child_request);
     }
 
     #[tokio::test]
@@ -10358,6 +10622,20 @@ mod tests {
     }
 
     #[test]
+    fn managed_codex_oauth_does_not_forward_desktop_account_header() {
+        let account_header = http::HeaderName::from_static("chatgpt-account-id");
+
+        assert!(
+            should_strip_inbound_codex_account_header(true, &account_header),
+            "a managed OAuth bearer must not be sent together with the Desktop account id"
+        );
+        assert!(
+            !should_strip_inbound_codex_account_header(false, &account_header),
+            "native OAuth routes must retain the Desktop account id that belongs to their bearer"
+        );
+    }
+
+    #[test]
     /// 官方 CLI、VS Code、TUI 和 ChatGPT Desktop 身份都属于可保留白名单。
     fn codex_oauth_originator_accepts_official_first_party_values() {
         for originator in [
@@ -11032,7 +11310,6 @@ mod tests {
     fn codex_anthropic_full_endpoint_guard_avoids_double_messages() {
         // On the Codex→Anthropic path a base URL already ending in `/v1/messages` (switch
         // off) must be treated as a full endpoint by the real `base_url_is_full_endpoint`.
-
         // The pasted URL is used verbatim (plus preserved query). Includes
         // query/fragment/whitespace suffixes, which must not hide the endpoint (fix: a base
         // like `.../v1/messages?beta=true` previously evaded the suffix check).

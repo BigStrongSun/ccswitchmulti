@@ -5,7 +5,10 @@ use super::{
     codex_chat_common::{
         extract_reasoning_field_text, split_leading_think_block, strip_leading_think_open_tag,
     },
-    codex_terminal::{classify_chat_terminal, ChatTerminalEvidence, TerminalDisposition},
+    codex_terminal::{
+        classify_chat_terminal, streamed_tool_arguments_are_complete, ChatTerminalEvidence,
+        TerminalDisposition,
+    },
     transform_codex_chat::{
         chat_usage_to_responses_usage, custom_tool_input_from_chat_arguments,
         response_id_from_chat_id, response_message_item_id, response_tool_call_item_from_chat_name,
@@ -826,6 +829,33 @@ impl ChatToResponsesState {
                 log::warn!(
                     "[Codex] dropped streaming tool call: model={} chat_index={} \
                      call_id_empty={} args_bytes={} finish_reason={} tools_total={}",
+                    self.model,
+                    key,
+                    call_id_empty,
+                    args_bytes,
+                    self.finish_reason.as_deref().unwrap_or("<none>"),
+                    self.tools.len()
+                );
+                continue;
+            }
+
+            let has_malformed_arguments = self
+                .tools
+                .get(&key)
+                .is_some_and(|state| !streamed_tool_arguments_are_complete(&state.arguments));
+            if has_malformed_arguments {
+                let (call_id_empty, args_bytes) = self
+                    .tools
+                    .get(&key)
+                    .map(|state| (state.call_id.is_empty(), state.arguments.len()))
+                    .unwrap_or((true, 0));
+                if let Some(state) = self.tools.get_mut(&key) {
+                    state.done = true;
+                }
+                self.dropped_tool_calls += 1;
+                log::warn!(
+                    "[Codex] dropped streaming tool call with malformed arguments: model={} \
+                     chat_index={} call_id_empty={} args_bytes={} finish_reason={} tools_total={}",
                     self.model,
                     key,
                     call_id_empty,
@@ -2163,6 +2193,26 @@ mod tests {
             !output.contains("event: response.completed"),
             "got: {output}"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_semantics_malformed_tool_arguments_emits_failed() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_partial_tool\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_partial\",\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(output.contains("event: response.failed"), "got: {output}");
+        assert!(
+            output.contains("upstream_tool_call_dropped"),
+            "got: {output}"
+        );
+        assert!(
+            !output.contains("event: response.completed"),
+            "got: {output}"
+        );
+        assert!(!output.contains("raw_arguments"), "got: {output}");
     }
 
     #[tokio::test]

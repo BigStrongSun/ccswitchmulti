@@ -2279,10 +2279,18 @@ fn codex_vendor_catalog_model_entry(
 
 /// Fields Codex's external-catalog parser REQUIRES (no serde default): when
 /// one is missing Codex rejects the whole catalog file at startup ("missing
-/// field ..."). `base_instructions` is the other known required field; the
-/// templates always carry it and `codex_catalog_model_entry` handles it.
+/// field ..."). `supports_parallel_tool_calls` is required by the Codex
+/// 0.148-era Desktop parser but ignored as an unknown field by newer serde
+/// models after the capability was retired. Backfilling an explicit `false`
+/// compatibility default therefore keeps old clients parseable without claiming an
+/// unverified parallel-call capability. `base_instructions` is the other
+/// known required field; the templates always carry it and
+/// `codex_catalog_model_entry` handles it.
 /// When Codex requires a new field, add it here AND to the static templates.
-const CODEX_CATALOG_PARSER_REQUIRED_FIELDS: &[&str] = &["supports_reasoning_summaries"];
+const CODEX_CATALOG_PARSER_REQUIRED_FIELDS: &[&str] = &[
+    "supports_reasoning_summaries",
+    "supports_parallel_tool_calls",
+];
 
 /// `models_cache.json` is shared by every Codex install on the machine (npm
 /// CLI, desktop-bundled binary, ...), and each version serializes its own
@@ -2304,6 +2312,10 @@ fn fill_template_fields_from_static(template: &mut Value) {
     };
     for key in CODEX_CATALOG_PARSER_REQUIRED_FIELDS {
         if !template_obj.contains_key(*key) {
+            if *key == "supports_parallel_tool_calls" {
+                template_obj.insert((*key).to_string(), Value::Bool(false));
+                continue;
+            }
             if let Some(value) = static_obj.get(*key) {
                 template_obj.insert((*key).to_string(), value.clone());
             }
@@ -2801,8 +2813,11 @@ fn codex_multi_router_is_enabled(settings: &Value) -> bool {
 
 /// 判断当前 MultiRouter 是否包含需要跨 provider 投递的启用 route。
 ///
-/// 混合路由仍保留 Multi-Agent V2，并通过非保留工具 namespace 让 Codex 直接向
-/// 第三方 child 投递明文任务。旧 route 没有认证来源时按跨 provider 处理。
+/// 混合路由仍保留 Multi-Agent V2，并切到 CCSwitchMulti 管理的 `agents`
+/// namespace，使出站 schema 清理与第三方 child 投影命中同一条托管兼容链。
+/// `agents` 本身不会让 Codex 直接构造明文 `agent_message`；真正的可移植性来自
+/// 代理在父请求前移除 `message.encrypted`，再在 child 请求边界投影其文本容器。
+/// 旧 route 没有认证来源时按跨 provider 处理。
 fn codex_multi_router_requires_non_reserved_agent_namespace(settings: &Value) -> bool {
     let Some(routing) = settings.get("codexRouting") else {
         return false;
@@ -2984,9 +2999,9 @@ fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result
 /// `service_tier` 参数；这些额外字段会让新模型直接拒绝请求。
 ///
 /// CCSwitchMulti 通过 `~/.codex/agents/*.toml` 托管 role 文件固定子 Agent 模型，
-/// 因此始终隐藏 metadata。混合官方/第三方路由不能使用后端保留的
-/// `collaboration` namespace：若用户没有选择 namespace，或仍使用该保留名，改用
-/// Codex 原生支持的 `agents`。用户已有其它非保留 namespace 时保持不变。
+/// 因此始终隐藏 metadata。混合官方/第三方路由统一使用非保留的 `agents`
+/// namespace；这是代理出站移除 `message.encrypted` 和 child 请求投影共同覆盖的
+/// 唯一托管 namespace，不能保留一个代理并不处理的自定义值。
 fn ensure_codex_multi_agent_reserved_schema_compatible(
     doc: &mut DocumentMut,
     version: CodexSubagentVersion,
@@ -3020,14 +3035,7 @@ fn ensure_codex_multi_agent_reserved_schema_compatible(
             }
         }
         multi_agent_v2["hide_spawn_agent_metadata"] = toml_edit::value(true);
-        let namespace_requires_replacement = multi_agent_v2
-            .get("tool_namespace")
-            .and_then(|item| item.as_str())
-            .map(str::trim)
-            .is_none_or(|namespace| {
-                namespace.is_empty() || namespace.eq_ignore_ascii_case("collaboration")
-            });
-        if mixed_provider_delivery && namespace_requires_replacement {
+        if mixed_provider_delivery {
             multi_agent_v2["tool_namespace"] = toml_edit::value("agents");
         }
     }
@@ -12457,8 +12465,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         // whole catalog file without it).
         let mut template = json!({
             "slug": "gpt-5.5",
-            "context_window": 272_000,
-            "supports_parallel_tool_calls": false
+            "context_window": 272_000
         });
         fill_template_fields_from_static(&mut template);
 
@@ -12468,12 +12475,20 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                 .and_then(Value::as_bool),
             Some(true)
         );
-        // Keys already present in the dynamic template are never overwritten.
         assert_eq!(
             template
                 .get("supports_parallel_tool_calls")
                 .and_then(Value::as_bool),
             Some(false)
+        );
+        // Keys already present in the dynamic template are never overwritten.
+        template["supports_parallel_tool_calls"] = json!(true);
+        fill_template_fields_from_static(&mut template);
+        assert_eq!(
+            template
+                .get("supports_parallel_tool_calls")
+                .and_then(Value::as_bool),
+            Some(true)
         );
         assert_eq!(
             template.get("context_window").and_then(Value::as_u64),
@@ -12519,6 +12534,13 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                 .get("supports_reasoning_summaries")
                 .and_then(Value::as_bool),
             Some(true)
+        );
+        assert_eq!(
+            catalog["models"][0]
+                .get("supports_parallel_tool_calls")
+                .and_then(Value::as_bool),
+            Some(false),
+            "unknown Provider models must keep the safe sequential default while remaining parseable by Codex 0.148-era catalogs"
         );
     }
 
@@ -13690,7 +13712,9 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     // ===== P0 契约：三态 schema 的 catalog 投影 =====
 
     #[test]
+    #[serial]
     fn new_schema_unknown_model_does_not_inherit_template_reasoning() {
+        let _home = TestHomeGuard::new();
         // schema v2 显式 unknown：不得被当作解析失败丢弃，也不得继承模板档位。
         let settings = json!({
             "modelCatalog": { "models": [{
@@ -13720,7 +13744,9 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    #[serial]
     fn explicit_empty_efforts_model_is_not_filled_by_template() {
+        let _home = TestHomeGuard::new();
         // 明确的 supportedEfforts=[]（boolean 开关）：任何投影都不得回退到通用档位。
         let settings = json!({
             "modelCatalog": { "models": [{
@@ -14097,7 +14123,7 @@ base_url = "http://127.0.0.1:15721/v1"
 
     #[test]
     #[serial]
-    fn mixed_router_preserves_custom_non_reserved_tool_namespace() {
+    fn mixed_router_normalizes_custom_non_reserved_tool_namespace() {
         let multi_agent_v2 = prepared_router_multi_agent_v2_config(
             &json!({
                 "modelCatalog": {
@@ -14119,7 +14145,8 @@ base_url = "http://127.0.0.1:15721/v1"
             multi_agent_v2
                 .get("tool_namespace")
                 .and_then(toml::Value::as_str),
-            Some("team_agents")
+            Some("agents"),
+            "mixed routing must use the namespace covered by the plaintext request policy"
         );
     }
 
