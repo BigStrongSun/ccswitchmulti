@@ -14,7 +14,7 @@ pub(crate) const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
 pub(crate) const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
-const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV6";
+const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV7";
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
 #[cfg(any(target_os = "macos", test))]
 const CODEX_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.openai.codex";
@@ -884,7 +884,7 @@ fn guardian_v2_compatibility_patch_core_script() -> &'static str {
 /// 覆盖历史线程保存的旧入口标签，使跨 Provider 历史在冷恢复后重新经过 CCSM Router。
 fn app_server_request_normalization_core_script() -> &'static str {
     r#"
-  const appServerRequestPatchVersion = "6";
+  const appServerRequestPatchVersion = "7";
   const appServerRequestClientNeedsPatch = (client) => client?.__ccSwitchModelRequestPatch !== appServerRequestPatchVersion;
   const appServerMethod = (method, params) => method === "send-cli-request-for-host" && params?.method ? String(params.method) : String(method || "");
   const currentModelProvider = () => {
@@ -1189,7 +1189,6 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return values;
   }};
   const patchReactAppServerClients = () => {{
-    if (state.reactRequestClientPatchVersion === "5") return state.historyQueryPatch?.clientCount || 1;
     const queue = reactRoots().map((value) => ({{ value, depth: 0 }}));
     const seen = new Set();
     let cursor = 0;
@@ -1238,18 +1237,19 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return patched;
   }};
   const installAppServerPatch = async () => {{
-    if (state.appServerPatchVersion === "5") return;
     let patched = 0;
-    try {{
-      const module = await loadAppModule("app-server-manager-signals-");
-      for (const candidate of Object.values(module).filter((item) => item && typeof item === "object")) {{
-        if (patchRequestClient(candidate)) patched += 1;
-        if (typeof candidate.sendRequest !== "function" && typeof candidate.get === "function") {{
-          try {{ if (patchRequestClient(candidate.get())) patched += 1; }} catch {{}}
+    if (state.appServerPatchVersion !== appServerRequestPatchVersion) {{
+      try {{
+        const module = await loadAppModule("app-server-manager-signals-");
+        for (const candidate of Object.values(module).filter((item) => item && typeof item === "object")) {{
+          if (patchRequestClient(candidate)) patched += 1;
+          if (typeof candidate.sendRequest !== "function" && typeof candidate.get === "function") {{
+            try {{ if (patchRequestClient(candidate.get())) patched += 1; }} catch {{}}
+          }}
         }}
+      }} catch (error) {{
+        recordFailure(error);
       }}
-    }} catch (error) {{
-      recordFailure(error);
     }}
     patched += patchReactAppServerClients();
     if (state.historyQueryRefreshPromise) {{
@@ -1263,8 +1263,8 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }};
     state.appServerPatchInstalled = patched > 0;
     if (patched > 0 && state.historyQueryRefreshCompleted) {{
-      state.reactRequestClientPatchVersion = "5";
-      state.appServerPatchVersion = "5";
+      state.reactRequestClientPatchVersion = appServerRequestPatchVersion;
+      state.appServerPatchVersion = appServerRequestPatchVersion;
     }}
   }};
   const patchMcpModelResponseData = (data) => {{
@@ -2539,18 +2539,20 @@ JSON.stringify({
             json!({ "modelProvider": "codex_model_router_v2" }),
             r#"
 JSON.stringify({
-  previousNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "5" }),
-  currentNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "6" }),
+  v5NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "5" }),
+  v6NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "6" }),
+  currentNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "7" }),
   missingNeedsPatch: appServerRequestClientNeedsPatch({}),
   patchVersion: appServerRequestPatchVersion,
 });
 "#,
         );
 
-        assert_eq!(result["previousNeedsPatch"], true);
+        assert_eq!(result["v5NeedsPatch"], true);
+        assert_eq!(result["v6NeedsPatch"], true);
         assert_eq!(result["currentNeedsPatch"], false);
         assert_eq!(result["missingNeedsPatch"], true);
-        assert_eq!(result["patchVersion"], "6");
+        assert_eq!(result["patchVersion"], "7");
     }
 
     #[test]
@@ -2822,8 +2824,17 @@ JSON.stringify({
         assert!(script.contains("isModelListMethod(method)"));
         assert!(script.contains("await installAppServerPatch()"));
         assert!(script.contains("!state.requestIds.has(requestId)"));
-        assert!(script.contains("__ccSwitchCodexAppCompatibilityV6"));
-        assert!(script.contains("appServerRequestPatchVersion = \"6\""));
+        assert!(script.contains("__ccSwitchCodexAppCompatibilityV7"));
+        assert!(script.contains("appServerRequestPatchVersion = \"7\""));
+        assert!(
+            script.contains("state.reactRequestClientPatchVersion = appServerRequestPatchVersion")
+        );
+        assert!(script.contains("state.appServerPatchVersion !== appServerRequestPatchVersion"));
+        assert!(!script.contains(
+            "if (state.reactRequestClientPatchVersion === appServerRequestPatchVersion) return"
+        ));
+        assert!(!script
+            .contains("if (state.appServerPatchVersion === appServerRequestPatchVersion) return"));
         assert!(script.contains("2553103476"));
         assert!(script.contains("isGuardianV2FeatureTomlError(error)"));
         assert!(script.contains("guardianV2FallbackRequestParams"));

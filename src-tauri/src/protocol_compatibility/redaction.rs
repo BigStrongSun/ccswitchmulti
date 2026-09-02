@@ -4,6 +4,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::proxy::usage::TokenUsage;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeTokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_creation_tokens: u32,
+    pub total_tokens: u32,
+}
+
+impl From<TokenUsage> for ProbeTokenUsage {
+    fn from(usage: TokenUsage) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_creation_tokens: usage.cache_creation_tokens,
+            total_tokens: usage.input_tokens.saturating_add(usage.output_tokens),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactedFieldEvidence {
     pub path: String,
@@ -18,17 +42,21 @@ pub struct RedactedProbeEvidence {
     pub paths: Vec<String>,
     pub fields: Vec<RedactedFieldEvidence>,
     pub event_types: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ProbeTokenUsage>,
 }
 
 pub fn redact_json_probe_response(status_code: u16, response: &Value) -> RedactedProbeEvidence {
     let mut fields = Vec::new();
     collect_allowlisted_fields(response, "", &mut fields);
-    build_evidence(status_code, fields, Vec::new())
+    let usage = TokenUsage::from_codex_response_auto(response).map(ProbeTokenUsage::from);
+    build_evidence(status_code, fields, Vec::new(), usage)
 }
 
 pub fn redact_sse_probe_response(status_code: u16, sse_body: &str) -> RedactedProbeEvidence {
     let mut fields = Vec::new();
     let mut event_types = Vec::new();
+    let mut payloads = Vec::new();
 
     for frame in sse_body.split("\n\n") {
         let mut event_name = None;
@@ -54,16 +82,19 @@ pub fn redact_sse_probe_response(status_code: u16, sse_body: &str) -> RedactedPr
         event_types.push(event_name.unwrap_or_else(|| "data".to_owned()));
         if let Ok(value) = serde_json::from_str::<Value>(&data) {
             collect_allowlisted_fields(&value, "", &mut fields);
+            payloads.push(value);
         }
     }
 
-    build_evidence(status_code, fields, event_types)
+    let usage = TokenUsage::from_codex_stream_events_auto(&payloads).map(ProbeTokenUsage::from);
+    build_evidence(status_code, fields, event_types, usage)
 }
 
 fn build_evidence(
     status_code: u16,
     fields: Vec<RedactedFieldEvidence>,
     event_types: Vec<String>,
+    usage: Option<ProbeTokenUsage>,
 ) -> RedactedProbeEvidence {
     let paths = fields
         .iter()
@@ -76,6 +107,7 @@ fn build_evidence(
         paths,
         fields,
         event_types,
+        usage,
     }
 }
 

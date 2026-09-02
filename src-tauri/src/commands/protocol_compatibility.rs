@@ -1,10 +1,12 @@
 use chrono::Utc;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     future::Future,
+    str::FromStr,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -27,6 +29,7 @@ use crate::{
         PROBE_PROFILE_VERSION,
     },
     provider::{Provider, UniversalProvider},
+    proxy::usage::{CostCalculator, TokenUsage, UsageLogger},
     services::ProviderService,
     store::AppState,
 };
@@ -117,6 +120,133 @@ pub struct CodexProviderProtocolPreflightOutcome {
     pub observations: Vec<ProtocolCompatibilityRecord>,
     pub receipt_ids: Vec<String>,
     pub protocol_applied: bool,
+    pub probe_usage: CodexProtocolProbeUsageSummary,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProtocolProbeUsageSummary {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub total_tokens: u64,
+    pub reported_responses: usize,
+    pub successful_responses: usize,
+    pub estimated_cost_usd: Option<String>,
+    pub priced_models: Vec<String>,
+    pub unpriced_models: Vec<String>,
+}
+
+fn configured_probe_cost_multiplier(
+    state: &AppState,
+    draft_provider: &Provider,
+    provider_id: &str,
+    default_multiplier: Decimal,
+) -> Decimal {
+    let provider = if draft_provider.id == provider_id {
+        Some(draft_provider.clone())
+    } else {
+        state
+            .db
+            .get_provider_by_id(provider_id, AppType::Codex.as_str())
+            .ok()
+            .flatten()
+    };
+    provider
+        .as_ref()
+        .and_then(|provider| provider.meta.as_ref())
+        .and_then(|meta| meta.cost_multiplier.as_deref())
+        .and_then(|value| Decimal::from_str(value.trim()).ok())
+        .filter(|value| *value >= Decimal::ZERO)
+        .unwrap_or(default_multiplier)
+}
+
+async fn summarize_protocol_probe_usage(
+    state: &AppState,
+    provider: &Provider,
+    records: &[ProtocolCompatibilityRecord],
+) -> CodexProtocolProbeUsageSummary {
+    let default_multiplier = state
+        .db
+        .get_default_cost_multiplier(AppType::Codex.as_str())
+        .await
+        .ok()
+        .and_then(|value| Decimal::from_str(value.trim()).ok())
+        .filter(|value| *value >= Decimal::ZERO)
+        .unwrap_or(Decimal::ONE);
+    let logger = UsageLogger::new(state.db.as_ref());
+    let mut summary = CodexProtocolProbeUsageSummary::default();
+    let mut total_cost = Decimal::ZERO;
+    let mut priced_models = BTreeSet::new();
+    let mut unpriced_models = BTreeSet::new();
+    let mut has_priced_usage = false;
+
+    for record in records {
+        let mut model_usage = TokenUsage::default();
+        for branch in &record.result.branches {
+            for evidence in branch.evidence() {
+                summary.successful_responses += 1;
+                let Some(usage) = evidence.usage.as_ref() else {
+                    continue;
+                };
+                summary.reported_responses += 1;
+                summary.input_tokens += u64::from(usage.input_tokens);
+                summary.output_tokens += u64::from(usage.output_tokens);
+                summary.cache_read_tokens += u64::from(usage.cache_read_tokens);
+                summary.cache_creation_tokens += u64::from(usage.cache_creation_tokens);
+                summary.total_tokens += u64::from(usage.total_tokens);
+                model_usage.input_tokens =
+                    model_usage.input_tokens.saturating_add(usage.input_tokens);
+                model_usage.output_tokens = model_usage
+                    .output_tokens
+                    .saturating_add(usage.output_tokens);
+                model_usage.cache_read_tokens = model_usage
+                    .cache_read_tokens
+                    .saturating_add(usage.cache_read_tokens);
+                model_usage.cache_creation_tokens = model_usage
+                    .cache_creation_tokens
+                    .saturating_add(usage.cache_creation_tokens);
+            }
+        }
+        if !model_usage.has_billable_tokens() {
+            continue;
+        }
+
+        let pricing_model = [&record.target.upstream_model, &record.target.public_model]
+            .into_iter()
+            .find_map(|model| {
+                logger
+                    .get_model_pricing(model)
+                    .ok()
+                    .flatten()
+                    .map(|pricing| (model.to_string(), pricing))
+            });
+        if let Some((model, pricing)) = pricing_model {
+            let multiplier = configured_probe_cost_multiplier(
+                state,
+                provider,
+                &record.target.provider_id,
+                default_multiplier,
+            );
+            let cost = CostCalculator::calculate_for_app(
+                AppType::Codex.as_str(),
+                &model_usage,
+                &pricing,
+                multiplier,
+            );
+            total_cost += cost.total_cost;
+            has_priced_usage = true;
+            priced_models.insert(model);
+        } else {
+            unpriced_models.insert(record.target.upstream_model.clone());
+        }
+    }
+
+    summary.estimated_cost_usd = has_priced_usage.then(|| total_cost.normalize().to_string());
+    summary.priced_models = priced_models.into_iter().collect();
+    summary.unpriced_models = unpriced_models.into_iter().collect();
+    summary
 }
 
 #[derive(Debug, Serialize)]
@@ -864,6 +994,7 @@ where
         chrono::Utc::now().timestamp(),
     )
     .map_err(|error| error.to_string())?;
+    let probe_usage = summarize_protocol_probe_usage(state, &provider, &records).await;
     reporter(batch_finished_event(total, &records));
     Ok(CodexProviderProtocolPreflightOutcome {
         provider,
@@ -872,6 +1003,7 @@ where
         observations: batch.observations,
         receipt_ids,
         protocol_applied: false,
+        probe_usage,
     })
 }
 
@@ -1469,12 +1601,12 @@ mod tests {
         prepare_codex_provider_set_batch_internal, prepare_codex_provider_set_internal,
         remember_candidate_batch_receipts, run_automatic_candidate_result_with,
         run_candidate_batch_with, run_candidate_batch_with_observations,
-        run_explicit_candidate_result_with, ApplyReasoningOverrideRequest,
-        ClearReasoningOverrideRequest, CodexProtocolProbeScope, CodexProviderSetBatchSourceRequest,
-        CodexProviderSetCommitIntent, CodexProviderSetCommitStatus,
-        CommitCodexProviderSetBatchRequest, CommitCodexProviderSetRequest,
-        PlanReasoningOverrideRequest, PrepareCodexProviderSetBatchRequest,
-        PrepareCodexProviderSetRequest,
+        run_explicit_candidate_result_with, summarize_protocol_probe_usage,
+        ApplyReasoningOverrideRequest, ClearReasoningOverrideRequest, CodexProtocolProbeScope,
+        CodexProviderSetBatchSourceRequest, CodexProviderSetCommitIntent,
+        CodexProviderSetCommitStatus, CommitCodexProviderSetBatchRequest,
+        CommitCodexProviderSetRequest, PlanReasoningOverrideRequest,
+        PrepareCodexProviderSetBatchRequest, PrepareCodexProviderSetRequest,
     };
     use crate::protocol_compatibility::{
         HistoryReplay, ManualReasoningOverride, ProbeCandidate, ProbeReadiness, ProbeTargetKey,
@@ -1482,7 +1614,7 @@ mod tests {
         ReasoningProjection, ReasoningSemantic, ReasoningSource, TransportKind,
     };
     use crate::provider::{CodexProtocolMode, CodexProtocolOverride, Provider, ProviderMeta};
-    use crate::{database::Database, store::AppState};
+    use crate::{database::Database, store::AppState, AppError};
     use serde_json::json;
     use std::{
         collections::HashMap,
@@ -1575,6 +1707,92 @@ mod tests {
             },
         )
         .expect("build record")
+    }
+
+    #[tokio::test]
+    async fn protocol_probe_usage_uses_reported_tokens_provider_multiplier_and_model_pricing(
+    ) -> Result<(), AppError> {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT OR REPLACE INTO model_pricing (
+                    model_id, display_name, input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+                 ) VALUES ('priced-model', 'Priced model', '1', '2', '0.1', '0')",
+                [],
+            )
+            .expect("seed probe pricing");
+        }
+        let state = AppState::new(db);
+        let mut provider = ordinary_provider();
+        provider
+            .meta
+            .as_mut()
+            .expect("provider meta")
+            .cost_multiplier = Some("2".to_string());
+        let target = crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+            &provider,
+            "priced-model".to_string(),
+            "priced-model".to_string(),
+        )
+        .expect("compile candidate")
+        .target_key(TransportKind::OpenAiResponses)
+        .expect("target");
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": "open_ai_responses",
+            "readiness": "verified",
+            "branches": [{
+                "assessment": {
+                    "transport": "open_ai_responses",
+                    "baseline": "passed",
+                    "streaming": "passed",
+                    "forced_tool": "passed",
+                    "continuation": "passed"
+                },
+                "reasoning_shape": {
+                    "semantic": "readable",
+                    "source": "native_responses",
+                    "pre_tool_visible_content": "absent"
+                },
+                "tool_schema_dialect": "open_ai",
+                "history_replay": "native_only",
+                "evidence": [{
+                    "status_code": 200,
+                    "paths": [],
+                    "fields": [],
+                    "event_types": [],
+                    "usage": {
+                        "inputTokens": 100,
+                        "outputTokens": 50,
+                        "cacheReadTokens": 20,
+                        "cacheCreationTokens": 0,
+                        "totalTokens": 150
+                    }
+                }, {
+                    "status_code": 200,
+                    "paths": [],
+                    "fields": [],
+                    "event_types": []
+                }],
+                "failures": []
+            }]
+        }))
+        .expect("probe result");
+        let record = ProtocolCompatibilityRecord::new(target, result, 100, 200);
+
+        let summary = summarize_protocol_probe_usage(&state, &provider, &[record]).await;
+
+        assert_eq!(summary.input_tokens, 100);
+        assert_eq!(summary.output_tokens, 50);
+        assert_eq!(summary.cache_read_tokens, 20);
+        assert_eq!(summary.total_tokens, 150);
+        assert_eq!(summary.reported_responses, 1);
+        assert_eq!(summary.successful_responses, 2);
+        assert_eq!(summary.estimated_cost_usd.as_deref(), Some("0.000364"));
+        assert_eq!(summary.priced_models, vec!["priced-model"]);
+        assert!(summary.unpriced_models.is_empty());
+        Ok(())
     }
 
     fn provider_set_record(

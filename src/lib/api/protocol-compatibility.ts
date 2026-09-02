@@ -105,7 +105,30 @@ export interface CodexProtocolProbeBranch {
   };
   tool_schema_dialect?: CodexToolSchemaDialect;
   history_replay?: CodexHistoryReplay;
+  evidence?: Array<{
+    status_code: number;
+    paths: string[];
+    event_types: string[];
+    usage?: CodexProtocolProbeTokenUsage;
+  }>;
   failures?: CodexProtocolProbeFailure[];
+}
+
+export interface CodexProtocolProbeTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  totalTokens: number;
+}
+
+export interface CodexProtocolProbeUsageSummary
+  extends CodexProtocolProbeTokenUsage {
+  reportedResponses: number;
+  successfulResponses: number;
+  estimatedCostUsd: string | null;
+  pricedModels: string[];
+  unpricedModels: string[];
 }
 
 export interface CodexProtocolCompatibilityRecord {
@@ -137,6 +160,8 @@ export interface CodexProviderProtocolPreflightOutcome {
   observations: CodexProtocolCompatibilityRecord[];
   receiptIds: string[];
   protocolApplied: boolean;
+  /** Missing only on receipts created by releases before probe-usage accounting. */
+  probeUsage?: CodexProtocolProbeUsageSummary;
 }
 
 export interface CodexProviderSetBlockedModel {

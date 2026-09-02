@@ -146,6 +146,18 @@ describe("CodexProtocolProbeProgressDialog", () => {
       },
       receiptIds: ["receipt-kimi-k2"],
       protocolApplied: true,
+      probeUsage: {
+        inputTokens: 1200,
+        outputTokens: 300,
+        cacheReadTokens: 200,
+        cacheCreationTokens: 0,
+        totalTokens: 1500,
+        reportedResponses: 8,
+        successfulResponses: 10,
+        estimatedCostUsd: "0.0123",
+        pricedModels: ["kimi-k2"],
+        unpricedModels: [],
+      },
       observations: [],
       records: [
         {
@@ -226,6 +238,155 @@ describe("CodexProtocolProbeProgressDialog", () => {
     expect(screen.getByText("历史续轮：reasoning_content")).toBeInTheDocument();
     expect(screen.getByText("上游原生摘要")).toBeInTheDocument();
     expect(screen.getByText("原始推理正文")).toBeInTheDocument();
+    expect(screen.getByText(/本次上游已报告 1,500 tokens/)).toBeInTheDocument();
+    expect(screen.getByText(/估算费用约 US\$0\.0123/)).toBeInTheDocument();
+    expect(screen.getByText(/2 个成功响应未返回 usage/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "运行时适配：Responses 请求保持原协议；续轮推理按 reasoning_text content 重建。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "运行时适配：Codex Responses 转换为 Chat Completions；推理从 reasoning_content 读取并投影回 Codex。",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("warns before completion that deep probing sends billable model requests", () => {
+    render(
+      <CodexProtocolProbeProgressDialog
+        open
+        running
+        expectedModels={["qwen3.8"]}
+        events={[]}
+        outcome={null}
+        error=""
+        onOpenChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        /深度探测会向每个模型的 Responses 和 Chat 端点发送多次真实请求，会消耗 Token 并可能产生费用/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("aggregates reported token usage and mappings across provider outcomes", () => {
+    const makeOutcome = (
+      providerId: string,
+      model: string,
+      totalTokens: number,
+      estimatedCostUsd: string,
+    ) =>
+      ({
+        provider: {
+          id: providerId,
+          name: providerId,
+          settingsConfig: {},
+        },
+        adaptationPreview: {
+          persistence: "single",
+          status: "ready",
+          effectiveTransport: "open_ai_responses",
+          models: [],
+        },
+        receiptIds: [`receipt-${providerId}`],
+        protocolApplied: true,
+        probeUsage: {
+          inputTokens: totalTokens - 10,
+          outputTokens: 10,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          totalTokens,
+          reportedResponses: 1,
+          successfulResponses: 1,
+          estimatedCostUsd,
+          pricedModels: [model],
+          unpricedModels: [],
+        },
+        observations: [],
+        records: [
+          {
+            probeVersion: 6,
+            target: {
+              provider_id: providerId,
+              route_id: null,
+              public_model: model,
+              upstream_model: model,
+              transport: "open_ai_responses",
+              endpoint_fingerprint: `endpoint-${providerId}`,
+              authentication_kind: "bearer",
+              credential_fingerprint: `credential-${providerId}`,
+              request_policy_fingerprint: `policy-${providerId}`,
+            },
+            result: {
+              selected_transport: "open_ai_responses",
+              readiness: "verified",
+              branches: [
+                {
+                  assessment: {
+                    transport: "open_ai_responses",
+                    baseline: "passed",
+                    streaming: "passed",
+                    forced_tool: "passed",
+                    continuation: "passed",
+                  },
+                  reasoning_shape: {
+                    semantic: "summary",
+                    source: "native_responses",
+                    pre_tool_visible_content: "absent",
+                  },
+                  tool_schema_dialect: "openai",
+                  history_replay: "native_only",
+                  failures: [],
+                },
+              ],
+            },
+            testedAt: 1,
+            expiresAt: 2,
+          },
+        ],
+      }) as CodexProviderProtocolPreflightOutcome;
+
+    render(
+      <CodexProtocolProbeProgressDialog
+        open
+        running={false}
+        expectedModels={["qwen3.8", "glm-5.3"]}
+        expectedTargets={[
+          {
+            providerId: "qwen-provider",
+            providerName: "qwen-provider",
+            model: "qwen3.8",
+          },
+          {
+            providerId: "glm-provider",
+            providerName: "glm-provider",
+            model: "glm-5.3",
+          },
+        ]}
+        events={[]}
+        outcome={null}
+        outcomes={[
+          makeOutcome("qwen-provider", "qwen3.8", 100, "0.001"),
+          makeOutcome("glm-provider", "glm-5.3", 200, "0.002"),
+        ]}
+        error=""
+        onOpenChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/本次上游已报告 300 tokens/)).toBeInTheDocument();
+    expect(screen.getByText(/估算费用约 US\$0\.003/)).toBeInTheDocument();
+    expect(screen.getByText("qwen3.8")).toBeInTheDocument();
+    expect(screen.getByText("glm-5.3")).toBeInTheDocument();
+    expect(
+      screen.getAllByText(
+        "运行时适配：Responses 请求保持原协议；上游原生推理项按原结构回放。",
+      ),
+    ).toHaveLength(2);
   });
 
   it("marks opaque reasoning as unavailable for Codex presentation", () => {

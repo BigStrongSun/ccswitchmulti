@@ -7298,6 +7298,11 @@ pub fn apply_codex_official_proxy_route_with_system_proxy_policy(
     // The official route must use Codex's native OpenAI login instead.
     doc.as_table_mut().remove("experimental_bearer_token");
     doc["model_provider"] = toml_edit::value(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID);
+    // An auto-restored historical thread may still carry `model_provider =
+    // "openai"` before the Desktop renderer compatibility layer is ready.
+    // Route that built-in provider through the same local CCSM endpoint so it
+    // cannot bypass the runtime normalizer during startup.
+    doc["openai_base_url"] = toml_edit::value(proxy_base_url.trim_end_matches('/'));
 
     let mut providers = match doc.as_table_mut().remove("model_providers") {
         Some(item) => item.into_table().map_err(|_| {
@@ -7386,6 +7391,13 @@ pub fn remove_codex_official_proxy_route(config_text: &str) -> Result<String, Ap
     }
 
     doc.as_table_mut().remove("model_provider");
+    if doc
+        .get("openai_base_url")
+        .and_then(|item| item.as_str())
+        .is_some_and(codex_base_url_is_local_proxy)
+    {
+        doc.as_table_mut().remove("openai_base_url");
+    }
     if let Some(item) = doc.as_table_mut().remove("model_providers") {
         let mut providers = item.into_table().map_err(|_| {
             AppError::Message(
@@ -11033,6 +11045,11 @@ command = "example"
             Some(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID)
         );
         assert!(doc.get("experimental_bearer_token").is_none());
+        assert_eq!(
+            doc.get("openai_base_url").and_then(toml::Value::as_str),
+            Some("http://127.0.0.1:15721/v1"),
+            "auto-restored historical openai threads must enter the local proxy before renderer compatibility loads"
+        );
         assert!(
             doc.get("mcp_servers").is_some(),
             "unrelated config survives"
@@ -11101,6 +11118,7 @@ command = "example"
         let cleaned = remove_codex_official_proxy_route(&projected).expect("clean");
         let doc: toml::Value = toml::from_str(&cleaned).expect("parse cleaned");
         assert!(doc.get("model_provider").is_none());
+        assert!(doc.get("openai_base_url").is_none());
         assert!(doc.get("model_providers").is_none());
         assert_eq!(
             doc.get("model").and_then(toml::Value::as_str),

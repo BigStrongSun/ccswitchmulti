@@ -3207,9 +3207,18 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             std::path::Path::new(model_catalog_json).is_absolute(),
             "Codex requires model_catalog_json to be absolute, got: {model_catalog_json}"
         );
-        assert!(
-            !live_config.contains("openai_base_url"),
-            "router takeover must not leave the built-in OpenAI base-url override in live config"
+        let managed_base_url = live_config_toml
+            .get("model_providers")
+            .and_then(|providers| providers.get("codex_model_router_v2"))
+            .and_then(|provider| provider.get("base_url"))
+            .and_then(toml::Value::as_str)
+            .expect("router takeover must publish the managed local base URL");
+        assert_eq!(
+            live_config_toml
+                .get("openai_base_url")
+                .and_then(toml::Value::as_str),
+            Some(managed_base_url),
+            "auto-restored historical OpenAI threads must enter the same CCSM takeover route"
         );
         assert!(
             !live_config.contains("model_provider = \"openai\""),

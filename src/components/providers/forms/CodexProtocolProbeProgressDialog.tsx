@@ -64,6 +64,7 @@ interface CodexProtocolProbeProgressDialogProps {
   expectedTargets?: CodexProviderProtocolProbeTarget[];
   events: CodexProviderScopedProtocolProbeProgressEvent[];
   outcome: CodexProviderProtocolPreflightOutcome | null;
+  outcomes?: CodexProviderProtocolPreflightOutcome[];
   error: string;
   onOpenChange: (open: boolean) => void;
   onRetry?: () => void;
@@ -172,7 +173,7 @@ function buildProgress(
   expectedModels: string[],
   expectedTargets: CodexProviderProtocolProbeTarget[],
   events: CodexProviderScopedProtocolProbeProgressEvent[],
-  outcome: CodexProviderProtocolPreflightOutcome | null,
+  outcomes: CodexProviderProtocolPreflightOutcome[],
 ): ModelProgress[] {
   const models = new Map<string, ModelProgress>();
   const scoped =
@@ -234,15 +235,74 @@ function buildProgress(
     }
   }
 
-  for (const record of outcome?.records ?? []) {
-    const model = ensure(
-      record.target.public_model,
-      scoped ? outcome?.provider.id : null,
-      scoped ? outcome?.provider.name : null,
-    );
-    applyRecord(model, record);
+  for (const outcome of outcomes) {
+    for (const record of outcome.records) {
+      const model = ensure(
+        record.target.public_model,
+        scoped ? outcome.provider.id : null,
+        scoped ? outcome.provider.name : null,
+      );
+      applyRecord(model, record);
+    }
   }
   return [...models.values()];
+}
+
+function aggregateProbeUsage(
+  outcomes: CodexProviderProtocolPreflightOutcome[],
+) {
+  const summaries = outcomes.flatMap((outcome) =>
+    outcome.probeUsage ? [outcome.probeUsage] : [],
+  );
+  if (summaries.length === 0) return undefined;
+  const estimatedCosts = summaries
+    .flatMap((summary) =>
+      summary.estimatedCostUsd === null
+        ? []
+        : [Number(summary.estimatedCostUsd)],
+    )
+    .filter(Number.isFinite);
+  const estimatedCost = estimatedCosts.reduce((sum, cost) => sum + cost, 0);
+  return {
+    inputTokens: summaries.reduce(
+      (sum, summary) => sum + summary.inputTokens,
+      0,
+    ),
+    outputTokens: summaries.reduce(
+      (sum, summary) => sum + summary.outputTokens,
+      0,
+    ),
+    cacheReadTokens: summaries.reduce(
+      (sum, summary) => sum + summary.cacheReadTokens,
+      0,
+    ),
+    cacheCreationTokens: summaries.reduce(
+      (sum, summary) => sum + summary.cacheCreationTokens,
+      0,
+    ),
+    totalTokens: summaries.reduce(
+      (sum, summary) => sum + summary.totalTokens,
+      0,
+    ),
+    reportedResponses: summaries.reduce(
+      (sum, summary) => sum + summary.reportedResponses,
+      0,
+    ),
+    successfulResponses: summaries.reduce(
+      (sum, summary) => sum + summary.successfulResponses,
+      0,
+    ),
+    estimatedCostUsd:
+      estimatedCosts.length > 0
+        ? estimatedCost.toFixed(10).replace(/0+$/, "").replace(/\.$/, "")
+        : null,
+    pricedModels: [
+      ...new Set(summaries.flatMap((summary) => summary.pricedModels)),
+    ],
+    unpricedModels: [
+      ...new Set(summaries.flatMap((summary) => summary.unpricedModels)),
+    ],
+  };
 }
 
 function statusPresentation(status: VisibleStageStatus) {
@@ -338,6 +398,27 @@ function historyReplayLabel(
   return "原生 Responses";
 }
 
+function runtimeAdaptationLabel(
+  transport: CodexProtocolTransport,
+  reasoningSource: CodexReasoningSource | null,
+  historyReplay: CodexHistoryReplay | null,
+) {
+  if (transport === "open_ai_chat") {
+    const source =
+      reasoningSource && reasoningSource !== "none"
+        ? reasoningSource
+        : "已识别的推理字段";
+    return `运行时适配：Codex Responses 转换为 Chat Completions；推理从 ${source} 读取并投影回 Codex。`;
+  }
+  if (historyReplay === "responses_reasoning_text_content") {
+    return "运行时适配：Responses 请求保持原协议；续轮推理按 reasoning_text content 重建。";
+  }
+  if (historyReplay === "omit") {
+    return "运行时适配：Responses 请求保持原协议；续轮仅移除不兼容的推理项，工具调用和工具结果仍会保留。";
+  }
+  return "运行时适配：Responses 请求保持原协议；上游原生推理项按原结构回放。";
+}
+
 export function CodexProtocolProbeProgressDialog({
   open,
   running,
@@ -345,13 +426,19 @@ export function CodexProtocolProbeProgressDialog({
   expectedTargets = [],
   events,
   outcome,
+  outcomes = [],
   error,
   onOpenChange,
   onRetry,
 }: CodexProtocolProbeProgressDialogProps) {
+  const resolvedOutcomes = useMemo(
+    () => (outcomes.length > 0 ? outcomes : outcome ? [outcome] : []),
+    [outcome, outcomes],
+  );
   const models = useMemo(
-    () => buildProgress(expectedModels, expectedTargets, events, outcome),
-    [expectedModels, expectedTargets, events, outcome],
+    () =>
+      buildProgress(expectedModels, expectedTargets, events, resolvedOutcomes),
+    [expectedModels, expectedTargets, events, resolvedOutcomes],
   );
   const completedModels = models.filter((model) => model.readiness !== null);
   const completed = completedModels.length;
@@ -387,7 +474,16 @@ export function CodexProtocolProbeProgressDialog({
   const hasMissingResults =
     !running &&
     missingResultCount > 0 &&
-    (Boolean(error) || batchSummaries.length > 0 || outcome !== null);
+    (Boolean(error) ||
+      batchSummaries.length > 0 ||
+      resolvedOutcomes.length > 0);
+  const probeUsage = useMemo(
+    () => aggregateProbeUsage(resolvedOutcomes),
+    [resolvedOutcomes],
+  );
+  const unreportedResponses = probeUsage
+    ? Math.max(0, probeUsage.successfulResponses - probeUsage.reportedResponses)
+    : 0;
 
   return (
     <Dialog
@@ -419,6 +515,47 @@ export function CodexProtocolProbeProgressDialog({
           role="status"
           aria-live="polite"
         >
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
+            深度探测会向每个模型的 Responses 和 Chat
+            端点发送多次真实请求，会消耗 Token
+            并可能产生费用。探测成功后，所选协议的请求、推理、工具和续轮映射会由
+            CCSM 在运行时自动应用。
+          </div>
+          {!running && resolvedOutcomes.length > 0 && (
+            <div className="rounded-md border border-border-default bg-muted/20 p-3 text-sm">
+              {probeUsage && probeUsage.reportedResponses > 0 ? (
+                <div className="space-y-1">
+                  <p className="font-medium text-foreground">
+                    本次上游已报告 {probeUsage.totalTokens.toLocaleString()}{" "}
+                    tokens （输入 {probeUsage.inputTokens.toLocaleString()}
+                    ，输出 {probeUsage.outputTokens.toLocaleString()}）
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {probeUsage.estimatedCostUsd
+                      ? `按当前模型定价和 Provider 倍率估算费用约 US$${probeUsage.estimatedCostUsd}。`
+                      : "当前模型没有可用定价，暂时无法估算费用。"}
+                  </p>
+                  {unreportedResponses > 0 && (
+                    <p className="text-xs text-amber-700 dark:text-amber-300">
+                      {unreportedResponses} 个成功响应未返回 usage；上述 Token
+                      和费用只是已报告部分，实际消耗可能更高。
+                    </p>
+                  )}
+                  {probeUsage.unpricedModels.length > 0 && (
+                    <p className="text-xs text-amber-700 dark:text-amber-300">
+                      未找到定价：{probeUsage.unpricedModels.join("、")}
+                      ；费用估算不包含这些模型。
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  本次上游没有返回 usage，无法可靠统计 Token
+                  和费用；实际请求仍可能已经计费。
+                </p>
+              )}
+            </div>
+          )}
           {error && (
             <div
               className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
@@ -527,6 +664,13 @@ export function CodexProtocolProbeProgressDialog({
                               {historyReplayLabel(
                                 branch.historyReplay,
                                 branch.stages.continuation,
+                              )}
+                            </p>
+                            <p className="pt-1 text-foreground/80">
+                              {runtimeAdaptationLabel(
+                                transport,
+                                branch.reasoningSource,
+                                branch.historyReplay,
                               )}
                             </p>
                           </div>

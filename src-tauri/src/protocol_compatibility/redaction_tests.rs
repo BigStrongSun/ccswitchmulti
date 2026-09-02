@@ -65,3 +65,58 @@ fn sse_evidence_keeps_event_types_and_redacts_delta_payloads() {
     assert!(!serialized.contains("private thought"));
     assert!(!serialized.contains("private nonce"));
 }
+
+#[test]
+fn json_evidence_records_only_numeric_probe_usage() {
+    let evidence = redact_json_probe_response(
+        200,
+        &json!({
+            "id": "response-secret-id",
+            "model": "private-upstream-model",
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 30,
+                "total_tokens": 150,
+                "input_tokens_details": { "cached_tokens": 20 }
+            },
+            "output": [{"content": [{"type": "output_text", "text": "private text"}]}]
+        }),
+    );
+
+    assert_eq!(
+        evidence.usage,
+        Some(super::redaction::ProbeTokenUsage {
+            input_tokens: 120,
+            output_tokens: 30,
+            cache_read_tokens: 20,
+            cache_creation_tokens: 0,
+            total_tokens: 150,
+        })
+    );
+    let serialized = serde_json::to_string(&evidence).unwrap();
+    assert!(!serialized.contains("response-secret-id"));
+    assert!(!serialized.contains("private-upstream-model"));
+    assert!(!serialized.contains("private text"));
+}
+
+#[test]
+fn sse_evidence_records_completed_response_usage() {
+    let evidence = redact_sse_probe_response(
+        200,
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"private\"}\n\n\
+         event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":80,\"output_tokens\":20,\"total_tokens\":100}}}\n\n",
+    );
+
+    assert_eq!(
+        evidence.usage.as_ref().map(|usage| usage.total_tokens),
+        Some(100)
+    );
+    assert_eq!(
+        evidence.usage.as_ref().map(|usage| usage.input_tokens),
+        Some(80)
+    );
+    assert_eq!(
+        evidence.usage.as_ref().map(|usage| usage.output_tokens),
+        Some(20)
+    );
+}

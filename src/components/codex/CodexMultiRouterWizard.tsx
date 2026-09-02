@@ -3317,6 +3317,9 @@ export function CodexMultiRouterWizard({
           outcome={
             batchProtocolLab.probeOutcome?.outcomes.at(-1)?.outcome ?? null
           }
+          outcomes={(batchProtocolLab.probeOutcome?.outcomes ?? []).map(
+            (entry) => entry.outcome,
+          )}
           error={batchProtocolLab.state.errorDetail ?? ""}
           onOpenChange={setProbeDialogOpen}
           onRetry={() => {
@@ -3349,7 +3352,9 @@ export function CodexMultiRouterWizard({
               <DialogDescription className="space-y-2 text-left">
                 <span className="block">
                   每个普通 provider/model 都会分别验证 Responses 与 Chat
-                  Completions。探测会向上游发送真实请求，可能产生少量额度或流量消耗，也可能触发限流。
+                  Completions。探测会向上游发送真实请求，会消耗模型 Token
+                  并可能产生费用，也可能触发限流；完成后会显示每个来源的 Token
+                  和费用估算。
                 </span>
                 <span className="block">
                   每条协议都要依次通过基础响应、流式

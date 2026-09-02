@@ -102,7 +102,9 @@ export function useCodexProviderSetSave() {
             <DialogDescription className="space-y-2 text-left">
               <span className="block">
                 保存前需要向上游发送少量真实请求，分别验证 Responses 和 Chat
-                Completions；可能产生少量额度或流量消耗，也可能触发限流。
+                Completions；会消耗模型 Token
+                并可能产生费用，也可能触发限流。完成后会显示上游已报告的 Token
+                和按当前模型定价估算的费用。
               </span>
               <span className="block">
                 每个启用模型会依次测试基础响应、SSE

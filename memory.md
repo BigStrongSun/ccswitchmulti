@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-03 v25 旧会话绕过 CCSM 与深探测用量呈现根修
+
+- `v3.19.2-25` 已包含旧会话 `thread/resume` 的 Provider 归一化和官方 OAuth reasoning request normalizer，但安装态 renderer 显示外层兼容对象为 V6、内部 `appServerPatchVersion/reactRequestClientPatchVersion` 仍为 V5。源码也把这两个完成标记硬编码成 `"5"`，并在初次安装后永久 early-return；因此 Codex 启动后新建或替换的 app-server request client 不会再被包裹。失败 rollout `01a04e4f-55be-7463-98ca-d5d8fb1cd158` 的续轮仍保存 `model_provider=openai`，同一时刻 Router 无入站日志，说明该请求在 Desktop 冷恢复竞态中直接走了内置 OpenAI，而不是 CCSM 映射失效。
+- 根修把 Desktop compatibility/request wrapper 升为 V7，旧 V5/V6 client 都必须升级；module discovery 按版本执行，React app-server clients 每轮重扫，新 client 也会安装 wrapper。更关键的是接管期间把顶层 `openai_base_url` 指向与 `codex_model_router_v2` 相同的本地 CCSM endpoint：即使历史任务在 renderer 注入前仍携带 built-in `openai`，请求也必须先进入 CCSM。退出接管或恢复 Provider 快照时只移除本地 proxy URL，不批量改写 rollout/SQLite 的历史来源字段。
+- `input[n].content array too long; maximum length 0` 的直接结构来自第三方 Responses 历史 reasoning item 的 raw `content=[reasoning_text]` 被送到官方 ChatGPT 私有 schema。进入 CCSM 后，official OAuth 链继续由 `normalize_codex_oauth_responses_request` 把 raw reasoning content 归并为 summary 并移除不被接受的 content；第三方运行态则继续使用探测档案：Responses 的 `native_only / responses_reasoning_text_content / omit` 和 Chat 的 Responses-to-Chat、reasoning source、工具 schema 与工具续轮转换。本轮没有另造第二套映射，仅修复绕过入口并把实际运行时映射显式呈现在深探测结果里。
+- 深探测 redacted evidence 现在只额外持久化数值 usage，不保存模型返回文本、响应 ID 或模型名。preflight 对所有实际响应汇总 input/output/cache/total tokens；费用复用现有 model pricing、Codex cache semantics、Provider cost multiplier 和全局默认倍率。上游不返回 usage、模型无定价或失败响应无 usage 时不伪造精确值，界面明确标记“只统计已报告部分/实际消耗可能更高”。普通 Provider 与 MultiRouter 向导都在请求前说明会消耗 Token 并可能产生费用，完成页展示 Token、估算美元成本和每个 Provider/model 的运行时映射。
+- fresh 源码门禁：前端 166 files / 1339 tests，Rust protocol compatibility 125/125，Rust lib `3789 passed / 0 failed / 6 ignored`，`pnpm typecheck`、renderer production build、全仓 Prettier、`cargo check --all-targets`、rustfmt、diff check 与任务文件 UTF-8 strict/no-BOM/U+FFFD 均通过。当前没有构建、安装或重启承载本任务的 Codex；已安装的 v25 仍是旧二进制，不能把源码通过冒充安装态已经修复。
+- 外部语义核对使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链：两者对 DeepSeek Chat 的 `reasoning_content` 续轮约束和 vLLM Responses 的原生 reasoning item/event 结构一致；OpenAI 官方文档确认 Responses reasoning 与 response usage 为独立结构。Matrix 打开 OpenAI 官方页时遇到 403，因此 OpenAI 部分由内置 Web 读取官方文档、本地真实错误、Codex app-server 行为与 CCSM 源码/测试共同交叉确认。
+
 ## 2026-09-02 历史任务 Provider 冷恢复与 Qwen reasoning 回放根修
 
 - 目标任务 `01a04e4f-55be-7463-98ca-d5d8fb1cd158` 的 rollout 首条 `session_meta` 与 `state_5.sqlite.threads` 都保存了 `model_provider=openai`，但这不代表 Qwen 请求实际绕过 Router。`codex-router.log` 在任务创建后的首个 turn 明确记录 `outer_provider=codex-multirouter`、`effective_name=Qwen`、上游为 Qwen Responses，且状态 200；因此“历史 Provider 标签”和“真实转发路由”必须分开判断。

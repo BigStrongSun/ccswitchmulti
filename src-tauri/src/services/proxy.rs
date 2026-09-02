@@ -3951,7 +3951,13 @@ impl ProxyService {
 
         doc["model_provider"] = toml_edit::value(proxy_provider_id);
         doc.as_table_mut().remove("base_url");
-        doc.as_table_mut().remove("openai_base_url");
+        // Codex can auto-resume a historical thread before the renderer-side
+        // compatibility layer has replaced its persisted `model_provider =
+        // "openai"`. Keep the active local proxy as the built-in OpenAI
+        // fallback too, so that startup race cannot bypass CCSM's request and
+        // response normalization. The top-level provider remains the managed
+        // custom provider; this field is only a stale-session safety route.
+        doc["openai_base_url"] = toml_edit::value(proxy_url.trim());
         doc.as_table_mut().remove("wire_api");
         doc.as_table_mut().remove("experimental_bearer_token");
         doc.as_table_mut().remove("model_providers");
@@ -7236,9 +7242,10 @@ wire_api = "chat"
             parsed.get("model").and_then(|v| v.as_str()),
             Some("gpt-5.1-codex")
         );
-        assert!(
-            parsed.get("openai_base_url").is_none(),
-            "takeover live config must not use the reserved built-in OpenAI base URL override"
+        assert_eq!(
+            parsed.get("openai_base_url").and_then(|v| v.as_str()),
+            Some(proxy_url),
+            "stale historical threads that still name the built-in openai provider must not bypass CCSM"
         );
         assert_eq!(
             parsed
@@ -7718,7 +7725,10 @@ wire_api = "responses"
                 .and_then(|v| v.as_str()),
             Some(proxy_url)
         );
-        assert!(parsed.get("openai_base_url").is_none());
+        assert_eq!(
+            parsed.get("openai_base_url").and_then(|v| v.as_str()),
+            Some(proxy_url)
+        );
     }
 
     #[test]
@@ -8816,9 +8826,10 @@ requires_openai_auth = true
             Some("http://127.0.0.1:15721/v1"),
             "local custom provider should point at the local proxy during takeover"
         );
-        assert!(
-            parsed_live.get("openai_base_url").is_none(),
-            "taken-over live config must not use the reserved OpenAI base URL override"
+        assert_eq!(
+            parsed_live.get("openai_base_url").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:15721/v1"),
+            "historical built-in OpenAI sessions must use the same local takeover route"
         );
 
         service
@@ -8836,6 +8847,10 @@ requires_openai_auth = true
             parsed_live.get("model_provider").and_then(|v| v.as_str()),
             Some("aihubmix"),
             "restored Codex live config should preserve the provider's model_provider"
+        );
+        assert!(
+            parsed_live.get("openai_base_url").is_none(),
+            "restoring the provider snapshot must remove CCSM's startup fallback route"
         );
         assert_eq!(
             live.get("auth")
@@ -8985,9 +9000,10 @@ requires_openai_auth = true
             Some("http://127.0.0.1:15721/v1"),
             "local custom provider should be routed through the local proxy"
         );
-        assert!(
-            parsed_live.get("openai_base_url").is_none(),
-            "taken-over live config must not use the reserved OpenAI base URL override"
+        assert_eq!(
+            parsed_live.get("openai_base_url").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:15721/v1"),
+            "historical built-in OpenAI sessions must use the same local takeover route"
         );
         assert_eq!(
             parsed_live.get("model").and_then(|v| v.as_str()),

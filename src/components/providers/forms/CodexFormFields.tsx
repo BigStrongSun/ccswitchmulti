@@ -1648,7 +1648,9 @@ export function CodexFormFields({
             <DialogDescription className="space-y-2 text-left">
               <span className="block">
                 这个测试会帮助判断当前 provider 应该选择 Responses 还是 Chat
-                Completions。它会对当前模型目录里的模型发送真实请求，可能产生少量额度或流量消耗，也可能触发限流。
+                Completions。它会对当前模型目录里的模型发送真实请求，会消耗模型
+                Token 并可能产生费用，也可能触发限流；完成后会显示上游已报告的
+                Token 和费用估算。
               </span>
               <span className="block">
                 如果还没有模型目录，请先到上方“模型目录与上下文”点击“获取模型列表”，或手动添加至少一个模型。
