@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-02 CCSwitchMulti v3.19.2-23 阶段性大版本发布
+
+- 用户要求把 `v3.19.2-18` 起的后续改动统一整理为一个完整大版本，而不是继续发布只覆盖单点修复的短说明。`v18..main@55245dc4` 实际包含 72 个提交、150 个文件、约 4 万行新增；新说明按自动双协议探测/Provider Set、推理与工具语义、13/14 页 MultiRouter 向导、统一 Protocol Lab、Codex TOML 所有权、运行态与历史恢复、Windows 接管升级、模型兼容和 Guardian V2 九个主题重写，并补充升级步骤、错误分类和安装态边界。
+- 版本提交为 `d647e96a`，只包含 `docs/release-notes/v3.19.2-23-zh.md` 与 package/Tauri/Cargo/Cargo.lock 四个版本源；主工作区并行的 Rust 与临时文件没有被暂存。annotated tag `v3.19.2-23` 指向 `d647e96a0f74913c86cf62f9e2f6b108395b15db`，`main` 与标签已推送到 `BigStrongSun/ccswitchmulti`。
+- 干净 detached 候选 fresh 门禁：前端 165 files / 1327 tests、Rust library 3718 passed / 0 failed / 6 ignored、Windows guardian/install/release Pester 90/90；TypeScript、Prettier、renderer production build、`cargo check --lib --no-default-features`、rustfmt、diff 与 UTF-8/no-BOM 通过。严格 `cargo clippy -- -D warnings` 在未改业务代码的干净主线报告 25 个存量 lint（含 Rust 1.95 新 lint、dead code 和 large enum）；它不是当前 tag release workflow 的既有门禁，未在本次发布中顺手做大范围无关重构，后续应单独收口且不得声称 Clippy 已通过。
+- GitHub Actions run `33590274165` 的 Linux x64/ARM64、Windows x64/ARM64、macOS、Publish GitHub Release、Assemble latest.json 共 7 个 job 全部 `success`。正式 Release `CCSwitchMulti v3.19.2-23` 于 `2026-09-02T05:09:18Z` 发布，为非 draft、非 prerelease，且 `/releases/latest` 已指向本 tag；共 19 个资产。
+- 远端 `latest.json` 版本为 `3.19.2-23`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台且六个 signature 均非空。Windows x64 installer 资产 SHA-256 为 `10b8a07c88c593ad724f51d043519e192d8570dd5c8296ba67c24251d9842ebe`；`latest.json` SHA-256 为 `68f9e27e3efe3c6e3ac8ed6a543b43da8a421391d26006c8e63b6d6fea7a88d1`。
+- 外部当前状态核对按仓库规则走两条独立链：Codex 内置搜索能定位公开 Releases 但索引停留在较早版本；Matrix WebSearch 直接读取了 v22 Release 正文；最终 v22/v23 的 latest、资产、时间和 workflow 状态以 GitHub API/CLI 一手数据为准。两条搜索链与本地 Git 对版本序列和发布工作流的结论一致，搜索索引时效差异已明确保留。
+
 ## 2026-09-02 Guardian V2 FeatureToml 与 Statsig 补丁越界根修
 
 - 截图中的 `data did not match any variant of untagged enum FeatureToml in features.guardianv2` 不是磁盘 `~/.codex/config.toml` 仍然无效。现场磁盘 TOML 不含 Guardian 键，本机随包 `codex.exe features list` 返回 0；但同一 Desktop renderer 的 Statsig `2553103476` 动态配置在 CCSM V5 兼容层运行后，从原始 `{ enabled: false }` 变成了同时含 `available_models`、`default_model`、`use_hidden_models` 的四字段对象，随后被 Desktop 作为请求级 `features.guardianv2` 转发并由 app-server 严格拒绝。
