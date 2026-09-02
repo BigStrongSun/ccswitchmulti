@@ -957,10 +957,14 @@ fn build_continuation_request(
 
 fn extract_responses_output_items(exchange: &CapturedProbeExchange) -> Vec<Value> {
     if let Some(output) = exchange.payloads().iter().find_map(|payload| {
-        payload
-            .value
-            .pointer("/response/output")
-            .and_then(Value::as_array)
+        (payload.event_type.as_deref() == Some("response.completed"))
+            .then(|| {
+                payload
+                    .value
+                    .pointer("/response/output")
+                    .and_then(Value::as_array)
+            })
+            .flatten()
     }) {
         return output.clone();
     }
@@ -984,30 +988,31 @@ fn extract_tool_call(
 }
 
 fn extract_responses_tool_call(exchange: &CapturedProbeExchange) -> Option<CapturedToolCall> {
-    exchange.payloads().iter().find_map(|payload| {
-        let item = payload.value.get("item").unwrap_or(&payload.value);
-        if item.get("type").and_then(Value::as_str) != Some("function_call") {
-            return None;
-        }
-        Some(CapturedToolCall {
-            call_id: item
-                .get("call_id")
-                .or_else(|| item.get("id"))
-                .and_then(Value::as_str)?
-                .to_string(),
-            name: item.get("name").and_then(Value::as_str)?.to_string(),
-            arguments: item
-                .get("arguments")
-                .and_then(Value::as_str)
-                .unwrap_or("{}")
-                .to_string(),
-            reasoning_content: item
-                .get("reasoning_content")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
+    extract_responses_output_items(exchange)
+        .into_iter()
+        .find_map(|item| {
+            if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                return None;
+            }
+            Some(CapturedToolCall {
+                call_id: item
+                    .get("call_id")
+                    .or_else(|| item.get("id"))
+                    .and_then(Value::as_str)?
+                    .to_string(),
+                name: item.get("name").and_then(Value::as_str)?.to_string(),
+                arguments: item
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}")
+                    .to_string(),
+                reasoning_content: item
+                    .get("reasoning_content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
         })
-    })
 }
 
 #[derive(Default)]
