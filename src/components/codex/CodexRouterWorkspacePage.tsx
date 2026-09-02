@@ -579,6 +579,7 @@ type CodexCatalogModelDraft = {
   codexCache?: CodexCatalogModel["codexCache"];
   codex_cache?: CodexCatalogModel["codex_cache"];
   sortIndex?: number;
+  enabled?: boolean;
   reasoning?: CodexCatalogModel["reasoning"];
   codexUltra?: CodexCatalogModel["codexUltra"];
   capabilities?: CodexRouteCapabilities;
@@ -825,7 +826,7 @@ function getProviderModelFetchConfig(
 }
 
 /// 将远端模型结果写回 provider 的 modelCatalog；普通源保留用户筛选，OAuth 源则追加官方新发布模型。
-function providerWithFetchedModelCatalog(
+export function providerWithFetchedModelCatalog(
   provider: Provider,
   fetchedModels: FetchedModel[],
 ): Provider {
@@ -857,6 +858,8 @@ function providerWithFetchedModelCatalog(
         : {}),
       ...(model.vision !== undefined ? { vision: model.vision } : {}),
       ...(model.sortIndex !== undefined ? { sortIndex: model.sortIndex } : {}),
+      // 远端目录刷新不能把用户隐藏的模型静默复活。
+      ...(model.enabled !== undefined ? { enabled: model.enabled } : {}),
       // 模型目录刷新必须保留已有 reasoning 声明（用户手动声明的档位/能力）。
       // 否则 /models 拉取重建会把声明清空，导致档位消失（K3/Qwen 均受影响）。
       ...(model.reasoning ? { reasoning: model.reasoning } : {}),
@@ -4279,6 +4282,35 @@ function ModelOrderTab({
     setError(null);
   }, [selectedPlan?.id, catalogKey]);
 
+  const hiddenCatalogModels = useMemo(() => {
+    const hidden: Array<{
+      model: string;
+      upstream?: string;
+      providerId: string;
+      providerName: string;
+    }> = [];
+    const seenProviders = new Set<string>();
+    for (const { route } of selectedRoutes) {
+      const targetProviderId = routeTargetProviderId(route);
+      if (!targetProviderId || seenProviders.has(targetProviderId)) continue;
+      seenProviders.add(targetProviderId);
+      const source = providersById.get(targetProviderId);
+      if (!source) continue;
+      for (const model of readCodexModelCatalog(source).models) {
+        if (model.enabled !== false) continue;
+        const modelId = model.model?.trim();
+        if (!modelId) continue;
+        hidden.push({
+          model: modelId,
+          upstream: model.upstreamModel ?? model.upstream_model,
+          providerId: targetProviderId,
+          providerName: source.name,
+        });
+      }
+    }
+    return hidden;
+  }, [selectedRoutes, providersById]);
+
   function handleDragEnd(event: DragEndEvent) {
     const activeModel = String(event.active.id);
     const overModel = event.over ? String(event.over.id) : "";
@@ -4413,6 +4445,121 @@ function ModelOrderTab({
     }
   }
 
+  async function hideModel(visibleModel: string) {
+    const trimmed = visibleModel.trim();
+    if (!trimmed) return;
+    const confirmed = window.confirm(
+      `把 ${trimmed} 从 Codex 模型选择器移除？\n\n` +
+        "移除后该模型不再出现在选择器中，也不再被 MultiRouter 路由匹配。\n" +
+        "模型条目仍保留在目标 Provider 中，可在本页的“已隐藏模型”恢复。",
+    );
+    if (!confirmed) return;
+    setIsSaving(true);
+    setMessage(null);
+    setError(null);
+    try {
+      let nextProvider: Provider | null = null;
+      for (const { route } of selectedRoutes) {
+        if (route.enabled === false) continue;
+        const targetProviderId = routeTargetProviderId(route);
+        if (!targetProviderId) continue;
+        const aliases = route.aliases ?? route.upstream?.modelMap ?? {};
+        const canonicalModel = aliases[trimmed] ?? trimmed;
+        if (
+          route.modelSelection?.mode === "include" &&
+          !route.modelSelection.models.includes(canonicalModel)
+        ) {
+          continue;
+        }
+        const source = providersById.get(targetProviderId);
+        if (!source) continue;
+        const sourceModels = readCodexModelCatalog(source).models;
+        const sourceIndex = sourceModels.findIndex(
+          (model) =>
+            model.model?.trim() === canonicalModel ||
+            model.upstreamModel?.trim() === canonicalModel ||
+            model.upstream_model?.trim() === canonicalModel,
+        );
+        if (sourceIndex < 0) continue;
+        nextProvider = {
+          ...source,
+          settingsConfig: {
+            ...source.settingsConfig,
+            modelCatalog: {
+              ...(source.settingsConfig?.modelCatalog ?? {}),
+              models: sourceModels.map((model, index) =>
+                index === sourceIndex ? { ...model, enabled: false } : model,
+              ),
+            },
+          },
+        };
+        break;
+      }
+      if (!nextProvider) {
+        setError(`没有找到可移除的 ${trimmed} 模型条目。`);
+        return;
+      }
+      await providersApi.update(nextProvider, "codex");
+      setDraftModels((current) =>
+        current.filter((model) => model.model?.trim() !== trimmed),
+      );
+      setMessage(
+        `已隐藏 ${trimmed}；投影刷新后将从 Codex 选择器移除，可在“已隐藏模型”恢复。`,
+      );
+      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    } catch (saveError) {
+      setError(`隐藏模型失败：${workspaceErrorMessage(saveError)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function restoreHiddenModel(target: {
+    model: string;
+    providerId: string;
+  }) {
+    const source = providersById.get(target.providerId);
+    if (!source) return;
+    setIsSaving(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const models = readCodexModelCatalog(source).models.map((model) => {
+        if (
+          model.model?.trim() !== target.model &&
+          model.upstreamModel?.trim() !== target.model &&
+          model.upstream_model?.trim() !== target.model
+        ) {
+          return model;
+        }
+        const restored = { ...model };
+        delete restored.enabled;
+        return restored;
+      });
+      await providersApi.update(
+        {
+          ...source,
+          settingsConfig: {
+            ...source.settingsConfig,
+            modelCatalog: {
+              ...(source.settingsConfig?.modelCatalog ?? {}),
+              models,
+            },
+          },
+        },
+        "codex",
+      );
+      setMessage(
+        `已恢复 ${target.model}；投影刷新后会重新出现在 Codex 选择器。`,
+      );
+      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    } catch (saveError) {
+      setError(`恢复模型失败：${workspaceErrorMessage(saveError)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   if (!selectedPlan) {
     return (
       <EmptyState
@@ -4425,7 +4572,7 @@ function ModelOrderTab({
     );
   }
 
-  if (catalog.models.length === 0) {
+  if (catalog.models.length === 0 && hiddenCatalogModels.length === 0) {
     return (
       <EmptyState
         icon={GripVertical}
@@ -4467,28 +4614,78 @@ function ModelOrderTab({
         }
       />
 
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragEnd={handleDragEnd}
-      >
-        <SortableContext
-          items={draftModels
-            .map((model) => model.model?.trim())
-            .filter((model): model is string => Boolean(model))}
-          strategy={verticalListSortingStrategy}
+      {draftModels.length > 0 ? (
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={handleDragEnd}
         >
-          <div className="mt-4 space-y-2">
-            {draftModels.map((model, index) => (
-              <SortableCatalogModel
-                key={model.model}
-                model={model}
-                index={index}
-              />
+          <SortableContext
+            items={draftModels
+              .map((model) => model.model?.trim())
+              .filter((model): model is string => Boolean(model))}
+            strategy={verticalListSortingStrategy}
+          >
+            <div className="mt-4 space-y-2">
+              {draftModels.map((model, index) => (
+                <SortableCatalogModel
+                  key={model.model}
+                  model={model}
+                  index={index}
+                  onDelete={(modelId) => void hideModel(modelId)}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
+      ) : (
+        <p className="mt-4 text-xs text-muted-foreground dark:text-slate-400">
+          当前模型都已隐藏，可从下方列表恢复。
+        </p>
+      )}
+
+      {hiddenCatalogModels.length > 0 ? (
+        <details
+          open={draftModels.length === 0}
+          className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 p-3 dark:border-slate-700/60 dark:bg-slate-950/30"
+        >
+          <summary className="cursor-pointer text-xs font-medium text-muted-foreground dark:text-slate-300">
+            已隐藏模型（{hiddenCatalogModels.length}）——已从选择器和路由中移除
+          </summary>
+          <ul className="mt-2 space-y-1.5">
+            {hiddenCatalogModels.map((hidden) => (
+              <li
+                key={`${hidden.providerId}:${hidden.model}`}
+                className="flex items-center justify-between gap-3 rounded border border-border/60 bg-background/70 px-2.5 py-1.5 text-xs dark:border-slate-700/50 dark:bg-slate-900/40"
+              >
+                <span className="min-w-0 flex-1 truncate">
+                  <span className="font-medium text-foreground dark:text-slate-100">
+                    {hidden.model}
+                  </span>
+                  {hidden.upstream ? (
+                    <span className="ml-2 font-mono text-muted-foreground dark:text-slate-400">
+                      {hidden.upstream}
+                    </span>
+                  ) : null}
+                  <span className="ml-2 text-muted-foreground dark:text-slate-400">
+                    来源：{hidden.providerName}
+                  </span>
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={isSaving}
+                  onClick={() => void restoreHiddenModel(hidden)}
+                  className="shrink-0"
+                >
+                  恢复
+                </Button>
+              </li>
             ))}
-          </div>
-        </SortableContext>
-      </DndContext>
+          </ul>
+        </details>
+      ) : null}
 
       {message ? (
         <p className="mt-3 text-xs text-emerald-700 dark:text-emerald-200">
@@ -8744,9 +8941,11 @@ function SortableSpawnAgentCandidate({
 function SortableCatalogModel({
   model,
   index,
+  onDelete,
 }: {
   model: CodexCatalogModel;
   index: number;
+  onDelete?: (modelId: string) => void;
 }) {
   const modelId = model.model?.trim() ?? "";
   const {
@@ -8795,6 +8994,19 @@ function SortableCatalogModel({
           </div>
         ) : null}
       </div>
+      {onDelete ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          aria-label={`移除 ${modelId}`}
+          title="从 Codex 模型选择器和 MultiRouter 路由中移除；可在本页恢复"
+          onClick={() => onDelete(modelId)}
+          className="h-7 shrink-0 px-2 text-rose-700 hover:bg-rose-50 hover:text-rose-800 dark:text-rose-200 dark:hover:bg-rose-500/15"
+        >
+          移除
+        </Button>
+      ) : null}
     </div>
   );
 }

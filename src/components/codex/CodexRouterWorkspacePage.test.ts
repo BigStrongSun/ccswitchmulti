@@ -26,6 +26,7 @@ import {
   mergeRoutePickerDraftIds,
   normalizeCodexRouteForSave,
   normalizeCodexRoutesForVisibleModelAliases,
+  providerWithFetchedModelCatalog,
   projectCodexModelCatalog,
   readCodexRouting,
   resolveCodexRouterAuthFacadeLabel,
@@ -3777,6 +3778,130 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       ),
     ).toBeInTheDocument();
     expect(providersApi.update).not.toHaveBeenCalled();
+  });
+
+  it("hides a model from the target Provider catalog through the model-order page", async () => {
+    const source: Provider = {
+      id: "visibility-source",
+      name: "Visibility Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "model-a" }, { model: "model-b" }],
+        },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([source], [source]),
+      source,
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "model-order",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "移除 model-a" }));
+
+    await waitFor(() => {
+      expect(providersApi.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: source.id,
+          settingsConfig: expect.objectContaining({
+            modelCatalog: expect.objectContaining({
+              models: [
+                expect.objectContaining({ model: "model-a", enabled: false }),
+                expect.objectContaining({ model: "model-b" }),
+              ],
+            }),
+          }),
+        }),
+        "codex",
+      );
+    });
+    expect(
+      screen.getByText(/已隐藏 model-a；.*Codex 选择器移除/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not resurrect a hidden model when refreshing the upstream catalog", () => {
+    const source: Provider = {
+      id: "refresh-hidden-source",
+      name: "Refresh Hidden Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "hidden-model", enabled: false, sortIndex: 3 }],
+        },
+      },
+    };
+
+    const refreshed = providerWithFetchedModelCatalog(source, [
+      { id: "hidden-model", ownedBy: null, supportsImage: true },
+    ]);
+
+    expect(refreshed.settingsConfig?.modelCatalog?.models).toContainEqual(
+      expect.objectContaining({
+        model: "hidden-model",
+        enabled: false,
+        sortIndex: 3,
+        supportsImage: true,
+      }),
+    );
+  });
+
+  it("restores the only hidden model even when the projected catalog is empty", async () => {
+    const source: Provider = {
+      id: "hidden-only-source",
+      name: "Hidden Only Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "hidden-model", enabled: false }],
+        },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([source], [source]),
+      source,
+    );
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "model-order",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    expect(await screen.findByText(/已隐藏模型（1）/)).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "恢复" }));
+
+    await waitFor(() => {
+      const updated = vi.mocked(providersApi.update).mock.calls.at(-1)?.[0];
+      expect(updated?.id).toBe(source.id);
+      expect(updated?.settingsConfig?.modelCatalog?.models).toEqual([
+        { model: "hidden-model" },
+      ]);
+    });
   });
 
   it("keeps unsaved route picker enabled draft state across candidate refreshes", () => {
