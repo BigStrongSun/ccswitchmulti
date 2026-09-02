@@ -314,7 +314,8 @@ pub(crate) fn normalize_third_party_responses_reasoning_items(request_body: Valu
 /// 参数:
 /// - `item`: 一条 Responses input item。
 ///   返回:
-/// - `Some(item)`: 归一化后的 item，`content` 保证携带可读 reasoning_text。
+/// - `Some(item)`: 归一化后的 item，`content` 保证携带可读 reasoning_text，
+///   `summary` 保留为 Responses schema 要求的空数组。
 /// - `None`: item 没有任何可读 reasoning 文本（只有不透明密文），应丢弃。
 ///   副作用:
 /// - 无。
@@ -334,7 +335,10 @@ fn normalize_third_party_responses_reasoning_item(item: Value) -> Option<Value> 
         "content".to_string(),
         Value::Array(vec![json!({ "type": "reasoning_text", "text": text })]),
     );
-    object.remove("summary");
+    // Responses 的 reasoning input schema 要求 summary 字段存在。这里不能把
+    // 原始 reasoning 文本伪装成 summary，但也不能删掉字段；严格上游（例如
+    // Paratera/OpenResponses 实现）会把缺失 summary 判为 400。
+    object.insert("summary".to_string(), Value::Array(Vec::new()));
     object.remove("encrypted_content");
     object.remove("internal_chat_message_metadata_passthrough");
 
@@ -2671,7 +2675,7 @@ mod tests {
             item["content"],
             json!([{ "type": "reasoning_text", "text": "Summarizing final handoff details" }])
         );
-        assert!(item.get("summary").is_none());
+        assert_eq!(item["summary"], json!([]));
         assert!(item.get("encrypted_content").is_none());
         assert!(item
             .get("internal_chat_message_metadata_passthrough")
@@ -2700,7 +2704,7 @@ mod tests {
             item["content"],
             json!([{ "type": "reasoning_text", "text": "We have an interrupted context." }])
         );
-        assert!(item.get("summary").is_none());
+        assert_eq!(item["summary"], json!([]));
         assert!(item.get("encrypted_content").is_none());
         assert_eq!(item["id"], "f7edc5f8-06fd-46b6-bb89-e83c270c2b15");
     }

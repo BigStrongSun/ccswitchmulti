@@ -4920,3 +4920,11 @@ supported in one streaming turn`。
 - 运行态刷新结果已拆成三个独立字段：配置与 app-server 生效、分页历史修复/投影追平仍是核心硬门禁；renderer 跨 Provider 历史查询兼容失败只返回 `completed_with_warnings`，不得把前两项已经成功的结果改成全局失败。完成弹窗分别显示三项状态，并提供只重试 renderer 注入的按钮；Codex Provider 工具栏新增常驻“Codex 状态与修复”入口，先做非破坏性检查，再由用户进入有确认弹窗的关闭/重写/重开流程。
 - TOML 一致性继续只比较 CCSM 所有的投影：`model_provider`、CCSM 目录指针、被选 Provider 表、受管 web-search/路由窗口等。Codex 自己维护的 `agents.*`、`desktop.*`、`developer_instructions`、MCP command/env、plugins、projects trust 等保留且不触发漂移；`model_catalog_json`、当前 Provider 的 `wire_api/base_url/auth` 等受管值变化仍需报告。`codex_config_consistency` 20/20 回归证明启动后非托管改写不让 activation receipt 失效，Apply/refresh 也保留非托管字段。
 - 源码 fresh 门禁：状态 Dialog/Hook 14/14、App integration 17/17、前端全量 165 files / 1327 tests；TypeScript、Prettier、renderer production build 和 `git diff --check` 通过。Rust 定向为 runtime refresh 11/11、renderer 27/27、TOML consistency 20/20；`cargo check --lib` 通过，全量 library 为 3757 passed / 0 failed / 6 ignored。记录写入时尚未构建并安装包含本轮变更的新 NSIS，因此只能声称源码与 live canary 已验证，不能声称安装版 UI 已验收。
+
+## 2026-09-02 v3.19.2-24 新 Issue 根修与 PR 分流
+
+- Issue #80 的根因是 `ResponsesReasoningTextContent` 适配把可读推理正确放进 `content[].reasoning_text` 后，又删除了 Responses 输入 schema 必填的 `summary`。OpenAI 官方生成 SDK把 reasoning input 的 `summary` 声明为 Required；Paratera 等严格实现因此返回 `Missing required parameter: input[n].summary`。修复保留真实 `reasoning_text`，同时写入空 `summary: []`，不把原始推理伪装成 summary，并继续移除第三方无法使用的官方密文与内部 metadata。
+- Issue #81 不是新的退出误判，而是恢复结果查询没有淘汰旧启动代际的 `UncleanExit` 等运行分类。当前查询只让本次启动代际的 ActivePreviousInstance/ConfirmedCrash/UncleanExit/PlannedRestart 分类进入待处理队列；Provider 恢复失败、端口接管失败等持久故障仍跨代保留到用户确认，完整历史记录不删除。
+- Issue #82 的残留目录覆写来自启动对账把 CCSM 生成的 `model_catalog_json` 指针本身当成持续所有权证明。启动目录刷新现在先读取 Codex app takeover 状态；明确关闭时直接跳过，不触碰目录，即使 live TOML 仍有旧指针。接管开启时原有刷新行为不变。
+- PR #83 只包含 #82 的候选修复，但基于 v18，整体合并会回退 Protocol Lab、Provider Set、运行刷新和设置向导；只按当前主线重新实现并保留作者思路，不 cherry-pick 整个分支。PR #85 的环境注入方向有官方配置依据，但当前实现无法区分“本来就存在且恰好同值”与“CCSM 注入”的键，关闭时可能误删用户配置；即时同步失败也只写日志并向 UI 返回成功，且没有覆盖当前 TOML consistency 所有权回归，因此暂不进入 v24。PR #86 一次升级 56 个 Cargo 依赖并有约 49 个真实编译错误，必须拆分迁移，不能进入发布候选。
+- 定向 TDD 先在旧实现得到三个稳定失败：缺失 `summary`、旧代际异常退出仍 pending、接管关闭仍刷新目录；实现后 Responses reasoning 4/4、recovery outcome 6/6、接管关闭目录 1/1 通过。首次并行启动 Rust 链接造成 Windows PDB 冲突，随后确认 C 盘空间耗尽；只清理隔离候选和多个旧日期的可再生成 Cargo target 缓存后改为串行门禁，未删除源码、配置或用户数据。

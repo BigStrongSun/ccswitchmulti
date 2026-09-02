@@ -159,11 +159,16 @@ pub fn get_pending_recovery_outcomes() -> Result<Vec<RecoveryOutcome>, String> {
     let _guard = store_lock()
         .lock()
         .map_err(|_| "恢复结果存储锁已损坏".to_string())?;
-    let mut pending = read_store_unlocked()?
+    let store = read_store_unlocked()?;
+    let current_generation = store.generation.max(1);
+    let mut pending = store
         .outcomes
         .into_iter()
         .filter(|outcome| {
-            outcome.acknowledged_at.is_none() && !matches!(outcome.severity, RecoverySeverity::Info)
+            outcome.acknowledged_at.is_none()
+                && !matches!(outcome.severity, RecoverySeverity::Info)
+                && (!is_run_classification(outcome.kind)
+                    || outcome.generation == current_generation)
         })
         .collect::<Vec<_>>();
     pending.sort_by(|left, right| {
@@ -174,6 +179,16 @@ pub fn get_pending_recovery_outcomes() -> Result<Vec<RecoveryOutcome>, String> {
             .then_with(|| left.timestamp.cmp(&right.timestamp))
     });
     Ok(pending)
+}
+
+fn is_run_classification(kind: RecoveryOutcomeKind) -> bool {
+    matches!(
+        kind,
+        RecoveryOutcomeKind::ActivePreviousInstance
+            | RecoveryOutcomeKind::ConfirmedCrash
+            | RecoveryOutcomeKind::UncleanExit
+            | RecoveryOutcomeKind::PlannedRestartOrUpdate
+    )
 }
 
 pub fn acknowledge_recovery_outcomes(generation: u64, ids: &[String]) -> Result<usize, String> {
@@ -406,5 +421,50 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, failure.id);
         assert_eq!(pending[0].app_type.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    #[serial]
+    fn a_new_startup_generation_retires_only_stale_run_classification_warnings() {
+        let _home = TempHome::new();
+        let stale_unclean = outcome(
+            30,
+            "ccsm",
+            RecoverySeverity::Warning,
+            RecoveryOutcomeKind::UncleanExit,
+        );
+        let persisted_failure = outcome(
+            30,
+            "codex",
+            RecoverySeverity::Error,
+            RecoveryOutcomeKind::StartupTakeoverFailed,
+        );
+        record_recovery_outcome(stale_unclean).expect("record stale unclean exit");
+        record_recovery_outcome(persisted_failure.clone()).expect("record durable failure");
+
+        let current_generation = begin_generation().expect("begin later clean startup");
+        assert!(current_generation > 30);
+
+        let pending = get_pending_recovery_outcomes().expect("read pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, persisted_failure.id);
+    }
+
+    #[test]
+    #[serial]
+    fn current_generation_run_classification_warning_remains_pending() {
+        let _home = TempHome::new();
+        let generation = begin_generation().expect("begin current startup");
+        let current_unclean = outcome(
+            generation,
+            "ccsm",
+            RecoverySeverity::Warning,
+            RecoveryOutcomeKind::UncleanExit,
+        );
+        record_recovery_outcome(current_unclean.clone()).expect("record current unclean exit");
+
+        let pending = get_pending_recovery_outcomes().expect("read pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, current_unclean.id);
     }
 }
