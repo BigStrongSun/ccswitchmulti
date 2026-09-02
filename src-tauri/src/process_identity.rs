@@ -280,7 +280,60 @@ pub(crate) fn terminate_verified_process(_expected: &ProcessIdentity) -> Result<
     Err("当前平台尚不支持强制替换旧 CCSM 监听进程".to_string())
 }
 
-#[cfg(all(unix, not(target_os = "windows")))]
+#[cfg(target_os = "macos")]
+pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    use libc::{proc_pidinfo, proc_pidpath, PROC_PIDTBSDINFO};
+
+    if pid == 0 {
+        return None;
+    }
+
+    let mut path = [0u8; 4096];
+    let path_len = unsafe {
+        proc_pidpath(
+            pid as libc::c_int,
+            path.as_mut_ptr().cast(),
+            path.len() as u32,
+        )
+    };
+    if path_len <= 0 {
+        return None;
+    }
+    let executable_path = std::str::from_utf8(&path[..path_len as usize])
+        .ok()?
+        .to_string();
+
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let info_size = std::mem::size_of::<libc::proc_bsdinfo>();
+    let bytes_written = unsafe {
+        proc_pidinfo(
+            pid as libc::c_int,
+            PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            info_size as libc::c_int,
+        )
+    };
+    if bytes_written != info_size as libc::c_int {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    let started_at_ticks = info
+        .pbi_start_tvsec
+        .saturating_mul(1_000_000)
+        .saturating_add(info.pbi_start_tvusec);
+    if started_at_ticks == 0 {
+        return None;
+    }
+
+    Some(ProcessIdentity {
+        pid,
+        executable_path,
+        started_at_ticks,
+    })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     let proc_dir = PathBuf::from("/proc").join(pid.to_string());
     let executable_path = std::fs::read_link(proc_dir.join("exe"))
@@ -301,7 +354,7 @@ pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     })
 }
 
-#[cfg(all(unix, not(target_os = "windows")))]
+#[cfg(unix)]
 pub(crate) fn tcp_listener_owner_pid(_port: u16) -> Option<u32> {
     None
 }

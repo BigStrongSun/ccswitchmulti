@@ -207,6 +207,17 @@ pub fn get_app_config_dir() -> PathBuf {
 
     let default_dir = get_home_dir().join(".cc-switch");
 
+    // `CC_SWITCH_TEST_HOME` is an explicit test/debug isolation boundary. Once it
+    // supplied the home used above, the Windows v3.10.3 compatibility fallback
+    // must not consult the process-wide `HOME` again: doing so can redirect an
+    // isolated QA instance back into the user's real legacy database.
+    if std::env::var("CC_SWITCH_TEST_HOME")
+        .ok()
+        .is_some_and(|home| !home.trim().is_empty())
+    {
+        return default_dir;
+    }
+
     // 兼容 v3.10.3：当用户环境存在 `HOME` 且与真实用户目录不同，
     // v3.10.3 可能在 `HOME/.cc-switch/` 下创建/使用了数据库。
     // 这里仅在“默认位置没有数据库”时回退到旧位置，避免再次出现“供应商消失”问题，
@@ -566,6 +577,49 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    #[serial_test::serial]
+    fn test_home_override_is_never_redirected_to_the_legacy_home_database() {
+        struct EnvRestore {
+            test_home: Option<std::ffi::OsString>,
+            home: Option<std::ffi::OsString>,
+        }
+
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                match &self.test_home {
+                    Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                    None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+                }
+                match &self.home {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+
+        let isolated_home = tempfile::tempdir().expect("create isolated home");
+        let legacy_home = tempfile::tempdir().expect("create legacy home");
+        let legacy_config_dir = legacy_home.path().join(".cc-switch");
+        std::fs::create_dir_all(&legacy_config_dir).expect("create legacy config dir");
+        std::fs::write(legacy_config_dir.join("cc-switch.db"), b"legacy")
+            .expect("seed legacy database marker");
+
+        let _restore = EnvRestore {
+            test_home: std::env::var_os("CC_SWITCH_TEST_HOME"),
+            home: std::env::var_os("HOME"),
+        };
+        std::env::set_var("CC_SWITCH_TEST_HOME", isolated_home.path());
+        std::env::set_var("HOME", legacy_home.path());
+
+        assert_eq!(
+            get_app_config_dir(),
+            isolated_home.path().join(".cc-switch"),
+            "an explicit test/debug home must not fall back into a real legacy HOME database"
+        );
+    }
 
     #[cfg(windows)]
     #[test]

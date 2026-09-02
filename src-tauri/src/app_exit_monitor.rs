@@ -31,6 +31,7 @@ pub enum PreviousRunClassification {
     ActivePreviousInstance,
     ConfirmedCrash,
     PlannedRestartOrUpdate,
+    CleanExit,
     UncleanExit,
 }
 
@@ -250,18 +251,22 @@ fn classify_previous_run(
         .filter(|event| event.pid == marker.pid && event.timestamp >= marker.started_at);
     let mut confirmed_crash = crash_log_modified_after_marker;
     let mut planned_restart = false;
+    let mut clean_exit = false;
     for event in same_pid_events {
         if matches!(event.kind.as_str(), "panic" | "forced_exit") {
             confirmed_crash = true;
         }
-        if event.kind == "clean_exit" && is_planned_exit_reason(&event.reason) {
-            planned_restart = true;
+        if event.kind == "clean_exit" {
+            clean_exit = true;
+            planned_restart |= is_planned_exit_reason(&event.reason);
         }
     }
     if confirmed_crash {
         PreviousRunClassification::ConfirmedCrash
     } else if planned_restart {
         PreviousRunClassification::PlannedRestartOrUpdate
+    } else if clean_exit {
+        PreviousRunClassification::CleanExit
     } else {
         PreviousRunClassification::UncleanExit
     }
@@ -506,6 +511,99 @@ mod tests {
                 marker.config_scope.as_deref().expect("marker scope"),
             ),
             PreviousRunClassification::UncleanExit
+        );
+    }
+
+    #[test]
+    fn clean_exit_event_prevents_recovery_when_marker_cleanup_was_unavailable() {
+        let marker = marker_with_identity();
+        let events = vec![ExitEvent {
+            timestamp: "2026-08-25 10:01:00.000".to_string(),
+            kind: "clean_exit".to_string(),
+            reason: "user_requested_exit".to_string(),
+            exit_code: Some(0),
+            version: "test".to_string(),
+            os: "test".to_string(),
+            arch: "test".to_string(),
+            pid: marker.pid,
+            details: None,
+        }];
+
+        let classification = classify_previous_run(
+            Some(&marker),
+            &events,
+            false,
+            None,
+            marker.config_scope.as_deref().expect("marker scope"),
+        );
+        assert_eq!(classification, PreviousRunClassification::CleanExit);
+        assert!(!classification.allows_crash_recovery());
+    }
+
+    #[test]
+    fn clean_exit_with_restart_reason_remains_a_planned_restart() {
+        let marker = marker_with_identity();
+        let events = vec![ExitEvent {
+            timestamp: "2026-08-25 10:01:00.000".to_string(),
+            kind: "clean_exit".to_string(),
+            reason: "restart_after_update".to_string(),
+            exit_code: Some(0),
+            version: "test".to_string(),
+            os: "test".to_string(),
+            arch: "test".to_string(),
+            pid: marker.pid,
+            details: None,
+        }];
+
+        assert_eq!(
+            classify_previous_run(
+                Some(&marker),
+                &events,
+                false,
+                None,
+                marker.config_scope.as_deref().expect("marker scope"),
+            ),
+            PreviousRunClassification::PlannedRestartOrUpdate
+        );
+    }
+
+    #[test]
+    fn crash_evidence_wins_over_an_earlier_clean_exit_event() {
+        let marker = marker_with_identity();
+        let events = vec![
+            ExitEvent {
+                timestamp: "2026-08-25 10:01:00.000".to_string(),
+                kind: "clean_exit".to_string(),
+                reason: "user_requested_exit".to_string(),
+                exit_code: Some(0),
+                version: "test".to_string(),
+                os: "test".to_string(),
+                arch: "test".to_string(),
+                pid: marker.pid,
+                details: None,
+            },
+            ExitEvent {
+                timestamp: "2026-08-25 10:01:01.000".to_string(),
+                kind: "panic".to_string(),
+                reason: "panic after shutdown began".to_string(),
+                exit_code: Some(1),
+                version: "test".to_string(),
+                os: "test".to_string(),
+                arch: "test".to_string(),
+                pid: marker.pid,
+                details: None,
+            },
+        ];
+
+        assert_eq!(
+            classify_previous_run(
+                Some(&marker),
+                &events,
+                false,
+                None,
+                marker.config_scope.as_deref().expect("marker scope"),
+            ),
+            PreviousRunClassification::ConfirmedCrash
         );
     }
 
