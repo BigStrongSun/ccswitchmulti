@@ -12,6 +12,7 @@ import type {
   CodexSubagentVersion,
   Provider,
 } from "@/types";
+import type { CodexSubagentV2Profile } from "@/types/codexSubagentV2";
 import {
   normalizeHostedToolsConfig,
   type HostedToolsConfig,
@@ -1241,6 +1242,111 @@ export function initialWizardCatalogModelOrder(
   return ordered;
 }
 
+// 向导重建路由/目录后，为既有 subagentV2 生成“旧可见名 → 新可见名”的重定向器。
+// 旧 profile 是可见名快照；重名消歧发生变化时必须先经旧 aliases 找回 upstream
+// 身份，再映射到新目录，否则会产生无法被路由命中的孤儿 profile。
+function buildSubagentNameRedirector(
+  oldRoutes: CodexRoutingRouteV2[],
+  newRoutes: CodexRoutingRouteV2[],
+  resolvedSources: Provider[],
+) {
+  const oldVisibleToUpstream = new Map<string, string>();
+  for (const route of oldRoutes) {
+    for (const [visible, canonical] of Object.entries(route.aliases ?? {})) {
+      if (visible.trim() && canonical.trim()) {
+        oldVisibleToUpstream.set(
+          visible.trim().toLowerCase(),
+          canonical.trim(),
+        );
+      }
+    }
+  }
+
+  const identityToNewVisible = new Map<string, string>();
+  for (const source of resolvedSources) {
+    for (const model of readWizardModelCatalog(source)) {
+      const upstream = (
+        model.upstreamModel ??
+        model.upstream_model ??
+        model.model ??
+        ""
+      ).trim();
+      const visible = (model.model ?? "").trim();
+      const identity = upstream.toLowerCase();
+      if (identity && visible && !identityToNewVisible.has(identity)) {
+        identityToNewVisible.set(identity, visible);
+      }
+    }
+  }
+  for (const route of newRoutes) {
+    for (const [visible, canonical] of Object.entries(route.aliases ?? {})) {
+      const identity = canonical.trim().toLowerCase();
+      if (identity && visible.trim() && !identityToNewVisible.has(identity)) {
+        identityToNewVisible.set(identity, visible.trim());
+      }
+    }
+  }
+
+  function redirectVisibleName(oldVisible: string): string | null {
+    const trimmed = oldVisible.trim();
+    if (!trimmed) return null;
+    const identities = [
+      oldVisibleToUpstream.get(trimmed.toLowerCase()),
+      trimmed,
+    ]
+      .filter((identity): identity is string => Boolean(identity))
+      .map((identity) => identity.toLowerCase());
+    for (const identity of identities) {
+      const mapped = identityToNewVisible.get(identity);
+      if (mapped) return mapped;
+    }
+    return null;
+  }
+
+  function remapSubagentV2(
+    current: CodexRoutingConfigV2["subagentV2"],
+  ): CodexRoutingConfigV2["subagentV2"] {
+    if (!current?.profiles) return current;
+    const profiles = current.profiles;
+    const next: Record<string, CodexSubagentV2Profile> = {};
+    for (const [oldKey, profile] of Object.entries(profiles)) {
+      const oldVisible = (
+        typeof profile.model === "string" && profile.model.trim()
+          ? profile.model
+          : oldKey
+      ).trim();
+      const newVisible = redirectVisibleName(oldVisible);
+      if (
+        !newVisible ||
+        newVisible.toLowerCase() === oldVisible.toLowerCase()
+      ) {
+        next[oldKey] = profile;
+        continue;
+      }
+
+      const occupiedByOther =
+        Object.prototype.hasOwnProperty.call(next, newVisible) ||
+        Object.entries(profiles).some(([otherKey, otherProfile]) => {
+          if (otherKey === oldKey) return false;
+          const otherVisible = (
+            typeof otherProfile.model === "string" && otherProfile.model.trim()
+              ? otherProfile.model
+              : otherKey
+          ).trim();
+          return otherVisible.toLowerCase() === newVisible.toLowerCase();
+        });
+      if (occupiedByOther) {
+        next[oldKey] = profile;
+        continue;
+      }
+      next[newVisible] = { ...profile, model: newVisible };
+    }
+    return { ...current, profiles: next };
+  }
+
+  return { redirectVisibleName, remapSubagentV2 };
+}
+
 // 创建或更新 MultiRouter provider；草稿只在用户点击保存发布时写入数据库。
 export function buildCodexMultiRouterWizardPlan(
   allProviders: Provider[],
@@ -1337,15 +1443,24 @@ export function buildCodexMultiRouterWizardPlan(
   const subagentVersion = normalizeCodexSubagentVersion(
     options.subagentVersion ?? existingRouting?.subagentVersion,
   );
+  const subagentNameRedirector = buildSubagentNameRedirector(
+    existingRoutingV2?.routes ?? [],
+    routes,
+    resolvedSources,
+  );
   const routing: CodexRoutingConfigV2 = {
     ...(existingRoutingV2 ?? {}),
     schemaVersion: 2,
     enabled: true,
     subagentVersion,
-    subagentV2: existingRouting?.subagentV2,
-    spawnAgentModels: requestedSpawnAgentModels.filter((model) =>
-      selectedVisibleModels.has(model),
+    subagentV2: subagentNameRedirector.remapSubagentV2(
+      existingRouting?.subagentV2,
     ),
+    spawnAgentModels: requestedSpawnAgentModels
+      .map(
+        (model) => subagentNameRedirector.redirectVisibleName(model) ?? model,
+      )
+      .filter((model) => selectedVisibleModels.has(model)),
     routes,
   };
   const existingIds = new Set(allProviders.map((provider) => provider.id));

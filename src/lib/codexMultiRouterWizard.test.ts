@@ -175,3 +175,115 @@ describe("buildCodexMultiRouterWizardPlan subagent version", () => {
     expect(plan.settingsConfig).not.toHaveProperty("model_catalog");
   });
 });
+
+describe("buildCodexMultiRouterWizardPlan subagent profile rekey", () => {
+  const legacyAlias = "shared-model-old-a";
+  const nextAlias = "shared-model-vendor-a";
+
+  function source(id: string, name: string): Provider {
+    return {
+      id,
+      name,
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "shared-model" }] },
+      },
+    };
+  }
+
+  function existingPlanWith(
+    profiles: Record<string, Record<string, unknown>>,
+    spawnAgentModels: string[] = [legacyAlias],
+  ): Provider {
+    return {
+      id: "router-existing",
+      name: "Router Existing",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          subagentVersion: "v2",
+          routes: [
+            {
+              id: "vendor-a",
+              enabled: true,
+              targetProviderId: "vendor-a",
+              modelSelection: { mode: "all" },
+              aliases: { [legacyAlias]: "shared-model" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+          subagentV2: {
+            schemaVersion: 2,
+            selectionPolicy: "balanced",
+            profiles,
+          },
+          spawnAgentModels,
+        },
+      },
+    };
+  }
+
+  it("rekeys a stale profile and spawn candidate to the rebuilt visible alias", () => {
+    const legacyProfile = {
+      model: legacyAlias,
+      enabled: true,
+      questionnaire: {
+        taskStrengths: ["testing"],
+        optimization: "quality",
+        writeScope: "complex_changes",
+        preference: "preferred",
+      },
+      reasoning: { policy: "fixed", effort: "high" },
+    };
+    const result = buildCodexMultiRouterWizardPlan(
+      [source("vendor-a", "Vendor A"), source("vendor-b", "Vendor B")],
+      [source("vendor-a", "Vendor A"), source("vendor-b", "Vendor B")],
+      existingPlanWith({ [legacyAlias]: legacyProfile }),
+    );
+    const routing = result.plan.settingsConfig.codexRouting as Record<
+      string,
+      any
+    >;
+
+    expect(routing.subagentV2.profiles[nextAlias]).toMatchObject({
+      model: nextAlias,
+      enabled: true,
+      reasoning: { policy: "fixed", effort: "high" },
+    });
+    expect(routing.subagentV2.profiles[legacyAlias]).toBeUndefined();
+    expect(routing.spawnAgentModels).toContain(nextAlias);
+  });
+
+  it("preserves both profiles when the rebuilt alias is already occupied", () => {
+    const result = buildCodexMultiRouterWizardPlan(
+      [source("vendor-a", "Vendor A"), source("vendor-b", "Vendor B")],
+      [source("vendor-a", "Vendor A"), source("vendor-b", "Vendor B")],
+      existingPlanWith({
+        [legacyAlias]: { model: legacyAlias, enabled: true },
+        [nextAlias]: { model: nextAlias, enabled: false },
+      }),
+    );
+    const profiles = (
+      result.plan.settingsConfig.codexRouting as Record<string, any>
+    ).subagentV2.profiles;
+
+    expect(profiles[legacyAlias]).toMatchObject({ enabled: true });
+    expect(profiles[nextAlias]).toMatchObject({ enabled: false });
+  });
+
+  it("preserves an unrelated profile for later catalog reconciliation", () => {
+    const removedProfile = { model: "removed-model", enabled: false };
+    const result = buildCodexMultiRouterWizardPlan(
+      [source("vendor-a", "Vendor A"), source("vendor-b", "Vendor B")],
+      [source("vendor-a", "Vendor A"), source("vendor-b", "Vendor B")],
+      existingPlanWith({ "removed-model": removedProfile }),
+    );
+    const profiles = (
+      result.plan.settingsConfig.codexRouting as Record<string, any>
+    ).subagentV2.profiles;
+
+    expect(profiles["removed-model"]).toEqual(removedProfile);
+  });
+});
