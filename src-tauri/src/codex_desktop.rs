@@ -55,6 +55,7 @@ pub(crate) struct CodexAppCompatibilityEvidence {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodexModelCatalogProjection {
     default_model: Option<String>,
+    model_provider: Option<String>,
     model_names: Vec<String>,
     models: Vec<Value>,
 }
@@ -64,6 +65,7 @@ impl CodexModelCatalogProjection {
     fn empty() -> Self {
         Self {
             default_model: None,
+            model_provider: None,
             model_names: Vec::new(),
             models: Vec::new(),
         }
@@ -96,8 +98,11 @@ pub(crate) struct CdpTarget {
 /// - 若发现已开放 CDP 的 Codex renderer，会触发新版历史目录同步并修复模型菜单；
 /// - 若未发现 CDP 且 Codex 未运行，会以 remote debugging 参数启动 Codex。
 pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String> {
-    let catalog = load_cc_switch_model_catalog_projection()
-        .unwrap_or_else(|_| CodexModelCatalogProjection::empty());
+    let catalog = load_cc_switch_model_catalog_projection().unwrap_or_else(|_| {
+        let mut projection = CodexModelCatalogProjection::empty();
+        projection.model_provider = read_current_codex_model_provider();
+        projection
+    });
     let attempted_ports = candidate_debug_ports(DEFAULT_CODEX_DEBUG_PORT);
 
     if let Some(result) = try_inject_on_candidate_ports(&catalog, &attempted_ports).await {
@@ -236,6 +241,7 @@ pub(crate) fn load_cc_switch_model_catalog_projection(
 ) -> Result<CodexModelCatalogProjection, String> {
     let catalog_path = crate::codex_config::get_codex_model_catalog_path();
     let default_model = read_current_codex_default_model();
+    let model_provider = read_current_codex_model_provider();
     let mut candidates = Vec::new();
 
     if let Ok(catalog) = crate::config::read_json_file::<Value>(&catalog_path) {
@@ -254,9 +260,11 @@ pub(crate) fn load_cc_switch_model_catalog_projection(
     }
 
     for candidate in &candidates {
-        if let Some(projection) =
-            codex_model_catalog_projection_from_value(candidate, default_model.clone())
-        {
+        if let Some(projection) = codex_model_catalog_projection_from_value(
+            candidate,
+            default_model.clone(),
+            model_provider.clone(),
+        ) {
             return Ok(projection);
         }
     }
@@ -271,6 +279,7 @@ pub(crate) fn load_cc_switch_model_catalog_projection(
 fn codex_model_catalog_projection_from_value(
     catalog: &Value,
     default_model: Option<String>,
+    model_provider: Option<String>,
 ) -> Option<CodexModelCatalogProjection> {
     let (model_names, models) = codex_model_entries_from_catalog_value(catalog);
     if model_names.is_empty() {
@@ -278,6 +287,7 @@ fn codex_model_catalog_projection_from_value(
     }
     Some(CodexModelCatalogProjection {
         default_model: default_model.or_else(|| model_names.first().cloned()),
+        model_provider,
         model_names,
         models,
     })
@@ -379,6 +389,18 @@ fn read_current_codex_default_model() -> Option<String> {
     let parsed = text.parse::<toml::Value>().ok()?;
     parsed
         .get("model")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+/// 读取当前 live Codex Provider，供 renderer 在冷恢复旧任务时覆盖历史 Provider 标签。
+fn read_current_codex_model_provider() -> Option<String> {
+    let text = crate::codex_config::read_codex_config_text().ok()?;
+    let parsed = text.parse::<toml::Value>().ok()?;
+    parsed
+        .get("model_provider")
         .and_then(toml::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -856,11 +878,48 @@ fn guardian_v2_compatibility_patch_core_script() -> &'static str {
 "#
 }
 
+/// App-server 请求兼容核心，同时嵌入 renderer 并由 QuickJS 行为测试直接执行。
+///
+/// `thread/list` 继续显式查询所有 Provider；`thread/resume` 则以当前 live Provider
+/// 覆盖历史线程保存的旧入口标签，使跨 Provider 历史在冷恢复后重新经过 CCSM Router。
+fn app_server_request_normalization_core_script() -> &'static str {
+    r#"
+  const appServerRequestPatchVersion = "6";
+  const appServerRequestClientNeedsPatch = (client) => client?.__ccSwitchModelRequestPatch !== appServerRequestPatchVersion;
+  const appServerMethod = (method, params) => method === "send-cli-request-for-host" && params?.method ? String(params.method) : String(method || "");
+  const currentModelProvider = () => {
+    const value = state.payload?.modelProvider;
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  };
+  const normalizeAppServerRequestParams = (method, params) => {
+    const actualMethod = appServerMethod(method, params);
+    if (actualMethod === "thread/list") {
+      if (method === "send-cli-request-for-host" && params?.params?.modelProviders == null) {
+        return { ...params, params: { ...(params?.params || {}), modelProviders: [] } };
+      }
+      if (params == null) return { modelProviders: [] };
+      return params?.modelProviders == null ? { ...params, modelProviders: [] } : params;
+    }
+    if (actualMethod !== "thread/resume") return params;
+    const modelProvider = currentModelProvider();
+    if (!modelProvider) return params;
+    if (method === "send-cli-request-for-host") {
+      const requestParams = params?.params;
+      if (!requestParams || typeof requestParams !== "object" || Array.isArray(requestParams) || requestParams.modelProvider === modelProvider) return params;
+      return { ...params, params: { ...requestParams, modelProvider } };
+    }
+    if (!params || typeof params !== "object" || Array.isArray(params) || params.modelProvider === modelProvider) return params;
+    return { ...params, modelProvider };
+  };
+"#
+}
+
 /// 构造 renderer 注入脚本：触发新版本地历史目录同步，并修复模型白名单和缓存。
 fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> String {
     let payload = serde_json::to_string(catalog).unwrap_or_else(|_| "{}".to_string());
     let model_patch_core = model_picker_patch_core_script();
     let guardian_v2_patch_core = guardian_v2_compatibility_patch_core_script();
+    let request_normalization_core = app_server_request_normalization_core_script();
     format!(
         r#"
 (async () => {{
@@ -879,6 +938,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   window[patchKey] = state;
 {model_patch_core}
 {guardian_v2_patch_core}
+{request_normalization_core}
   const patchStatsigConfig = (name, config, repairLegacyPollution = false) => {{
     const prepared = prepareStatsigDynamicConfig(name, config, repairLegacyPollution);
     config = prepared.config;
@@ -1050,7 +1110,6 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }});
     return await state.historySyncPromise;
   }};
-  const appServerMethod = (method, params) => method === "send-cli-request-for-host" && params?.method ? String(params.method) : String(method || "");
   const isModelListMethod = (method) => method === "list-models-for-host" || method === "model/list";
   const patchModelListResult = (result) => {{
     if (result == null) return false;
@@ -1072,18 +1131,9 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     patchModelListResult(result);
     return result;
   }};
-  const normalizeAppServerRequestParams = (method, params) => {{
-    const actualMethod = appServerMethod(method, params);
-    if (actualMethod !== "thread/list") return params;
-    if (method === "send-cli-request-for-host" && params?.params?.modelProviders == null) {{
-      return {{ ...params, params: {{ ...(params?.params || {{}}), modelProviders: [] }} }};
-    }}
-    if (params == null) return {{ modelProviders: [] }};
-    return params?.modelProviders == null ? {{ ...params, modelProviders: [] }} : params;
-  }};
   const patchRequestClient = (client) => {{
     if (!client || typeof client.sendRequest !== "function") return false;
-    if (client.__ccSwitchModelRequestPatch === "5") return true;
+    if (!appServerRequestClientNeedsPatch(client)) return true;
     try {{
       const original = client.__ccSwitchOriginalSendRequest || client.sendRequest.bind(client);
       client.__ccSwitchOriginalSendRequest = original;
@@ -1102,7 +1152,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
           return patchAppServerResult(actualMethod, result);
         }}
       }};
-      client.__ccSwitchModelRequestPatch = "5";
+      client.__ccSwitchModelRequestPatch = appServerRequestPatchVersion;
       return true;
     }} catch (error) {{
       // rpc-BaVz... also exposes immutable RpcStub objects whose method shape
@@ -2288,7 +2338,7 @@ mod tests {
     fn catalog_projection_skips_empty_source_and_accepts_fallback_source() {
         let empty = json!({ "models": [] });
         assert!(
-            codex_model_catalog_projection_from_value(&empty, None).is_none(),
+            codex_model_catalog_projection_from_value(&empty, None, None).is_none(),
             "empty primary catalog must not freeze an empty renderer payload"
         );
 
@@ -2298,9 +2348,12 @@ mod tests {
                 { "model": "qwen3.6", "display_name": "Qwen3.6 Local" }
             ]
         });
-        let projection =
-            codex_model_catalog_projection_from_value(&fallback, Some("qwen3.6".to_string()))
-                .expect("fallback catalog projection");
+        let projection = codex_model_catalog_projection_from_value(
+            &fallback,
+            Some("qwen3.6".to_string()),
+            Some("codex_model_router_v2".to_string()),
+        )
+        .expect("fallback catalog projection");
 
         assert_eq!(
             projection.model_names,
@@ -2357,6 +2410,147 @@ mod tests {
                 .expect("execute Guardian V2 compatibility core");
             serde_json::from_str(&json_text).expect("parse Guardian V2 compatibility result")
         })
+    }
+
+    fn run_app_server_request_normalization_probe_with_payload(
+        payload: Value,
+        probe: &str,
+    ) -> serde_json::Value {
+        let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
+        let script = format!(
+            "const payload = {};\nconst state = {{ payload }};\n{}\n{}",
+            payload,
+            app_server_request_normalization_core_script(),
+            probe
+        );
+
+        context.with(|ctx| {
+            let json_text: String = ctx
+                .eval(script)
+                .expect("execute app-server request normalization core");
+            serde_json::from_str(&json_text).expect("parse app-server request normalization result")
+        })
+    }
+
+    #[test]
+    fn codex_app_request_normalization_routes_resumed_threads_through_active_provider() {
+        let result = run_app_server_request_normalization_probe_with_payload(
+            json!({ "modelProvider": "codex_model_router_v2" }),
+            r#"
+const directOriginal = { threadId: "thread-1", model: "gpt-5.6-sol", modelProvider: "openai" };
+const wrappedOriginal = {
+  method: "thread/resume",
+  params: { threadId: "thread-2", model: "qwen3.8", modelProvider: "openai" },
+  hostId: "local",
+};
+const unrelatedOriginal = { threadId: "thread-3", modelProvider: "openai" };
+const direct = normalizeAppServerRequestParams("thread/resume", directOriginal);
+const wrapped = normalizeAppServerRequestParams("send-cli-request-for-host", wrappedOriginal);
+const unrelated = normalizeAppServerRequestParams("thread/read", unrelatedOriginal);
+JSON.stringify({
+  direct,
+  wrapped,
+  unrelated,
+  directOriginal,
+  wrappedOriginal,
+  unrelatedIdentityPreserved: unrelated === unrelatedOriginal,
+});
+"#,
+        );
+
+        assert_eq!(
+            result["direct"],
+            json!({
+                "threadId": "thread-1",
+                "model": "gpt-5.6-sol",
+                "modelProvider": "codex_model_router_v2"
+            })
+        );
+        assert_eq!(
+            result["wrapped"],
+            json!({
+                "method": "thread/resume",
+                "params": {
+                    "threadId": "thread-2",
+                    "model": "qwen3.8",
+                    "modelProvider": "codex_model_router_v2"
+                },
+                "hostId": "local"
+            })
+        );
+        assert_eq!(
+            result["unrelated"],
+            json!({
+                "threadId": "thread-3",
+                "modelProvider": "openai"
+            })
+        );
+        assert_eq!(result["directOriginal"]["modelProvider"], "openai");
+        assert_eq!(
+            result["wrappedOriginal"]["params"]["modelProvider"],
+            "openai"
+        );
+        assert_eq!(result["unrelatedIdentityPreserved"], true);
+    }
+
+    #[test]
+    fn codex_app_request_normalization_does_not_invent_a_resume_provider() {
+        let result = run_app_server_request_normalization_probe_with_payload(
+            json!({ "modelProvider": null }),
+            r#"
+const directOriginal = { threadId: "thread-1", modelProvider: "openai" };
+const direct = normalizeAppServerRequestParams("thread/resume", directOriginal);
+const list = normalizeAppServerRequestParams("thread/list", { modelProviders: null, limit: 20 });
+const wrappedList = normalizeAppServerRequestParams("send-cli-request-for-host", {
+  method: "thread/list",
+  params: { modelProviders: null, limit: 50 },
+});
+JSON.stringify({
+  direct,
+  directIdentityPreserved: direct === directOriginal,
+  list,
+  wrappedList,
+});
+"#,
+        );
+
+        assert_eq!(
+            result["direct"],
+            json!({
+                "threadId": "thread-1",
+                "modelProvider": "openai"
+            })
+        );
+        assert_eq!(result["directIdentityPreserved"], true);
+        assert_eq!(result["list"], json!({ "modelProviders": [], "limit": 20 }));
+        assert_eq!(
+            result["wrappedList"],
+            json!({
+                "method": "thread/list",
+                "params": { "modelProviders": [], "limit": 50 }
+            })
+        );
+    }
+
+    #[test]
+    fn codex_app_request_normalization_replaces_the_previous_request_wrapper() {
+        let result = run_app_server_request_normalization_probe_with_payload(
+            json!({ "modelProvider": "codex_model_router_v2" }),
+            r#"
+JSON.stringify({
+  previousNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "5" }),
+  currentNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "6" }),
+  missingNeedsPatch: appServerRequestClientNeedsPatch({}),
+  patchVersion: appServerRequestPatchVersion,
+});
+"#,
+        );
+
+        assert_eq!(result["previousNeedsPatch"], true);
+        assert_eq!(result["currentNeedsPatch"], false);
+        assert_eq!(result["missingNeedsPatch"], true);
+        assert_eq!(result["patchVersion"], "6");
     }
 
     #[test]
@@ -2612,6 +2806,7 @@ JSON.stringify({
     fn model_picker_unlock_script_patches_renderer_whitelists() {
         let catalog = CodexModelCatalogProjection {
             default_model: Some("qwen3.6".to_string()),
+            model_provider: Some("codex_model_router_v2".to_string()),
             model_names: vec!["qwen3.6".to_string(), "deepseek-v4-flash".to_string()],
             models: vec![json!({ "model": "qwen3.6", "hidden": false })],
         };
@@ -2628,7 +2823,7 @@ JSON.stringify({
         assert!(script.contains("await installAppServerPatch()"));
         assert!(script.contains("!state.requestIds.has(requestId)"));
         assert!(script.contains("__ccSwitchCodexAppCompatibilityV6"));
-        assert!(script.contains("__ccSwitchModelRequestPatch === \"5\""));
+        assert!(script.contains("appServerRequestPatchVersion = \"6\""));
         assert!(script.contains("2553103476"));
         assert!(script.contains("isGuardianV2FeatureTomlError(error)"));
         assert!(script.contains("guardianV2FallbackRequestParams"));

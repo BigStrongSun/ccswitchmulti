@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-02 历史任务 Provider 冷恢复与 Qwen reasoning 回放根修
+
+- 目标任务 `01a04e4f-55be-7463-98ca-d5d8fb1cd158` 的 rollout 首条 `session_meta` 与 `state_5.sqlite.threads` 都保存了 `model_provider=openai`，但这不代表 Qwen 请求实际绕过 Router。`codex-router.log` 在任务创建后的首个 turn 明确记录 `outer_provider=codex-multirouter`、`effective_name=Qwen`、上游为 Qwen Responses，且状态 200；因此“历史 Provider 标签”和“真实转发路由”必须分开判断。
+- 结合时间线可确定：任务创建时 app-server 仍持有旧的 built-in `openai + 本地 15721 base_url` 运行快照；CCSM/磁盘后来已经使用稳定 `codex_model_router_v2`，但运行中的 app-server 配置和线程元数据不会热迁移。旧字符串在 2026-09-02 恢复时又被当前 app-server 按官方 ChatGPT Provider 解释，于是用户即使把模型切回 `gpt-5.6-sol`，Provider 仍是 `openai`，请求绕过 CCSM 的 official OAuth replay normalizer。
+- 报错 `Invalid input[17].content: array too long; maximum length 0, got 1` 已定位到最后一次 compaction 后的首条 Qwen `type=reasoning` item，其 `content=[{type=reasoning_text}]`。CCSM 的 Router official route 已有 `normalize_codex_oauth_reasoning_item`，会把该 raw content 归并为 `summary` 并删除官方私有 schema 不接受的 `content`；失败的直接原因是错误 Provider 让请求没有经过 Router，而不是整个 Responses `input` 数组长度超限。
+- 根修不批量重写 rollout/SQLite，也不抹掉历史来源。renderer 兼容 payload 新增当前 live `model_provider`；`normalizeAppServerRequestParams` 只在 `thread/resume` 的 direct 或 `send-cli-request-for-host` wrapped 请求上，把 `modelProvider` 覆盖为当前活动 Provider。缺失/空 Provider 时 no-op，`thread/list modelProviders=[]` 和其它请求保持原语义。已加载且仍被订阅/运行的线程会按 app-server 语义忽略 resume override；重启后首次打开、未加载旧任务、或无订阅 idle cache 被卸载后的 cold resume 才真正创建新 Provider continuation。
+- 旧安装态已有 request wrapper V5，若沿用版本号会跳过新行为；本修复把 request wrapper 升为 V6，并用 QuickJS 行为测试锁定 V5 必须替换、V6 幂等。TDD RED 分别捕获缺少 normalization core 与缺少 V5→V6 升级门；GREEN 为 request normalization 3/3、`codex_desktop::tests` 33/33、Rust library `3721 passed / 0 failed / 6 ignored`，`cargo check --lib --no-default-features`、rustfmt 与 diff check 通过。当前只完成隔离 worktree 源码验证，尚未构建/安装新版本，也未重启承载当前任务的 Codex。
+- 外部核对使用两条独立链：Codex 内置 Web 与 Matrix WebSearch 均打开 OpenAI 官方 Responses create 文档，公共契约支持 reasoning 通过 `summary`/`encrypted_content` 跨轮回放；公开文档不能单独证明 ChatGPT Codex 私有 schema，最终 `content` 最大长度 0 的判断以本机真实错误、精确 input ordinal、当前 app-server 源码和 CCSM official normalizer 交叉确定。
+
 ## 2026-09-02 CCSwitchMulti v3.19.2-23 阶段性大版本发布
 
 - 用户要求把 `v3.19.2-18` 起的后续改动统一整理为一个完整大版本，而不是继续发布只覆盖单点修复的短说明。`v18..main@55245dc4` 实际包含 72 个提交、150 个文件、约 4 万行新增；新说明按自动双协议探测/Provider Set、推理与工具语义、13/14 页 MultiRouter 向导、统一 Protocol Lab、Codex TOML 所有权、运行态与历史恢复、Windows 接管升级、模型兼容和 Guardian V2 九个主题重写，并补充升级步骤、错误分类和安装态边界。
