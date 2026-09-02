@@ -11,6 +11,11 @@ vi.mock("react-i18next", () => ({
         "codexConfigConsistency.title": "Codex 配置与 CCSM 不一致",
         "codexConfigConsistency.description":
           "检测到 Codex config.toml 在 CCSM 之外发生了修改。请选择如何处理。",
+        "codexConfigConsistency.projectionTitle": "Codex 路由接管配置缺失",
+        "codexConfigConsistency.projectionDescription":
+          "CCSM 已启用路由接管，但磁盘配置尚未完整指向本地路由。",
+        "codexConfigConsistency.projectionDetail":
+          "这是接管整体投影状态，不代表 Codex 修改了下面两个字段。",
         "codexConfigConsistency.provider": "当前 Provider：",
         "codexConfigConsistency.changedKeys": "变更的配置项：",
         "codexConfigConsistency.noSecrets": "仅显示配置键路径，不显示配置值。",
@@ -18,6 +23,7 @@ vi.mock("react-i18next", () => ({
         "codexConfigConsistency.later": "稍后处理",
         "codexConfigConsistency.keepCodex": "保留 Codex 修改",
         "codexConfigConsistency.applyCcsm": "应用 CCSM 配置",
+        "codexConfigConsistency.restoreTakeover": "恢复路由接管",
         "codexConfigConsistency.runtimeTitle": "Codex 仍在使用旧配置",
         "codexConfigConsistency.runtimeDescription":
           "磁盘配置已经正确，但运行中的 app-server 启动得更早。",
@@ -162,10 +168,7 @@ describe("CodexConfigConsistencyDialog", () => {
         report={{
           ...report,
           reason: "takeover_projection_drift",
-          changedKeys: [
-            "model_provider",
-            "model_providers.codex_model_router_v2",
-          ],
+          changedKeys: [],
         }}
         pending={false}
         error={null}
@@ -176,8 +179,20 @@ describe("CodexConfigConsistencyDialog", () => {
       />,
     );
 
+    expect(
+      screen.getByRole("dialog", { name: "Codex 路由接管配置缺失" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("CCSM 已启用路由接管，但磁盘配置尚未完整指向本地路由。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "这是接管整体投影状态，不代表 Codex 修改了下面两个字段。",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("变更的配置项：")).toBeNull();
     expect(screen.queryByText("保留 Codex 修改")).toBeNull();
-    expect(screen.getByText("应用 CCSM 配置")).toBeInTheDocument();
+    expect(screen.getByText("恢复路由接管")).toBeInTheDocument();
   });
 
   it("shows restart guidance instead of pretending a disk-only repair is active", () => {

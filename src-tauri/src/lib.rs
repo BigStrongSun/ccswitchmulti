@@ -703,6 +703,12 @@ pub fn run() {
             }
 
             let app_state = AppState::new(db);
+            // The renderer can mount while the async crash-recovery/takeover
+            // pipeline below is still rebuilding Codex live config. Keep
+            // consistency inspection behind an explicit readiness gate so that
+            // this intentional intermediate state is never reported as external
+            // config drift.
+            app_state.begin_codex_startup_reconciliation();
 
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());

@@ -488,10 +488,18 @@ export function CodexConfigConsistencyDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <AlertTriangle className="h-5 w-5 text-amber-500" />
-            {t("codexConfigConsistency.title")}
+            {t(
+              takeoverProjectionDrift
+                ? "codexConfigConsistency.projectionTitle"
+                : "codexConfigConsistency.title",
+            )}
           </DialogTitle>
           <DialogDescription>
-            {t("codexConfigConsistency.description")}
+            {t(
+              takeoverProjectionDrift
+                ? "codexConfigConsistency.projectionDescription"
+                : "codexConfigConsistency.description",
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -502,19 +510,27 @@ export function CodexConfigConsistencyDialog({
             </span>{" "}
             <code>{report.providerId || t("common.unknown")}</code>
           </div>
-          <div>
-            <span className="font-medium">
-              {t("codexConfigConsistency.changedKeys")}
-            </span>
-            <ul className="mt-2 max-h-32 space-y-1 overflow-y-auto rounded-md border bg-muted/20 p-2 font-mono text-xs">
-              {report.changedKeys.map((key) => (
-                <li key={key}>{key}</li>
-              ))}
-            </ul>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {t("codexConfigConsistency.noSecrets")}
-          </p>
+          {takeoverProjectionDrift ? (
+            <p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-muted-foreground">
+              {t("codexConfigConsistency.projectionDetail")}
+            </p>
+          ) : (
+            <>
+              <div>
+                <span className="font-medium">
+                  {t("codexConfigConsistency.changedKeys")}
+                </span>
+                <ul className="mt-2 max-h-32 space-y-1 overflow-y-auto rounded-md border bg-muted/20 p-2 font-mono text-xs">
+                  {report.changedKeys.map((key) => (
+                    <li key={key}>{key}</li>
+                  ))}
+                </ul>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t("codexConfigConsistency.noSecrets")}
+              </p>
+            </>
+          )}
           {error ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
               <p>{error}</p>
@@ -542,7 +558,11 @@ export function CodexConfigConsistencyDialog({
           ) : null}
           <Button onClick={onApply} disabled={pending}>
             {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            {t("codexConfigConsistency.applyCcsm")}
+            {t(
+              takeoverProjectionDrift
+                ? "codexConfigConsistency.restoreTakeover"
+                : "codexConfigConsistency.applyCcsm",
+            )}
           </Button>
           {onInspectRefresh ? (
             <Button onClick={onInspectRefresh} disabled={pending}>

@@ -5,7 +5,10 @@ use crate::protocol_compatibility::{
 use crate::services::{ProxyService, UsageCache};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -19,6 +22,7 @@ pub struct AppState {
     protocol_probes_in_flight: Arc<Mutex<HashSet<String>>>,
     protocol_probe_receipts: Arc<Mutex<HashMap<String, ProtocolProbeReceipt>>>,
     codex_provider_set_probe_receipts: Arc<Mutex<HashMap<String, CodexProviderSetProbeReceipt>>>,
+    codex_startup_reconciliation_pending: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -125,7 +129,29 @@ impl AppState {
             protocol_probes_in_flight: Arc::new(Mutex::new(HashSet::new())),
             protocol_probe_receipts: Arc::new(Mutex::new(HashMap::new())),
             codex_provider_set_probe_receipts: Arc::new(Mutex::new(HashMap::new())),
+            // Tests, CLI helpers and command-only AppState instances do not run the
+            // Desktop startup recovery pipeline. The real app explicitly opens the
+            // gate before exposing its renderer.
+            codex_startup_reconciliation_pending: AtomicBool::new(false),
         }
+    }
+
+    /// Prevent renderer consistency checks from observing the transient state
+    /// between restoring the user's live config and re-projecting proxy takeover.
+    pub(crate) fn begin_codex_startup_reconciliation(&self) {
+        self.codex_startup_reconciliation_pending
+            .store(true, Ordering::Release);
+    }
+
+    /// Publish that startup writers have settled and live config is safe to inspect.
+    pub(crate) fn finish_codex_startup_reconciliation(&self) {
+        self.codex_startup_reconciliation_pending
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn codex_startup_reconciliation_pending(&self) -> bool {
+        self.codex_startup_reconciliation_pending
+            .load(Ordering::Acquire)
     }
 
     pub fn try_acquire_protocol_probe(&self, key: &str) -> Result<ProtocolProbeLease, String> {

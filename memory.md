@@ -4991,3 +4991,11 @@ supported in one streaming turn`。
 - GitHub Release 已公开为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.2-25`，不是 draft/prerelease，共 19 个资产。下载复核的 `latest.json` 版本为 `3.19.2-25`，包含 `darwin-aarch64`、`darwin-x86_64`、`linux-aarch64`、`linux-x86_64`、`windows-aarch64`、`windows-x86_64` 六个平台；签名全部非空，URL 全部指向本 tag，文件 SHA-256 `1153139a463a09a631678589e41c5ebd5b7bbb8f7ae82cd645b6d3feada84007` 与 GitHub 资产摘要一致。正式 Release body 已替换为仓库内完整中文说明。
 - 依据当前主线提交与 fresh 测试证据关闭 Issue #50、#52、#53、#54、#68、#71、#72、#76、#78、#79、#84；关闭已由当前架构等价或扩展实现替代的 PR #70、#73、#75、#85，并保留贡献者署名。Issue #74 仍有独立验收范围，插件 PR #61/#69、依赖 PR 与其余未逐项证明完成的条目继续保持开放。
 - 发布后复查仍只发现两个 tracked 脏旧 worktree：`codex-multirouter-ssot-v2` 是落后 271 个提交、会强制开启已改为用户可选的 system-proxy 策略的旧尝试；`codex-reasoning-probe-backend` 落后 152 个提交且 tracked diff 只有 rustfmt 排版。其它相关 worktree 仅有 `.tmp`/target 产物。它们均不是遗漏的可合生产修复，继续原样保留；不得以 `git status` 或 `--no-merged` 结果直接判定应合并。
+
+## 2026-09-03 Codex 接管启动竞态与配置一致性误报根修
+
+- 截图中的 `model_provider` 与 `model_providers.codex_model_router_v2` 不是一次真实的逐字段语义差异，也不是 v25 漏合代码。现场日志给出确定时序：旧实例退出/升级先恢复用户 live config，新实例随后显示主窗口，renderer 的一致性 hook 立即查询；异步启动恢复稍后才重新投影 15721 Router。数据库此时已记录 takeover enabled，但磁盘尚处于刻意的中间态，旧检查因此生成 `takeover_projection_drift`；同一秒后端已把 live config 修正。弹窗里两条路径来自后端硬编码，并非 diff 引擎的输出。
+- 根修在 `AppState` 增加显式启动对账门禁：真实 Desktop 在 renderer 可查询前标记 pending，启动恢复、代理接管和 Profile 对账全部稳定后才解除；pending 期间 inspect 返回无告警的 `startup_reconciliation_pending`，既不允许中间态弹窗，也不吞掉对账完成后的真实漂移。完成后无论健康还是异常都发布最终 snapshot，使 renderer 能立即清除先前状态，不必等待 30 秒轮询。
+- 持久存在的 takeover projection drift 仍可操作，但作为“路由接管配置缺失”整体状态展示；不再伪称 Codex 修改了两个字段，不再展示虚构 changed-key 列表，也不允许选择“保留 Codex 修改”。主操作改为“恢复路由接管”。普通 CCSM 托管字段的真实语义 diff、Codex 非托管字段忽略、端口身份 fail-closed 与运行态刷新逻辑均保持原边界。
+- TDD 先确认旧实现在启动 pending 时会报 external drift、投影弹窗会显示硬编码路径；实现后 Codex consistency 21/21、相关前端 14/14、前端全量 166 files / 1337 tests、Rust library 3786 passed / 0 failed / 6 ignored、`pnpm typecheck`、`cargo check --all-targets`、生产库严格 Clippy 和 rustfmt 均通过。全 targets 严格 Clippy 仍被本任务外既有测试警告阻断；Tauri release EXE 与 renderer 编译成功，但本地 WiX bundling 返回非零，因此没有形成可验收 installer，也没有安装、重启或替换当前运行态。
+- 外部交叉核对使用 Codex 内置 Web 和 Matrix WebSearch。上游 issue #6183 佐证启动阶段确有接管配置重写行为；本次具体竞态与误报键来源仍以当前 main 源码、04:12 本机日志和 RED→GREEN 回归为权威。

@@ -522,13 +522,11 @@ fn runtime_activation_from_system(
     )
 }
 
-pub(crate) fn should_emit_startup_event(state: CodexConfigConsistencyState) -> bool {
-    state == CodexConfigConsistencyState::ExternalDrift
-}
-
-fn should_emit_report(report: &CodexConfigConsistencyReport) -> bool {
-    should_emit_startup_event(report.state)
-        || report.runtime_activation.state == CodexConfigRuntimeActivationState::RestartRequired
+fn should_emit_report(_report: &CodexConfigConsistencyReport) -> bool {
+    // Startup completion is itself meaningful: a renderer may have queried while
+    // recovery was pending. Always publish the settled snapshot so a healthy
+    // result can clear any stale attention state without waiting for polling.
+    true
 }
 
 pub(crate) fn repair_current_profile_provider_before_inspection(
@@ -556,6 +554,7 @@ pub(crate) async fn reconcile_after_startup(app: &tauri::AppHandle) -> Result<()
             "Codex 当前 Provider 已恢复，但活跃项目快照仍无法同步，error_kind=profile_provider_snapshot_sync_failed"
         );
     }
+    state.finish_codex_startup_reconciliation();
     let report = inspect(&state)?;
     if should_emit_report(&report) {
         app.emit("codex-config-consistency", &report)
@@ -567,6 +566,23 @@ pub(crate) async fn reconcile_after_startup(app: &tauri::AppHandle) -> Result<()
 }
 
 pub fn inspect(state: &AppState) -> Result<CodexConfigConsistencyReport, AppError> {
+    if state.codex_startup_reconciliation_pending() {
+        return Ok(CodexConfigConsistencyReport {
+            state: CodexConfigConsistencyState::NotApplicable,
+            provider_id: None,
+            expected_fingerprint: None,
+            actual_fingerprint: None,
+            changed_keys: Vec::new(),
+            reason: Some("startup_reconciliation_pending".to_string()),
+            runtime_activation: CodexConfigRuntimeActivation {
+                state: CodexConfigRuntimeActivationState::Unknown,
+                app_server_started_at: None,
+                config_modified_at: None,
+                reason: Some("startup_reconciliation_pending".to_string()),
+            },
+        });
+    }
+
     let provider_id = crate::settings::get_effective_current_provider(&state.db, &AppType::Codex)?;
     let Some(provider_id) = provider_id else {
         return Ok(report(
@@ -620,13 +636,7 @@ pub fn inspect(state: &AppState) -> Result<CodexConfigConsistencyReport, AppErro
             Some(provider_id),
             None,
             Some(actual_fingerprint),
-            vec![
-                "model_provider".to_string(),
-                format!(
-                    "model_providers.{}",
-                    crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID
-                ),
-            ],
+            Vec::new(),
             Some("takeover_projection_drift"),
         ));
     }
@@ -1227,16 +1237,57 @@ wire_api = "responses"
 
         assert_eq!(result.state, CodexConfigConsistencyState::ExternalDrift);
         assert_eq!(result.reason.as_deref(), Some("takeover_projection_drift"));
-        assert!(result
-            .changed_keys
-            .iter()
-            .any(|key| key == "model_provider"));
+        assert!(
+            result.changed_keys.is_empty(),
+            "an aggregate takeover projection failure is not a semantic field diff"
+        );
         let actual = result.actual_fingerprint.expect("actual fingerprint");
         let error = resolve(&state, actual, CodexConfigConsistencyAction::KeepCodex)
             .expect_err("takeover drift cannot be accepted as an external edit");
         assert!(error
             .to_string()
             .contains("cannot_keep_codex_changes_while_takeover_enabled"));
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_defers_takeover_drift_until_startup_reconciliation_finishes() {
+        let _home = TestHomeGuard::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let (state, _) = seed_provider();
+        let provider = state
+            .db
+            .get_provider_by_id("consistency-provider", AppType::Codex.as_str())
+            .expect("read provider")
+            .expect("provider exists");
+        let direct_config = build_codex_live_config_for_provider(&state.db, &provider)
+            .expect("build direct provider config");
+        codex_config::write_codex_live_config_atomic(Some(&direct_config))
+            .expect("write non-router live config");
+        let mut proxy_config =
+            futures::executor::block_on(state.db.get_proxy_config_for_app(AppType::Codex.as_str()))
+                .expect("read proxy config");
+        proxy_config.enabled = true;
+        futures::executor::block_on(state.db.update_proxy_config_for_app(proxy_config))
+            .expect("mark takeover enabled");
+
+        state.begin_codex_startup_reconciliation();
+        let pending = inspect(&state).expect("inspect during startup reconciliation");
+
+        assert_eq!(pending.state, CodexConfigConsistencyState::NotApplicable);
+        assert_eq!(
+            pending.reason.as_deref(),
+            Some("startup_reconciliation_pending")
+        );
+        assert!(pending.changed_keys.is_empty());
+
+        state.finish_codex_startup_reconciliation();
+        let completed = inspect(&state).expect("inspect after startup reconciliation");
+        assert_eq!(completed.state, CodexConfigConsistencyState::ExternalDrift);
+        assert_eq!(
+            completed.reason.as_deref(),
+            Some("takeover_projection_drift")
+        );
     }
 
     #[test]
@@ -1562,18 +1613,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn startup_reconciliation_emits_for_disk_drift_or_stale_runtime() {
-        let states = [
-            CodexConfigConsistencyState::Consistent,
-            CodexConfigConsistencyState::NotApplicable,
-            CodexConfigConsistencyState::Unavailable,
-        ];
-        assert!(states
-            .iter()
-            .all(|state| !should_emit_startup_event(*state)));
-        assert!(should_emit_startup_event(
-            CodexConfigConsistencyState::ExternalDrift
-        ));
+    fn startup_reconciliation_always_emits_the_settled_report() {
         let runtime_only = CodexConfigConsistencyReport {
             state: CodexConfigConsistencyState::Consistent,
             provider_id: Some("router".to_string()),
@@ -1589,5 +1629,24 @@ wire_api = "responses"
             },
         };
         assert!(should_emit_report(&runtime_only));
+
+        let healthy_completion = CodexConfigConsistencyReport {
+            state: CodexConfigConsistencyState::NotApplicable,
+            provider_id: Some("router".to_string()),
+            expected_fingerprint: None,
+            actual_fingerprint: None,
+            changed_keys: Vec::new(),
+            reason: Some("proxy_takeover_active".to_string()),
+            runtime_activation: CodexConfigRuntimeActivation {
+                state: CodexConfigRuntimeActivationState::Current,
+                app_server_started_at: None,
+                config_modified_at: None,
+                reason: None,
+            },
+        };
+        assert!(
+            should_emit_report(&healthy_completion),
+            "startup completion must clear a renderer report captured during recovery"
+        );
     }
 }
