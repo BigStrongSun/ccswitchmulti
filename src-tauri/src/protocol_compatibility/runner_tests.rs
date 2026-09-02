@@ -879,7 +879,7 @@ async fn responses_continuation_falls_back_to_reasoning_text_replay_when_require
         continuations[1]["input"][1]["content"],
         json!([{"type": "reasoning_text", "text": "private tool reasoning"}])
     );
-    assert!(continuations[1]["input"][1].get("summary").is_none());
+    assert_eq!(continuations[1]["input"][1]["summary"], json!([]));
 }
 
 #[tokio::test]
