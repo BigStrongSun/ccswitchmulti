@@ -319,6 +319,7 @@ export interface CodexHistorySessionSummary {
   id: string;
   title: string;
   cwd: string | null;
+  model: string | null;
   modelProvider: string | null;
   source: string | null;
   threadSource: string | null;

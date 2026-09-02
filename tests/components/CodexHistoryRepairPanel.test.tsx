@@ -125,6 +125,38 @@ beforeEach(() => {
 });
 
 describe("CodexHistoryRepairPanel", () => {
+  it("renders the numeric epoch using the device timezone even when the ISO display field is missing", async () => {
+    vi.mocked(proxyApi.listCodexHistorySessions).mockResolvedValue(
+      historyListFixture({
+        totalMatched: 1,
+        items: [
+          {
+            id: "timezone-session",
+            title: "Timezone session",
+            cwd: "C:\\work",
+            model: "qwen3.8",
+            modelProvider: "openai",
+            source: "vscode",
+            threadSource: "user",
+            archived: false,
+            hasUserEvent: true,
+            updatedAtMs: Date.UTC(2026, 7, 30, 12, 34),
+            updatedAt: null,
+            rolloutPath: "C:\\sessions\\timezone.jsonl",
+          },
+        ],
+      }),
+    );
+
+    render(<CodexHistoryRepairPanel />);
+
+    const row = await screen.findByRole("button", {
+      name: /Timezone session/,
+    });
+    expect(row.textContent).toMatch(/\d{2}\/\d{2}.*\d{2}:\d{2}/);
+    expect(row).toHaveTextContent("qwen3.8");
+  });
+
   it("loads all projects by default even when opened from a selected session", async () => {
     render(
       <CodexHistoryRepairPanel
@@ -201,6 +233,9 @@ describe("CodexHistoryRepairPanel", () => {
     );
     expect(confirmSpy).toHaveBeenCalledWith(
       expect.stringContaining("请先完全退出 Codex / ChatGPT App"),
+    );
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining("thread_settings_applied"),
     );
     expect(proxyApi.repairCodexHistoryVisibility).toHaveBeenNthCalledWith(
       2,

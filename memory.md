@@ -4939,3 +4939,13 @@ supported in one streaming turn`。
 - GitHub 状态已收口：#80、#81、#82 带 commit/tag/测试证据关闭；PR #83 方向正确但基于 v18，已由当前主线等价根修取代并关闭；PR #86 一次升级 56 个 Cargo 依赖且三平台 backend CI 失败，已要求拆批并关闭；PR #85 保持打开且为 `CHANGES_REQUESTED`，Issue #84 保持打开，等待环境变量所有权账本、结构化同步失败、inline/table TOML 兼容与配置一致性回归。
 - 本轮没有安装发布版、关闭 CCSM、重启 Codex 或执行破坏性 Codex runtime refresh。Release/资产验收不能替代当前机器安装态、端口接管和现有任务的桌面验收；若后续要安装，必须继续使用 `scripts/invoke-ccswitchmulti-local-upgrade.ps1` 的可回滚事务。
 - 外部事实交叉验证使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链；两者均读取 OpenAI Codex 的 `ShellEnvironmentPolicyToml.set`、OpenAI 生成 SDK 的 Responses reasoning input 类型和 Claude Code settings 官方文档，结论一致。具体 Issue 根因和 PR 可合并性仍以本地当前主线、RED→GREEN 回归和 GitHub CI 为权威。
+
+## 2026-09-02 历史 Provider 重放与本机时区显示根修
+
+- 任务 `01a04e4f-55be-7463-98ca-d5d8fb1cd158` 的 Qwen 官方账户报错不是代理未支持 Qwen：其 rollout 同时保存了 `session_meta.model_provider=openai` 和后续 `thread_settings_applied.thread_settings.model_provider_id=openai`。Codex 恢复线程时按事件顺序重放，后者会覆盖初始 Provider；旧历史修复只改 `session_meta` 和 SQLite，因此 App 重启重建后可能再次钉回官方 Provider。
+- 历史元数据解析现在与 Codex 当前 state extractor 对齐：读取 `turn_context.model`，并让后续 `thread_settings_applied` 更新模型和 Provider。历史列表同时展示模型与 Provider，便于直接识别“第三方模型 + openai Provider”组合；重建/插入 thread-store 时若 schema 有 `model` 列也会保存真实模型。
+- 所有 Provider 桶迁移、当前历史可见性修复和官方历史还原现在都同时改写 `session_meta.model_provider` 与 `thread_settings_applied.thread_settings.model_provider_id`。迁移资格仍由每个 `session_meta` 分段控制，不能因为同一测试文件前一个会话命中就误改后续不在来源集合中的会话；原 rollout mtime、模型名和其它事件内容保持不变。
+- 历史修复会核对已在目标 DB Provider 桶中的 rollout，专门完成“SQLite/session_meta 已修、thread_settings_applied 仍是 openai”的半修复状态。UI 的旧 IPC 统计字段 `rolloutFirstLines*` 为兼容保留，但文案明确为 Provider 状态文件，并在确认框列出两种权威记录。
+- 时区没有通过固定 `+8` 修正：rollout RFC3339 时间先归一为绝对 epoch 毫秒，后端排序/重建保持同一时刻，前端直接从 `updatedAtMs` 用设备本地时区格式化。这样 `2026-08-29T16:16:57Z` 在上海显示为 8 月 30 日 00:16，同时 UTC/DST 设备仍按自身时区显示；Provider 元数据迁移继续恢复原文件 mtime。此前提交 `392e8c32` 只修复额度统计测试的跨时区日边界，并不覆盖历史列表，本次才补齐历史 UI 的数值时间源。
+- TDD 首先复现三类失败：解析器不认识后续设置事件、历史 UI 在 ISO 字段缺失时把有效 epoch 显示为 `-`、半修复 rollout 因 DB 已是目标 Provider 而被跳过。修复后历史迁移 54/54、前端定向 4/4、前端全量 165 files / 1328 tests、Rust library 3723 passed / 0 failed / 6 ignored、TypeScript、renderer production build 和 `cargo check --lib --no-default-features` 全部通过；既有 dead-code/unused、浏览器数据陈旧、Tauri/MSW/act 输出仍是非阻断警告。
+- 外部核对使用 Codex 内置搜索与 Matrix WebSearch 两条独立链读取 OpenAI Codex 配置参考；具体重放根因以本地最新 Codex `state/src/extract.rs`、`thread_processor.rs`、真实 rollout/SQLite 与 fork Issue #77 为权威。当前仅完成源码与本地门禁，尚未构建、安装或代用户运行离线历史修复；运行历史修复仍必须先完全退出 Codex/ChatGPT App。
