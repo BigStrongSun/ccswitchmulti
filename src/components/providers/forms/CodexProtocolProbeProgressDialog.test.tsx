@@ -251,6 +251,52 @@ describe("CodexProtocolProbeProgressDialog", () => {
         "运行时适配：Codex Responses 转换为 Chat Completions；推理从 reasoning_content 读取并投影回 Codex。",
       ),
     ).toBeInTheDocument();
+
+    const chatBranch = screen
+      .getByText("Chat Completions")
+      .closest("section") as HTMLElement;
+    fireEvent.click(
+      within(chatBranch).getByRole("button", {
+        name: "查看字段映射与生效方式",
+      }),
+    );
+    expect(
+      within(chatBranch).getByText("Codex input[] → Chat messages[]"),
+    ).toBeInTheDocument();
+    expect(
+      within(chatBranch).getByText(
+        "function_call_output → role=tool + tool_call_id",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(chatBranch).getByText(
+        "choices[].delta.reasoning_content → response.reasoning_text.delta",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(chatBranch).getByText(
+        "保存并启用 Provider 后，每次运行请求都会自动应用；仅运行探测不会改写当前配置。",
+      ),
+    ).toBeInTheDocument();
+
+    const responsesBranch = screen
+      .getByText("Responses")
+      .closest("section") as HTMLElement;
+    fireEvent.click(
+      within(responsesBranch).getByRole("button", {
+        name: "查看字段映射与生效方式",
+      }),
+    );
+    expect(
+      within(responsesBranch).getByText(
+        "reasoning.summary[] → reasoning.content[type=reasoning_text]",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(responsesBranch).getByText(
+        "工具调用与工具结果保持 Responses 原结构",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("warns before completion that deep probing sends billable model requests", () => {

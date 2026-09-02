@@ -1,6 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   CheckCircle2,
+  ChevronDown,
   Circle,
   Loader2,
   MinusCircle,
@@ -419,6 +420,45 @@ function runtimeAdaptationLabel(
   return "运行时适配：Responses 请求保持原协议；上游原生推理项按原结构回放。";
 }
 
+function runtimeMappingRows(
+  transport: CodexProtocolTransport,
+  reasoningSource: CodexReasoningSource | null,
+  historyReplay: CodexHistoryReplay | null,
+) {
+  if (transport === "open_ai_chat") {
+    const source =
+      reasoningSource && reasoningSource !== "none"
+        ? reasoningSource
+        : "已识别的推理字段";
+    return [
+      "Codex instructions → Chat messages[role=system]",
+      "Codex input[] → Chat messages[]",
+      "function_call / custom_tool_call → assistant.tool_calls[]",
+      "function_call_output → role=tool + tool_call_id",
+      "tools[] → Chat tools[].function（按探测到的 Schema 方言编译）",
+      `choices[].delta.${source} → response.reasoning_text.delta`,
+      "choices[].delta.content → response.output_text.delta",
+      "Chat tool_calls[] → Responses function/custom/tool_search call items",
+      "prompt/completion usage → input/output usage",
+    ];
+  }
+
+  const replay =
+    historyReplay === "responses_reasoning_text_content"
+      ? "reasoning.summary[] → reasoning.content[type=reasoning_text]"
+      : historyReplay === "omit"
+        ? "不兼容的 reasoning item → 删除（仅删除推理项）"
+        : "reasoning item → 按上游原生结构回放";
+  return [
+    "Codex Responses 请求 → Responses 上游（不改协议）",
+    "system / developer message → 顶层 instructions",
+    replay,
+    "tools[].parameters → 按探测到的 Schema 方言编译",
+    "工具调用与工具结果保持 Responses 原结构",
+    "SSE、推理事件与 usage → 规范化后返回 Codex",
+  ];
+}
+
 export function CodexProtocolProbeProgressDialog({
   open,
   running,
@@ -431,6 +471,9 @@ export function CodexProtocolProbeProgressDialog({
   onOpenChange,
   onRetry,
 }: CodexProtocolProbeProgressDialogProps) {
+  const [expandedMappings, setExpandedMappings] = useState<Set<string>>(
+    () => new Set(),
+  );
   const resolvedOutcomes = useMemo(
     () => (outcomes.length > 0 ? outcomes : outcome ? [outcome] : []),
     [outcome, outcomes],
@@ -601,6 +644,8 @@ export function CodexProtocolProbeProgressDialog({
               <div className="grid gap-3 lg:grid-cols-2">
                 {TRANSPORTS.map((transport) => {
                   const branch = model.branches[transport];
+                  const mappingKey = `${model.key}\u0000${transport}`;
+                  const mappingExpanded = expandedMappings.has(mappingKey);
                   return (
                     <section
                       key={transport}
@@ -673,6 +718,53 @@ export function CodexProtocolProbeProgressDialog({
                                 branch.historyReplay,
                               )}
                             </p>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-auto w-full justify-between px-0 py-1 text-xs font-medium text-foreground/80 hover:bg-transparent"
+                              aria-expanded={mappingExpanded}
+                              onClick={() =>
+                                setExpandedMappings((current) => {
+                                  const next = new Set(current);
+                                  if (next.has(mappingKey)) {
+                                    next.delete(mappingKey);
+                                  } else {
+                                    next.add(mappingKey);
+                                  }
+                                  return next;
+                                })
+                              }
+                            >
+                              查看字段映射与生效方式
+                              <ChevronDown
+                                className={cn(
+                                  "h-3.5 w-3.5 transition-transform",
+                                  mappingExpanded && "rotate-180",
+                                )}
+                                aria-hidden
+                              />
+                            </Button>
+                            {mappingExpanded && (
+                              <div className="space-y-2 rounded-md border border-border-default bg-muted/20 p-2 text-[11px] leading-5">
+                                <p className="font-medium text-foreground">
+                                  实际运行字段映射
+                                </p>
+                                <ul className="space-y-0.5 font-mono text-muted-foreground">
+                                  {runtimeMappingRows(
+                                    transport,
+                                    branch.reasoningSource,
+                                    branch.historyReplay,
+                                  ).map((row) => (
+                                    <li key={row}>{row}</li>
+                                  ))}
+                                </ul>
+                                <p className="border-t pt-2 font-sans text-muted-foreground">
+                                  保存并启用 Provider
+                                  后，每次运行请求都会自动应用；仅运行探测不会改写当前配置。
+                                </p>
+                              </div>
+                            )}
                           </div>
                           {branch.failures.length > 0 && (
                             <div className="space-y-1 border-t pt-2 text-xs text-destructive">
