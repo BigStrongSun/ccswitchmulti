@@ -3236,6 +3236,16 @@ impl Database {
                 .unwrap_or_else(|_| serde_json::json!({}));
             let mut settings = serde_json::from_str::<serde_json::Value>(&settings_str)
                 .unwrap_or_else(|_| serde_json::json!({}));
+            // This migration owns only legacy inline routes. A schema v2 route
+            // references a target Provider, so adding `match`, `apiFormat`, or
+            // `upstream` here poisons the strict v2 document on every startup.
+            if settings
+                .pointer("/codexRouting/schemaVersion")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2)
+            {
+                continue;
+            }
             let mut changed = false;
             let has_flash = settings_str.to_lowercase().contains("deepseek-v4-flash");
 
@@ -3737,6 +3747,59 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
         assert_eq!(counts, (0, 1, 0, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn repair_deepseek_native_responses_leaves_schema_v2_routes_untouched() -> Result<(), AppError>
+    {
+        let conn = Connection::open_in_memory()?;
+        Database::create_tables_on_conn(&conn)?;
+        let deepseek_settings = json!({
+            "auth": {"OPENAI_API_KEY": "sk-test"},
+            "modelCatalog": {"models": [{"model": "deepseek-v4-flash"}]},
+            "config": "model = \"deepseek-v4-flash\"\n[model_providers.custom]\nbase_url = \"https://api.deepseek.com\"\nwire_api = \"responses\""
+        });
+        let router_settings = json!({
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "routes": [{
+                    "id": "router-deepseek",
+                    "enabled": true,
+                    "targetProviderId": "codex-deepseek",
+                    "modelSelection": {"mode": "all"},
+                    "matchPrefixes": ["deepseek"],
+                    "aliases": {},
+                    "authPolicy": {"source": "provider_config"}
+                }]
+            }
+        });
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('codex-deepseek', 'codex', 'DeepSeek', ?1, ?2)",
+            params![
+                deepseek_settings.to_string(),
+                json!({"apiFormat": "openai_responses"}).to_string()
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('codex-multirouter', 'codex', 'Codex MultiRouter', ?1, '{}')",
+            params![router_settings.to_string()],
+        )?;
+
+        Database::repair_deepseek_native_responses_on_conn(&conn)?;
+
+        let settings_str: String = conn.query_row(
+            "SELECT settings_config FROM providers WHERE id='codex-multirouter'",
+            [],
+            |row| row.get(0),
+        )?;
+        let settings: serde_json::Value =
+            serde_json::from_str(&settings_str).expect("router settings stay valid JSON");
+        let route = &settings["codexRouting"]["routes"][0];
+        assert!(route.get("apiFormat").is_none());
+        assert!(route.get("match").is_none());
+        assert_eq!(route["matchPrefixes"][0], "deepseek");
         Ok(())
     }
 

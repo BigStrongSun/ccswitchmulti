@@ -136,7 +136,15 @@ fn save_provider_in_transaction(
         .optional()
         .map_err(|error| AppError::Database(error.to_string()))?;
     let is_update = existing.is_some();
-    let settings_config = normalize_provider_settings_config(provider.settings_config.clone());
+    let mut settings_config = normalize_provider_settings_config(provider.settings_config.clone());
+    if app_type == crate::app_config::AppType::Codex.as_str()
+        && crate::codex_multirouter::schema::strip_v2_route_inherited_fields(&mut settings_config)
+    {
+        log::warn!(
+            "[CodexMultiRouter] stripped schema v2 inherited route snapshots before persisting provider {}",
+            provider.id
+        );
+    }
     let (is_current, in_failover_queue, removed_route_ids) = match existing {
         Some((is_current, in_failover_queue, previous_settings)) => {
             let removed_route_ids = if app_type == "codex" {
@@ -1159,6 +1167,38 @@ mod tests {
     };
     use crate::provider::UniversalProvider;
     use serde_json::json;
+
+    #[test]
+    fn save_provider_strips_v2_route_inherited_fields_at_the_shared_transaction_boundary() {
+        let db = crate::database::Database::memory().expect("memory db");
+        let provider = crate::Provider::with_id(
+            "router-poison".to_string(),
+            "Poisoned router".to_string(),
+            json!({
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "routes": [{
+                        "id": "router-target",
+                        "targetProviderId": "target-1",
+                        "apiFormat": "openai_responses",
+                        "matchPrefixes": ["deepseek"]
+                    }]
+                }
+            }),
+            None,
+        );
+
+        db.save_provider("codex", &provider)
+            .expect("save router carrying inherited fields");
+        let saved = db
+            .get_provider_by_id("router-poison", "codex")
+            .expect("read back router")
+            .expect("router exists");
+        let route = &saved.settings_config["codexRouting"]["routes"][0];
+        assert!(route.get("apiFormat").is_none());
+        assert_eq!(route["matchPrefixes"][0], "deepseek");
+    }
 
     fn provider(id: &str, state: &str) -> Provider {
         Provider::with_id(

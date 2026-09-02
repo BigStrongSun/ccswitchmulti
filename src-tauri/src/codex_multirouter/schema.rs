@@ -41,19 +41,23 @@ impl CodexRoutingDocument {
     }
 }
 
+/// schema v2 routes only reference a Provider and selection policy. These v1
+/// snapshot fields belong to the referenced Provider and must never persist on
+/// a v2 route object.
+const V2_ROUTE_FORBIDDEN_INHERITED_FIELDS: &[&str] = &[
+    "baseUrl",
+    "baseURL",
+    "base_url",
+    "apiKey",
+    "api_key",
+    "apiFormat",
+    "wireApi",
+    "wire_api",
+    "capabilities",
+    "upstream",
+];
+
 fn reject_v2_route_snapshot_fields(value: &Value) -> Result<(), CodexRoutingParseError> {
-    const FORBIDDEN: &[&str] = &[
-        "baseUrl",
-        "baseURL",
-        "base_url",
-        "apiKey",
-        "api_key",
-        "apiFormat",
-        "wireApi",
-        "wire_api",
-        "capabilities",
-        "upstream",
-    ];
     let Some(routes) = value.get("routes").and_then(Value::as_array) else {
         return Ok(());
     };
@@ -61,7 +65,10 @@ fn reject_v2_route_snapshot_fields(value: &Value) -> Result<(), CodexRoutingPars
         let Some(route) = route.as_object() else {
             continue;
         };
-        if let Some(field) = FORBIDDEN.iter().find(|field| route.contains_key(**field)) {
+        if let Some(field) = V2_ROUTE_FORBIDDEN_INHERITED_FIELDS
+            .iter()
+            .find(|field| route.contains_key(**field))
+        {
             return Err(CodexRoutingParseError {
                 code: "v2_route_forbidden_field".to_string(),
                 message: format!("route[{index}] contains forbidden inherited field `{field}`"),
@@ -69,6 +76,36 @@ fn reject_v2_route_snapshot_fields(value: &Value) -> Result<(), CodexRoutingPars
         }
     }
     Ok(())
+}
+
+/// Remove legacy Provider snapshots from schema v2 routes at the common
+/// persistence boundary. Parsing remains fail-closed; this narrow migration
+/// lets old frontends and external writers converge without changing any v1
+/// document, catalog entry, or valid v2 field.
+pub(crate) fn strip_v2_route_inherited_fields(settings_config: &mut Value) -> bool {
+    if settings_config
+        .pointer("/codexRouting/schemaVersion")
+        .and_then(Value::as_u64)
+        != Some(2)
+    {
+        return false;
+    }
+    let Some(routes) = settings_config
+        .pointer_mut("/codexRouting/routes")
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+    let mut stripped = false;
+    for route in routes {
+        let Some(route) = route.as_object_mut() else {
+            continue;
+        };
+        for field in V2_ROUTE_FORBIDDEN_INHERITED_FIELDS {
+            stripped |= route.remove(*field).is_some();
+        }
+    }
+    stripped
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -477,6 +514,49 @@ mod tests {
 
         validate_v2(&plan, &providers).expect(
             "visible catalog selection and upstream alias target should refer to the same model",
+        );
+    }
+
+    #[test]
+    fn strips_v2_route_inherited_fields_without_touching_valid_v2_or_model_fields() {
+        let mut settings = json!({
+            "modelCatalog": {
+                "models": [{"model": "deepseek-v4-flash", "apiFormat": "openai_responses"}]
+            },
+            "codexRouting": {
+                "schemaVersion": 2,
+                "routes": [{
+                    "id": "deepseek",
+                    "targetProviderId": "codex-deepseek",
+                    "modelSelection": {"mode": "all"},
+                    "matchPrefixes": ["deepseek"],
+                    "apiFormat": "openai_responses",
+                    "upstream": {"apiFormat": "openai_responses"}
+                }]
+            }
+        });
+
+        assert!(strip_v2_route_inherited_fields(&mut settings));
+        let route = &settings["codexRouting"]["routes"][0];
+        assert!(route.get("apiFormat").is_none());
+        assert!(route.get("upstream").is_none());
+        assert_eq!(route["targetProviderId"], "codex-deepseek");
+        assert_eq!(route["matchPrefixes"][0], "deepseek");
+        assert_eq!(
+            settings["modelCatalog"]["models"][0]["apiFormat"],
+            "openai_responses"
+        );
+
+        let mut v1 = json!({
+            "codexRouting": {
+                "schemaVersion": 1,
+                "routes": [{"apiFormat": "openai_responses"}]
+            }
+        });
+        assert!(!strip_v2_route_inherited_fields(&mut v1));
+        assert_eq!(
+            v1["codexRouting"]["routes"][0]["apiFormat"],
+            "openai_responses"
         );
     }
 
