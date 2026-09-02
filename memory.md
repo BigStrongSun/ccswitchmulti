@@ -4974,3 +4974,13 @@ supported in one streaming turn`。
 - 遗留实现不是同一个未完成功能，而是两组已经过测试但此前被精确提交排除的工作：退出/接管恢复安全，以及第三方 Codex 协议/工具终态/模型目录兼容。收口时发现 macOS `process_identity` 分支排除了原 Unix `tcp_listener_owner_pid` 定义却未补替代符号；已恢复全 Unix 安全兜底。`proc_pidpath`、`PROC_PIDTBSDINFO` 与 `proc_bsdinfo` 字段同时由本地 `libc` 和 Apple XNU 官方源码交叉确认。
 - 两组改动分别提交为 `2f351b48` 与 `0770edef`。随后把已发布但未回到主线的 `bigstrongsun/release-v3.19.2-24` 合入 `main`；唯一文本冲突是两边都在 `memory.md` 尾部追加记录，解决时完整保留双方内容。合并后的第一次 Rust 全量门禁发现综合请求契约仍断言 `ResponsesReasoningTextContent` 删除 `summary`，与 v24 的严格 Responses schema 根修冲突；已改为验证必填空数组 `summary: []`，真实推理仍只写入 `content[].reasoning_text`。
 - 合并后 fresh 门禁：前端 165 files / 1328 tests，Rust library 3778 passed / 0 failed / 6 ignored；TypeScript、Prettier、renderer production build、`cargo check --all-targets`、rustfmt 与 diff 检查均通过。`cargo check` 仍显示 13 条仓库既有 unused/dead-code 警告，与本轮改动无关；未机械改写业务代码消警。此次只完成源码、提交和主线整合，没有安装、重启或替换当前运行中的 CCSwitchMulti/Codex。
+
+## 2026-09-03 v3.19.2-25 分支审计与功能收口
+
+- v25 从已完成 v24 合流的 `main@41dbfbaf` 建立隔离发布工作树。逐个比较本地分支、worktree、开放 Issue 和 PR 后，确认多数历史产品分支已经完全落后于当前主线；旧完整向导与 Ultra 分支仍显示独立提交，但其有效行为已由主线的完整 13/14 页向导、Protocol Lab、Provider Set 和编译投影实现替代，不能整分支 cherry-pick 回退架构。
+- 两个旧工作树仍有跟踪改动：`codex-multirouter-ssot-v2` 是已被当前 takeover/proxy 路径替代的旧强制代理残留；`codex-reasoning-probe-backend` 是旧格式化/探测候选残留。另一些工作树仅有 `.tmp` 或 target 产物。它们都被原样保留，没有 reset/clean，也没有混入 v25。
+- Issue #84 / PR #85 的环境注入按当前架构重新实现：新增所有权账本，只接管真正不存在的键；同值旧键仍是用户所有，用户改写已接管值时 CCSM 放弃所有权。Claude JSON 与 Codex inline/table TOML 均支持，Provider 投影和反向导入不会吞掉注入键，失败与冲突作为结构化状态返回设置页。
+- Issue #76 的根因是 legacy DeepSeek 修复会把顶层 Provider 快照扩散进 schema v2 route。公共保存事务现在统一剥离 v2 route 的继承字段，legacy repair 在 schemaVersion 2 入口直接跳过，严格 `deny_unknown_fields` 保持不变。
+- Issue #78 的向导 Profile 漂移通过稳定上游身份重映射：旧公开名先解析旧 alias，再映射新 alias；Profile key、`profile.model` 与 `spawnAgentModels` 一起迁移，目标冲突保留双方。Issue #79 的模型顺序工作区把移除持久化为 `enabled:false`，即使全部隐藏仍可恢复，目录刷新不复活隐藏模型。
+- 旧运行时协议改写 helper 已删除。新 Provider/叶子/schema v2 Router 只服从持久化规划，旧混合数据才允许走迁移兜底。发布代码按环境注入、协议单一权威、schema v2 防污染、向导 Profile 重映射、模型隐藏恢复五个独立提交保存，便于追溯。
+- v25 tag 前 fresh 门禁为：前端 166 files / 1337 tests；Rust library 3785 passed / 0 failed / 6 ignored；TypeScript、Prettier、renderer build、`cargo check --all-targets`、严格 Clippy `-D warnings`、rustfmt、diff 与 UTF-8/no-BOM 均通过。Windows 正式导出生成 13,101,567 字节 NSIS、portable ZIP、原始 EXE、签名、SHA256SUMS 和单平台 latest.json；EXE 内嵌版本为 `3.19.2-25`，NSIS SHA-256 为 `CCE176AC342B2BB0CC281F000F89A81FE4F4AD54F3CBB2EC6EBA6F75908FEA79`。本轮没有安装或重启当前运行态，多平台资产仍需 tag 后 GitHub workflow 验收。
