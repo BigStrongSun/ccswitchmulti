@@ -45,14 +45,9 @@ pub use runner::{
 
 mod provider;
 #[cfg(test)]
-pub(crate) use provider::apply_selected_transport_to_provider;
-#[cfg(test)]
 pub(crate) use provider::compile_provider_probe_candidate;
 pub(crate) use provider::compile_provider_probe_candidate_for_model;
-pub use provider::{
-    apply_probe_selection_to_provider, compile_codex_router_probe_candidates,
-    compile_provider_probe_candidates,
-};
+pub use provider::{compile_codex_router_probe_candidates, compile_provider_probe_candidates};
 
 pub(crate) mod profile;
 pub use profile::ProtocolCompatibilityRecord;
@@ -303,6 +298,7 @@ impl ProbeCandidate {
         Ok(self)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_request(
         &self,
         transport: TransportKind,

@@ -67,6 +67,10 @@ enum CodexProviderSetPlanningMode {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the prepared Provider Set plan intentionally owns complete atomic persistence snapshots"
+)]
 pub enum CodexProviderSetPersistence {
     Single {
         transport: TransportKind,

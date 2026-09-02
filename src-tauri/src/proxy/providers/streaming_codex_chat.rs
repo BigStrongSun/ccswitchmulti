@@ -156,6 +156,7 @@ impl Default for ChatToResponsesState {
 }
 
 impl ChatToResponsesState {
+    #[cfg(test)]
     fn with_tool_context(tool_context: CodexToolContext) -> Self {
         Self::with_tool_context_and_projection(tool_context, ReasoningProjection::ReasoningSummary)
     }
@@ -1150,6 +1151,7 @@ pub fn create_responses_sse_stream_from_chat_with_context_and_projection<
 /// hosted tool calls between upstream rounds. Hosted tool output items are
 /// intentionally withheld from the client; ordinary text continues through
 /// the same response lifecycle before and after the tool round.
+#[cfg(test)]
 pub(crate) fn create_responses_sse_stream_from_chat_with_hosted_loop<F, Fut>(
     initial_stream: ChatSseStream,
     tool_context: CodexToolContext,

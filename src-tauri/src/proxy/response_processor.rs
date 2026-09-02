@@ -788,7 +788,7 @@ pub fn create_logged_passthrough_stream_with_options(
                         }
                         _ = tokio::time::sleep_until(idle_deadline) => {
                             log::error!("[{tag}] 流式响应静默期超时 ({}秒)", idle_timeout.unwrap().as_secs());
-                            yield Err(std::io::Error::other(format!("流式响应静默期超时")));
+                            yield Err(std::io::Error::other("流式响应静默期超时".to_string()));
                             break;
                         }
                     }

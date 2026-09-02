@@ -28,12 +28,15 @@
 
 use std::collections::HashMap;
 
+#[cfg(test)]
 use bytes::Bytes;
+#[cfg(test)]
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
 
 use super::transform_codex_chat::flatten_namespace_tool_name;
 use crate::proxy::error::ProxyError;
+#[cfg(test)]
 use crate::proxy::sse::{append_utf8_safe, strip_sse_field, take_sse_block};
 
 /// Reverse map entry: a flattened tool name resolves back to its original
@@ -236,6 +239,7 @@ pub(crate) fn restore_response_namespaces(
 
 /// Restore a single parsed SSE event (e.g. `response.output_item.added` /
 /// `.done` carrying a `function_call`). Returns whether anything changed.
+#[cfg(test)]
 pub(crate) fn restore_sse_event_namespaces(
     event: &mut Value,
     map: &HashMap<String, NamespacedName>,
@@ -338,6 +342,7 @@ fn restore_value(value: &mut Value, map: &HashMap<String, NamespacedName>) -> bo
 /// names in each event back to their namespace identity. Events that carry no
 /// affected function call pass through with their inner content preserved
 /// verbatim (only the block delimiter is normalized to `\n\n`).
+#[cfg(test)]
 pub(crate) fn create_namespace_restore_sse_stream<E>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
     map: HashMap<String, NamespacedName>,
@@ -384,6 +389,7 @@ where
 /// Restore one SSE block. When the block's `data:` JSON carries an affected
 /// function call, re-serialize just that line; otherwise the original block text
 /// is preserved and only the `\n\n` delimiter re-appended.
+#[cfg(test)]
 fn restore_sse_block(block: &str, map: &HashMap<String, NamespacedName>) -> Bytes {
     let mut event_name: Option<&str> = None;
     let mut data_parts: Vec<&str> = Vec::new();

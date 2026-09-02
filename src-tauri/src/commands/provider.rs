@@ -240,11 +240,15 @@ pub(crate) fn get_codex_provider_editor_snapshot_internal(
     .map_err(|error| AppError::InvalidInput(error.to_string()))?;
 
     let mut related_provider_ids = vec![provider_id.to_string()];
-    related_provider_ids.extend(providers.values().filter_map(|provider| {
-        (crate::codex_multirouter::provider_set::codex_provider_set_leaf_parent_id(provider)
-            == Some(provider_id))
-        .then(|| provider.id.clone())
-    }));
+    related_provider_ids.extend(
+        providers
+            .values()
+            .filter(|provider| {
+                crate::codex_multirouter::provider_set::codex_provider_set_leaf_parent_id(provider)
+                    == Some(provider_id)
+            })
+            .map(|provider| provider.id.clone()),
+    );
     let mut profiles = Vec::new();
     let mut observations = Vec::new();
     for related_provider_id in related_provider_ids {

@@ -327,9 +327,7 @@ fn normalize_third_party_responses_reasoning_item(item: Value) -> Option<Value> 
         return Some(Value::Object(object));
     }
 
-    let Some(text) = third_party_reasoning_readable_text(&object) else {
-        return None;
-    };
+    let text = third_party_reasoning_readable_text(&object)?;
 
     object.insert(
         "content".to_string(),

@@ -114,17 +114,14 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CodexModelSelection {
+    #[default]
     All,
-    Include { models: Vec<String> },
-}
-
-impl Default for CodexModelSelection {
-    fn default() -> Self {
-        Self::All
-    }
+    Include {
+        models: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

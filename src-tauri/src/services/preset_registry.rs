@@ -276,6 +276,7 @@ fn parse_version(v: &str) -> Option<Vec<u64>> {
 }
 
 /// `a <= b` 的版本比较；无法解析为纯数值分量时退化为字符串比较。
+#[cfg(test)]
 fn version_le(a: &str, b: &str) -> bool {
     match (parse_version(a), parse_version(b)) {
         (Some(x), Some(y)) => x <= y,

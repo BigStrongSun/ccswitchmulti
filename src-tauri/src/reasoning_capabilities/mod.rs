@@ -108,6 +108,10 @@ pub struct ReasoningCapabilitySnapshot {
 /// `confirmed_unsupported`——缺失证据不是不存在的证据。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "discovery returns one owned capability snapshot and the outcome remains short-lived"
+)]
 pub enum DiscoveryOutcome {
     Found(ProviderCapabilitySnapshot),
     /// 端点可达，但模型/字段未声明。

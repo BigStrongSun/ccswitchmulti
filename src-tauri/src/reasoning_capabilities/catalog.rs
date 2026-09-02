@@ -186,15 +186,12 @@ pub fn resolve_packaged_library_path() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    for candidate in [
+    [
         PathBuf::from("src-tauri/resources/reasoning-capabilities.json"),
         PathBuf::from("resources/reasoning-capabilities.json"),
-    ] {
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
 }
 
 /// 全局懒加载能力库（请求路径共享；加载失败保持 None 并降级到内置/unknown）。

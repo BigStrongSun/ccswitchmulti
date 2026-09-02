@@ -735,23 +735,21 @@ impl XaiNativeResponsesSseRewriter {
             Some("response.output_item.added") => {
                 self.remember_custom_call_from_event(&event);
             }
-            Some("response.function_call_arguments.delta") => {
+            Some("response.function_call_arguments.delta")
                 if event
                     .get("item_id")
                     .and_then(Value::as_str)
-                    .is_some_and(|item_id| self.custom_calls.contains_key(item_id))
-                {
-                    return self.rewrite_custom_arguments_delta(event);
-                }
+                    .is_some_and(|item_id| self.custom_calls.contains_key(item_id)) =>
+            {
+                return self.rewrite_custom_arguments_delta(event);
             }
-            Some("response.function_call_arguments.done") => {
+            Some("response.function_call_arguments.done")
                 if event
                     .get("item_id")
                     .and_then(Value::as_str)
-                    .is_some_and(|item_id| self.custom_calls.contains_key(item_id))
-                {
-                    return self.rewrite_custom_arguments_done(event);
-                }
+                    .is_some_and(|item_id| self.custom_calls.contains_key(item_id)) =>
+            {
+                return self.rewrite_custom_arguments_done(event);
             }
             _ => {}
         }

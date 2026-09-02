@@ -105,7 +105,7 @@ pub fn parse_bundle_bytes(bytes: &[u8]) -> Option<PresetTableBundle> {
         );
         return None;
     }
-    let bundle: PresetTableBundle = serde_json::from_slice(&bytes).ok()?;
+    let bundle: PresetTableBundle = serde_json::from_slice(bytes).ok()?;
     if !matches!(
         bundle.schema_version,
         PRESET_TABLE_LEGACY_SCHEMA_VERSION | PRESET_TABLE_SCHEMA_VERSION
@@ -190,6 +190,7 @@ fn entry_effective_percent(entry: &serde_json::Value) -> Option<u64> {
 ///
 /// `plan` 为 `None` 或空时只查基线；plan 条目缺失时同样回退基线（不报错），
 /// 让调用方可以无脑传 plan 名。
+#[cfg(test)]
 pub fn resolve(
     bundle: &PresetTableBundle,
     provider: &str,
@@ -270,6 +271,7 @@ pub fn lookup_baseline<'a>(
 }
 
 /// 仅基线查询上下文窗口（`/models` 补齐用，API 通道不涉及 plan）。
+#[cfg(test)]
 pub fn lookup_baseline_context(
     bundle: &PresetTableBundle,
     provider: &str,

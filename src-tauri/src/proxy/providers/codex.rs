@@ -1308,9 +1308,7 @@ where
         .and_then(JsonValue::as_str)
         .map(str::trim)
         .filter(|id| !id.is_empty())?;
-    if target.route_id.is_none() {
-        return None;
-    }
+    target.route_id.as_ref()?;
 
     let mut standalone_target = target.clone();
     standalone_target.provider_id = target_provider_id.to_string();

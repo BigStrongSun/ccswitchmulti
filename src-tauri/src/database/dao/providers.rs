@@ -465,6 +465,10 @@ impl Database {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "this private transaction boundary keeps every atomic Provider Set mutation explicit"
+    )]
     pub(crate) fn apply_provider_set_with_protocol_state_setting_cleanup_and_universal_upsert(
         &self,
         mutations: &[(&str, &str, Option<&Provider>)],

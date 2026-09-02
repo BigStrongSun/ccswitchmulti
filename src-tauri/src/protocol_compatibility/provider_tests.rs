@@ -9,10 +9,8 @@ use crate::{
 };
 
 use super::{
-    apply_probe_selection_to_provider, apply_selected_transport_to_provider,
     compile_codex_router_probe_candidates, compile_provider_probe_candidate,
-    compile_provider_probe_candidates, ProbeReadiness, ProtocolCompatibilityProbeResult,
-    TransportKind,
+    compile_provider_probe_candidates, TransportKind,
 };
 
 fn codex_provider(config: &str, api_format: &str) -> Provider {
@@ -252,71 +250,6 @@ wire_api = "chat"
 }
 
 #[test]
-fn applying_chat_selection_updates_every_runtime_protocol_source() {
-    let mut provider = codex_provider(
-        r#"model = "qwen-visible"
-model_provider = "qwen"
-[model_providers.qwen]
-base_url = "https://vllm.example/v1"
-wire_api = "responses"
-"#,
-        "openai_responses",
-    );
-
-    apply_selected_transport_to_provider(&mut provider, TransportKind::OpenAiChat)
-        .expect("apply chat selection");
-
-    assert_eq!(
-        provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.api_format.as_deref()),
-        Some("openai_chat")
-    );
-    assert_eq!(provider.settings_config["apiFormat"], "openai_chat");
-    assert_eq!(
-        provider.settings_config["modelCatalog"]["models"][0]["apiFormat"],
-        "openai_chat"
-    );
-    let config = provider.settings_config["config"].as_str().unwrap();
-    assert!(config.contains("wire_api = \"chat\""));
-    assert!(!config.contains("wire_api = \"responses\""));
-}
-
-#[test]
-fn applying_responses_selection_replaces_a_historical_chat_hint() {
-    let mut provider = codex_provider(
-        r#"model = "qwen-visible"
-model_provider = "qwen"
-[model_providers.qwen]
-base_url = "https://vllm.example/v1"
-wire_api = "chat"
-"#,
-        "openai_chat",
-    );
-
-    apply_selected_transport_to_provider(&mut provider, TransportKind::OpenAiResponses)
-        .expect("apply responses selection");
-
-    assert_eq!(
-        provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.api_format.as_deref()),
-        Some("openai_responses")
-    );
-    assert_eq!(provider.settings_config["apiFormat"], "openai_responses");
-    assert_eq!(
-        provider.settings_config["modelCatalog"]["models"][0]["apiFormat"],
-        "openai_responses"
-    );
-    assert!(provider.settings_config["config"]
-        .as_str()
-        .unwrap()
-        .contains("wire_api = \"responses\""));
-}
-
-#[test]
 fn managed_oauth_provider_is_not_an_active_third_party_probe_candidate() {
     let mut provider = codex_provider(
         "model = \"gpt-5.6\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\n",
@@ -325,45 +258,6 @@ fn managed_oauth_provider_is_not_an_active_third_party_probe_candidate() {
     provider.meta.as_mut().unwrap().provider_type = Some("codex_oauth".to_string());
 
     assert!(compile_provider_probe_candidate(&provider).is_err());
-}
-
-#[test]
-fn a_partial_but_reachable_selection_keeps_the_historical_transport_unchanged() {
-    let mut provider = codex_provider(
-        "model = \"qwen-visible\"\nbase_url = \"https://vllm.example/v1\"\nwire_api = \"responses\"\n",
-        "openai_responses",
-    );
-    let result = ProtocolCompatibilityProbeResult {
-        selected_transport: Some(TransportKind::OpenAiChat),
-        readiness: ProbeReadiness::Partial,
-        branches: Vec::new(),
-    };
-
-    assert!(!apply_probe_selection_to_provider(&mut provider, &result).unwrap());
-    assert_eq!(
-        provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.api_format.as_deref()),
-        Some("openai_responses")
-    );
-}
-
-#[test]
-fn an_unreachable_probe_keeps_the_historical_transport_unchanged() {
-    let mut provider = codex_provider(
-        "model = \"qwen-visible\"\nbase_url = \"https://vllm.example/v1\"\nwire_api = \"responses\"\n",
-        "openai_responses",
-    );
-    let before = serde_json::to_value(&provider).unwrap();
-    let result = ProtocolCompatibilityProbeResult {
-        selected_transport: None,
-        readiness: ProbeReadiness::Unverified,
-        branches: Vec::new(),
-    };
-
-    assert!(!apply_probe_selection_to_provider(&mut provider, &result).unwrap());
-    assert_eq!(serde_json::to_value(&provider).unwrap(), before);
 }
 
 #[test]

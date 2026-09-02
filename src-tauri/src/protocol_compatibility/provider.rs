@@ -10,21 +10,7 @@ use crate::{
     },
 };
 
-use super::{ProbeCandidate, ProtocolCompatibilityProbeResult, TransportKind};
-
-pub fn apply_probe_selection_to_provider(
-    provider: &mut Provider,
-    result: &ProtocolCompatibilityProbeResult,
-) -> Result<bool, String> {
-    if result.readiness != super::ProbeReadiness::Verified {
-        return Ok(false);
-    }
-    let Some(transport) = result.selected_transport else {
-        return Ok(false);
-    };
-    apply_selected_transport_to_provider(provider, transport)?;
-    Ok(true)
-}
+use super::{ProbeCandidate, TransportKind};
 
 pub fn compile_provider_probe_candidate(provider: &Provider) -> Result<ProbeCandidate, String> {
     if provider.uses_managed_account_auth() {
@@ -147,41 +133,6 @@ pub fn compile_codex_router_probe_candidates(
     Ok(candidates)
 }
 
-pub fn apply_selected_transport_to_provider(
-    provider: &mut Provider,
-    transport: TransportKind,
-) -> Result<(), String> {
-    let configured_model = codex_provider_upstream_model(provider)
-        .ok_or_else(|| "Codex provider has no configured model".to_string())?;
-    let (public_model, upstream_model) = resolve_primary_model(provider, &configured_model);
-    let (api_format, wire_api) = match transport {
-        TransportKind::OpenAiChat => ("openai_chat", "chat"),
-        TransportKind::OpenAiResponses => ("openai_responses", "responses"),
-    };
-
-    provider
-        .meta
-        .get_or_insert_with(Default::default)
-        .api_format = Some(api_format.to_string());
-    provider.settings_config["apiFormat"] = Value::String(api_format.to_string());
-    update_primary_catalog_protocol(
-        &mut provider.settings_config,
-        &public_model,
-        &upstream_model,
-        api_format,
-    );
-
-    if let Some(config) = provider
-        .settings_config
-        .get("config")
-        .and_then(Value::as_str)
-    {
-        let updated = crate::codex_config::update_codex_toml_field(config, "wire_api", wire_api)?;
-        provider.settings_config["config"] = Value::String(updated);
-    }
-    Ok(())
-}
-
 fn resolve_primary_model(provider: &Provider, configured_model: &str) -> (String, String) {
     let models = provider
         .settings_config
@@ -202,33 +153,6 @@ fn resolve_primary_model(provider: &Provider, configured_model: &str) -> (String
         }
     }
     (configured_model.to_string(), configured_model.to_string())
-}
-
-fn update_primary_catalog_protocol(
-    settings: &mut Value,
-    public_model: &str,
-    upstream_model: &str,
-    api_format: &str,
-) {
-    let catalog_key = if settings.get("modelCatalog").is_some() {
-        "modelCatalog"
-    } else {
-        "model_catalog"
-    };
-    let Some(models) = settings
-        .get_mut(catalog_key)
-        .and_then(|catalog| catalog.get_mut("models"))
-        .and_then(Value::as_array_mut)
-    else {
-        return;
-    };
-    for model in models {
-        let visible = string_field(model, &["model", "id", "slug"]);
-        let upstream = string_field(model, &["upstreamModel", "upstream_model"]);
-        if visible == Some(public_model) || upstream == Some(upstream_model) {
-            model["apiFormat"] = Value::String(api_format.to_string());
-        }
-    }
 }
 
 fn string_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
