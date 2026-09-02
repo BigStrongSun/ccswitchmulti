@@ -4928,3 +4928,14 @@ supported in one streaming turn`。
 - Issue #82 的残留目录覆写来自启动对账把 CCSM 生成的 `model_catalog_json` 指针本身当成持续所有权证明。启动目录刷新现在先读取 Codex app takeover 状态；明确关闭时直接跳过，不触碰目录，即使 live TOML 仍有旧指针。接管开启时原有刷新行为不变。
 - PR #83 只包含 #82 的候选修复，但基于 v18，整体合并会回退 Protocol Lab、Provider Set、运行刷新和设置向导；只按当前主线重新实现并保留作者思路，不 cherry-pick 整个分支。PR #85 的环境注入方向有官方配置依据，但当前实现无法区分“本来就存在且恰好同值”与“CCSM 注入”的键，关闭时可能误删用户配置；即时同步失败也只写日志并向 UI 返回成功，且没有覆盖当前 TOML consistency 所有权回归，因此暂不进入 v24。PR #86 一次升级 56 个 Cargo 依赖并有约 49 个真实编译错误，必须拆分迁移，不能进入发布候选。
 - 定向 TDD 先在旧实现得到三个稳定失败：缺失 `summary`、旧代际异常退出仍 pending、接管关闭仍刷新目录；实现后 Responses reasoning 4/4、recovery outcome 6/6、接管关闭目录 1/1 通过。首次并行启动 Rust 链接造成 Windows PDB 冲突，随后确认 C 盘空间耗尽；只清理隔离候选和多个旧日期的可再生成 Cargo target 缓存后改为串行门禁，未删除源码、配置或用户数据。
+
+## 2026-09-02 v3.19.2-24 累计发布与 GitHub 验收
+
+- `v3.19.2-24` 精确标记 release commit `396171fa71742ac4ae7a93acdaf289230bdc4401`；该版本相对 `v3.19.2-15` 为 181 个提交、249 个文件、64752 行新增和 4598 行删除。发布说明不再把用户所称“BrokerProvider 分流”描述为新增类型，而是明确为 Provider SSOT、MultiRouter schema v2 编译/投影、`all/include` 选择语义与 V2 Sub-Agent 同步边界；同时覆盖 13 个常规向导页、零 Provider 动态第 14 页、双协议 Protocol Lab、配置/历史/端口恢复和 #80/#81/#82。
+- 历史 `v3.19.2-23` GitHub Release 正文已同步改为完整累计说明，补回 v16/v17 已交付但旧短版遗漏的 Provider 分流、Provider→MultiRouter 跨模型自动同步、共享投影单写者和 V2 Profile 跟随语义。v24 完整说明保存在 `docs/release-notes/v3.19.2-24-zh.md`。
+- release workflow `33606908647` 全部通过：Windows x64、Windows arm64、macOS、Linux x64、Linux arm64 五个平台矩阵，以及 `Publish GitHub Release`、`Assemble latest.json` 均为 success。正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.2-24`，非 draft、非 prerelease，共 19 个 uploaded 资产；`latest.json` 版本为 `3.19.2-24`，包含 6 个 updater 平台，所有 URL 均指向该 tag 且签名非空。
+- tag 前 fresh 门禁：前端 165 files / 1327 tests，Rust library 3720 passed / 0 failed / 6 ignored；TypeScript、Prettier、renderer production build、`cargo check --lib --no-default-features`、rustfmt、diff、JSON 和 UTF-8 strict/no-BOM/no-U+FFFD 均通过。本地 Windows x64 应用与 13036403 字节 NSIS 已生成；命令只在其后的 updater 签名因本机无私钥返回非零，GitHub workflow 已用正式密钥完成签名与 updater 校验。
+- 普通 CI run `33606842838` 仍因仓库既有的 `cargo clippy -D warnings` 债失败，错误覆盖 unused/dead-code/too-many-arguments 等数十项并跨多个旧模块；这不是编译或测试失败，且不阻塞独立 Release workflow，但后续应单独清理，不能在发布提交里机械改写几十处业务代码。
+- GitHub 状态已收口：#80、#81、#82 带 commit/tag/测试证据关闭；PR #83 方向正确但基于 v18，已由当前主线等价根修取代并关闭；PR #86 一次升级 56 个 Cargo 依赖且三平台 backend CI 失败，已要求拆批并关闭；PR #85 保持打开且为 `CHANGES_REQUESTED`，Issue #84 保持打开，等待环境变量所有权账本、结构化同步失败、inline/table TOML 兼容与配置一致性回归。
+- 本轮没有安装发布版、关闭 CCSM、重启 Codex 或执行破坏性 Codex runtime refresh。Release/资产验收不能替代当前机器安装态、端口接管和现有任务的桌面验收；若后续要安装，必须继续使用 `scripts/invoke-ccswitchmulti-local-upgrade.ps1` 的可回滚事务。
+- 外部事实交叉验证使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链；两者均读取 OpenAI Codex 的 `ShellEnvironmentPolicyToml.set`、OpenAI 生成 SDK 的 Responses reasoning input 类型和 Claude Code settings 官方文档，结论一致。具体 Issue 根因和 PR 可合并性仍以本地当前主线、RED→GREEN 回归和 GitHub CI 为权威。
