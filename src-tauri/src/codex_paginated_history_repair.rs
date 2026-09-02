@@ -53,6 +53,7 @@ pub(super) struct ProjectionCatchUpTarget {
 struct RolloutRepairCandidate {
     path: PathBuf,
     source_id: String,
+    #[cfg(any(target_os = "windows", test))]
     scan: RolloutOrdinalScan,
 }
 
@@ -522,12 +523,14 @@ fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
         plan.candidates.push(RolloutRepairCandidate {
             path,
             source_id,
+            #[cfg(any(target_os = "windows", test))]
             scan,
         });
     }
     Ok(plan)
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn inspect_paginated_history_repair() -> Result<PaginatedHistoryRepairPreflight, String>
 {
     let plan = build_repair_plan()?;

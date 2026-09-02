@@ -6,6 +6,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+#[cfg(target_os = "windows")]
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
@@ -37,6 +38,7 @@ struct CodexRuntimeRefreshTargets {
 }
 
 impl CodexRuntimeRefreshTargets {
+    #[cfg(target_os = "windows")]
     fn process_count(&self) -> usize {
         self.desktop_shells.len() + self.app_servers.len()
     }
@@ -54,6 +56,7 @@ enum CodexRuntimeLaunchTarget {
 }
 
 impl CodexRuntimeLaunchTarget {
+    #[cfg(target_os = "windows")]
     fn label(&self) -> String {
         match self {
             #[cfg(target_os = "windows")]
@@ -442,43 +445,41 @@ fn resolve_launch_target() -> Option<CodexRuntimeLaunchTarget> {
         .map(CodexRuntimeLaunchTarget::DesktopExecutable)
 }
 
+#[cfg(not(target_os = "windows"))]
 async fn build_preflight() -> Result<CodexRuntimeRefreshPreflight, String> {
-    #[cfg(not(target_os = "windows"))]
-    {
-        return Ok(CodexRuntimeRefreshPreflight {
-            supported: false,
-            can_refresh: false,
-            snapshot_token: String::new(),
-            desktop_process_count: 0,
-            app_server_process_count: 0,
-            process_count: 0,
-            launch_target: None,
-            warning: Some("codex_runtime_refresh_windows_only".to_string()),
-            paginated_history: Default::default(),
-        });
-    }
+    Ok(CodexRuntimeRefreshPreflight {
+        supported: false,
+        can_refresh: false,
+        snapshot_token: String::new(),
+        desktop_process_count: 0,
+        app_server_process_count: 0,
+        process_count: 0,
+        launch_target: None,
+        warning: Some("codex_runtime_refresh_windows_only".to_string()),
+        paginated_history: Default::default(),
+    })
+}
 
-    #[cfg(target_os = "windows")]
-    {
-        let targets = query_refresh_targets().await?;
-        let launch_target = resolve_launch_target();
-        let paginated_history =
-            tokio::task::spawn_blocking(paginated_history::inspect_paginated_history_repair)
-                .await
-                .map_err(|error| format!("paginated_history_inspection_join_failed: {error}"))??;
-        Ok(CodexRuntimeRefreshPreflight {
-            supported: true,
-            can_refresh: launch_target.is_some(),
-            snapshot_token: refresh_target_fingerprint(&targets),
-            desktop_process_count: targets.desktop_shells.len(),
-            app_server_process_count: targets.app_servers.len(),
-            process_count: targets.process_count(),
-            launch_target: launch_target.as_ref().map(CodexRuntimeLaunchTarget::label),
-            warning: (targets.process_count() > 0)
-                .then(|| "active_tasks_will_be_interrupted".to_string()),
-            paginated_history,
-        })
-    }
+#[cfg(target_os = "windows")]
+async fn build_preflight() -> Result<CodexRuntimeRefreshPreflight, String> {
+    let targets = query_refresh_targets().await?;
+    let launch_target = resolve_launch_target();
+    let paginated_history =
+        tokio::task::spawn_blocking(paginated_history::inspect_paginated_history_repair)
+            .await
+            .map_err(|error| format!("paginated_history_inspection_join_failed: {error}"))??;
+    Ok(CodexRuntimeRefreshPreflight {
+        supported: true,
+        can_refresh: launch_target.is_some(),
+        snapshot_token: refresh_target_fingerprint(&targets),
+        desktop_process_count: targets.desktop_shells.len(),
+        app_server_process_count: targets.app_servers.len(),
+        process_count: targets.process_count(),
+        launch_target: launch_target.as_ref().map(CodexRuntimeLaunchTarget::label),
+        warning: (targets.process_count() > 0)
+            .then(|| "active_tasks_will_be_interrupted".to_string()),
+        paginated_history,
+    })
 }
 
 fn same_process_identity(
@@ -542,6 +543,7 @@ fn request_windows_close(pid: u32) {
 #[cfg(not(target_os = "windows"))]
 fn request_windows_close(_pid: u32) {}
 
+#[cfg(any(target_os = "windows", test))]
 fn force_terminate_process_arguments(pid: u32) -> Vec<String> {
     vec!["/PID".to_string(), pid.to_string(), "/F".to_string()]
 }
