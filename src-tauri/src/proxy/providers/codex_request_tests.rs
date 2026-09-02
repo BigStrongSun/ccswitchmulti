@@ -748,7 +748,11 @@ fn reasoning_text_replay_is_opt_in_for_responses_dialect() {
             "text": "Plan the next automation update."
         }])
     );
-    assert!(replay.get("summary").is_none());
+    assert_eq!(
+        replay["summary"],
+        json!([]),
+        "strict Responses replay keeps the required summary field empty instead of relabeling raw reasoning as a summary"
+    );
     assert!(replay.get("encrypted_content").is_none());
 }
 

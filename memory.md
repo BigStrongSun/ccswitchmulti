@@ -4938,3 +4938,39 @@ supported in one streaming turn`。
 - Chat Completions 分支通过 `ChatToolAccumulator` 累加 delta 后再判定，不具有这条“首个 added 事件抢跑”的同型缺陷。Responses 修复没有添加 DeepSeek 特判：`extract_responses_tool_call` 统一复用 `extract_responses_output_items`，只从 `response.completed.response.output` 或 `response.output_item.done` 提取终态 item，保留原有 nonce、参数 JSON、schema dialect、终态和续轮校验。首次回归用 `added(arguments="", in_progress) -> done(arguments=complete) -> completed` 在旧实现下得到 `Unsupported`，修复后 `forced_tool` 与 `continuation` 均为 `Passed`。
 - 独立复审发现首版仍可能被非终态 `response.created.response.output=[]` / `response.in_progress.response.output=[]` 抢占。扩展真实序列后第二次稳定复现 `Unsupported`；随后将 `/response/output` 限定为仅接受 `response.completed`，再转 GREEN。最终复审无 Critical、Important 或 Minor 问题；`protocol_compatibility::runner_tests` 32/32、整个 `protocol_compatibility` 126/126、Rust library 3773 passed / 0 failed / 6 ignored，`cargo check --lib`、目标文件 `rustfmt --check`、`git diff --check` 与 UTF-8 严格解码均通过。
 - 本次修复只落到本地 `main` 源码与回归测试。没有构建安装包、替换或重启 CCSwitchMulti，也没有重新验收当前安装版 `3.19.2-22`；因此安装态仍应视为保留旧误判行为，直到另行完成构建、安装和运行态验收。
+
+## 2026-09-02 v3.19.2-24 新 Issue 根修与 PR 分流
+
+- Issue #80 的根因是 `ResponsesReasoningTextContent` 适配把可读推理正确放进 `content[].reasoning_text` 后，又删除了 Responses 输入 schema 必填的 `summary`。OpenAI 官方生成 SDK把 reasoning input 的 `summary` 声明为 Required；Paratera 等严格实现因此返回 `Missing required parameter: input[n].summary`。修复保留真实 `reasoning_text`，同时写入空 `summary: []`，不把原始推理伪装成 summary，并继续移除第三方无法使用的官方密文与内部 metadata。
+- Issue #81 不是新的退出误判，而是恢复结果查询没有淘汰旧启动代际的 `UncleanExit` 等运行分类。当前查询只让本次启动代际的 ActivePreviousInstance/ConfirmedCrash/UncleanExit/PlannedRestart 分类进入待处理队列；Provider 恢复失败、端口接管失败等持久故障仍跨代保留到用户确认，完整历史记录不删除。
+- Issue #82 的残留目录覆写来自启动对账把 CCSM 生成的 `model_catalog_json` 指针本身当成持续所有权证明。启动目录刷新现在先读取 Codex app takeover 状态；明确关闭时直接跳过，不触碰目录，即使 live TOML 仍有旧指针。接管开启时原有刷新行为不变。
+- PR #83 只包含 #82 的候选修复，但基于 v18，整体合并会回退 Protocol Lab、Provider Set、运行刷新和设置向导；只按当前主线重新实现并保留作者思路，不 cherry-pick 整个分支。PR #85 的环境注入方向有官方配置依据，但当前实现无法区分“本来就存在且恰好同值”与“CCSM 注入”的键，关闭时可能误删用户配置；即时同步失败也只写日志并向 UI 返回成功，且没有覆盖当前 TOML consistency 所有权回归，因此暂不进入 v24。PR #86 一次升级 56 个 Cargo 依赖并有约 49 个真实编译错误，必须拆分迁移，不能进入发布候选。
+- 定向 TDD 先在旧实现得到三个稳定失败：缺失 `summary`、旧代际异常退出仍 pending、接管关闭仍刷新目录；实现后 Responses reasoning 4/4、recovery outcome 6/6、接管关闭目录 1/1 通过。首次并行启动 Rust 链接造成 Windows PDB 冲突，随后确认 C 盘空间耗尽；只清理隔离候选和多个旧日期的可再生成 Cargo target 缓存后改为串行门禁，未删除源码、配置或用户数据。
+
+## 2026-09-02 v3.19.2-24 累计发布与 GitHub 验收
+
+- `v3.19.2-24` 精确标记 release commit `396171fa71742ac4ae7a93acdaf289230bdc4401`；该版本相对 `v3.19.2-15` 为 181 个提交、249 个文件、64752 行新增和 4598 行删除。发布说明不再把用户所称“BrokerProvider 分流”描述为新增类型，而是明确为 Provider SSOT、MultiRouter schema v2 编译/投影、`all/include` 选择语义与 V2 Sub-Agent 同步边界；同时覆盖 13 个常规向导页、零 Provider 动态第 14 页、双协议 Protocol Lab、配置/历史/端口恢复和 #80/#81/#82。
+- 历史 `v3.19.2-23` GitHub Release 正文已同步改为完整累计说明，补回 v16/v17 已交付但旧短版遗漏的 Provider 分流、Provider→MultiRouter 跨模型自动同步、共享投影单写者和 V2 Profile 跟随语义。v24 完整说明保存在 `docs/release-notes/v3.19.2-24-zh.md`。
+- release workflow `33606908647` 全部通过：Windows x64、Windows arm64、macOS、Linux x64、Linux arm64 五个平台矩阵，以及 `Publish GitHub Release`、`Assemble latest.json` 均为 success。正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.2-24`，非 draft、非 prerelease，共 19 个 uploaded 资产；`latest.json` 版本为 `3.19.2-24`，包含 6 个 updater 平台，所有 URL 均指向该 tag 且签名非空。
+- tag 前 fresh 门禁：前端 165 files / 1327 tests，Rust library 3720 passed / 0 failed / 6 ignored；TypeScript、Prettier、renderer production build、`cargo check --lib --no-default-features`、rustfmt、diff、JSON 和 UTF-8 strict/no-BOM/no-U+FFFD 均通过。本地 Windows x64 应用与 13036403 字节 NSIS 已生成；命令只在其后的 updater 签名因本机无私钥返回非零，GitHub workflow 已用正式密钥完成签名与 updater 校验。
+- 普通 CI run `33606842838` 仍因仓库既有的 `cargo clippy -D warnings` 债失败，错误覆盖 unused/dead-code/too-many-arguments 等数十项并跨多个旧模块；这不是编译或测试失败，且不阻塞独立 Release workflow，但后续应单独清理，不能在发布提交里机械改写几十处业务代码。
+- GitHub 状态已收口：#80、#81、#82 带 commit/tag/测试证据关闭；PR #83 方向正确但基于 v18，已由当前主线等价根修取代并关闭；PR #86 一次升级 56 个 Cargo 依赖且三平台 backend CI 失败，已要求拆批并关闭；PR #85 保持打开且为 `CHANGES_REQUESTED`，Issue #84 保持打开，等待环境变量所有权账本、结构化同步失败、inline/table TOML 兼容与配置一致性回归。
+- 本轮没有安装发布版、关闭 CCSM、重启 Codex 或执行破坏性 Codex runtime refresh。Release/资产验收不能替代当前机器安装态、端口接管和现有任务的桌面验收；若后续要安装，必须继续使用 `scripts/invoke-ccswitchmulti-local-upgrade.ps1` 的可回滚事务。
+- 外部事实交叉验证使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链；两者均读取 OpenAI Codex 的 `ShellEnvironmentPolicyToml.set`、OpenAI 生成 SDK 的 Responses reasoning input 类型和 Claude Code settings 官方文档，结论一致。具体 Issue 根因和 PR 可合并性仍以本地当前主线、RED→GREEN 回归和 GitHub CI 为权威。
+
+## 2026-09-02 历史 Provider 重放与本机时区显示根修
+
+- 任务 `01a04e4f-55be-7463-98ca-d5d8fb1cd158` 的 Qwen 官方账户报错不是代理未支持 Qwen：其 rollout 同时保存了 `session_meta.model_provider=openai` 和后续 `thread_settings_applied.thread_settings.model_provider_id=openai`。Codex 恢复线程时按事件顺序重放，后者会覆盖初始 Provider；旧历史修复只改 `session_meta` 和 SQLite，因此 App 重启重建后可能再次钉回官方 Provider。
+- 历史元数据解析现在与 Codex 当前 state extractor 对齐：读取 `turn_context.model`，并让后续 `thread_settings_applied` 更新模型和 Provider。历史列表同时展示模型与 Provider，便于直接识别“第三方模型 + openai Provider”组合；重建/插入 thread-store 时若 schema 有 `model` 列也会保存真实模型。
+- 所有 Provider 桶迁移、当前历史可见性修复和官方历史还原现在都同时改写 `session_meta.model_provider` 与 `thread_settings_applied.thread_settings.model_provider_id`。迁移资格仍由每个 `session_meta` 分段控制，不能因为同一测试文件前一个会话命中就误改后续不在来源集合中的会话；原 rollout mtime、模型名和其它事件内容保持不变。
+- 历史修复会核对已在目标 DB Provider 桶中的 rollout，专门完成“SQLite/session_meta 已修、thread_settings_applied 仍是 openai”的半修复状态。UI 的旧 IPC 统计字段 `rolloutFirstLines*` 为兼容保留，但文案明确为 Provider 状态文件，并在确认框列出两种权威记录。
+- 时区没有通过固定 `+8` 修正：rollout RFC3339 时间先归一为绝对 epoch 毫秒，后端排序/重建保持同一时刻，前端直接从 `updatedAtMs` 用设备本地时区格式化。这样 `2026-08-29T16:16:57Z` 在上海显示为 8 月 30 日 00:16，同时 UTC/DST 设备仍按自身时区显示；Provider 元数据迁移继续恢复原文件 mtime。此前提交 `392e8c32` 只修复额度统计测试的跨时区日边界，并不覆盖历史列表，本次才补齐历史 UI 的数值时间源。
+- TDD 首先复现三类失败：解析器不认识后续设置事件、历史 UI 在 ISO 字段缺失时把有效 epoch 显示为 `-`、半修复 rollout 因 DB 已是目标 Provider 而被跳过。修复后历史迁移 54/54、前端定向 4/4、前端全量 165 files / 1328 tests、Rust library 3723 passed / 0 failed / 6 ignored、TypeScript、renderer production build 和 `cargo check --lib --no-default-features` 全部通过；既有 dead-code/unused、浏览器数据陈旧、Tauri/MSW/act 输出仍是非阻断警告。
+- 外部核对使用 Codex 内置搜索与 Matrix WebSearch 两条独立链读取 OpenAI Codex 配置参考；具体重放根因以本地最新 Codex `state/src/extract.rs`、`thread_processor.rs`、真实 rollout/SQLite 与 fork Issue #77 为权威。当前仅完成源码与本地门禁，尚未构建、安装或代用户运行离线历史修复；运行历史修复仍必须先完全退出 Codex/ChatGPT App。
+
+## 2026-09-02 长任务未提交改动归属与主线收口
+
+- `main` 上遗留的 17 个已跟踪文件来自当前长期任务 `01a02da5-70c7-73e1-9587-9cd9fdaf3634` 的多轮实现；通过对应 rollout 的 `apply_patch` 路径、文件时间线与 Git 状态逐项确认。独立 DeepSeek 任务 `01a0619c-56ce-7572-9ceb-9b6b1371e79e` 只提交了 `b493737b` 所含的 runner、runner tests 和当时的 memory 记录，没有遗留这 17 个文件。
+- 遗留实现不是同一个未完成功能，而是两组已经过测试但此前被精确提交排除的工作：退出/接管恢复安全，以及第三方 Codex 协议/工具终态/模型目录兼容。收口时发现 macOS `process_identity` 分支排除了原 Unix `tcp_listener_owner_pid` 定义却未补替代符号；已恢复全 Unix 安全兜底。`proc_pidpath`、`PROC_PIDTBSDINFO` 与 `proc_bsdinfo` 字段同时由本地 `libc` 和 Apple XNU 官方源码交叉确认。
+- 两组改动分别提交为 `2f351b48` 与 `0770edef`。随后把已发布但未回到主线的 `bigstrongsun/release-v3.19.2-24` 合入 `main`；唯一文本冲突是两边都在 `memory.md` 尾部追加记录，解决时完整保留双方内容。合并后的第一次 Rust 全量门禁发现综合请求契约仍断言 `ResponsesReasoningTextContent` 删除 `summary`，与 v24 的严格 Responses schema 根修冲突；已改为验证必填空数组 `summary: []`，真实推理仍只写入 `content[].reasoning_text`。
+- 合并后 fresh 门禁：前端 165 files / 1328 tests，Rust library 3778 passed / 0 failed / 6 ignored；TypeScript、Prettier、renderer production build、`cargo check --all-targets`、rustfmt 与 diff 检查均通过。`cargo check` 仍显示 13 条仓库既有 unused/dead-code 警告，与本轮改动无关；未机械改写业务代码消警。此次只完成源码、提交和主线整合，没有安装、重启或替换当前运行中的 CCSwitchMulti/Codex。

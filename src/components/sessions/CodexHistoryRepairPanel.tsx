@@ -297,6 +297,7 @@ export function CodexHistoryRepairPanel({
         `重建索引元数据: ${preview.threadMetadataRowsToRebuild}`,
         `backfill 状态: ${preview.backfillStateToUpdate ? "将更新为 complete" : "当前 DB 无此表"}`,
         `provider rows: ${preview.providerRowsToUpdate}`,
+        `Provider 状态文件（session_meta + thread_settings_applied）: ${preview.rolloutFirstLinesToUpdate}`,
         `session_index append: ${preview.sessionIndexMissingToAppend}`,
         `session_index 回收: ${preview.sessionIndexDuplicateRowsToRemove}`,
         `recent rows: ${preview.balancedRecentWindowRows}`,
@@ -410,7 +411,8 @@ export function CodexHistoryRepairPanel({
               <p className="text-xs leading-5">
                 选择记录、项目范围和目标 provider 后点击
                 <span className="font-medium"> 确认修复</span>。写入会修改
-                active DB、索引和 rollout 元数据；如果 Codex
+                active DB、索引，以及 rollout 内的 session_meta 和
+                thread_settings_applied Provider 状态；如果 Codex
                 仍在运行，后端会拒绝写入。 写入成功后重新打开
                 Codex；若新版侧边栏仍未刷新，再到高级设置里使用
                 <span className="font-medium"> 启动并刷新新版目录</span>。
@@ -930,11 +932,14 @@ function HistoryRepairSessionRow({
           {session.cwd ?? "no cwd"}
         </div>
         <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-muted-foreground">
+          {session.model ? (
+            <Badge variant="outline">model={session.model}</Badge>
+          ) : null}
           <Badge variant="outline">{session.modelProvider ?? "-"}</Badge>
           <Badge variant="outline">
             source={compactSource(session.source)}
           </Badge>
-          <span>{formatHistorySessionTime(session.updatedAt)}</span>
+          <span>{formatHistorySessionTime(session.updatedAtMs)}</span>
         </div>
       </button>
     </div>
@@ -1058,6 +1063,10 @@ function RepairResultPanel({
                 <RepairMetric
                   label="provider"
                   value={result.providerRowsToUpdate}
+                />
+                <RepairMetric
+                  label="provider state files"
+                  value={result.rolloutFirstLinesToUpdate}
                 />
                 <RepairMetric
                   label="user-event"
@@ -1223,11 +1232,11 @@ function canUseTauriInvoke(): boolean {
   );
 }
 
-/// 格式化历史时间，异常时保留原始字符串便于排查。
-function formatHistorySessionTime(value: string | null): string {
-  if (!value) return "-";
+/// 从后端的绝对 epoch 毫秒按设备时区格式化；不对时间做固定时区偏移。
+function formatHistorySessionTime(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "-";
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+  if (Number.isNaN(date.getTime())) return "-";
   return date.toLocaleString("zh-CN", {
     month: "2-digit",
     day: "2-digit",

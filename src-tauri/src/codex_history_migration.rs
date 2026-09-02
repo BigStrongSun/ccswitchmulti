@@ -266,6 +266,8 @@ pub struct CodexHistoryVisibilityRepairOutcome {
     pub backfill_state_updated: bool,
     pub provider_rows_to_update: usize,
     pub provider_rows_updated: usize,
+    /// 兼容旧 IPC 字段名：实际统计需要改写 provider 状态的 rollout 文件，
+    /// 包括 session_meta 与后续 thread_settings_applied，而不再只限第一行。
     pub rollout_first_lines_to_update: usize,
     pub rollout_first_lines_updated: usize,
     pub user_event_rows_to_update: usize,
@@ -351,6 +353,7 @@ pub struct CodexHistorySessionSummary {
     pub id: String,
     pub title: String,
     pub cwd: Option<String>,
+    pub model: Option<String>,
     pub model_provider: Option<String>,
     pub source: Option<String>,
     pub thread_source: Option<String>,
@@ -1123,6 +1126,7 @@ struct HistoryVisibilityRepairRuntimeOptions {
 struct ThreadHistoryRow {
     id: String,
     rollout_path: Option<String>,
+    model: Option<String>,
     model_provider: Option<String>,
     cwd: Option<String>,
     has_user_event: Option<i64>,
@@ -1143,6 +1147,7 @@ struct ThreadHistoryRow {
 struct RolloutThreadMetadata {
     id: String,
     rollout_path: PathBuf,
+    model: Option<String>,
     model_provider: Option<String>,
     cwd: Option<String>,
     source: Option<String>,
@@ -1293,12 +1298,16 @@ fn repair_codex_history_visibility_at(
     let provider_update_id_set: HashSet<String> = provider_update_ids.iter().cloned().collect();
 
     let mut rollout_provider_updates = Vec::new();
-    for row in rows
-        .iter()
-        .filter(|row| provider_update_id_set.contains(&row.id))
-    {
-        if let Some(update) = prepare_rollout_provider_update(row, target_provider)? {
-            rollout_provider_updates.push(update);
+    if runtime.provider_bucket_sync_enabled {
+        for row in rows.iter().filter(|row| {
+            provider_update_id_set.contains(&row.id)
+                || row.model_provider.as_deref() == Some(target_provider)
+        }) {
+            // DB 已在目标桶也必须核对 rollout：旧版修复可能只改过
+            // session_meta/threads，留下后续 thread_settings_applied 指向旧 provider。
+            if let Some(update) = prepare_rollout_provider_update(row, target_provider)? {
+                rollout_provider_updates.push(update);
+            }
         }
     }
 
@@ -1744,6 +1753,7 @@ fn codex_history_summary_from_row(row: &ThreadHistoryRow) -> CodexHistorySession
         id: row.id.clone(),
         title,
         cwd,
+        model: row.model.clone(),
         model_provider: row.model_provider.clone(),
         source: row.source.clone(),
         thread_source: row.thread_source.clone(),
@@ -1811,6 +1821,7 @@ fn thread_history_row_from_sql(
     Ok(ThreadHistoryRow {
         id: sqlite_optional_string(row, columns, "id")?.unwrap_or_default(),
         rollout_path: sqlite_optional_string(row, columns, "rollout_path")?,
+        model: sqlite_optional_string(row, columns, "model")?,
         model_provider: sqlite_optional_string(row, columns, "model_provider")?,
         cwd: sqlite_optional_string(row, columns, "cwd")?,
         has_user_event: sqlite_optional_i64(row, columns, "has_user_event")?,
@@ -2174,11 +2185,34 @@ fn parse_rollout_thread_metadata(
             metadata.thread_source = json_string(payload, "thread_source");
             continue;
         }
+        if value.get("type").and_then(Value::as_str) == Some("turn_context") {
+            if let Some(model) = json_string(payload, "model") {
+                metadata.model = Some(model);
+            }
+        }
         let event_type = payload
             .get("type")
             .and_then(Value::as_str)
             .or_else(|| value.get("type").and_then(Value::as_str));
         if value.get("type").and_then(Value::as_str) == Some("event_msg") {
+            if event_type == Some("thread_settings_applied") {
+                if let Some(model) = payload
+                    .pointer("/thread_settings/model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    metadata.model = Some(model.to_string());
+                }
+                if let Some(provider) = payload
+                    .pointer("/thread_settings/model_provider_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    metadata.model_provider = Some(provider.to_string());
+                }
+            }
             if let Some(message) = rollout_user_event_preview(payload) {
                 metadata.has_user_event = true;
                 if metadata.first_user_message.is_none() {
@@ -2409,6 +2443,7 @@ fn thread_history_row_from_rollout(metadata: &RolloutThreadMetadata) -> ThreadHi
     ThreadHistoryRow {
         id: metadata.id.clone(),
         rollout_path: Some(metadata.rollout_path.to_string_lossy().to_string()),
+        model: metadata.model.clone(),
         model_provider: metadata.model_provider.clone(),
         cwd: metadata.cwd.clone(),
         has_user_event: Some(metadata.has_user_event as i64),
@@ -2429,6 +2464,7 @@ fn apply_rollout_metadata_to_thread_row(
 ) -> bool {
     let before = (
         row.rollout_path.clone(),
+        row.model.clone(),
         row.cwd.clone(),
         row.source.clone(),
         row.thread_source.clone(),
@@ -2442,6 +2478,7 @@ fn apply_rollout_metadata_to_thread_row(
     );
     let derived = thread_history_row_from_rollout(metadata);
     row.rollout_path = derived.rollout_path;
+    row.model = derived.model.or_else(|| row.model.clone());
     row.cwd = derived.cwd.or_else(|| row.cwd.clone());
     row.source = derived.source.or_else(|| row.source.clone());
     row.thread_source = derived.thread_source.or_else(|| row.thread_source.clone());
@@ -2457,6 +2494,7 @@ fn apply_rollout_metadata_to_thread_row(
     before
         != (
             row.rollout_path.clone(),
+            row.model.clone(),
             row.cwd.clone(),
             row.source.clone(),
             row.thread_source.clone(),
@@ -2694,7 +2732,7 @@ fn rollout_contains_user_event(path: Option<PathBuf>) -> bool {
         || content.contains("\"user_input\"")
 }
 
-/// 准备改写 rollout 第一行的 provider 元数据，并保留剩余内容。
+/// 准备改写 rollout 中所有会参与 Codex 恢复的 provider 状态，并保留其余内容。
 fn prepare_rollout_provider_update(
     row: &ThreadHistoryRow,
     target_provider: &str,
@@ -2711,29 +2749,12 @@ fn prepare_rollout_provider_update(
     let mut changed = false;
     let mut rewritten = Vec::new();
     for line in content.lines() {
-        let Ok(mut value) = serde_json::from_str::<Value>(line) else {
-            rewritten.push(line.to_string());
-            continue;
-        };
-        let is_session_meta = value.get("type").and_then(Value::as_str) == Some("session_meta");
-        let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
-            rewritten.push(line.to_string());
-            continue;
-        };
-        if !is_session_meta && !payload.contains_key("model_provider") {
-            rewritten.push(line.to_string());
-            continue;
-        }
-        if payload.get("model_provider").and_then(Value::as_str) != Some(target_provider) {
-            payload.insert(
-                "model_provider".to_string(),
-                Value::String(target_provider.to_string()),
-            );
+        if let Some(next_line) = rewrite_codex_provider_state_line(line, target_provider) {
+            rewritten.push(next_line);
             changed = true;
+        } else {
+            rewritten.push(line.to_string());
         }
-        rewritten.push(
-            serde_json::to_string(&value).map_err(|e| AppError::JsonSerialize { source: e })?,
-        );
     }
     if !changed {
         return Ok(None);
@@ -2743,6 +2764,38 @@ fn prepare_rollout_provider_update(
         rewritten,
         old_mtime_ms,
     }))
+}
+
+/// 改写 Codex 恢复线程时真正读取的两类 provider 状态。
+///
+/// `session_meta.model_provider` 是初始值；较新的 Codex 还会按事件顺序用
+/// `thread_settings_applied.thread_settings.model_provider_id` 覆盖它。两处必须在同一
+/// 次离线事务中保持一致，否则 App 重启重建 thread-store 后会再次钉回旧 provider。
+fn rewrite_codex_provider_state_line(line: &str, target_provider: &str) -> Option<String> {
+    let mut value: Value = serde_json::from_str(line).ok()?;
+    let is_session_meta = value.get("type").and_then(Value::as_str) == Some("session_meta");
+    let is_event_msg = value.get("type").and_then(Value::as_str) == Some("event_msg");
+    let payload = value.get_mut("payload")?.as_object_mut()?;
+    let provider_slot = if is_session_meta {
+        Some((payload, "model_provider"))
+    } else if is_event_msg
+        && payload.get("type").and_then(Value::as_str) == Some("thread_settings_applied")
+    {
+        payload
+            .get_mut("thread_settings")
+            .and_then(Value::as_object_mut)
+            .map(|settings| (settings, "model_provider_id"))
+    } else {
+        None
+    }?;
+    if provider_slot.0.get(provider_slot.1).and_then(Value::as_str) == Some(target_provider) {
+        return None;
+    }
+    provider_slot.0.insert(
+        provider_slot.1.to_string(),
+        Value::String(target_provider.to_string()),
+    );
+    serde_json::to_string(&value).ok()
 }
 
 /// 拆出 JSONL 第一行和保留换行符的剩余文本。
@@ -3126,6 +3179,7 @@ fn rebuild_thread_metadata_rows(
             "rollout_path",
             metadata.rollout_path.to_string_lossy().to_string()
         );
+        set!("model", metadata.model.clone().unwrap_or_default());
         set!("model_provider", target_provider.to_string());
         set!("cwd", metadata.cwd.clone().unwrap_or_default());
         set!(
@@ -3205,6 +3259,7 @@ fn insert_missing_thread_rows(
                 .clone()
                 .unwrap_or_else(|| "user".to_string())
         );
+        add!("model", metadata.model.clone().unwrap_or_default());
         add!("model_provider", target_provider.to_string());
         add!("cwd", metadata.cwd.clone().unwrap_or_default());
         add!("title", metadata.title.clone().unwrap_or_default());
@@ -3331,7 +3386,7 @@ fn update_thread_rows_by_ids(
     Ok(changed)
 }
 
-/// 应用 rollout 第一行 provider 元数据更新。
+/// 应用 rollout provider 状态文件更新，并恢复原 mtime，避免元数据修复改变会话时间。
 fn apply_rollout_provider_updates(updates: Vec<RolloutProviderUpdate>) -> Result<usize, AppError> {
     let mut changed = 0;
     for update in updates {
@@ -3644,8 +3699,25 @@ fn restore_codex_official_history_inner(
     collect_jsonl_files(&codex_dir.join("archived_sessions"), &mut files, 0, 4);
     let mut restored_jsonl_files = 0;
     for file_path in files {
+        let mut restore_all_following_provider_state = false;
+        let mut repair_partially_restored_state = false;
         if rewrite_codex_session_file_lines(&file_path, codex_dir, restore_backup_root, |line| {
-            rewrite_codex_session_meta_line_for_restore(line, &official_session_ids)
+            if let Some((id, provider)) = codex_session_meta_identity_line(line) {
+                let ledgered = official_session_ids.contains(&id);
+                restore_all_following_provider_state =
+                    ledgered && provider == CC_SWITCH_CODEX_MODEL_PROVIDER_ID;
+                repair_partially_restored_state =
+                    ledgered && provider == OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID;
+            }
+            if restore_all_following_provider_state
+                || (repair_partially_restored_state
+                    && codex_provider_state_line_provider(line).as_deref()
+                        == Some(CC_SWITCH_CODEX_MODEL_PROVIDER_ID))
+            {
+                rewrite_codex_provider_state_line(line, OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID)
+            } else {
+                None
+            }
         })? {
             restored_jsonl_files += 1;
         }
@@ -3813,32 +3885,6 @@ fn collect_files_with_extension(
             files.push(path);
         }
     }
-}
-
-fn rewrite_codex_session_meta_line_for_restore(
-    line: &str,
-    official_session_ids: &HashSet<String>,
-) -> Option<String> {
-    if !line.contains("\"session_meta\"") || !line.contains("\"model_provider\"") {
-        return None;
-    }
-    let mut value: Value = serde_json::from_str(line).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-        return None;
-    }
-    let payload = value.get_mut("payload")?.as_object_mut()?;
-    if payload.get("model_provider")?.as_str()? != CC_SWITCH_CODEX_MODEL_PROVIDER_ID {
-        return None;
-    }
-    let session_id = payload.get("id")?.as_str()?;
-    if !official_session_ids.contains(session_id) {
-        return None;
-    }
-    payload.insert(
-        "model_provider".to_string(),
-        Value::String(OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID.to_string()),
-    );
-    serde_json::to_string(&value).ok()
 }
 
 fn restore_codex_state_db_official_threads(
@@ -4261,18 +4307,34 @@ fn migrate_all_non_target_codex_jsonl_files(
     let mut source_provider_ids = BTreeSet::new();
     let mut migrated = 0;
     for file_path in files {
-        let mut file_source_provider_ids = BTreeSet::new();
+        let mut rewrite_all_following_provider_state = false;
+        let mut repair_partial_target_state = false;
         let changed =
             rewrite_codex_session_file_lines(&file_path, codex_dir, backup_root, |line| {
-                rewrite_non_target_codex_session_meta_line(
-                    line,
-                    target_provider_id,
-                    &mut file_source_provider_ids,
-                )
+                if let Some((_, source_provider)) = codex_session_meta_identity_line(line) {
+                    rewrite_all_following_provider_state = source_provider != target_provider_id;
+                    repair_partial_target_state = source_provider == target_provider_id;
+                    if rewrite_all_following_provider_state && !source_provider.is_empty() {
+                        source_provider_ids.insert(source_provider);
+                    }
+                }
+                let current_provider = codex_provider_state_line_provider(line);
+                let should_rewrite = rewrite_all_following_provider_state
+                    || (repair_partial_target_state
+                        && current_provider.as_deref() != Some(target_provider_id));
+                if should_rewrite {
+                    if let Some(source_provider) = current_provider {
+                        if !source_provider.is_empty() && source_provider != target_provider_id {
+                            source_provider_ids.insert(source_provider);
+                        }
+                    }
+                    rewrite_codex_provider_state_line(line, target_provider_id)
+                } else {
+                    None
+                }
             })?;
         if changed {
             migrated += 1;
-            source_provider_ids.extend(file_source_provider_ids);
         }
     }
     Ok((source_provider_ids, migrated))
@@ -4327,9 +4389,71 @@ fn rewrite_codex_session_file_for_provider_bucket_to_target(
     backup_root: &Path,
     target_provider_id: &str,
 ) -> Result<bool, AppError> {
+    let mut rewrite_all_following_provider_state = false;
+    let mut repair_partial_target_state = false;
     rewrite_codex_session_file_lines(path, codex_dir, backup_root, |line| {
-        rewrite_codex_session_meta_line_to_target(line, source_provider_ids, target_provider_id)
+        if let Some((_, source_provider)) = codex_session_meta_identity_line(line) {
+            rewrite_all_following_provider_state = source_provider_ids.contains(&source_provider);
+            repair_partial_target_state = source_provider == target_provider_id;
+        }
+        let should_rewrite = rewrite_all_following_provider_state
+            || (repair_partial_target_state
+                && codex_provider_state_line_provider(line)
+                    .as_deref()
+                    .is_some_and(|provider| source_provider_ids.contains(provider)));
+        if should_rewrite {
+            rewrite_codex_provider_state_line(line, target_provider_id)
+        } else {
+            None
+        }
     })
+}
+
+/// 读取单条 session_meta 的会话 id 和初始 provider，用它控制后续设置事件的迁移资格。
+fn codex_session_meta_identity_line(line: &str) -> Option<(String, String)> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    Some((
+        payload.get("id")?.as_str()?.to_string(),
+        payload
+            .get("model_provider")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    ))
+}
+
+/// 读取会参与 Codex 线程恢复的 provider 值；非权威事件返回 None。
+fn codex_provider_state_line_provider(line: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let payload = value.get("payload")?;
+    if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+        return Some(
+            payload
+                .get("model_provider")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        );
+    }
+    if value.get("type").and_then(Value::as_str) == Some("event_msg")
+        && payload.get("type").and_then(Value::as_str) == Some("thread_settings_applied")
+    {
+        return Some(
+            payload
+                .pointer("/thread_settings/model_provider_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        );
+    }
+    None
 }
 
 fn rewrite_codex_session_file_lines(
@@ -4390,66 +4514,6 @@ fn ensure_codex_session_file_unchanged(
         )));
     }
     Ok(())
-}
-
-fn rewrite_codex_session_meta_line_to_target(
-    line: &str,
-    source_provider_ids: &HashSet<String>,
-    target_provider_id: &str,
-) -> Option<String> {
-    if !line.contains("\"session_meta\"") || !line.contains("\"model_provider\"") {
-        return None;
-    }
-
-    let mut value: Value = serde_json::from_str(line).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-        return None;
-    }
-
-    let payload = value.get_mut("payload")?.as_object_mut()?;
-    let current_provider = payload.get("model_provider")?.as_str()?;
-    if !source_provider_ids.contains(current_provider) {
-        return None;
-    }
-
-    payload.insert(
-        "model_provider".to_string(),
-        Value::String(target_provider_id.to_string()),
-    );
-    serde_json::to_string(&value).ok()
-}
-
-/// 把单条 session_meta 中任意非目标 provider 改为目标，并记录真实来源。
-fn rewrite_non_target_codex_session_meta_line(
-    line: &str,
-    target_provider_id: &str,
-    source_provider_ids: &mut BTreeSet<String>,
-) -> Option<String> {
-    if !line.contains("\"session_meta\"") {
-        return None;
-    }
-    let mut value: Value = serde_json::from_str(line).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-        return None;
-    }
-    let payload = value.get_mut("payload")?.as_object_mut()?;
-    let current_provider = payload
-        .get("model_provider")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_string();
-    if current_provider == target_provider_id {
-        return None;
-    }
-    if !current_provider.is_empty() {
-        source_provider_ids.insert(current_provider);
-    }
-    payload.insert(
-        "model_provider".to_string(),
-        Value::String(target_provider_id.to_string()),
-    );
-    serde_json::to_string(&value).ok()
 }
 
 fn migrate_codex_state_dbs(
@@ -4966,6 +5030,27 @@ mod tests {
             Some("new reducer request")
         );
         assert!(metadata.has_user_event);
+    }
+
+    #[test]
+    fn rollout_metadata_applies_latest_thread_settings_provider_and_model() {
+        let dir = tempdir().expect("tempdir");
+        let rollout = dir.path().join("thread-settings.jsonl");
+        fs::write(
+            &rollout,
+            r#"{"timestamp":"2026-08-29T16:16:57Z","type":"session_meta","payload":{"id":"thread-settings","model_provider":"codex_model_router_v2","cwd":"C:\\work"}}
+{"timestamp":"2026-08-29T16:16:58Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"qwen3.8","model_provider_id":"openai"}}}
+{"timestamp":"2026-08-29T16:16:59Z","type":"event_msg","payload":{"type":"user_message","message":"keep this task routed"}}
+"#,
+        )
+        .expect("rollout");
+
+        let metadata = parse_rollout_thread_metadata(&rollout, false)
+            .expect("parse")
+            .expect("metadata");
+        assert_eq!(metadata.model.as_deref(), Some("qwen3.8"));
+        assert_eq!(metadata.model_provider.as_deref(), Some("openai"));
+        assert_eq!(metadata.updated_at_ms, 1_788_020_219_000);
     }
 
     #[test]
@@ -5760,6 +5845,7 @@ mod tests {
             &rollout_one,
             concat!(
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1\",\"model_provider\":\"openai\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"model\":\"qwen3.8\",\"model_provider_id\":\"openai\"}}}\n",
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1-extra\",\"model_provider\":\"openai\"}}\n",
                 "{\"type\":\"user_message\",\"message\":\"hello\"}\n"
             ),
@@ -5954,7 +6040,9 @@ mod tests {
 
         let rollout_text = fs::read_to_string(&rollout_one).expect("rollout one after");
         assert!(rollout_text.contains("\"model_provider\":\"codex_model_router_v2\""));
+        assert!(rollout_text.contains("\"model_provider_id\":\"codex_model_router_v2\""));
         assert!(!rollout_text.contains("\"model_provider\":\"openai\""));
+        assert!(!rollout_text.contains("\"model_provider_id\":\"openai\""));
         assert!(backup_root
             .join("state/sqlite")
             .join(CODEX_STATE_DB_FILENAME)
@@ -6085,6 +6173,68 @@ mod tests {
         let rollout_text = fs::read_to_string(&rollout).expect("rollout after");
         assert!(rollout_text.contains("\"model_provider\":\"custom\""));
         assert!(!rollout_text.contains("remote_ccswitch_forward"));
+    }
+
+    #[test]
+    fn repair_visibility_finishes_partially_repaired_thread_settings_state() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let session_dir = codex_dir.join("sessions/2026/08/30");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        let rollout = session_dir.join("rollout-partial.jsonl");
+        fs::write(
+            &rollout,
+            concat!(
+                "{\"timestamp\":\"2026-08-29T16:16:57Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"partial\",\"model_provider\":\"codex_model_router_v2\",\"cwd\":\"C:\\\\work\"}}\n",
+                "{\"timestamp\":\"2026-08-29T16:16:58Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"model\":\"qwen3.8\",\"model_provider_id\":\"openai\"}}}\n",
+                "{\"timestamp\":\"2026-08-29T16:16:59Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"repair the persisted provider\"}}\n",
+            ),
+        )
+        .expect("write rollout");
+
+        let db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open db");
+        create_history_test_threads_table(&conn);
+        conn.execute(
+            "INSERT INTO threads VALUES ('partial', ?1, 'codex_model_router_v2', 'C:\\work', 1, 0, 'vscode', 'user', 'Partial repair', 'Partial repair', 'repair the persisted provider', 1788020219, 1788020219000)",
+            [rollout.to_string_lossy().to_string()],
+        )
+        .expect("insert thread");
+        drop(conn);
+
+        let outcome = repair_codex_history_visibility_at(
+            &codex_dir,
+            ActiveCodexStateDb {
+                path: db_path,
+                kind: "codex_root".to_string(),
+            },
+            CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
+            Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
+            BTreeSet::new(),
+            None,
+            HistoryVisibilityRepairRuntimeOptions {
+                dry_run: false,
+                count: 0,
+                window_limit: 0,
+                balance_recent_window: false,
+                max_per_project: 0,
+                max_total: 0,
+                source_filter: Some("all".to_string()),
+                include_archived: false,
+                include_subagents: false,
+                selected_session_ids: BTreeSet::new(),
+                provider_bucket_sync_enabled: true,
+                backup_root_override: Some(dir.path().join("backup")),
+            },
+        )
+        .expect("repair");
+
+        assert_eq!(outcome.provider_rows_updated, 0);
+        assert_eq!(outcome.rollout_first_lines_updated, 1);
+        let text = fs::read_to_string(&rollout).expect("read repaired rollout");
+        assert!(text.contains("\"model\":\"qwen3.8\""));
+        assert!(text.contains("\"model_provider_id\":\"codex_model_router_v2\""));
+        assert!(!text.contains("\"model_provider_id\":\"openai\""));
     }
 
     #[test]
@@ -6872,14 +7022,17 @@ base_url = "https://proxy.example/v1"
             .expect("seed backup db");
         drop(backup_db);
 
-        // 当前数据：s1（账本内，custom）应还原；s2（开启期间新会话，不在账本）
-        // 与 s3（手工 relay）必须原样保留
+        // 当前数据：s1（账本内）模拟旧版只还原了 session_meta、却遗漏后续设置事件；
+        // s2（开启期间新会话，不在账本）与 s3（手工 relay）必须原样保留。
         let session_dir = codex_dir.join("sessions/2026/06/01");
         fs::create_dir_all(&session_dir).expect("create session dir");
         let official_path = session_dir.join("official.jsonl");
         fs::write(
             &official_path,
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"custom\"}}\n",
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"openai\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"model\":\"gpt-5.4\",\"model_provider_id\":\"custom\"}}}\n",
+            ),
         )
         .expect("write official session");
         let on_period_dir = codex_dir.join("sessions/2026/06/12");
@@ -6929,6 +7082,8 @@ base_url = "https://proxy.example/v1"
 
         let official_text = fs::read_to_string(&official_path).expect("read official");
         assert!(official_text.contains("\"model_provider\":\"openai\""));
+        assert!(official_text.contains("\"model_provider_id\":\"openai\""));
+        assert!(!official_text.contains("\"model_provider_id\":\"custom\""));
         let on_period_text = fs::read_to_string(&on_period_path).expect("read on-period");
         assert!(on_period_text.contains("\"id\":\"s2\",\"model_provider\":\"custom\""));
         assert!(on_period_text.contains("\"model_provider\":\"my-private-relay\""));
@@ -7086,7 +7241,7 @@ base_url = "https://proxy.example/v1"
     }
 
     #[test]
-    fn rewrites_only_codex_session_meta_provider_ids() {
+    fn rewrites_all_authoritative_codex_provider_state_records() {
         let dir = tempdir().expect("tempdir");
         let codex_dir = dir.path().join(".codex");
         let backup_root = dir.path().join("backup");
@@ -7097,6 +7252,7 @@ base_url = "https://proxy.example/v1"
             &path,
             concat!(
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"rightcode\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"model\":\"qwen3.8\",\"model_provider_id\":\"rightcode\"}}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\"}}\n"
             ),
         )
@@ -7113,9 +7269,43 @@ base_url = "https://proxy.example/v1"
         assert!(changed);
         let next = fs::read_to_string(&path).expect("read rewritten");
         assert!(next.contains("\"model_provider\":\"custom\""));
+        assert!(next.contains("\"model_provider_id\":\"custom\""));
+        assert!(!next.contains("rightcode"));
         assert!(backup_root
             .join("jsonl/sessions/2026/05/20/rollout-test.jsonl")
             .exists());
+    }
+
+    #[test]
+    fn finishes_legacy_partial_provider_bucket_migration() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let backup_root = dir.path().join("backup");
+        let session_dir = codex_dir.join("sessions/2026/05/20");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        let path = session_dir.join("rollout-partial.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"custom\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"model\":\"qwen3.8\",\"model_provider_id\":\"rightcode\"}}}\n",
+            ),
+        )
+        .expect("write session");
+
+        let changed = rewrite_codex_session_file_for_provider_bucket(
+            &path,
+            &codex_dir,
+            &HashSet::from(["rightcode".to_string()]),
+            &backup_root,
+        )
+        .expect("rewrite partial migration");
+
+        assert!(changed);
+        let next = fs::read_to_string(&path).expect("read rewritten");
+        assert!(next.contains("\"model_provider\":\"custom\""));
+        assert!(next.contains("\"model_provider_id\":\"custom\""));
+        assert!(!next.contains("rightcode"));
     }
 
     #[test]
