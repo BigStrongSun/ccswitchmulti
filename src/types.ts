@@ -707,6 +707,9 @@ export interface Settings {
   // ===== Codex 多设备额度协作设置 =====
   quotaCollaboration?: QuotaCollaborationSettings;
 
+  // ===== 设备级环境变量注入 =====
+  envInjection?: EnvInjectionSettings;
+
   // ===== 备份策略设置 =====
   // Auto-backup interval in hours (0=disabled, default 24)
   backupIntervalHours?: number;
@@ -730,6 +733,53 @@ export interface Settings {
       migratedStateRows?: number;
     };
   };
+}
+
+export interface EnvInjectionSettings {
+  enabled: boolean;
+  targets: {
+    claude: boolean;
+    codex: boolean;
+  };
+  variables: Record<string, string>;
+}
+
+export type EnvInjectionTargetSyncState =
+  | "disabled"
+  | "synced"
+  | "conflict"
+  | "pending"
+  | "failed";
+
+export interface EnvInjectionTargetSyncStatus {
+  state: EnvInjectionTargetSyncState;
+  managedKeys: string[];
+  addedKeys: string[];
+  updatedKeys: string[];
+  removedKeys: string[];
+  relinquishedKeys: string[];
+  conflictedKeys: string[];
+  error?: string;
+  rollbackError?: string;
+}
+
+export type EnvInjectionSyncState =
+  | "disabled"
+  | "synced"
+  | "warning"
+  | "partial"
+  | "failed";
+
+export interface EnvInjectionSyncReport {
+  state: EnvInjectionSyncState;
+  claude: EnvInjectionTargetSyncStatus;
+  codex: EnvInjectionTargetSyncStatus;
+  codexIncludeAllowlist: boolean;
+}
+
+export interface SettingsSaveResult {
+  settingsSaved: boolean;
+  envInjection: EnvInjectionSyncReport;
 }
 
 /** 多设备额度协作的本机配置，不包含任何 Codex 登录凭据。 */

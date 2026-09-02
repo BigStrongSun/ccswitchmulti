@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { providersApi, settingsApi } from "@/lib/api";
 import { syncCurrentProvidersLiveSafe } from "@/utils/postChangeSync";
 import { useSettingsQuery, useSaveSettingsMutation } from "@/lib/query";
-import type { Settings } from "@/types";
+import type { EnvInjectionSyncReport, Settings } from "@/types";
 import { useSettingsForm, type SettingsFormState } from "./useSettingsForm";
 import {
   useDirectorySettings,
@@ -16,6 +16,7 @@ import { useSettingsMetadata } from "./useSettingsMetadata";
 
 interface SaveResult {
   requiresRestart: boolean;
+  envInjection?: EnvInjectionSyncReport;
 }
 
 export interface UseSettingsResult {
@@ -219,7 +220,7 @@ export function useSettings(): UseSettingsResult {
         ])?.enableClaudePluginIntegration;
 
         // 保存到配置文件
-        await saveMutation.mutateAsync(payload);
+        const saveOutcome = await saveMutation.mutateAsync(payload);
 
         // 如果开机自启状态改变，调用系统 API
         if (
@@ -292,7 +293,13 @@ export function useSettings(): UseSettingsResult {
           console.warn("[useSettings] Failed to refresh tray menu", error);
         }
 
-        return { requiresRestart: false };
+        return {
+          requiresRestart: false,
+          envInjection:
+            typeof saveOutcome === "object"
+              ? saveOutcome.envInjection
+              : undefined,
+        };
       } catch (error) {
         console.error("[useSettings] Failed to auto-save settings", error);
         toast.error(
@@ -358,7 +365,7 @@ export function useSettings(): UseSettingsResult {
           "settings",
         ])?.enableClaudePluginIntegration;
 
-        await saveMutation.mutateAsync(payload);
+        const saveOutcome = await saveMutation.mutateAsync(payload);
 
         await settingsApi.setAppConfigDirOverride(sanitizedAppDir ?? null);
 
@@ -466,7 +473,13 @@ export function useSettings(): UseSettingsResult {
           );
         }
 
-        return { requiresRestart: appDirChanged };
+        return {
+          requiresRestart: appDirChanged,
+          envInjection:
+            typeof saveOutcome === "object"
+              ? saveOutcome.envInjection
+              : undefined,
+        };
       } catch (error) {
         console.error("[useSettings] Failed to save settings", error);
         toast.error(

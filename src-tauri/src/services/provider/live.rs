@@ -1229,7 +1229,10 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
     match app_type {
         AppType::Claude => {
             let path = get_claude_settings_path();
-            let settings = sanitize_claude_settings_for_live(&provider.settings_config);
+            let mut settings = sanitize_claude_settings_for_live(&provider.settings_config);
+            if let Err(error) = crate::env_injection::inject_owned_into_claude_live(&mut settings) {
+                log::warn!("Claude environment injection could not be reapplied: {error}");
+            }
             write_json_file(&path, &settings)?;
         }
         AppType::ClaudeDesktop => {

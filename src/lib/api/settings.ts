@@ -4,6 +4,8 @@ import type {
   WebDavSyncSettings,
   S3SyncSettings,
   RemoteSnapshotInfo,
+  EnvInjectionSyncReport,
+  SettingsSaveResult,
 } from "@/types";
 import type { AppId } from "./types";
 
@@ -60,13 +62,54 @@ export interface WebDavSyncResult {
   status: string;
 }
 
+const disabledEnvInjectionReport = (): EnvInjectionSyncReport => ({
+  state: "disabled",
+  claude: {
+    state: "disabled",
+    managedKeys: [],
+    addedKeys: [],
+    updatedKeys: [],
+    removedKeys: [],
+    relinquishedKeys: [],
+    conflictedKeys: [],
+  },
+  codex: {
+    state: "disabled",
+    managedKeys: [],
+    addedKeys: [],
+    updatedKeys: [],
+    removedKeys: [],
+    relinquishedKeys: [],
+    conflictedKeys: [],
+  },
+  codexIncludeAllowlist: false,
+});
+
 export const settingsApi = {
   async get(): Promise<Settings> {
     return await invoke("get_settings");
   },
 
-  async save(settings: Settings): Promise<boolean> {
-    return await invoke("save_settings", { settings });
+  async save(settings: Settings): Promise<SettingsSaveResult | boolean> {
+    const result = await invoke<SettingsSaveResult | boolean>("save_settings", {
+      settings,
+    });
+    // Compatibility for tests and older side-loaded backends that still return
+    // the historical boolean shape.
+    return typeof result === "boolean"
+      ? {
+          settingsSaved: result,
+          envInjection: disabledEnvInjectionReport(),
+        }
+      : result;
+  },
+
+  async inspectEnvInjectionStatus(): Promise<EnvInjectionSyncReport> {
+    return await invoke("inspect_env_injection_status");
+  },
+
+  async retryEnvInjectionSync(): Promise<EnvInjectionSyncReport> {
+    return await invoke("retry_env_injection_sync");
   },
 
   /** 是否存在统一 Codex 会话历史的迁移备份（关闭弹窗据此显示"恢复备份"勾选） */

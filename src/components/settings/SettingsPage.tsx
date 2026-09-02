@@ -41,6 +41,7 @@ import { WindowSettings } from "@/components/settings/WindowSettings";
 import { AppVisibilitySettings } from "@/components/settings/AppVisibilitySettings";
 import { SkillStorageLocationSettings } from "@/components/settings/SkillStorageLocationSettings";
 import { SkillSyncMethodSettings } from "@/components/settings/SkillSyncMethodSettings";
+import { EnvInjectionSettings } from "@/components/settings/EnvInjectionSettings";
 import { TerminalSettings } from "@/components/settings/TerminalSettings";
 import { DirectorySettings } from "@/components/settings/DirectorySettings";
 import { ImportExportSection } from "@/components/settings/ImportExportSection";
@@ -59,6 +60,7 @@ import { useSettings } from "@/hooks/useSettings";
 import { useImportExport } from "@/hooks/useImportExport";
 import { useTranslation } from "react-i18next";
 import type { SettingsFormState } from "@/hooks/useSettings";
+import type { EnvInjectionSettings as EnvInjectionSettingsValue } from "@/types";
 
 interface SettingsDialogProps {
   open: boolean;
@@ -212,6 +214,25 @@ export function SettingsPage({
     [autoSaveSettings, settings, t, updateSettings],
   );
 
+  const handleEnvInjectionSave = useCallback(
+    async (envInjection: EnvInjectionSettingsValue) => {
+      const previous = settings?.envInjection;
+      updateSettings({ envInjection });
+      try {
+        const result = await autoSaveSettings({ envInjection });
+        return result?.envInjection ?? null;
+      } catch (error) {
+        console.error(
+          "[SettingsPage] Failed to save environment injection settings",
+          error,
+        );
+        updateSettings({ envInjection: previous });
+        return null;
+      }
+    },
+    [autoSaveSettings, settings?.envInjection, updateSettings],
+  );
+
   const isBusy = useMemo(() => isLoading && !settings, [isLoading, settings]);
 
   return (
@@ -289,6 +310,10 @@ export function SettingsPage({
                       onChange={(terminal) =>
                         handleAutoSave({ preferredTerminal: terminal })
                       }
+                    />
+                    <EnvInjectionSettings
+                      value={settings.envInjection}
+                      onChange={handleEnvInjectionSave}
                     />
                   </motion.div>
                 ) : null}

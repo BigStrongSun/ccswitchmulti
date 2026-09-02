@@ -553,7 +553,7 @@ export const useSaveSettingsMutation = () => {
 
   return useMutation({
     mutationFn: async (settings: Settings) => {
-      await settingsApi.save(settings);
+      return await settingsApi.save(settings);
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["settings"] });

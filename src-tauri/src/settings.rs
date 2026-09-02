@@ -572,6 +572,12 @@ pub struct AppSettings {
     #[serde(default)]
     pub quota_collaboration: QuotaCollaborationSettings,
 
+    /// Device-local environment variables managed through each CLI's native
+    /// configuration surface. Disabled by default and never synced to the
+    /// provider database.
+    #[serde(default)]
+    pub env_injection: crate::env_injection::EnvInjectionSettings,
+
     // ===== 本机自动迁移状态 =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_migrations: Option<LocalMigrations>,
@@ -639,6 +645,7 @@ impl Default for AppSettings {
             backup_retain_count: None,
             preferred_terminal: None,
             quota_collaboration: QuotaCollaborationSettings::default(),
+            env_injection: crate::env_injection::EnvInjectionSettings::default(),
             local_migrations: None,
         }
     }
@@ -845,6 +852,7 @@ pub fn get_settings_for_frontend() -> AppSettings {
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     new_settings.normalize_paths();
+    new_settings.env_injection.validate()?;
     save_settings_file(&new_settings)?;
 
     let mut guard = settings_store().write().unwrap_or_else(|e| {

@@ -230,10 +230,18 @@ impl ConfigService {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
-        let settings = sanitize_claude_settings_for_live(&provider.settings_config);
+        let mut settings = sanitize_claude_settings_for_live(&provider.settings_config);
+        if let Err(error) = crate::env_injection::inject_owned_into_claude_live(&mut settings) {
+            log::warn!("Claude environment injection could not be reapplied: {error}");
+        }
         write_json_file(&settings_path, &settings)?;
 
-        let live_after = read_json_file::<serde_json::Value>(&settings_path)?;
+        let mut live_after = read_json_file::<serde_json::Value>(&settings_path)?;
+        if let Err(error) = crate::env_injection::strip_owned_from_claude_live(&mut live_after) {
+            log::warn!(
+                "Claude environment injection could not be stripped from provider storage: {error}"
+            );
+        }
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
                 target.settings_config = live_after;
