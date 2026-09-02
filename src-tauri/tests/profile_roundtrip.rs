@@ -8,8 +8,8 @@ use serde_json::json;
 
 use cc_switch_lib::{
     get_codex_config_path, write_codex_live_atomic, AppType, InstalledSkill, McpServer, McpService,
-    ProfilePayload, ProfileScope, ProfileService, Prompt, PromptService, Provider, ProviderService,
-    SkillApps, SkillService,
+    ProfilePayload, ProfileScope, ProfileService, Prompt, PromptService, Provider, ProviderMeta,
+    ProviderService, SkillApps, SkillService,
 };
 
 #[path = "support.rs"]
@@ -753,8 +753,22 @@ fn profile_switch_auto_disables_takeover_before_apply() {
 async fn codex_profile_reapplies_same_multirouter_after_takeover_cleanup() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
     let state = create_test_state().expect("create test state");
+
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create Codex config dir");
+    fs::write(
+        codex_dir.join("models_cache.json"),
+        serde_json::to_string_pretty(&json!({
+            "fetched_at": "2026-06-01T00:00:00.000000000Z",
+            "etag": "official-cache",
+            "client_version": "0.140.0",
+            "models": []
+        }))
+        .expect("serialize Codex model cache"),
+    )
+    .expect("seed Codex model cache");
 
     let mut proxy_config = state.db.get_proxy_config().await.expect("get proxy config");
     proxy_config.listen_port = 0;
@@ -764,23 +778,48 @@ async fn codex_profile_reapplies_same_multirouter_after_takeover_cleanup() {
         .await
         .expect("set ephemeral proxy port");
 
+    let mut target = Provider::with_id(
+        "target".to_string(),
+        "Target".to_string(),
+        json!({
+            "auth": { "OPENAI_API_KEY": "route-key" },
+            "config": concat!(
+                "model_provider = \"custom\"\n",
+                "model = \"gpt-visible\"\n",
+                "[model_providers.custom]\n",
+                "name = \"Target\"\n",
+                "base_url = \"https://example.test/v1\"\n",
+                "wire_api = \"responses\"\n"
+            ),
+            "modelCatalog": {
+                "models": [{ "model": "gpt-visible" }]
+            }
+        }),
+        None,
+    );
+    target.category = Some("custom".to_string());
+    target.meta = Some(ProviderMeta {
+        api_format: Some("openai_responses".to_string()),
+        ..Default::default()
+    });
+    state
+        .db
+        .save_provider(AppType::Codex.as_str(), &target)
+        .expect("save router target");
+
     let mut router = Provider::with_id(
         "router".to_string(),
         "Router".to_string(),
         json!({
-            "auth": { "OPENAI_API_KEY": "router-key" },
-            "config": "model = \"gpt-visible\"\n",
             "codexRouting": {
+                "schemaVersion": 2,
                 "enabled": true,
                 "routes": [{
                     "id": "route-a",
                     "enabled": true,
-                    "match": { "models": ["gpt-visible"] },
-                    "upstream": {
-                        "baseUrl": "https://example.test/v1",
-                        "apiFormat": "openai_responses",
-                        "apiKey": "route-key"
-                    }
+                    "targetProviderId": "target",
+                    "modelSelection": { "mode": "all" },
+                    "authPolicy": { "source": "provider_config" }
                 }]
             }
         }),

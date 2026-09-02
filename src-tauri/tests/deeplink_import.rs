@@ -43,7 +43,7 @@ fn deeplink_import_claude_provider_persists_to_db() {
 }
 
 #[test]
-fn deeplink_import_codex_provider_builds_auth_and_config() {
+fn deeplink_import_codex_provider_requires_protocol_probe_without_writing() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
@@ -54,33 +54,19 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
     let db = Arc::new(Database::memory().expect("create memory db"));
     let state = AppState::new(db.clone());
 
-    let provider_id = import_provider_from_deeplink(&state, request.clone())
-        .expect("import provider from deeplink");
+    let error = import_provider_from_deeplink(&state, request)
+        .expect_err("unverified Codex deeplink must not bypass Provider Set probing");
 
-    let providers = db.get_all_providers("codex").expect("get providers");
-    let provider = providers
-        .get(&provider_id)
-        .expect("provider created via deeplink");
-
-    assert_eq!(provider.name, request.name.clone().unwrap());
-    assert_eq!(provider.website_url.as_deref(), request.homepage.as_deref());
-    assert_eq!(provider.icon.as_deref(), Some("openai"));
-    let auth_value = provider
-        .settings_config
-        .pointer("/auth/OPENAI_API_KEY")
-        .and_then(|v| v.as_str());
-    let config_text = provider
-        .settings_config
-        .get("config")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    assert_eq!(auth_value, request.api_key.as_deref());
     assert!(
-        config_text.contains(request.endpoint.as_deref().unwrap()),
-        "config.toml content should contain endpoint"
+        error
+            .to_string()
+            .contains("codex_provider_set_probe_required"),
+        "the caller must receive an actionable probe-required error: {error}"
     );
     assert!(
-        config_text.contains("model = \"gpt-4o\""),
-        "config.toml content should contain model setting"
+        db.get_all_providers("codex")
+            .expect("get providers after rejected import")
+            .is_empty(),
+        "a rejected Codex deeplink must not leave a partially imported provider"
     );
 }

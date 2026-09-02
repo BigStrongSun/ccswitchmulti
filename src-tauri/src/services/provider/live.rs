@@ -808,22 +808,27 @@ pub(crate) fn write_live_with_common_config(
 }
 
 /// 为 Codex live 写入构造配置：保留 DB 中的 `modelCatalog` 元数据，但只有菜单映射开启时才投射到 live。
-fn codex_settings_for_live_projection(provider: &Provider) -> Value {
+fn codex_settings_for_live_projection(provider: &Provider) -> Result<Value, AppError> {
     let should_project = provider
         .meta
         .as_ref()
         .map(|meta| meta.codex_model_catalog_projection_enabled(&provider.settings_config))
         .unwrap_or_else(|| provider.settings_config.get("modelCatalog").is_some());
 
-    if should_project {
-        return provider.settings_config.clone();
+    let mut settings = provider.settings_config.clone();
+    if !should_project {
+        if let Some(obj) = settings.as_object_mut() {
+            obj.remove("modelCatalog");
+        }
     }
 
-    let mut settings = provider.settings_config.clone();
-    if let Some(obj) = settings.as_object_mut() {
-        obj.remove("modelCatalog");
-    }
-    settings
+    // Codex MCP declarations are owned by the unified database table. Provider snapshots can
+    // contain historical/imported [mcp_servers] blocks, but writing those blocks before the
+    // ownership-aware MCP reconciler runs would make them look user-owned and therefore
+    // undeletable. Keep every live writer on the same boundary: Provider settings supply model
+    // routing and user preferences; McpService projects the complete enabled MCP set afterwards.
+    crate::codex_config::strip_codex_mcp_servers_from_settings(&mut settings)?;
+    Ok(settings)
 }
 
 /// 只刷新 Codex provider 的 live `config.toml`，不覆盖当前 `auth.json`。
@@ -836,7 +841,7 @@ pub(crate) fn write_codex_config_only_with_common_config(
     provider: &Provider,
 ) -> Result<(), AppError> {
     let config_text = build_codex_live_config_for_provider(db, provider)?;
-    let settings_for_live = codex_settings_for_live_projection(provider);
+    let settings_for_live = codex_settings_for_live_projection(provider)?;
     let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
     crate::codex_config::write_codex_provider_config_only_with_catalog_and_provider_context(
         &settings_for_live,
@@ -886,7 +891,7 @@ pub(crate) fn build_codex_live_config_for_provider(
         );
     }
 
-    let settings_for_live = codex_settings_for_live_projection(&effective_provider);
+    let settings_for_live = codex_settings_for_live_projection(&effective_provider)?;
     let config_text = settings_for_live
         .get("config")
         .and_then(Value::as_str)
@@ -1364,7 +1369,7 @@ fn write_codex_live_snapshot(
     provider: &Provider,
     provider_context: Option<&crate::codex_config::ProviderClassificationContext>,
 ) -> Result<(), AppError> {
-    let settings_for_live = codex_settings_for_live_projection(provider);
+    let settings_for_live = codex_settings_for_live_projection(provider)?;
     let obj = settings_for_live
         .as_object()
         .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
@@ -2945,7 +2950,8 @@ web_search = true
             ..Default::default()
         });
 
-        let projected = codex_settings_for_live_projection(&provider);
+        let projected =
+            codex_settings_for_live_projection(&provider).expect("build Codex live projection");
 
         assert!(
             projected.get("modelCatalog").is_none(),
@@ -2973,7 +2979,8 @@ web_search = true
         );
         provider.meta = Some(crate::provider::ProviderMeta::default());
 
-        let projected = codex_settings_for_live_projection(&provider);
+        let projected =
+            codex_settings_for_live_projection(&provider).expect("build Codex live projection");
 
         assert!(
             projected.get("modelCatalog").is_some(),

@@ -2563,12 +2563,13 @@ command = "ghost-cmd"
         "provider A's bearer token must not leak into B's live, got: {live_after}"
     );
     assert!(
-        !live_after.contains("mcp_servers"),
-        "no DB-enabled MCP servers, so live must not resurrect stale entries, got: {live_after}"
+        live_after.contains("[mcp_servers.echo]") && live_after.contains("command = \"echo\""),
+        "an unowned user MCP entry must survive a Provider switch, got: {live_after}"
     );
     assert!(
-        !live_after.contains("ghost-legacy"),
-        "the legacy [mcp.servers] orphan must not propagate to B's live, got: {live_after}"
+        live_after.contains("[mcp.servers.ghost-legacy]")
+            && live_after.contains("command = \"ghost-cmd\""),
+        "an unowned legacy user MCP entry must survive until the user imports or removes it, got: {live_after}"
     );
     assert!(
         !live_after.contains("wire_api = \"chat\""),

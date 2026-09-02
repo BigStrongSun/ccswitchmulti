@@ -437,7 +437,7 @@ command = "say"
     // 快照里的 stale `latest` 不得绕过启用状态重新进入 config.toml。
     assert!(
         !config_text.contains("mcp_servers.latest"),
-        "live file must replace stale provider MCP entries with the DB projection"
+        "live file must replace stale provider MCP entries with the DB projection:\n{config_text}"
     );
     assert!(
         new_config_text.contains("mcp_servers.latest"),
