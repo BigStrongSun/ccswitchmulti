@@ -3993,6 +3993,14 @@ impl ProxyService {
                 facade => facade,
             };
             Self::apply_codex_multirouter_auth_facade_to_doc(&mut doc, proxy_provider_id, facade);
+            let providers = doc["model_providers"]
+                .as_table_mut()
+                .expect("CCSM creates model_providers as a TOML table");
+            crate::codex_config::install_codex_custom_history_proxy_alias(
+                providers,
+                proxy_provider_id,
+            )
+            .map_err(|error| format!("生成 Codex 历史 Provider 兼容路由失败: {error}"))?;
         } else {
             // 普通第三方 provider 没有 route 级凭据所有权，继续让 CCSM 统一注入。
             doc["model_providers"][proxy_provider_id]["requires_openai_auth"] =
@@ -6915,6 +6923,14 @@ requires_openai_auth = true
 supports_websockets = false
 http_headers = { x-cc-switch-proxy-mode = "router" }
 
+[model_providers.custom]
+name = "OpenAI"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+http_headers = { x-cc-switch-proxy-mode = "router", x-cc-switch-history-provider-alias = "custom" }
+
 [mcp_servers.memory]
 command = "memory-server"
 
@@ -6955,6 +6971,13 @@ trust_level = "trusted"
                 .and_then(|providers| providers.get("codex_model_router_v2"))
                 .is_none(),
             "the detached Router table and its local-only headers must be removed together"
+        );
+        assert!(
+            parsed
+                .get("model_providers")
+                .and_then(|providers| providers.get("custom"))
+                .is_none(),
+            "the detached Router's custom history compatibility alias must be removed too"
         );
         assert_eq!(
             parsed
@@ -7358,6 +7381,52 @@ respect_system_proxy = false
     }
 
     #[test]
+    fn codex_multirouter_takeover_keeps_custom_history_bucket_loadable() {
+        let provider = codex_multirouter_provider("managed_codex_oauth");
+        let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
+            "",
+            "http://127.0.0.1:5000/v1",
+            Some(&provider),
+            None,
+        )
+        .expect("project router with history compatibility alias");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+        let providers = parsed["model_providers"]
+            .as_table()
+            .expect("provider tables");
+        let primary = providers
+            .get(crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID)
+            .expect("primary router provider");
+        let legacy_custom = providers
+            .get(crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+            .expect("historical custom provider alias");
+
+        assert_eq!(
+            legacy_custom.get("base_url"),
+            primary.get("base_url"),
+            "a resumed custom-bucket task must enter the same local proxy"
+        );
+        assert_eq!(legacy_custom.get("wire_api"), primary.get("wire_api"));
+        assert_eq!(
+            legacy_custom.get("requires_openai_auth"),
+            primary.get("requires_openai_auth")
+        );
+        assert_eq!(
+            legacy_custom.get("experimental_bearer_token"),
+            primary.get("experimental_bearer_token")
+        );
+        assert_eq!(
+            legacy_custom
+                .get("http_headers")
+                .and_then(toml::Value::as_table)
+                .and_then(|headers| headers.get("x-cc-switch-history-provider-alias"))
+                .and_then(toml::Value::as_str),
+            Some("custom"),
+            "the compatibility alias must carry an explicit CCSM ownership marker"
+        );
+    }
+
+    #[test]
     fn codex_multirouter_takeover_facade_projects_native_mixed_toml() {
         let provider = codex_multirouter_provider("native_codex_auth");
         let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
@@ -7650,11 +7719,49 @@ supports_websockets = false
         let parsed: toml::Value = toml::from_str(&output).expect("valid official route");
         let route_id = crate::codex_config::CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID;
         let route = &parsed["model_providers"][route_id];
+        let historical_custom =
+            &parsed["model_providers"][crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID];
 
         assert_eq!(parsed["model_provider"].as_str(), Some(route_id));
         assert_eq!(route["base_url"].as_str(), Some(proxy_url));
         assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
+        assert_eq!(historical_custom["base_url"].as_str(), Some(proxy_url));
+        assert_eq!(
+            historical_custom["requires_openai_auth"].as_bool(),
+            Some(true),
+            "historical custom-bucket tasks must retain native Codex authentication"
+        );
         assert!(parsed.get("experimental_bearer_token").is_none());
+    }
+
+    #[test]
+    fn official_takeover_does_not_claim_an_unmarked_user_custom_provider() {
+        let mut provider = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {}, "config": "" }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        let output = ProxyService::apply_codex_proxy_toml_config_for_provider(
+            r#"[model_providers.custom]
+name = "User Local Gateway"
+base_url = "http://127.0.0.1:9000/v1"
+wire_api = "chat"
+"#,
+            "http://127.0.0.1:5000/v1",
+            Some(&provider),
+        )
+        .expect("apply official proxy without claiming user custom table");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+        let custom = &parsed["model_providers"]["custom"];
+
+        assert_eq!(custom["name"].as_str(), Some("User Local Gateway"));
+        assert_eq!(
+            custom["base_url"].as_str(),
+            Some("http://127.0.0.1:9000/v1")
+        );
+        assert_eq!(custom["wire_api"].as_str(), Some("chat"));
     }
 
     #[test]

@@ -5026,3 +5026,10 @@ supported in one streaming turn`。
 - 根修把数据库 schema 提升到 v20，并在 v19→v20 的启动/备份导入迁移事务中扫描 Codex Provider，调用公共 `strip_v2_route_inherited_fields` 清除 route 级 `baseUrl`、Key、`apiFormat`、`wireApi`、capabilities 和 `upstream` 等禁止快照。合法的 `targetProviderId`、`modelSelection`、prefix、alias、auth policy 均保留；`modelCatalog[].apiFormat` 也保留给既有逐模型覆盖迁移路径。严格 V2 parser 继续 fail closed，读路径不做掩盖性容错，公共保存事务仍作为未来外部写入的第二道防线。
 - TDD 先以 v19 数据库、第三条路由的 `apiFormat` 和第二条路由的 `upstream` 复现相同失败；迁移后原始 V2 parser 可直接通过，重复迁移字节级幂等。定向结果为 schema migrations 15/15、schema v2 9/9、Provider Set 22/22、协议探测命令 27/27、保存边界 1/1；fresh 完整 `cargo test` 为 library 3799 passed / 0 failed / 6 ignored，全部 integration suites 通过，`cargo check --all-targets`、rustfmt、生产 lib/bin 严格 Clippy 通过。
 - Codex 内置 Web 读取仓库 schema v2 文档所得“路由只引用 Provider、不得复制 Provider 配置”的结论与本地源码一致；Matrix WebSearch 独立检索没有得到可用的项目特定结果，因此具体回归根因以本地 Git 历史、数据库初始化顺序和 RED→GREEN 测试为权威。本轮只完成源码修复与本地提交准备，没有构建、安装、重启 CCSM/Codex 或发布新版本。
+
+## 2026-09-03 历史 `custom` Provider 兼容路由根修
+
+- `Model provider 'custom' not found` 不是 Codex 再次改坏 `config.toml`。旧普通第三方 Provider 和统一历史功能把会话持久化在 `model_provider=custom` 桶；后续 MultiRouter/官方接管只生成 `codex_model_router_v2` 或 `cc-switch-official`，而此前的冷恢复兼容仅补了内置 `openai`，遗漏了 CCSM 自己的历史 `custom`。Codex 在恢复旧任务时先校验 Provider 表，因此请求尚未进入 15721 就直接终止。
+- 根修不改写 rollout 或 SQLite 历史元数据。接管投影会把当前受管 Provider 克隆成 `[model_providers.custom]` 兼容别名，使旧任务和新任务进入同一代理、认证与 Responses 外层；别名用 `x-cc-switch-history-provider-alias=custom` 明确标记 CCSM 所有权，该本地头会被现有 `x-cc-switch-*` 出站过滤器剥离，不发送给上游。
+- 所有权和退出路径均 fail closed：只有 `custom` 缺失或已带 CCSM 标记时才安装/更新别名；用户自建、未标记的 `custom`（即使同样指向 127.0.0.1）绝不覆盖。关闭接管、切回官方或剥离受管 live 字段时只删除带标记别名，不误删用户表。
+- TDD 先稳定复现 MultiRouter 缺别名、官方接管缺别名、退出残留以及用户 `custom` 被错误覆盖四类失败；实现后代理定向 89/89、Codex config 216/216、完整 `cargo test` 的 library 3801 passed/0 failed/6 ignored 且全部 integration suites 通过，`cargo check --all-targets` 与生产 lib/bin 严格 Clippy 通过。本轮未构建、安装、重启或替换当前 v25 运行态；安装版仍需后续发布/安装验收。
