@@ -5019,3 +5019,10 @@ supported in one streaming turn`。
 - 持久存在的 takeover projection drift 仍可操作，但作为“路由接管配置缺失”整体状态展示；不再伪称 Codex 修改了两个字段，不再展示虚构 changed-key 列表，也不允许选择“保留 Codex 修改”。主操作改为“恢复路由接管”。普通 CCSM 托管字段的真实语义 diff、Codex 非托管字段忽略、端口身份 fail-closed 与运行态刷新逻辑均保持原边界。
 - TDD 先确认旧实现在启动 pending 时会报 external drift、投影弹窗会显示硬编码路径；实现后 Codex consistency 21/21、相关前端 14/14、前端全量 166 files / 1337 tests、Rust library 3786 passed / 0 failed / 6 ignored、`pnpm typecheck`、`cargo check --all-targets`、生产库严格 Clippy 和 rustfmt 均通过。全 targets 严格 Clippy 仍被本任务外既有测试警告阻断；Tauri release EXE 与 renderer 编译成功，但本地 WiX bundling 返回非零，因此没有形成可验收 installer，也没有安装、重启或替换当前运行态。
 - 外部交叉核对使用 Codex 内置 Web 和 Matrix WebSearch。上游 issue #6183 佐证启动阶段确有接管配置重写行为；本次具体竞态与误报键来源仍以当前 main 源码、04:12 本机日志和 RED→GREEN 回归为权威。
+
+## 2026-09-03 schema v2 旧路由快照升级迁移
+
+- 用户截图中的 `v2_route_forbidden_field: route[2] contains forbidden inherited field 'apiFormat'` 不是 OpenAI Official、DeepSeek 或深探测网络请求失败，而是 v25 之前已经持久化的 MultiRouter schema v2 route 仍携带 Provider 级 `apiFormat` / `upstream` 快照。v25 已修复写入边界和 legacy DeepSeek 启动修复，能阻止新污染，但没有迁移已存在的 v19 数据；深探测在保存前严格校验，因此旧记录无法进入现有保存边界自愈。
+- 根修把数据库 schema 提升到 v20，并在 v19→v20 的启动/备份导入迁移事务中扫描 Codex Provider，调用公共 `strip_v2_route_inherited_fields` 清除 route 级 `baseUrl`、Key、`apiFormat`、`wireApi`、capabilities 和 `upstream` 等禁止快照。合法的 `targetProviderId`、`modelSelection`、prefix、alias、auth policy 均保留；`modelCatalog[].apiFormat` 也保留给既有逐模型覆盖迁移路径。严格 V2 parser 继续 fail closed，读路径不做掩盖性容错，公共保存事务仍作为未来外部写入的第二道防线。
+- TDD 先以 v19 数据库、第三条路由的 `apiFormat` 和第二条路由的 `upstream` 复现相同失败；迁移后原始 V2 parser 可直接通过，重复迁移字节级幂等。定向结果为 schema migrations 15/15、schema v2 9/9、Provider Set 22/22、协议探测命令 27/27、保存边界 1/1；fresh 完整 `cargo test` 为 library 3799 passed / 0 failed / 6 ignored，全部 integration suites 通过，`cargo check --all-targets`、rustfmt、生产 lib/bin 严格 Clippy 通过。
+- Codex 内置 Web 读取仓库 schema v2 文档所得“路由只引用 Provider、不得复制 Provider 配置”的结论与本地源码一致；Matrix WebSearch 独立检索没有得到可用的项目特定结果，因此具体回归根因以本地 Git 历史、数据库初始化顺序和 RED→GREEN 测试为权威。本轮只完成源码修复与本地提交准备，没有构建、安装、重启 CCSM/Codex 或发布新版本。

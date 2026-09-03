@@ -364,6 +364,112 @@ fn schema_v18_migration_creates_protocol_probe_observations() {
 }
 
 #[test]
+fn schema_v19_migration_repairs_existing_codex_v2_route_snapshots() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create tables");
+
+    let poisoned_settings = json!({
+        "modelCatalog": {
+            "models": [
+                {
+                    "id": "deepseek-v4-flash",
+                    "enabled": true,
+                    "apiFormat": "openai_chat"
+                }
+            ]
+        },
+        "codexRouting": {
+            "schemaVersion": 2,
+            "enabled": true,
+            "routes": [
+                {
+                    "id": "openai",
+                    "targetProviderId": "openai-provider",
+                    "modelSelection": { "mode": "all" },
+                    "matchPrefixes": ["gpt-"]
+                },
+                {
+                    "id": "qwen",
+                    "targetProviderId": "qwen-provider",
+                    "modelSelection": { "mode": "include", "models": ["qwen3.8"] },
+                    "upstream": {
+                        "baseUrl": "https://legacy.example/v1",
+                        "apiFormat": "openai_responses"
+                    }
+                },
+                {
+                    "id": "deepseek",
+                    "targetProviderId": "deepseek-provider",
+                    "modelSelection": { "mode": "include", "models": ["deepseek-v4-flash"] },
+                    "apiFormat": "openai_responses"
+                }
+            ]
+        }
+    });
+    conn.execute(
+        "INSERT INTO providers (id, app_type, name, settings_config, meta)\
+         VALUES (?1, 'codex', ?2, ?3, '{}')",
+        params![
+            "codex-multirouter",
+            "Codex MultiRouter",
+            serde_json::to_string(&poisoned_settings).expect("serialize poisoned settings"),
+        ],
+    )
+    .expect("seed poisoned v19 provider");
+    Database::set_user_version(&conn, 19).expect("set user_version=19");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    let settings_json: String = conn
+        .query_row(
+            "SELECT settings_config FROM providers WHERE id = 'codex-multirouter' AND app_type = 'codex'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read migrated provider");
+    let migrated: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse migrated settings");
+    let routes = migrated
+        .pointer("/codexRouting/routes")
+        .and_then(serde_json::Value::as_array)
+        .expect("migrated routes");
+
+    assert!(routes[1].get("upstream").is_none());
+    assert!(routes[2].get("apiFormat").is_none());
+    assert_eq!(
+        migrated.pointer("/modelCatalog/models/0/apiFormat"),
+        Some(&json!("openai_chat")),
+        "model-level legacy override belongs to the catalog migration path and must be preserved"
+    );
+    assert!(matches!(
+        crate::codex_multirouter::schema::CodexRoutingDocument::parse(
+            migrated.pointer("/codexRouting").expect("routing document")
+        ),
+        Ok(crate::codex_multirouter::schema::CodexRoutingDocument::V2(
+            _
+        ))
+    ));
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+
+    Database::set_user_version(&conn, 19).expect("replay v19 migration");
+    Database::apply_schema_migrations_on_conn(&conn).expect("reapply migrations");
+    let settings_after_replay: String = conn
+        .query_row(
+            "SELECT settings_config FROM providers WHERE id = 'codex-multirouter' AND app_type = 'codex'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read replayed provider");
+    assert_eq!(
+        settings_after_replay, settings_json,
+        "migration is idempotent"
+    );
+}
+
+#[test]
 fn protocol_compatibility_profile_round_trips_only_for_the_exact_target() {
     use crate::protocol_compatibility::{
         ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,

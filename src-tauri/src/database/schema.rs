@@ -542,6 +542,13 @@ impl Database {
                         Self::migrate_v18_to_v19(conn)?;
                         Self::set_user_version(conn, 19)?;
                     }
+                    19 => {
+                        log::info!(
+                            "迁移数据库从 v19 到 v20（清理 Codex schema v2 路由中的旧 Provider 快照）"
+                        );
+                        Self::migrate_v19_to_v20(conn)?;
+                        Self::set_user_version(conn, 20)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -1575,6 +1582,79 @@ impl Database {
 
     fn migrate_v18_to_v19(conn: &Connection) -> Result<(), AppError> {
         Self::create_protocol_probe_observation_tables(conn)
+    }
+
+    /// v19 曾允许旧页面把 Provider 的协议、地址等快照写进 schema v2 route。
+    /// 当前严格解析器会正确拒绝这类混合数据，但升级用户必须先在数据库迁移阶段
+    /// 收敛到仅引用 Provider 的 v2 结构，否则任何探测/编辑入口都会在保存前校验处中断。
+    fn migrate_v19_to_v20(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "providers")? {
+            return Ok(());
+        }
+
+        let mut statement = conn
+            .prepare("SELECT id, settings_config FROM providers WHERE app_type = 'codex'")
+            .map_err(|error| {
+                AppError::Database(format!(
+                    "读取 Codex Provider 以迁移 schema v2 路由失败: {error}"
+                ))
+            })?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| {
+                AppError::Database(format!(
+                    "遍历 Codex Provider 以迁移 schema v2 路由失败: {error}"
+                ))
+            })?;
+        let mut providers = Vec::new();
+        for row in rows {
+            providers.push(row.map_err(|error| {
+                AppError::Database(format!("读取 Codex Provider 迁移行失败: {error}"))
+            })?);
+        }
+        drop(statement);
+
+        let mut repaired = 0usize;
+        for (provider_id, settings_text) in providers {
+            let mut settings = match serde_json::from_str::<serde_json::Value>(&settings_text) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::warn!(
+                        "[CodexMultiRouter] skipped invalid settings_config while migrating provider {}: {}",
+                        provider_id,
+                        error
+                    );
+                    continue;
+                }
+            };
+            if !crate::codex_multirouter::schema::strip_v2_route_inherited_fields(&mut settings) {
+                continue;
+            }
+            let normalized = serde_json::to_string(&settings).map_err(|error| {
+                AppError::Database(format!(
+                    "序列化已迁移的 Codex Provider {provider_id} 失败: {error}"
+                ))
+            })?;
+            conn.execute(
+                "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = 'codex'",
+                params![normalized, provider_id],
+            )
+            .map_err(|error| {
+                AppError::Database(format!(
+                    "保存已迁移的 Codex Provider {provider_id} 失败: {error}"
+                ))
+            })?;
+            repaired += 1;
+        }
+        if repaired > 0 {
+            log::warn!(
+                "[CodexMultiRouter] migrated {} existing schema v2 provider(s) with inherited route snapshots",
+                repaired
+            );
+        }
+        Ok(())
     }
 
     fn create_protocol_compatibility_tables(conn: &Connection) -> Result<(), AppError> {
