@@ -53,7 +53,6 @@ struct RolloutRepairCandidate {
     source_id: String,
     projection_db: PathBuf,
     repair: ProjectionCursorRepair,
-    #[cfg(any(target_os = "windows", test))]
     scan: RolloutOrdinalScan,
 }
 
@@ -777,7 +776,6 @@ fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
             source_id,
             projection_db: projection_db.clone(),
             repair,
-            #[cfg(any(target_os = "windows", test))]
             scan,
         });
     }
