@@ -52,6 +52,7 @@ struct RolloutRepairCandidate {
     path: PathBuf,
     source_id: String,
     projection_db: PathBuf,
+    #[cfg(any(target_os = "windows", test))]
     repair: ProjectionCursorRepair,
     scan: RolloutOrdinalScan,
 }
@@ -69,6 +70,7 @@ struct RotatedRolloutRepairCandidate {
     canonical_path: PathBuf,
     segments: Vec<PathBuf>,
     projection_db: PathBuf,
+    #[cfg(any(target_os = "windows", test))]
     affected_bytes: u64,
 }
 
@@ -736,6 +738,7 @@ fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
     for (source_id, path) in paths {
         match rotated_rollout_segments(&source_id, &path) {
             Ok(segments) if !segments.is_empty() => {
+                #[cfg(any(target_os = "windows", test))]
                 let affected_bytes = segments
                     .iter()
                     .filter_map(|segment| fs::metadata(segment).ok().map(|metadata| metadata.len()))
@@ -745,6 +748,7 @@ fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
                     canonical_path: path.clone(),
                     segments,
                     projection_db: projection_db.clone(),
+                    #[cfg(any(target_os = "windows", test))]
                     affected_bytes,
                 });
                 continue;
@@ -755,7 +759,7 @@ fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
                 continue;
             }
         }
-        let repair =
+        let _repair =
             match inspect_verified_duplicate_projection_cursor(&projection_db, &source_id, &path) {
                 Ok(Some(repair)) => repair,
                 Ok(None) => continue,
@@ -775,7 +779,8 @@ fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
             path,
             source_id,
             projection_db: projection_db.clone(),
-            repair,
+            #[cfg(any(target_os = "windows", test))]
+            repair: _repair,
             scan,
         });
     }
@@ -894,7 +899,7 @@ pub(crate) fn repair_newly_stalled_projection_cursors(
     let Some(projection_db) = projection_db_path(&config_dir) else {
         return Ok(0);
     };
-    repair_projection_cursors_at(&projection_db, outcome)
+    repair_projection_cursors_at(projection_db.as_path(), outcome)
 }
 
 fn repair_projection_cursors_at(
@@ -904,7 +909,7 @@ fn repair_projection_cursors_at(
     let mut repaired = 0;
     for target in &outcome.targets {
         if repair_verified_duplicate_projection_cursor(
-            &projection_db,
+            projection_db,
             &target.source_id,
             &target.rollout_path,
         )?
