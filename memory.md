@@ -5042,3 +5042,10 @@ supported in one streaming turn`。
 - annotated tag `v3.19.2-26` 的远端 peeled commit 精确指向 `87e3fae2`。GitHub CI run `33724384662` 的 Frontend、Windows、Ubuntu、macOS 全部 success；Release run `33724403167` 的 Windows x64/ARM64、Linux x64/ARM64、macOS、正式发布和 `latest.json` 汇总全部 success。
 - 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.2-26`，不是 draft/prerelease，共 19 个资产。远端 `latest.json` 版本为 `3.19.2-26`，包含 darwin/linux/windows 的 x64 与 ARM64 六个平台，签名全部非空且 URL 全指向本 tag；SHA-256 为 `15AD530AC41867BC25DD178458F3E7A77A246E939634FE6271F69919C68FCC31`，与 GitHub asset digest 一致。Release body 完整包含仓库中文说明，并由 workflow 正常追加平台下载说明；严格全文比较不相等不是正文缺失。
 - 本轮没有安装、关闭、重启或替换当前运行中的 CCSwitchMulti/Codex。源码门禁、本地导出、GitHub 多平台资产与用户本机安装态仍是四个独立验收层级。
+
+## 2026-09-03 MultiRouter 向导内 Provider 编辑返回上下文根修
+
+- 13/14 页 MultiRouter 向导中的“配置 Provider”“打开配置页”和“编辑推理高级配置”共用同一 `onOpenProviderConfig` 边界。旧 `App` 回调在打开编辑器前主动把 `isCodexMultiRouterWizardOpen` 设为 false，导致整个向导组件卸载；返回按钮只清理 `editingProvider`，没有也不可能恢复已经销毁的步骤、草稿、模型选择和探测状态，所以用户必然回到 Provider 首页并从头配置。
+- 根修采用父流程保持挂载、子编辑器提升层级的统一嵌套面板语义：打开 Provider 编辑时不再关闭向导或改写 `currentView`；`EditProviderDialog` 接受显式面板层级，并与向导内新增 Provider 共用 `z-[140]` 子层级，高于向导的 `z-[120]`。取消、顶部返回和保存都只关闭子编辑器，自然露出原步骤与原草稿，不通过重新创建向导伪造恢复。
+- 入口审计确认：普通 Provider 列表编辑本来保持列表挂载；Codex Router 工作台编辑普通 Provider 本来保持工作台挂载；Universal Provider 在自身面板内维护编辑模态；只有向导 Provider 编辑入口存在主动卸载父流程。新增回归覆盖向导编辑的取消与保存、真实编辑器层级透传，以及 Router 工作台返回原上下文。
+- TDD 首先在旧实现下稳定得到“编辑器已打开但向导 DOM 消失”的失败；层级回归也通过删除透传进行 mutation RED。实现后编辑器与 App 定向 26/26，前端全量 167 files / 1347 tests，TypeScript、Prettier 和 renderer production build 均通过。该记录只证明源码行为，尚未构建、安装或进行桌面视觉验收。

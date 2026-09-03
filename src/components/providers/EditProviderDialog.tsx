@@ -28,6 +28,11 @@ interface EditProviderDialogProps {
   }) => Promise<void> | void;
   appId: AppId;
   isProxyTakeover?: boolean; // 代理接管模式下不读取 live（避免显示被接管后的代理配置）
+  /**
+   * Provider 编辑器从其它全屏流程内打开时，必须显式提升到父流程之上。
+   * 父流程保持挂载，返回后才能保留原来的步骤和草稿。
+   */
+  panelZIndexClassName?: string;
 }
 
 export function EditProviderDialog({
@@ -37,6 +42,7 @@ export function EditProviderDialog({
   onSubmit,
   appId,
   isProxyTakeover = false,
+  panelZIndexClassName,
 }: EditProviderDialogProps) {
   const { t } = useTranslation();
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
@@ -331,6 +337,7 @@ export function EditProviderDialog({
           isOpen={open}
           title={t("provider.editProvider")}
           onClose={() => onOpenChange(false)}
+          zIndexClassName={panelZIndexClassName}
         >
           <div className="rounded-lg border border-border-default bg-muted/30 p-4 text-sm text-muted-foreground">
             正在读取模型源、协议证据和自动适配状态…
@@ -343,6 +350,7 @@ export function EditProviderDialog({
         isOpen={open}
         title={t("provider.editProvider")}
         onClose={() => onOpenChange(false)}
+        zIndexClassName={panelZIndexClassName}
       >
         <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
           无法读取模型源的协议适配状态：{logicalProviderError}
@@ -359,6 +367,7 @@ export function EditProviderDialog({
       isOpen={open}
       title={t("provider.editProvider")}
       onClose={() => onOpenChange(false)}
+      zIndexClassName={panelZIndexClassName}
       footer={
         <Button
           type="submit"

@@ -128,6 +128,8 @@ vi.mock("@/components/codex/CodexRouterWorkspacePage", async () => {
       initialProviderId,
       initialTab,
       onRuntimeReady,
+      onEditProvider,
+      providers,
     }: any) => (
       <div
         data-testid="codex-router-workspace"
@@ -135,6 +137,21 @@ vi.mock("@/components/codex/CodexRouterWorkspacePage", async () => {
       >
         <span data-testid="codex-router-target">{initialProviderId}</span>
         <span data-testid="codex-router-tab">{initialTab}</span>
+        {Object.values(providers ?? {}).find(
+          (provider: any) => provider.category !== "aggregator",
+        ) ? (
+          <button
+            onClick={() =>
+              onEditProvider(
+                Object.values(providers).find(
+                  (provider: any) => provider.category !== "aggregator",
+                ),
+              )
+            }
+          >
+            edit-workspace-provider
+          </button>
+        ) : null}
       </div>
     ),
   };
@@ -152,7 +169,9 @@ vi.mock("@/components/codex/CodexMultiRouterWizard", () => ({
     newlyCreatedProviderIds,
     onOpenChange,
     onCreateProvider,
+    onOpenProviderConfig,
     onOpenHistoryRepair,
+    providers,
   }: any) =>
     open ? (
       <div
@@ -163,6 +182,13 @@ vi.mock("@/components/codex/CodexMultiRouterWizard", () => ({
       >
         <button onClick={() => onOpenChange(false)}>close-wizard</button>
         <button onClick={() => onCreateProvider?.()}>add-provider</button>
+        <button
+          onClick={() =>
+            onOpenProviderConfig?.(Object.values(providers ?? {})[0])
+          }
+        >
+          edit-wizard-provider
+        </button>
         <button onClick={() => onOpenHistoryRepair?.()}>
           open-history-repair
         </button>
@@ -750,6 +776,35 @@ describe("App integration with MSW", () => {
     );
   }, 30_000);
 
+  it("keeps the current wizard draft mounted while editing and saving a provider", async () => {
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    fireEvent.click(screen.getByText("switch-codex"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "codex-1",
+      ),
+    );
+    fireEvent.click(screen.getByText("open-multirouter-entry"));
+    fireEvent.click(await screen.findByText("创建新配置"));
+
+    fireEvent.click(screen.getByText("edit-wizard-provider"));
+    expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("codex-multirouter-wizard")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("close-edit"));
+    expect(screen.queryByTestId("edit-provider-dialog")).toBeNull();
+    expect(screen.getByTestId("codex-multirouter-wizard")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("edit-wizard-provider"));
+    fireEvent.click(screen.getByText("confirm-edit"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("edit-provider-dialog")).toBeNull(),
+    );
+    expect(screen.getByTestId("codex-multirouter-wizard")).toBeInTheDocument();
+  }, 30_000);
+
   it("routes the wizard history-repair action to the Codex session manager exactly once", async () => {
     const { default: App } = await import("@/App");
     renderApp(App);
@@ -863,6 +918,51 @@ describe("App integration with MSW", () => {
       "data-runtime-ready-wired",
       "false",
     );
+  });
+
+  it("returns provider editing to the router workspace that opened it", async () => {
+    setProviders("codex", {
+      "codex-router": {
+        id: "codex-router",
+        name: "OpenAI Multi-Model Router",
+        settingsConfig: {
+          codexRouting: { schemaVersion: 2, enabled: true, routes: [] },
+        },
+        category: "aggregator",
+        sortIndex: 0,
+        createdAt: Date.now(),
+      },
+      "codex-source": {
+        id: "codex-source",
+        name: "Codex Source",
+        settingsConfig: {
+          modelCatalog: { models: [{ model: "gpt-test" }] },
+        },
+        category: "custom",
+        sortIndex: 1,
+        createdAt: Date.now() + 1,
+      },
+    });
+    setCurrentProviderId("codex", "codex-router");
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+    fireEvent.click(screen.getByText("switch-codex"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "codex-router",
+      ),
+    );
+    fireEvent.click(screen.getByText("edit"));
+    await screen.findByTestId("codex-router-workspace");
+
+    fireEvent.click(screen.getByText("edit-workspace-provider"));
+    expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("codex-router-workspace")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("close-edit"));
+    expect(screen.queryByTestId("edit-provider-dialog")).toBeNull();
+    expect(screen.getByTestId("codex-router-workspace")).toBeInTheDocument();
   });
 
   it("opens the Codex usage page from the Codex toolbar", async () => {

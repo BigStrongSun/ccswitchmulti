@@ -154,6 +154,7 @@ interface SyncStatusUpdatedPayload {
 
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
+const WIZARD_CHILD_PANEL_Z_INDEX_CLASS = "z-[140]";
 
 const STORAGE_KEY = "cc-switch-last-app";
 const VALID_APPS: AppId[] = [
@@ -2161,7 +2162,9 @@ function App() {
         }}
         appId={activeApp}
         panelZIndexClassName={
-          isCodexMultiRouterWizardOpen ? "z-[140]" : undefined
+          isCodexMultiRouterWizardOpen
+            ? WIZARD_CHILD_PANEL_Z_INDEX_CLASS
+            : undefined
         }
         onSubmit={addProvider}
       />
@@ -2270,9 +2273,7 @@ function App() {
             setIsAddOpen(true);
           }}
           onOpenProviderConfig={(provider) => {
-            setIsCodexMultiRouterWizardOpen(false);
             setActiveApp("codex");
-            setCurrentView("providers");
             setEditingProvider(provider);
           }}
           onOpenHistoryRepair={() => {
@@ -2299,6 +2300,11 @@ function App() {
         onSubmit={handleEditProvider}
         appId={activeApp}
         isProxyTakeover={isCurrentAppTakeoverActive}
+        panelZIndexClassName={
+          isCodexMultiRouterWizardOpen
+            ? WIZARD_CHILD_PANEL_Z_INDEX_CLASS
+            : undefined
+        }
       />
 
       {effectiveUsageProvider && (

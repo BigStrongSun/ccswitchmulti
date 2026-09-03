@@ -59,13 +59,15 @@ vi.mock("@/components/common/FullScreenPanel", () => ({
     isOpen,
     children,
     footer,
+    zIndexClassName,
   }: {
     isOpen: boolean;
     children: React.ReactNode;
     footer?: React.ReactNode;
+    zIndexClassName?: string;
   }) =>
     isOpen ? (
-      <div>
+      <div data-testid="full-screen-panel" data-z-index={zIndexClassName ?? ""}>
         <div>{children}</div>
         <div>{footer}</div>
       </div>
@@ -543,5 +545,32 @@ describe("EditProviderDialog", () => {
     expect(
       JSON.parse(screen.getByTestId("codex-editor-snapshot").textContent ?? ""),
     ).toMatchObject({ adaptation: { persistence: "split" } });
+  });
+
+  it("forwards an elevated layer when the editor is opened from another full-screen flow", async () => {
+    const provider: Provider = {
+      id: "claude-source",
+      name: "Claude Source",
+      category: "custom",
+      settingsConfig: {},
+    };
+
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="claude"
+        panelZIndexClassName="z-[140]"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("full-screen-panel")).toHaveAttribute(
+        "data-z-index",
+        "z-[140]",
+      ),
+    );
   });
 });
