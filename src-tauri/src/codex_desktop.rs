@@ -412,6 +412,8 @@ pub(crate) async fn try_inject_on_candidate_ports(
     catalog: &CodexModelCatalogProjection,
     ports: &[u16],
 ) -> Option<CodexModelPickerUnlockResult> {
+    let launch_timezone =
+        crate::codex_egress_timezone::resolve_launch_timezone(&crate::settings::get_settings());
     for port in ports {
         let targets = match list_cdp_targets(*port).await {
             Ok(targets) => targets,
@@ -428,7 +430,9 @@ pub(crate) async fn try_inject_on_candidate_ports(
             let Some(websocket_url) = target.web_socket_debugger_url.as_deref() else {
                 continue;
             };
-            if let Ok(evidence) = install_script(websocket_url, &script).await {
+            if let Ok(evidence) =
+                install_script(websocket_url, &script, launch_timezone.as_deref()).await
+            {
                 if evidence.history_sync_requested
                     || evidence.history_catalog_complete.is_some()
                     || evidence.all_provider_history_patched
@@ -548,6 +552,7 @@ fn target_matches_codex_desktop(target: &CdpTarget) -> bool {
 pub(crate) async fn install_script(
     websocket_url: &str,
     script: &str,
+    timezone: Option<&str>,
 ) -> Result<CodexAppCompatibilityEvidence, String> {
     let (socket, _) = tokio::time::timeout(CDP_CONNECT_TIMEOUT, connect_async(websocket_url))
         .await
@@ -555,10 +560,27 @@ pub(crate) async fn install_script(
         .map_err(|error| format!("failed to connect CDP websocket: {error}"))?;
     let mut session = CdpSession::new(socket);
     session.send_command(1, "Runtime.enable", json!({})).await?;
-    session.send_command(2, "Page.enable", json!({})).await?;
+    if let Some(timezone) = timezone {
+        // `TZ` is inherited by a directly launched Desktop/app-server process,
+        // while Chromium has its own ICU timezone controller. Apply the same
+        // user-selected IANA identifier to the renderer through the documented
+        // CDP command as well. This remains best-effort so the experimental
+        // override can never block the model/history compatibility layer.
+        if let Err(error) = session
+            .send_command(
+                2,
+                "Emulation.setTimezoneOverride",
+                codex_timezone_override_parameters(timezone),
+            )
+            .await
+        {
+            log::warn!("Codex renderer timezone override was not applied: {error}");
+        }
+    }
+    session.send_command(3, "Page.enable", json!({})).await?;
     session
         .send_command(
-            3,
+            4,
             "Page.addScriptToEvaluateOnNewDocument",
             json!({ "source": script }),
         )
@@ -567,7 +589,7 @@ pub(crate) async fn install_script(
     // identifier，不能用来判断 localThreadCatalog 是否真正触发。
     let evaluation = session
         .send_command(
-            4,
+            5,
             "Runtime.evaluate",
             json!({
                 "expression": script,
@@ -578,6 +600,10 @@ pub(crate) async fn install_script(
         )
         .await?;
     codex_app_compatibility_evidence_from_evaluation(&evaluation)
+}
+
+fn codex_timezone_override_parameters(timezone: &str) -> Value {
+    json!({ "timezoneId": timezone })
 }
 
 /// 从 CDP `Runtime.evaluate` 结果中提取原生历史同步状态，并把脚本异常转为明确错误。
@@ -616,6 +642,108 @@ fn codex_app_compatibility_evidence_from_evaluation(
             .and_then(Value::as_bool)
             .unwrap_or(false),
     })
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodexRuntimeTimezone {
+    pub(crate) timezone: String,
+    pub(crate) utc_offset: String,
+}
+
+fn codex_runtime_timezone_from_evaluation(
+    evaluation: &Value,
+) -> Result<CodexRuntimeTimezone, String> {
+    if let Some(exception) = evaluation
+        .get("result")
+        .and_then(|result| result.get("exceptionDetails"))
+    {
+        return Err(format!(
+            "Codex runtime timezone inspection failed: {exception}"
+        ));
+    }
+    let value = evaluation
+        .pointer("/result/result/value")
+        .ok_or_else(|| "Codex runtime timezone inspection returned no value".to_string())?;
+    let timezone = value
+        .get("timezone")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|timezone| !timezone.is_empty())
+        .ok_or_else(|| "Codex renderer did not report an IANA timezone".to_string())?;
+    let minutes = value
+        .get("utcOffsetMinutes")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "Codex renderer did not report a UTC offset".to_string())?;
+    let sign = if minutes < 0 { '-' } else { '+' };
+    let absolute = minutes.unsigned_abs();
+    Ok(CodexRuntimeTimezone {
+        timezone: timezone.to_string(),
+        utc_offset: format!("{sign}{:02}:{:02}", absolute / 60, absolute % 60),
+    })
+}
+
+async fn evaluate_cdp_expression(websocket_url: &str, expression: &str) -> Result<Value, String> {
+    let (socket, _) = tokio::time::timeout(CDP_CONNECT_TIMEOUT, connect_async(websocket_url))
+        .await
+        .map_err(|_| "timed out connecting CDP websocket".to_string())?
+        .map_err(|error| format!("failed to connect CDP websocket: {error}"))?;
+    let mut session = CdpSession::new(socket);
+    session.send_command(1, "Runtime.enable", json!({})).await?;
+    session
+        .send_command(
+            2,
+            "Runtime.evaluate",
+            json!({
+                "expression": expression,
+                "returnByValue": true,
+                "allowUnsafeEvalBlockedByCSP": true
+            }),
+        )
+        .await
+}
+
+/// Read the timezone from a currently running Codex renderer. This verifies the
+/// child-process `TZ` result instead of inferring it from Windows settings.
+pub(crate) async fn inspect_codex_runtime_timezone() -> Result<CodexRuntimeTimezone, String> {
+    let ports = candidate_debug_ports(DEFAULT_CODEX_DEBUG_PORT);
+    let expression = r#"(() => ({
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      utcOffsetMinutes: -new Date().getTimezoneOffset()
+    }))()"#;
+    let mut errors = Vec::new();
+    for port in ports {
+        let targets = match list_cdp_targets(port).await {
+            Ok(targets) => targets,
+            Err(error) => {
+                errors.push(format!("port {port}: {error}"));
+                continue;
+            }
+        };
+        let targets = match pick_codex_page_targets(&targets, port) {
+            Ok(targets) => targets,
+            Err(error) => {
+                errors.push(format!("port {port}: {error}"));
+                continue;
+            }
+        };
+        for target in targets {
+            let Some(websocket_url) = target.web_socket_debugger_url.as_deref() else {
+                continue;
+            };
+            match evaluate_cdp_expression(websocket_url, expression).await {
+                Ok(evaluation) => return codex_runtime_timezone_from_evaluation(&evaluation),
+                Err(error) => errors.push(format!("port {port}: {error}")),
+            }
+        }
+    }
+    if detect_running_codex_main_process().is_some() {
+        Err("Codex is running without an injectable CDP port; fully quit it and relaunch it from CCSwitchMulti before verifying the runtime timezone".to_string())
+    } else if errors.is_empty() {
+        Err("Codex Desktop is not running".to_string())
+    } else {
+        Err("Codex Desktop is not running on a CCSwitchMulti-managed debug port".to_string())
+    }
 }
 
 /// 轻量 CDP websocket 会话，只处理 request/response。
@@ -1354,20 +1482,28 @@ pub(crate) fn launch_codex_with_debug_port(
             running.display()
         ));
     }
+    let launch_timezone =
+        crate::codex_egress_timezone::resolve_launch_timezone(&crate::settings::get_settings());
     #[cfg(target_os = "macos")]
     {
-        if let Some(bundle) = macos_codex_bundle_for_executable(executable) {
-            let mut command = Command::new("open");
-            command.arg(bundle).arg("--args");
-            append_codex_debug_args(&mut command, debug_port);
-            return command
-                .spawn()
-                .map(|_| ())
-                .map_err(|error| format!("failed to launch {}: {error}", executable.display()));
+        if launch_timezone.is_none() {
+            if let Some(bundle) = macos_codex_bundle_for_executable(executable) {
+                let mut command = Command::new("open");
+                command.arg(bundle).arg("--args");
+                append_codex_debug_args(&mut command, debug_port);
+                return command.spawn().map(|_| ()).map_err(|error| {
+                    format!("failed to launch {}: {error}", executable.display())
+                });
+            }
+        } else {
+            log::warn!(
+                "Codex egress timezone injection is not supported through macOS LaunchServices; launching the bundle executable directly"
+            );
         }
     }
     let mut command = Command::new(executable);
     append_codex_debug_args(&mut command, debug_port);
+    apply_codex_launch_timezone(&mut command, launch_timezone.as_deref());
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -1377,6 +1513,12 @@ pub(crate) fn launch_codex_with_debug_port(
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("failed to launch {}: {error}", executable.display()))
+}
+
+fn apply_codex_launch_timezone(command: &mut Command, timezone: Option<&str>) {
+    if let Some(timezone) = timezone {
+        command.env("TZ", timezone);
+    }
 }
 
 /// 为 Desktop 启动命令追加 Chromium remote-debugging 参数。
@@ -2266,6 +2408,51 @@ mod tests {
         assert!(!should_launch_codex_desktop_with_ccswitch(false, true));
         assert!(should_launch_codex_desktop_with_ccswitch(true, false));
         assert!(!should_launch_codex_desktop_with_ccswitch(true, true));
+    }
+
+    #[test]
+    fn codex_launch_timezone_is_scoped_to_the_child_command() {
+        let mut command = Command::new("codex-desktop-placeholder");
+        apply_codex_launch_timezone(&mut command, Some("Asia/Taipei"));
+
+        let timezone = command
+            .get_envs()
+            .find_map(|(key, value)| {
+                (key == "TZ").then(|| value.map(|value| value.to_string_lossy().to_string()))
+            })
+            .flatten();
+        assert_eq!(timezone.as_deref(), Some("Asia/Taipei"));
+
+        let mut disabled = Command::new("codex-desktop-placeholder");
+        apply_codex_launch_timezone(&mut disabled, None);
+        assert!(!disabled.get_envs().any(|(key, _)| key == "TZ"));
+    }
+
+    #[test]
+    fn codex_runtime_timezone_is_read_from_the_renderer_value() {
+        let evaluation = json!({
+            "result": {
+                "result": {
+                    "value": {
+                        "timezone": "Asia/Taipei",
+                        "utcOffsetMinutes": 480
+                    }
+                }
+            }
+        });
+
+        let timezone =
+            codex_runtime_timezone_from_evaluation(&evaluation).expect("valid runtime timezone");
+        assert_eq!(timezone.timezone, "Asia/Taipei");
+        assert_eq!(timezone.utc_offset, "+08:00");
+    }
+
+    #[test]
+    fn codex_renderer_timezone_override_uses_the_configured_iana_identifier() {
+        assert_eq!(
+            codex_timezone_override_parameters("America/Los_Angeles"),
+            json!({ "timezoneId": "America/Los_Angeles" })
+        );
     }
 
     /// 按当前平台构造一个能通过 Desktop 主程序校验的测试文件。

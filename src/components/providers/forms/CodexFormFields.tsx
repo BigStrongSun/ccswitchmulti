@@ -1021,6 +1021,31 @@ export function CodexFormFields({
           ? snapshotAdaptation
           : { ...snapshotAdaptation, status: "stale" as const }
         : null;
+  const storedProtocolRecords = useMemo(() => {
+    if (isProtocolProbeStateCurrent && protocolProbeOutcome) return [];
+    const records = (displayedAdaptation?.models ?? []).flatMap((model) =>
+      [model.responses, model.chat].filter(
+        (record): record is NonNullable<typeof record> => record !== null,
+      ),
+    );
+    const unique = new Map<string, (typeof records)[number]>();
+    for (const record of records) {
+      const target = record.target;
+      const key = [
+        target.provider_id,
+        target.route_id ?? "",
+        target.public_model,
+        target.upstream_model,
+        target.transport,
+        target.endpoint_fingerprint,
+        target.credential_fingerprint,
+        target.request_policy_fingerprint,
+        record.testedAt,
+      ].join("\u0000");
+      unique.set(key, record);
+    }
+    return [...unique.values()];
+  }, [displayedAdaptation, isProtocolProbeStateCurrent, protocolProbeOutcome]);
   const revealModelCatalogFetchAction = useCallback(() => {
     bindProtocolProbeIdentity(readinessIdentity);
     setProtocolProbeTone("warning");
@@ -1688,6 +1713,7 @@ export function CodexFormFields({
         expectedModels={protocolProbeExpectedModels}
         events={protocolProbeEvents}
         outcome={protocolProbeOutcome}
+        storedRecords={storedProtocolRecords}
         error={protocolProbeError}
         onOpenChange={setIsProtocolProbeProgressOpen}
         onRetry={() => {
@@ -1829,6 +1855,17 @@ export function CodexFormFields({
               "已打开验证确认框；如果没有看到弹窗，请按 Esc 后重试。",
             );
             setIsProtocolProbeConfirmOpen(true);
+          }}
+          onViewCompatibilityDetails={() => {
+            setIsProbingProtocol(false);
+            setProtocolProbeError("");
+            setProtocolProbeEvents([]);
+            setProtocolProbeExpectedModels(
+              (protocolProbeOutcome?.records ?? storedProtocolRecords).map(
+                (record) => record.target.public_model,
+              ),
+            );
+            setIsProtocolProbeProgressOpen(true);
           }}
         />
       )}

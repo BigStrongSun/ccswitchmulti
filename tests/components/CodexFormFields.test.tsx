@@ -637,6 +637,11 @@ function renderAutoSplitHarness() {
 
 describe("CodexFormFields local model routing", () => {
   it("restores split persistence and per-model transports from the editor snapshot", async () => {
+    const responsesRecord = createDeepProbeRecord(
+      "gpt-5.5",
+      "open_ai_responses",
+    );
+    const chatRecord = createDeepProbeRecord("qwen3.8", "open_ai_chat");
     const logicalProvider = {
       id: "codex-thirdparty",
       name: "Relay",
@@ -664,7 +669,7 @@ describe("CodexFormFields local model routing", () => {
               choiceSource: "automatic",
               effectiveTransport: "open_ai_responses",
               readiness: "verified",
-              responses: null,
+              responses: responsesRecord,
               chat: null,
             },
             {
@@ -675,7 +680,7 @@ describe("CodexFormFields local model routing", () => {
               effectiveTransport: "open_ai_chat",
               readiness: "verified",
               responses: null,
-              chat: null,
+              chat: chatRecord,
             },
           ],
         },
@@ -688,6 +693,13 @@ describe("CodexFormFields local model routing", () => {
     expect(screen.getByText("qwen3.8：Chat")).toBeInTheDocument();
     expect(screen.getByText(/证据时间/)).toBeInTheDocument();
     expect(screen.getByText("可加入 MultiRouter")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看已保存探测详情" }));
+    expect(
+      await screen.findByRole("heading", { name: "Codex 兼容性深度探测" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("查看字段映射与生效方式")).toHaveLength(4);
+    expect(preflightCodexProviderProtocolCompatibility).not.toHaveBeenCalled();
   });
 
   it("stores an advanced per-model protocol choice outside modelCatalog", async () => {

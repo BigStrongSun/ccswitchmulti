@@ -8,6 +8,9 @@ mod claude_plugin;
 pub mod codex_config;
 pub mod codex_config_consistency;
 mod codex_desktop;
+mod codex_egress_timezone;
+#[cfg(test)]
+mod codex_egress_timezone_tests;
 mod codex_guardian;
 pub mod codex_history_migration;
 pub mod codex_multirouter;
@@ -1533,6 +1536,9 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::get_settings,
+            codex_egress_timezone::detect_codex_egress_timezone,
+            codex_egress_timezone::inspect_codex_runtime_timezone,
+            codex_egress_timezone::validate_codex_egress_timezone,
             codex_config_consistency::inspect_codex_config_consistency,
             codex_config_consistency::resolve_codex_config_consistency,
             codex_runtime_refresh::inspect_codex_runtime_refresh,

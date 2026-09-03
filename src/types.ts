@@ -615,6 +615,20 @@ export interface RemoteSnapshotInfo {
 
 // 应用设置类型（用于设置对话框与 Tauri API）
 // 存储在本地 ~/.cc-switch/settings.json，不随数据库同步
+export type CodexEgressTimezoneMode = "off" | "auto" | "manual";
+
+export interface CodexEgressTimezoneSettings {
+  mode: CodexEgressTimezoneMode;
+  manualTimezone?: string;
+  detectedTimezone?: string;
+  detectedAt?: number;
+  detectedEgressIp?: string;
+  detectedCountryCode?: string;
+  detectedRegion?: string;
+  detectedCity?: string;
+  detectedColo?: string;
+}
+
 export interface Settings {
   // ===== 设备级 UI 设置 =====
   // 是否在系统托盘（macOS 菜单栏）显示图标
@@ -631,6 +645,8 @@ export interface Settings {
   launchOnStartup?: boolean;
   // 是否在 CCSwitchMulti 启动后启动 Codex Desktop（独立于开机自启）
   launchCodexDesktopWithCcswitch?: boolean;
+  // Codex 子进程级出口时区；不会修改操作系统时区
+  codexEgressTimezone?: CodexEgressTimezoneSettings;
   // 静默启动（程序启动时不显示主窗口）
   silentStartup?: boolean;
   // 是否启用主页面本地代理功能（默认关闭）

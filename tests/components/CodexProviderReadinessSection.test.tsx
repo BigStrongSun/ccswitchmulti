@@ -27,10 +27,69 @@ describe("CodexProviderReadinessSection", () => {
     expect(screen.getByText("需要同步模型")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
+    expect(screen.getByText("兼容性深度探测")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
 
     expect(onSyncModels).toHaveBeenCalledTimes(1);
     expect(onValidateConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers a read-only entry for persisted Responses and Chat evidence", () => {
+    const onViewCompatibilityDetails = vi.fn();
+    const record = {
+      probeVersion: 1,
+      target: {
+        provider_id: "qwen",
+        route_id: null,
+        public_model: "qwen3.8",
+        upstream_model: "qwen3.8",
+        transport: "open_ai_chat" as const,
+        endpoint_fingerprint: "endpoint",
+        authentication_kind: "bearer",
+        credential_fingerprint: "credential",
+        request_policy_fingerprint: "policy",
+      },
+      result: {
+        selected_transport: "open_ai_chat" as const,
+        readiness: "verified" as const,
+        branches: [],
+      },
+      testedAt: 1_787_875_200,
+      expiresAt: 1_787_961_600,
+    };
+
+    render(
+      <CodexProviderReadinessSection
+        models={[{ model: "qwen3.8" }]}
+        apiFormat="openai_chat"
+        adaptation={{
+          persistence: "single",
+          status: "ready",
+          effectiveTransport: "open_ai_chat",
+          models: [
+            {
+              publicModel: "qwen3.8",
+              upstreamModel: "qwen3.8",
+              choice: "follow_auto",
+              choiceSource: "automatic",
+              effectiveTransport: "open_ai_chat",
+              readiness: "verified",
+              responses: null,
+              chat: record,
+            },
+          ],
+        }}
+        isMaintainedPreset={false}
+        isSyncingModels={false}
+        isValidatingConnection={false}
+        onSyncModels={vi.fn()}
+        onValidateConnection={vi.fn()}
+        onViewCompatibilityDetails={onViewCompatibilityDetails}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "查看已保存探测详情" }));
+    expect(onViewCompatibilityDetails).toHaveBeenCalledOnce();
   });
 
   it("keeps maintained metadata ownership visible without treating unverified credentials as ready", () => {
@@ -85,7 +144,7 @@ describe("CodexProviderReadinessSection", () => {
     );
 
     expect(
-      screen.getByText(/验证连接时会自动检测 Chat 与 Responses/),
+      screen.getByText(/兼容性深度探测会自动检测 Chat 与 Responses/),
     ).toBeInTheDocument();
     expect(screen.getByText("建议先验证连接")).toBeInTheDocument();
   });

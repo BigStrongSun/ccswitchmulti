@@ -240,6 +240,9 @@ describe("CodexProtocolProbeProgressDialog", () => {
     expect(screen.getByText("原始推理正文")).toBeInTheDocument();
     expect(screen.getByText(/本次上游已报告 1,500 tokens/)).toBeInTheDocument();
     expect(screen.getByText(/估算费用约 US\$0\.0123/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/数字用量会随本次 Responses\/Chat 双协议脱敏证据保存/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/2 个成功响应未返回 usage/)).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -289,7 +292,7 @@ describe("CodexProtocolProbeProgressDialog", () => {
     );
     expect(
       within(responsesBranch).getByText(
-        "reasoning.summary[] → reasoning.content[type=reasoning_text]",
+        "reasoning.content / 可读 summary → content[type=reasoning_text]；summary=[]",
       ),
     ).toBeInTheDocument();
     expect(

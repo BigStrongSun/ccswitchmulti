@@ -411,6 +411,43 @@ pub struct CodexOfficialHistoryUnifyMigration {
 ///
 /// 存储设备级别设置，保存在本地 `~/.cc-switch/settings.json`，不随数据库同步。
 /// 这确保了云同步场景下多设备可以独立运作。
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexEgressTimezoneMode {
+    #[default]
+    Off,
+    Auto,
+    Manual,
+}
+
+/// Codex Desktop 进程级出口时区设置。
+///
+/// 仅在 CCSwitchMulti 启动 Codex 时通过子进程 `TZ` 环境变量生效，不会修改
+/// Windows 系统时区。`auto` 使用最近一次用户主动探测并保存的 IANA 时区，
+/// 启动阶段不依赖外部网络。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexEgressTimezoneSettings {
+    #[serde(default)]
+    pub mode: CodexEgressTimezoneMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_egress_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_country_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_city: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_colo: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -436,6 +473,9 @@ pub struct AppSettings {
     /// 绝不会拉起 Codex Desktop。
     #[serde(default)]
     pub launch_codex_desktop_with_ccswitch: bool,
+    /// Optional, process-local timezone injection for Codex Desktop.
+    #[serde(default)]
+    pub codex_egress_timezone: CodexEgressTimezoneSettings,
     /// 静默启动（程序启动时不显示主窗口，仅托盘运行）
     #[serde(default)]
     pub silent_startup: bool,
@@ -605,6 +645,7 @@ impl Default for AppSettings {
             skip_claude_onboarding: false,
             launch_on_startup: false,
             launch_codex_desktop_with_ccswitch: false,
+            codex_egress_timezone: CodexEgressTimezoneSettings::default(),
             silent_startup: false,
             enable_local_proxy: false,
             proxy_confirmed: None,
@@ -853,6 +894,8 @@ pub fn get_settings_for_frontend() -> AppSettings {
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     new_settings.normalize_paths();
     new_settings.env_injection.validate()?;
+    crate::codex_egress_timezone::validate_timezone_settings(&new_settings.codex_egress_timezone)
+        .map_err(AppError::InvalidInput)?;
     save_settings_file(&new_settings)?;
 
     let mut guard = settings_store().write().unwrap_or_else(|e| {

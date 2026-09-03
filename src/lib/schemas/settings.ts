@@ -15,6 +15,19 @@ export const settingsSchema = z.object({
   skipClaudeOnboarding: z.boolean().optional(),
   launchOnStartup: z.boolean().optional(),
   launchCodexDesktopWithCcswitch: z.boolean().optional(),
+  codexEgressTimezone: z
+    .object({
+      mode: z.enum(["off", "auto", "manual"]),
+      manualTimezone: z.string().optional(),
+      detectedTimezone: z.string().optional(),
+      detectedAt: z.number().optional(),
+      detectedEgressIp: z.string().optional(),
+      detectedCountryCode: z.string().optional(),
+      detectedRegion: z.string().optional(),
+      detectedCity: z.string().optional(),
+      detectedColo: z.string().optional(),
+    })
+    .optional(),
   enableLocalProxy: z.boolean().optional(),
   usageDashboardRefreshIntervalMs: z.number().optional(),
   preserveCodexOfficialAuthOnSwitch: z.boolean().optional(),

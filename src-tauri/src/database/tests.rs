@@ -489,6 +489,76 @@ fn protocol_probe_observations_round_trip_independently_for_each_transport() {
 }
 
 #[test]
+fn protocol_probe_observation_round_trips_numeric_usage_evidence() {
+    use crate::protocol_compatibility::{
+        ProbeTargetKey, ProtocolCompatibilityRecord, TransportKind,
+    };
+
+    let db = Database::memory().expect("create memory db");
+    let target = ProbeTargetKey::new(
+        "provider-usage",
+        None::<String>,
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiResponses,
+        "https://example.test/v1/responses",
+        "bearer",
+    )
+    .unwrap();
+    let result = serde_json::from_value(serde_json::json!({
+        "selected_transport": "open_ai_responses",
+        "readiness": "verified",
+        "branches": [{
+            "assessment": {
+                "transport": "open_ai_responses",
+                "baseline": "passed",
+                "streaming": "passed",
+                "forced_tool": "passed",
+                "continuation": "passed"
+            },
+            "reasoning_shape": {
+                "semantic": "readable",
+                "source": "native_responses",
+                "pre_tool_visible_content": "absent"
+            },
+            "evidence": [{
+                "status_code": 200,
+                "paths": ["response.usage.total_tokens"],
+                "fields": [],
+                "event_types": ["response.completed"],
+                "usage": {
+                    "inputTokens": 80,
+                    "outputTokens": 20,
+                    "cacheReadTokens": 10,
+                    "cacheCreationTokens": 0,
+                    "totalTokens": 100
+                }
+            }],
+            "failures": []
+        }]
+    }))
+    .expect("deserialize compatibility result with usage evidence");
+    let record = ProtocolCompatibilityRecord::new(target.clone(), result, 1_000, 3_000);
+
+    db.save_protocol_probe_observations(std::slice::from_ref(&record))
+        .expect("save usage evidence");
+    let restored = db
+        .get_protocol_probe_observation(&target)
+        .expect("read usage evidence")
+        .expect("stored observation");
+    let serialized = serde_json::to_value(restored).expect("serialize restored observation");
+
+    assert_eq!(
+        serialized.pointer("/result/branches/0/evidence/0/usage/totalTokens"),
+        Some(&serde_json::json!(100))
+    );
+    assert_eq!(
+        serialized.pointer("/result/branches/0/evidence/0/usage/cacheReadTokens"),
+        Some(&serde_json::json!(10))
+    );
+}
+
+#[test]
 fn protocol_probe_bundle_rolls_back_selection_when_observation_write_fails() {
     use crate::protocol_compatibility::{
         ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,

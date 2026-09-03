@@ -1,5 +1,16 @@
 # CC Switch Repository Memory
 
+## 2026-09-03 深探测详情入口与实验性 Codex 出口时区
+
+- `v3.19.2-25` 安装版仍可能在第三方 Provider 历史切回官方 ChatGPT 时出现 `[ArrayParam] input[n].content array too long; maximum length 0`。根因不是 Qwen/DeepSeek 输出字数过长，而是冷恢复任务可能在 renderer request-client 包裹完成前携带 built-in `openai` 直连官方 backend，从而绕过 CCSM 已有的 Responses 历史归一化。提交 `3f87531f` 已把 built-in `openai` 的接管 base URL 也指向本地 Router、持续重扫新建 app-server client，并只从已知非 content item 删除冗余 `content`；message、agent_message 与未知未来类型保守保留。该提交晚于 v25 tag，因此 v25 安装态不会自动获得修复。
+- 协议适配不是在探测按钮里临时改响应。Provider 编辑页“模型与兼容性”现在明确提供“兼容性深度探测”；完成或重开编辑器后可点击“查看已保存探测详情”，分别展开 Responses/Chat 的字段映射与生效方式。Chat 会把 Codex Responses input/tools 转为 Chat messages/tools，并从 `reasoning_content`、`reasoning`、`reasoning_details` 或 `<think>` 读取推理再投影成 Codex reasoning/output 事件；Responses 保持原协议，续轮按 `native_only`、真实 `reasoning_text content + summary=[]` 或 `omit reasoning item` 处理。只有保存并启用 Provider 后运行时才自动应用，单独探测不改写当前配置。
+- 深探测在发送真实 Responses/Chat、SSE、推理、强制工具和工具续轮请求前明确提示会消耗 Token/产生费用。完成页汇总上游实际报告的 input/output/cache/total usage，并复用当前模型定价、Provider 倍率和全局倍率估算美元成本；上游漏报 usage 或模型无定价时明确标为不完整估计，不伪造精确值。数值 usage 随 Responses/Chat 脱敏证据写入 SQLite，响应正文、API Key、Cookie 和响应 ID 不保存；已保存探测详情可复核两条协议的证据和映射。
+- 此前“本机时区显示修复”只把 rollout RFC3339 时间归一为 epoch 后交给前端按设备本地时区显示，不会改变 Codex 进程或出口时区。新功能位于“设置 → 常规 → Codex 出口时区（实验）”，默认关闭。探测使用与协议探测相同、遵循 CCSM/系统/透明代理的 HTTP client：先访问 `chatgpt.com/cdn-cgi/trace` 取得站点实际看到的公网出口，再把该公网 IP 交给 `ipwho.is` 获取 IANA 时区；DNS 的 `198.18/15` fake-IP 只做诊断，绝不用于定位。仅持久化掩码 IP 和地区/时区，不发送凭据或对话。
+- 用户可选择“跟随探测”或手填经真实 IANA 数据库校验的时区。CCSM 不修改 Windows 系统时区；由 CCSM 直接拉起 Codex 时只给子进程设置 `TZ`，随后用官方 CDP `Emulation.setTimezoneOverride` 给页面 renderer 设置同一时区。运行态按钮读取 renderer 的真实 `Intl.DateTimeFormat().resolvedOptions().timeZone` 与 UTC 偏移，分别显示 exact、offset-match 或 mismatch；app-server 是否继承 TZ 仍要求完全退出 Codex 后由 CCSM 直接启动。自动启动顺序固定为“检查配置 → 必要时重投影 → 再检查 → 仅 Ready 才启动”，避免与 config.toml 修复竞态。
+- 没有官方证据证明本地时区与 VPN 出口 IANA 名称不同一定导致模型降级，因此该功能明确标为实验性且默认关闭。本机只读现场中 `chatgpt.com` DNS 为 fake-IP `198.18.0.14`，站点看到的真实出口定位为 `Asia/Taipei`，本机为 `Asia/Shanghai`；两者 IANA 名称不同但当前 UTC 偏移均为 `+08:00`，只能判定 offset-match，不能据此宣称存在降质。
+- fresh 源码门禁：深探测/Provider/时区前端定向 65/65，前端全量 167 files / 1344 tests；Rust 时区 5/5、官方 OAuth normalizer 13/13、built-in openai 同链路、usage 数据库往返、启动顺序和 renderer 三项定向均通过；Rust library 3798 passed / 0 failed / 6 ignored，TypeScript 和 `cargo check --all-targets` 通过。Tauri release EXE 已编译，但本机 WiX `light.exe` 生成 MSI 时返回非零；当前没有安装、重启或替换 CCSM/Codex，源码通过不等于安装态验收。
+- 外部机制核对使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链。官方 CDP 文档确认 `Emulation.setTimezoneOverride` 接受 IANA timezoneId，Electron/Node 资料确认进程环境与 renderer 需要分别处理；Matrix 独立读取的社区帖子只提供现象与进程级 `TZ` 启动建议。两链都没有得到 OpenAI 官方“时区不一致会降级模型”的证据，因此产品文案保留不确定性，不把社区观察宣传成事实。
+
 ## 2026-09-03 v25 旧会话绕过 CCSM 与深探测用量呈现根修
 
 - `v3.19.2-25` 已包含旧会话 `thread/resume` 的 Provider 归一化和官方 OAuth reasoning request normalizer，但安装态 renderer 显示外层兼容对象为 V6、内部 `appServerPatchVersion/reactRequestClientPatchVersion` 仍为 V5。源码也把这两个完成标记硬编码成 `"5"`，并在初次安装后永久 early-return；因此 Codex 启动后新建或替换的 app-server request client 不会再被包裹。失败 rollout `01a04e4f-55be-7463-98ca-d5d8fb1cd158` 的续轮仍保存 `model_provider=openai`，同一时刻 Router 无入站日志，说明该请求在 Desktop 冷恢复竞态中直接走了内置 OpenAI，而不是 CCSM 映射失效。

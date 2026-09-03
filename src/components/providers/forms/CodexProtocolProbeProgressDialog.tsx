@@ -66,6 +66,7 @@ interface CodexProtocolProbeProgressDialogProps {
   events: CodexProviderScopedProtocolProbeProgressEvent[];
   outcome: CodexProviderProtocolPreflightOutcome | null;
   outcomes?: CodexProviderProtocolPreflightOutcome[];
+  storedRecords?: CodexProtocolCompatibilityRecord[];
   error: string;
   onOpenChange: (open: boolean) => void;
   onRetry?: () => void;
@@ -175,6 +176,7 @@ function buildProgress(
   expectedTargets: CodexProviderProtocolProbeTarget[],
   events: CodexProviderScopedProtocolProbeProgressEvent[],
   outcomes: CodexProviderProtocolPreflightOutcome[],
+  storedRecords: CodexProtocolCompatibilityRecord[],
 ): ModelProgress[] {
   const models = new Map<string, ModelProgress>();
   const scoped =
@@ -245,6 +247,10 @@ function buildProgress(
       );
       applyRecord(model, record);
     }
+  }
+  for (const record of storedRecords) {
+    const model = ensure(record.target.public_model);
+    applyRecord(model, record);
   }
   return [...models.values()];
 }
@@ -422,21 +428,39 @@ function runtimeAdaptationLabel(
 
 function runtimeMappingRows(
   transport: CodexProtocolTransport,
+  reasoningSemantic: CodexReasoningSemantic | null,
   reasoningSource: CodexReasoningSource | null,
   historyReplay: CodexHistoryReplay | null,
 ) {
   if (transport === "open_ai_chat") {
-    const source =
-      reasoningSource && reasoningSource !== "none"
-        ? reasoningSource
-        : "已识别的推理字段";
+    const source = (() => {
+      if (reasoningSource === "reasoning_content") {
+        return "choices[].delta.reasoning_content";
+      }
+      if (reasoningSource === "reasoning") {
+        return "choices[].delta.reasoning（字符串或 content/text/summary）";
+      }
+      if (reasoningSource === "reasoning_details") {
+        return "choices[].delta.reasoning_details[]";
+      }
+      if (reasoningSource === "think_tags") {
+        return "choices[].delta.content 中的 <think>...</think>";
+      }
+      return "探测到的 Chat 推理字段";
+    })();
+    const projection =
+      reasoningSemantic === "readable"
+        ? "response.reasoning_text.delta"
+        : reasoningSemantic === "summary"
+          ? "response.reasoning_summary_text.delta"
+          : "不生成可见推理事件";
     return [
       "Codex instructions → Chat messages[role=system]",
       "Codex input[] → Chat messages[]",
       "function_call / custom_tool_call → assistant.tool_calls[]",
       "function_call_output → role=tool + tool_call_id",
       "tools[] → Chat tools[].function（按探测到的 Schema 方言编译）",
-      `choices[].delta.${source} → response.reasoning_text.delta`,
+      `${source} → ${projection}`,
       "choices[].delta.content → response.output_text.delta",
       "Chat tool_calls[] → Responses function/custom/tool_search call items",
       "prompt/completion usage → input/output usage",
@@ -445,7 +469,7 @@ function runtimeMappingRows(
 
   const replay =
     historyReplay === "responses_reasoning_text_content"
-      ? "reasoning.summary[] → reasoning.content[type=reasoning_text]"
+      ? "reasoning.content / 可读 summary → content[type=reasoning_text]；summary=[]"
       : historyReplay === "omit"
         ? "不兼容的 reasoning item → 删除（仅删除推理项）"
         : "reasoning item → 按上游原生结构回放";
@@ -467,6 +491,7 @@ export function CodexProtocolProbeProgressDialog({
   events,
   outcome,
   outcomes = [],
+  storedRecords = [],
   error,
   onOpenChange,
   onRetry,
@@ -480,8 +505,14 @@ export function CodexProtocolProbeProgressDialog({
   );
   const models = useMemo(
     () =>
-      buildProgress(expectedModels, expectedTargets, events, resolvedOutcomes),
-    [expectedModels, expectedTargets, events, resolvedOutcomes],
+      buildProgress(
+        expectedModels,
+        expectedTargets,
+        events,
+        resolvedOutcomes,
+        storedRecords,
+      ),
+    [expectedModels, expectedTargets, events, resolvedOutcomes, storedRecords],
   );
   const completedModels = models.filter((model) => model.readiness !== null);
   const completed = completedModels.length;
@@ -577,6 +608,10 @@ export function CodexProtocolProbeProgressDialog({
                     {probeUsage.estimatedCostUsd
                       ? `按当前模型定价和 Provider 倍率估算费用约 US$${probeUsage.estimatedCostUsd}。`
                       : "当前模型没有可用定价，暂时无法估算费用。"}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    已报告的数字用量会随本次 Responses/Chat
+                    双协议脱敏证据保存，便于重开配置后复核；不会保存响应正文。
                   </p>
                   {unreportedResponses > 0 && (
                     <p className="text-xs text-amber-700 dark:text-amber-300">
@@ -753,6 +788,7 @@ export function CodexProtocolProbeProgressDialog({
                                 <ul className="space-y-0.5 font-mono text-muted-foreground">
                                   {runtimeMappingRows(
                                     transport,
+                                    branch.reasoningSemantic,
                                     branch.reasoningSource,
                                     branch.historyReplay,
                                   ).map((row) => (

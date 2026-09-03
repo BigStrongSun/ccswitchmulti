@@ -38,6 +38,7 @@ import { settingsApi } from "@/lib/api";
 import { LanguageSettings } from "@/components/settings/LanguageSettings";
 import { ThemeSettings } from "@/components/settings/ThemeSettings";
 import { WindowSettings } from "@/components/settings/WindowSettings";
+import { CodexEgressTimezoneSettings } from "@/components/settings/CodexEgressTimezoneSettings";
 import { AppVisibilitySettings } from "@/components/settings/AppVisibilitySettings";
 import { SkillStorageLocationSettings } from "@/components/settings/SkillStorageLocationSettings";
 import { SkillSyncMethodSettings } from "@/components/settings/SkillSyncMethodSettings";
@@ -304,6 +305,12 @@ export function SettingsPage({
                     <WindowSettings
                       settings={settings}
                       onChange={handleAutoSave}
+                    />
+                    <CodexEgressTimezoneSettings
+                      value={settings.codexEgressTimezone}
+                      onChange={(codexEgressTimezone) =>
+                        handleAutoSave({ codexEgressTimezone })
+                      }
                     />
                     <TerminalSettings
                       value={settings.preferredTerminal}

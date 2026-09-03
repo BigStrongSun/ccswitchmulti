@@ -1,5 +1,12 @@
 import type { Ref } from "react";
-import { CheckCircle2, Download, Loader2, Route, Server } from "lucide-react";
+import {
+  CheckCircle2,
+  Download,
+  Eye,
+  Loader2,
+  Route,
+  Server,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -23,6 +30,7 @@ interface CodexProviderReadinessSectionProps {
   sectionRef?: Ref<HTMLElement>;
   onSyncModels: () => void;
   onValidateConnection: () => void;
+  onViewCompatibilityDetails?: () => void;
 }
 
 function apiFormatLabel(apiFormat: CodexApiFormat): string {
@@ -51,6 +59,7 @@ export function CodexProviderReadinessSection({
   sectionRef,
   onSyncModels,
   onValidateConnection,
+  onViewCompatibilityDetails,
 }: CodexProviderReadinessSectionProps) {
   const configuredModels = models.filter((model) => model.model.trim());
   const enabledModels = configuredModels.filter(
@@ -100,6 +109,9 @@ export function CodexProviderReadinessSection({
   const evidenceTime = adaptation?.testedAt
     ? new Date(adaptation.testedAt * 1000).toLocaleString()
     : "尚未验证";
+  const hasPersistedEvidence = Boolean(
+    adaptation?.models.some((model) => model.responses || model.chat),
+  );
 
   return (
     <section
@@ -147,14 +159,28 @@ export function CodexProviderReadinessSection({
             className="h-8 gap-1"
             disabled={isValidatingConnection}
             onClick={onValidateConnection}
+            aria-label="验证连接"
+            title="向 Responses 与 Chat 发送真实请求，验证 SSE、推理、工具调用和工具续轮"
           >
             {isValidatingConnection ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <Route className="h-3.5 w-3.5" />
             )}
-            验证连接
+            兼容性深度探测
           </Button>
+          {hasPersistedEvidence && onViewCompatibilityDetails && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1"
+              onClick={onViewCompatibilityDetails}
+            >
+              <Eye className="h-3.5 w-3.5" />
+              查看已保存探测详情
+            </Button>
+          )}
         </div>
       </div>
 
@@ -221,7 +247,7 @@ export function CodexProviderReadinessSection({
             <p className="text-xs leading-relaxed text-muted-foreground">
               {isMaintainedPreset
                 ? "协议、上下文、推理档位与 /model 目录由 CCSwitchMulti 维护。"
-                : "验证连接时会自动检测 Chat 与 Responses；只有自动检测失败时才需要在高级设置中手动覆盖。"}
+                : "兼容性深度探测会自动检测 Chat 与 Responses；只有自动检测失败时才需要在高级设置中手动覆盖。"}
             </p>
           </div>
           <span
