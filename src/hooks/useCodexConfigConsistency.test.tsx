@@ -77,6 +77,45 @@ describe("useCodexConfigConsistency", () => {
     await waitFor(() => expect(result.current.report).toEqual(runtimeStale));
   });
 
+  it("proactively opens the repair status when Codex history projection damage is detected", async () => {
+    const consistent: CodexConfigConsistencyReport = {
+      ...drift,
+      state: "consistent",
+      changedKeys: [],
+      reason: null,
+    };
+    vi.mocked(codexConfigConsistencyApi.inspect).mockResolvedValue(consistent);
+    vi.mocked(
+      codexConfigConsistencyApi.inspectRuntimeRefresh,
+    ).mockResolvedValue({
+      supported: true,
+      canRefresh: true,
+      snapshotToken: "history-damage-snapshot",
+      desktopProcessCount: 1,
+      appServerProcessCount: 1,
+      processCount: 2,
+      launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+      warning: null,
+      paginatedHistory: {
+        affectedRolloutCount: 1,
+        duplicateOrdinalCount: 0,
+        rotatedThreadCount: 1,
+        rotatedSegmentCount: 3,
+        affectedBytes: 1_400_000_000,
+        blockedRolloutCount: 0,
+        blockedReason: null,
+      },
+    });
+
+    const { result } = renderHook(() => useCodexConfigConsistency());
+
+    await waitFor(() => expect(result.current.refresh.phase).toBe("status"));
+    expect(result.current.refresh.preflight?.paginatedHistory).toMatchObject({
+      rotatedThreadCount: 1,
+      rotatedSegmentCount: 3,
+    });
+  });
+
   it("requires a checked preflight before refreshing and preserves progress until completion", async () => {
     const runtimeStale: CodexConfigConsistencyReport = {
       ...drift,

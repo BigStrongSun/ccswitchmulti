@@ -42,6 +42,10 @@ vi.mock("react-i18next", () => ({
         "codexConfigConsistency.statusPending": "重启后验证",
         "codexConfigConsistency.noPaginatedHistoryIssue":
           "未发现可安全修复的重复序号。",
+        "codexConfigConsistency.codexHistoryBugNotice":
+          "这是 Codex Desktop 自身的历史显示缺陷；CCSM 只提供检测与修复工具。",
+        "codexConfigConsistency.rotatedHistoryThreads": "文件轮转任务",
+        "codexConfigConsistency.rotatedHistorySegments": "续写分段",
         "codexConfigConsistency.rendererIndependentHint":
           "此项失败不会撤销配置与分页历史修复。",
         "codexConfigConsistency.refreshConfirmTitle": "确认刷新 Codex 状态",
@@ -538,5 +542,53 @@ describe("CodexConfigConsistencyDialog", () => {
     expect(screen.getByText("历史查询兼容层")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "刷新 Codex 状态" }));
     expect(onInspectRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("labels proactively detected rotated history as a Codex bug and not a CCSM failure", () => {
+    render(
+      <CodexConfigConsistencyDialog
+        report={null}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "status",
+          progress: null,
+          preflight: {
+            supported: true,
+            canRefresh: true,
+            snapshotToken: "rotated-history",
+            desktopProcessCount: 1,
+            appServerProcessCount: 1,
+            processCount: 2,
+            launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+            warning: null,
+            paginatedHistory: {
+              affectedRolloutCount: 1,
+              duplicateOrdinalCount: 0,
+              rotatedThreadCount: 1,
+              rotatedSegmentCount: 3,
+              affectedBytes: 1_400_000_000,
+              blockedRolloutCount: 0,
+              blockedReason: null,
+            },
+          },
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={vi.fn()}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        "这是 Codex Desktop 自身的历史显示缺陷；CCSM 只提供检测与修复工具。",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/文件轮转任务.*1/)).toBeInTheDocument();
+    expect(screen.getByText(/续写分段.*3/)).toBeInTheDocument();
   });
 });

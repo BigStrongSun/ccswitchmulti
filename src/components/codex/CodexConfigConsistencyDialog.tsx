@@ -90,6 +90,12 @@ export function CodexConfigConsistencyDialog({
     const failed = refreshPhase === "failed";
     const completedWithWarnings =
       completed && refresh.result?.outcome === "completed_with_warnings";
+    const history = refresh.preflight?.paginatedHistory;
+    const historyNeedsAttention =
+      (history?.affectedRolloutCount ?? 0) > 0 ||
+      (history?.blockedRolloutCount ?? 0) > 0;
+    const rotatedThreadCount = history?.rotatedThreadCount ?? 0;
+    const rotatedSegmentCount = history?.rotatedSegmentCount ?? 0;
     const currentStageIndex = refreshStageIndex(refresh.progress?.stage);
     const stageLabels = [
       t("codexConfigConsistency.stageClosing"),
@@ -162,6 +168,11 @@ export function CodexConfigConsistencyDialog({
 
             {showingStatus && refresh.preflight ? (
               <div className="space-y-3">
+                {historyNeedsAttention ? (
+                  <div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-blue-800 dark:text-blue-200">
+                    {t("codexConfigConsistency.codexHistoryBugNotice")}
+                  </div>
+                ) : null}
                 <div className="rounded-md border bg-muted/20 p-3">
                   <div className="flex items-center justify-between gap-3">
                     <p className="font-medium">
@@ -209,6 +220,15 @@ export function CodexConfigConsistencyDialog({
                       ? `${t("codexConfigConsistency.paginatedHistoryFiles")} ${refresh.preflight.paginatedHistory.affectedRolloutCount} · ${t("codexConfigConsistency.duplicateOrdinals")} ${refresh.preflight.paginatedHistory.duplicateOrdinalCount}`
                       : t("codexConfigConsistency.noPaginatedHistoryIssue")}
                   </p>
+                  {rotatedThreadCount > 0 ? (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("codexConfigConsistency.rotatedHistoryThreads")}{" "}
+                      {rotatedThreadCount}
+                      {" · "}
+                      {t("codexConfigConsistency.rotatedHistorySegments")}{" "}
+                      {rotatedSegmentCount}
+                    </p>
+                  ) : null}
                 </div>
                 <div className="rounded-md border bg-muted/20 p-3">
                   <div className="flex items-center justify-between gap-3">
@@ -228,6 +248,11 @@ export function CodexConfigConsistencyDialog({
 
             {confirming && refresh.preflight ? (
               <>
+                {historyNeedsAttention ? (
+                  <div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-blue-800 dark:text-blue-200">
+                    {t("codexConfigConsistency.codexHistoryBugNotice")}
+                  </div>
+                ) : null}
                 <div className="grid grid-cols-2 gap-3">
                   <p className="rounded-md border bg-muted/20 p-3">
                     {t("codexConfigConsistency.desktopProcesses")}{" "}
@@ -253,6 +278,17 @@ export function CodexConfigConsistencyDialog({
                       {t("codexConfigConsistency.duplicateOrdinals")}{" "}
                       {refresh.preflight.paginatedHistory.duplicateOrdinalCount}
                     </p>
+                    {rotatedThreadCount > 0 ? (
+                      <p className="mt-1 text-xs">
+                        {t("codexConfigConsistency.rotatedHistoryThreads")}{" "}
+                        {rotatedThreadCount}
+                        {" · "}
+                        {t(
+                          "codexConfigConsistency.rotatedHistorySegments",
+                        )}{" "}
+                        {rotatedSegmentCount}
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
                 {refresh.preflight.paginatedHistory.blockedRolloutCount > 0 ? (

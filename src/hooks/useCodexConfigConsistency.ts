@@ -63,6 +63,7 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
     EMPTY_RUNTIME_REFRESH,
   );
   const seenFingerprintsRef = useRef(new Set<string>());
+  const seenHistoryDamageRef = useRef(new Set<string>());
   const runtimeRefreshActiveRef = useRef(false);
 
   const acceptReport = useCallback((next: CodexConfigConsistencyReport) => {
@@ -106,7 +107,37 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
       requestPending = true;
       try {
         const next = await codexConfigConsistencyApi.inspect();
-        if (active) acceptReport(next);
+        if (!active) return;
+        acceptReport(next);
+        const configNeedsAttention =
+          next.state === "external_drift" ||
+          next.runtimeActivation?.state === "restart_required";
+        if (configNeedsAttention || runtimeRefreshActiveRef.current) return;
+        const preflight =
+          await codexConfigConsistencyApi.inspectRuntimeRefresh();
+        if (!active || runtimeRefreshActiveRef.current) return;
+        const history = preflight.paginatedHistory;
+        const historyNeedsAttention =
+          history.affectedRolloutCount > 0 || history.blockedRolloutCount > 0;
+        if (!historyNeedsAttention) return;
+        const historyKey = [
+          history.duplicateOrdinalCount,
+          history.rotatedThreadCount,
+          history.rotatedSegmentCount,
+          history.blockedRolloutCount,
+          history.blockedReason ?? "",
+        ].join(":");
+        if (seenHistoryDamageRef.current.has(historyKey)) return;
+        seenHistoryDamageRef.current.add(historyKey);
+        runtimeRefreshActiveRef.current = true;
+        setReport(next);
+        setRefresh({
+          phase: "status",
+          preflight,
+          progress: null,
+          result: null,
+          error: null,
+        });
       } catch (cause) {
         if (active) console.debug("[CodexConsistency] inspect failed", cause);
       } finally {

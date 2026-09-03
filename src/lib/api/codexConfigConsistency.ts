@@ -59,6 +59,8 @@ export interface CodexRuntimeRefreshPreflight {
   paginatedHistory: {
     affectedRolloutCount: number;
     duplicateOrdinalCount: number;
+    rotatedThreadCount?: number;
+    rotatedSegmentCount?: number;
     affectedBytes: number;
     blockedRolloutCount: number;
     blockedReason: string | null;
@@ -75,6 +77,8 @@ export interface CodexRuntimeRefreshResult {
   closedProcessCount: number;
   repairedHistoryRolloutCount: number;
   repairedHistoryDuplicateCount: number;
+  repairedHistoryRotatedThreadCount?: number;
+  repairedHistoryRotatedSegmentCount?: number;
 }
 
 export const codexConfigConsistencyApi = {

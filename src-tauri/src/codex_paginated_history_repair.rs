@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,15 +14,8 @@ pub(crate) struct RolloutOrdinalScan {
     pub duplicate_count: usize,
     pub byte_len: u64,
     pub first_ordinal: Option<u64>,
+    pub last_original_ordinal: Option<u64>,
     pub last_normalized_ordinal: Option<u64>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct NormalizedRollout {
-    pub backup_path: PathBuf,
-    pub duplicate_count: usize,
-    pub last_normalized_ordinal: u64,
-    pub byte_len: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -30,6 +23,8 @@ pub(crate) struct NormalizedRollout {
 pub struct PaginatedHistoryRepairPreflight {
     pub affected_rollout_count: usize,
     pub duplicate_ordinal_count: usize,
+    pub rotated_thread_count: usize,
+    pub rotated_segment_count: usize,
     pub affected_bytes: u64,
     pub blocked_rollout_count: usize,
     pub blocked_reason: Option<String>,
@@ -39,20 +34,25 @@ pub struct PaginatedHistoryRepairPreflight {
 pub(crate) struct PaginatedHistoryRepairOutcome {
     pub repaired_rollout_count: usize,
     pub repaired_duplicate_count: usize,
+    pub repaired_rotated_thread_count: usize,
+    pub repaired_rotated_segment_count: usize,
     pub(super) targets: Vec<ProjectionCatchUpTarget>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ProjectionCatchUpTarget {
-    source_id: String,
-    minimum_next_ordinal: u64,
-    minimum_next_byte_offset: u64,
+    pub(super) source_id: String,
+    pub(super) rollout_path: PathBuf,
+    pub(super) minimum_next_ordinal: u64,
+    pub(super) minimum_next_byte_offset: u64,
 }
 
 #[derive(Clone, Debug)]
 struct RolloutRepairCandidate {
     path: PathBuf,
     source_id: String,
+    projection_db: PathBuf,
+    repair: ProjectionCursorRepair,
     #[cfg(any(target_os = "windows", test))]
     scan: RolloutOrdinalScan,
 }
@@ -60,7 +60,288 @@ struct RolloutRepairCandidate {
 #[derive(Default)]
 struct RolloutRepairPlan {
     candidates: Vec<RolloutRepairCandidate>,
+    rotated: Vec<RotatedRolloutRepairCandidate>,
     blocked: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct RotatedRolloutRepairCandidate {
+    thread_id: String,
+    canonical_path: PathBuf,
+    segments: Vec<PathBuf>,
+    projection_db: PathBuf,
+    affected_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProjectionCursorRepair {
+    skipped_duplicate_count: usize,
+    stalled_byte_offset: u64,
+    stalled_expected_ordinal: u64,
+    minimum_next_byte_offset: u64,
+    minimum_next_ordinal: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CoalescedRollout {
+    segment_count: usize,
+    first_ordinal: u64,
+    last_ordinal: u64,
+    byte_len: u64,
+}
+
+#[derive(Clone, Debug)]
+struct RolloutSegment {
+    path: PathBuf,
+    first_ordinal: u64,
+    last_ordinal: u64,
+}
+
+fn rollout_session_id(path: &Path) -> Result<String, String> {
+    let file = File::open(path)
+        .map_err(|error| format!("open_rollout_session_metadata_failed: {error}"))?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    if reader
+        .read_until(b'\n', &mut line)
+        .map_err(|error| format!("read_rollout_session_metadata_failed: {error}"))?
+        == 0
+    {
+        return Err("rollout_contains_no_records".to_string());
+    }
+    let value: serde_json::Value = serde_json::from_slice(&line)
+        .map_err(|error| format!("parse_rollout_session_metadata_failed: {error}"))?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
+        return Err("rollout_does_not_start_with_session_metadata".to_string());
+    }
+    value
+        .pointer("/payload/id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "rollout_session_metadata_missing_id".to_string())
+}
+
+fn write_coalesced_rollout(
+    expected_session_id: &str,
+    paths: &[PathBuf],
+    output_path: &Path,
+) -> Result<CoalescedRollout, String> {
+    if paths.len() < 2 {
+        return Err("rotated_rollout_chain_requires_multiple_segments".to_string());
+    }
+    let mut segments = Vec::with_capacity(paths.len());
+    for path in paths {
+        let session_id = rollout_session_id(path)?;
+        if session_id != expected_session_id {
+            return Err(format!(
+                "rotated_rollout_session_id_mismatch: expected={expected_session_id}, actual={session_id}"
+            ));
+        }
+        let scan = scan_rollout_ordinals(path)?;
+        if scan.duplicate_count > 0 {
+            return Err("rotated_rollout_segment_has_duplicate_ordinals".to_string());
+        }
+        segments.push(RolloutSegment {
+            path: path.clone(),
+            first_ordinal: scan
+                .first_ordinal
+                .ok_or_else(|| "rotated_rollout_segment_has_no_first_ordinal".to_string())?,
+            last_ordinal: scan
+                .last_original_ordinal
+                .ok_or_else(|| "rotated_rollout_segment_has_no_last_ordinal".to_string())?,
+        });
+    }
+    segments.sort_by_key(|segment| segment.first_ordinal);
+    if segments[0].first_ordinal != 0 {
+        return Err("rotated_rollout_chain_does_not_start_at_zero".to_string());
+    }
+    for pair in segments.windows(2) {
+        if pair[1].first_ordinal <= pair[0].first_ordinal
+            || pair[1].first_ordinal > pair[0].last_ordinal.saturating_add(1)
+        {
+            return Err(format!(
+                "unsafe_rotated_rollout_lineage: previous={}..{}, next={}..{}",
+                pair[0].first_ordinal,
+                pair[0].last_ordinal,
+                pair[1].first_ordinal,
+                pair[1].last_ordinal
+            ));
+        }
+    }
+
+    let output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(output_path)
+        .map_err(|error| format!("create_coalesced_rollout_failed: {error}"))?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024, output);
+    let write_result = (|| -> Result<(), String> {
+        for (index, segment) in segments.iter().enumerate() {
+            let cutoff = segments.get(index + 1).map(|next| next.first_ordinal);
+            let file = File::open(&segment.path)
+                .map_err(|error| format!("open_rotated_rollout_segment_failed: {error}"))?;
+            let mut reader = BufReader::with_capacity(1024 * 1024, file);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let read = reader
+                    .read_until(b'\n', &mut line)
+                    .map_err(|error| format!("read_rotated_rollout_segment_failed: {error}"))?;
+                if read == 0 {
+                    break;
+                }
+                let (_, _, ordinal) = ordinal_span(&line)?;
+                if cutoff.is_some_and(|cutoff| ordinal >= cutoff) {
+                    break;
+                }
+                writer
+                    .write_all(&line)
+                    .map_err(|error| format!("write_coalesced_rollout_failed: {error}"))?;
+            }
+        }
+        writer
+            .flush()
+            .map_err(|error| format!("flush_coalesced_rollout_failed: {error}"))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|error| format!("sync_coalesced_rollout_failed: {error}"))?;
+        Ok(())
+    })();
+    drop(writer);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(output_path);
+        return Err(error);
+    }
+    let scan = scan_rollout_ordinals(output_path)?;
+    if scan.duplicate_count != 0 || scan.first_ordinal != Some(0) {
+        let _ = fs::remove_file(output_path);
+        return Err("coalesced_rollout_failed_integrity_check".to_string());
+    }
+    Ok(CoalescedRollout {
+        segment_count: segments.len(),
+        first_ordinal: 0,
+        last_ordinal: scan
+            .last_original_ordinal
+            .ok_or_else(|| "coalesced_rollout_has_no_last_ordinal".to_string())?,
+        byte_len: scan.byte_len,
+    })
+}
+
+fn inspect_verified_duplicate_projection_cursor(
+    projection_db: &Path,
+    source_id: &str,
+    rollout_path: &Path,
+) -> Result<Option<ProjectionCursorRepair>, String> {
+    let connection = Connection::open_with_flags(
+        projection_db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("open_thread_history_projection_for_inspection_failed: {error}"))?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|error| format!("configure_thread_history_projection_timeout_failed: {error}"))?;
+    let Some((current_offset, expected_ordinal)) = connection
+        .query_row(
+            "SELECT next_rollout_byte_offset, next_rollout_ordinal
+             FROM thread_history_projection_state WHERE thread_id = ?1",
+            [source_id],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("read_thread_history_projection_cursor_failed: {error}"))?
+    else {
+        return Ok(None);
+    };
+
+    let mut file = File::open(rollout_path)
+        .map_err(|error| format!("open_rollout_for_projection_repair_failed: {error}"))?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| format!("read_rollout_projection_repair_metadata_failed: {error}"))?
+        .len();
+    if current_offset >= file_len {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(current_offset))
+        .map_err(|error| format!("seek_rollout_projection_repair_failed: {error}"))?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let read = reader
+        .read_until(b'\n', &mut line)
+        .map_err(|error| format!("read_rollout_projection_repair_record_failed: {error}"))?;
+    if read == 0 {
+        return Ok(None);
+    }
+    let value: serde_json::Value = serde_json::from_slice(&line)
+        .map_err(|error| format!("parse_rollout_projection_repair_record_failed: {error}"))?;
+    let actual_ordinal = value
+        .get("ordinal")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "projection_repair_record_missing_ordinal".to_string())?;
+    if actual_ordinal >= expected_ordinal {
+        return Ok(None);
+    }
+    let is_verified_duplicate_metadata = actual_ordinal.saturating_add(1) == expected_ordinal
+        && value.get("type").and_then(serde_json::Value::as_str) == Some("event_msg")
+        && value
+            .pointer("/payload/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("thread_settings_applied");
+    if !is_verified_duplicate_metadata {
+        return Err(format!(
+            "unsafe_projection_duplicate_record: expected={expected_ordinal}, actual={actual_ordinal}"
+        ));
+    }
+    Ok(Some(ProjectionCursorRepair {
+        skipped_duplicate_count: 1,
+        stalled_byte_offset: current_offset,
+        stalled_expected_ordinal: expected_ordinal,
+        minimum_next_byte_offset: current_offset,
+        minimum_next_ordinal: actual_ordinal,
+    }))
+}
+
+fn repair_verified_duplicate_projection_cursor(
+    projection_db: &Path,
+    source_id: &str,
+    rollout_path: &Path,
+) -> Result<Option<ProjectionCursorRepair>, String> {
+    let Some(repair) =
+        inspect_verified_duplicate_projection_cursor(projection_db, source_id, rollout_path)?
+    else {
+        return Ok(None);
+    };
+    let mut connection = Connection::open(projection_db)
+        .map_err(|error| format!("open_thread_history_projection_for_repair_failed: {error}"))?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|error| format!("configure_thread_history_projection_timeout_failed: {error}"))?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("begin_thread_history_projection_repair_failed: {error}"))?;
+    let updated = transaction
+        .execute(
+            "UPDATE thread_history_projection_state
+             SET next_rollout_ordinal = ?1
+             WHERE thread_id = ?2
+               AND next_rollout_byte_offset = ?3
+               AND next_rollout_ordinal = ?4",
+            rusqlite::params![
+                repair.minimum_next_ordinal,
+                source_id,
+                repair.stalled_byte_offset,
+                repair.stalled_expected_ordinal
+            ],
+        )
+        .map_err(|error| format!("update_thread_history_projection_cursor_failed: {error}"))?;
+    if updated != 1 {
+        return Err("thread_history_projection_cursor_changed_during_repair".to_string());
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("commit_thread_history_projection_repair_failed: {error}"))?;
+    Ok(Some(repair))
 }
 
 fn ordinal_span(line: &[u8]) -> Result<(usize, usize, u64), String> {
@@ -159,6 +440,7 @@ pub(crate) fn scan_rollout_ordinals(path: &Path) -> Result<RolloutOrdinalScan, S
         duplicate_count,
         byte_len,
         first_ordinal,
+        last_original_ordinal: previous_original,
         last_normalized_ordinal,
     })
 }
@@ -188,148 +470,117 @@ fn unique_sibling_path(path: &Path, label: &str) -> Result<PathBuf, String> {
     Err("could_not_allocate_rollout_repair_sibling_path".to_string())
 }
 
-#[cfg(windows)]
-fn replace_rollout_with_backup(
-    path: &Path,
-    replacement: &Path,
-    backup: &Path,
-) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
-
-    let replaced: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let replacement_wide: Vec<u16> = replacement
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let backup_wide: Vec<u16> = backup
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    // SAFETY: all three path buffers are NUL-terminated UTF-16 and remain alive
-    // for the duration of the call. The application and exclusion pointers are unused.
-    let replaced_ok = unsafe {
-        ReplaceFileW(
-            replaced.as_ptr(),
-            replacement_wide.as_ptr(),
-            backup_wide.as_ptr(),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    if replaced_ok == 0 {
-        return Err(format!(
-            "atomic_rollout_replace_failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn replace_rollout_with_backup(
-    path: &Path,
-    replacement: &Path,
-    backup: &Path,
-) -> Result<(), String> {
-    fs::rename(path, backup)
-        .map_err(|error| format!("backup_rollout_before_replace_failed: {error}"))?;
-    if let Err(error) = fs::rename(replacement, path) {
-        let restore_error = fs::rename(backup, path).err();
-        return Err(match restore_error {
-            Some(restore_error) => format!(
-                "install_normalized_rollout_failed: {error}; restore_original_failed: {restore_error}"
-            ),
-            None => format!("install_normalized_rollout_failed: {error}"),
-        });
-    }
-    Ok(())
-}
-
-pub(crate) fn normalize_rollout_ordinals(path: &Path) -> Result<NormalizedRollout, String> {
-    let scan = scan_rollout_ordinals(path)?;
-    if scan.duplicate_count == 0 {
-        return Err("rollout_has_no_duplicate_ordinals".to_string());
-    }
-
-    let temp_path = unique_sibling_path(path, "ordinal-normalized.tmp")?;
-    let backup_path = unique_sibling_path(path, "before-ordinal-repair.bak.jsonl")?;
-    let source = File::open(path)
-        .map_err(|error| format!("open_rollout_for_normalization_failed: {error}"))?;
-    let mut reader = BufReader::with_capacity(1024 * 1024, source);
-    let temp_file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temp_path)
-        .map_err(|error| format!("create_normalized_rollout_failed: {error}"))?;
-    let mut writer = BufWriter::with_capacity(1024 * 1024, temp_file);
-    let mut line = Vec::new();
-    let mut line_number = 0usize;
-    let mut previous_original = None;
-    let mut duplicate_count = 0usize;
-
-    let write_result = (|| -> Result<(), String> {
-        loop {
-            line.clear();
-            let read = reader
-                .read_until(b'\n', &mut line)
-                .map_err(|error| format!("read_rollout_for_normalization_failed: {error}"))?;
-            if read == 0 {
-                break;
-            }
-            line_number += 1;
-            let (digits_start, digits_end, original) =
-                ordinal_span(&line).map_err(|error| format!("{error}_at_line_{line_number}"))?;
-            let normalized = normalized_ordinal(previous_original, original, &mut duplicate_count)?;
-            writer
-                .write_all(&line[..digits_start])
-                .and_then(|_| writer.write_all(normalized.to_string().as_bytes()))
-                .and_then(|_| writer.write_all(&line[digits_end..]))
-                .map_err(|error| format!("write_normalized_rollout_failed: {error}"))?;
-            previous_original = Some(original);
+fn rollback_rotated_segment_moves(moved: &[(PathBuf, PathBuf)]) {
+    for (original, backup) in moved.iter().rev() {
+        if backup.exists() && !original.exists() {
+            let _ = fs::rename(backup, original);
         }
-        writer
-            .flush()
-            .map_err(|error| format!("flush_normalized_rollout_failed: {error}"))?;
-        writer
-            .get_ref()
-            .sync_all()
-            .map_err(|error| format!("sync_normalized_rollout_failed: {error}"))?;
+    }
+}
+
+fn install_coalesced_rollout(
+    config_dir: &Path,
+    candidate: &RotatedRolloutRepairCandidate,
+) -> Result<CoalescedRollout, String> {
+    let temp_path = unique_sibling_path(&candidate.canonical_path, "coalesced.tmp")?;
+    let coalesced = write_coalesced_rollout(&candidate.thread_id, &candidate.segments, &temp_path)?;
+    let backup_parent = config_dir
+        .parent()
+        .unwrap_or(config_dir)
+        .join(".cc-switch")
+        .join("backups")
+        .join("codex-paginated-history-repair-v2");
+    fs::create_dir_all(&backup_parent)
+        .map_err(|error| format!("create_rotated_rollout_backup_parent_failed: {error}"))?;
+    let backup_dir = unique_sibling_path(
+        &backup_parent.join(format!("{}.backup", candidate.thread_id)),
+        "segments",
+    )?;
+    fs::create_dir(&backup_dir)
+        .map_err(|error| format!("create_rotated_rollout_backup_failed: {error}"))?;
+
+    let mut moved = Vec::new();
+    for (index, original) in candidate.segments.iter().enumerate() {
+        let file_name = original
+            .file_name()
+            .ok_or_else(|| "rotated_rollout_segment_has_no_filename".to_string())?;
+        let backup = backup_dir.join(format!("{index:03}-{}", file_name.to_string_lossy()));
+        if let Err(error) = fs::rename(original, &backup) {
+            rollback_rotated_segment_moves(&moved);
+            let _ = fs::remove_file(&temp_path);
+            return Err(format!("backup_rotated_rollout_segment_failed: {error}"));
+        }
+        moved.push((original.clone(), backup));
+    }
+    if let Err(error) = fs::rename(&temp_path, &candidate.canonical_path) {
+        rollback_rotated_segment_moves(&moved);
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("install_coalesced_rollout_failed: {error}"));
+    }
+
+    let projection_result = (|| -> Result<(), String> {
+        let mut connection = Connection::open(&candidate.projection_db).map_err(|error| {
+            format!("open_thread_history_projection_for_rotation_repair_failed: {error}")
+        })?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| {
+                format!("configure_thread_history_projection_timeout_failed: {error}")
+            })?;
+        let transaction = connection.transaction().map_err(|error| {
+            format!("begin_thread_history_rotation_projection_reset_failed: {error}")
+        })?;
+        let mut projection_ids = candidate
+            .segments
+            .iter()
+            .filter_map(|path| source_id_from_rollout_path(path))
+            .collect::<Vec<_>>();
+        projection_ids.push(candidate.thread_id.clone());
+        projection_ids.sort();
+        projection_ids.dedup();
+        for table in [
+            "thread_history_projection_state",
+            "thread_items",
+            "thread_turns",
+            "thread_realtime_items",
+        ] {
+            let exists = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| format!("inspect_projection_table_failed: {error}"))?;
+            if !exists {
+                continue;
+            }
+            let placeholders = std::iter::repeat_n("?", projection_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            transaction
+                .execute(
+                    &format!("DELETE FROM {table} WHERE thread_id IN ({placeholders})"),
+                    rusqlite::params_from_iter(projection_ids.iter()),
+                )
+                .map_err(|error| format!("reset_rotated_thread_projection_failed: {error}"))?;
+        }
+        transaction.commit().map_err(|error| {
+            format!("commit_thread_history_rotation_projection_reset_failed: {error}")
+        })?;
         Ok(())
     })();
-    drop(writer);
-    drop(reader);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&temp_path);
+    if let Err(error) = projection_result {
+        let _ = fs::remove_file(&candidate.canonical_path);
+        rollback_rotated_segment_moves(&moved);
         return Err(error);
     }
-    if let Ok(metadata) = fs::metadata(path) {
-        let _ = fs::set_permissions(&temp_path, metadata.permissions());
-    }
-
-    if let Err(error) = replace_rollout_with_backup(path, &temp_path, &backup_path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(error);
-    }
-    let byte_len = fs::metadata(path)
-        .map_err(|error| format!("read_normalized_rollout_metadata_failed: {error}"))?
-        .len();
-
-    Ok(NormalizedRollout {
-        backup_path,
-        duplicate_count: scan.duplicate_count,
-        last_normalized_ordinal: scan
-            .last_normalized_ordinal
-            .expect("non-empty rollout scan has a last ordinal"),
-        byte_len,
-    })
+    log::info!(
+        "Coalesced Codex rotated rollout segments: thread={}, segments={}, backup={}",
+        candidate.thread_id,
+        coalesced.segment_count,
+        backup_dir.display()
+    );
+    Ok(coalesced)
 }
 
 fn source_id_from_rollout_path(path: &Path) -> Option<String> {
@@ -386,49 +637,7 @@ fn projection_cursor(
     .map_err(|error| format!("read_thread_history_projection_cursor_failed: {error}"))
 }
 
-fn normalized_ordinal_at_byte_offset(path: &Path, byte_offset: u64) -> Result<Option<u64>, String> {
-    let file = File::open(path)
-        .map_err(|error| format!("open_rollout_for_cursor_check_failed: {error}"))?;
-    let file_len = file
-        .metadata()
-        .map_err(|error| format!("read_rollout_cursor_metadata_failed: {error}"))?
-        .len();
-    if byte_offset >= file_len {
-        return Ok(None);
-    }
-    let mut reader = BufReader::with_capacity(1024 * 1024, file);
-    let mut line = Vec::new();
-    let mut current_offset = 0u64;
-    let mut previous_original = None;
-    let mut duplicate_count = 0usize;
-    loop {
-        line.clear();
-        let read = reader
-            .read_until(b'\n', &mut line)
-            .map_err(|error| format!("read_rollout_projection_cursor_failed: {error}"))?;
-        if read == 0 {
-            return Ok(None);
-        }
-        let (digits_start, digits_end, original) = ordinal_span(&line)?;
-        let normalized = normalized_ordinal(previous_original, original, &mut duplicate_count)?;
-        let next_offset = current_offset
-            .checked_add(read as u64)
-            .ok_or_else(|| "rollout_projection_cursor_offset_overflow".to_string())?;
-        if byte_offset >= current_offset && byte_offset < next_offset {
-            let normalized_digits = normalized.to_string();
-            let replacement_changes_width = normalized_digits.len() != digits_end - digits_start;
-            let cursor_after_ordinal = byte_offset > current_offset + digits_end as u64;
-            if replacement_changes_width && cursor_after_ordinal {
-                return Err("projection_cursor_would_move_after_ordinal_width_change".to_string());
-            }
-            return Ok(Some(normalized));
-        }
-        current_offset = next_offset;
-        previous_original = Some(original);
-    }
-}
-
-fn paginated_rollout_paths() -> Result<(PathBuf, Vec<PathBuf>), String> {
+fn paginated_rollout_paths() -> Result<(PathBuf, Vec<(String, PathBuf)>), String> {
     let config_dir = crate::codex_config::get_codex_config_dir();
     let config_text =
         fs::read_to_string(crate::codex_config::get_codex_config_path()).unwrap_or_default();
@@ -459,35 +668,103 @@ fn paginated_rollout_paths() -> Result<(PathBuf, Vec<PathBuf>), String> {
     }
     let mut statement = conn
         .prepare(
-            "SELECT DISTINCT rollout_path FROM threads
+            "SELECT id, rollout_path FROM threads
              WHERE history_mode = 'paginated' AND rollout_path IS NOT NULL AND rollout_path != ''",
         )
         .map_err(|error| format!("prepare_paginated_rollout_query_failed: {error}"))?;
     let mut paths = statement
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                PathBuf::from(row.get::<_, String>(1)?),
+            ))
+        })
         .map_err(|error| format!("query_paginated_rollout_paths_failed: {error}"))?
         .filter_map(Result::ok)
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
+        .filter(|(_, path)| path.is_file())
         .collect::<Vec<_>>();
-    paths.sort();
-    paths.dedup();
+    paths.sort_by(|left, right| left.0.cmp(&right.0));
+    paths.dedup_by(|left, right| left.0 == right.0);
     Ok((config_dir, paths))
+}
+
+fn rotated_rollout_segments(
+    thread_id: &str,
+    canonical_path: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let Some(parent) = canonical_path.parent() else {
+        return Ok(Vec::new());
+    };
+    let mut segments = vec![canonical_path.to_path_buf()];
+    for entry in fs::read_dir(parent)
+        .map_err(|error| format!("read_rotated_rollout_directory_failed: {error}"))?
+    {
+        let entry = entry
+            .map_err(|error| format!("read_rotated_rollout_directory_entry_failed: {error}"))?;
+        let path = entry.path();
+        if path == canonical_path
+            || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+            || !path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.contains(thread_id))
+        {
+            continue;
+        }
+        match rollout_session_id(&path) {
+            Ok(session_id) if session_id == thread_id => segments.push(path),
+            Ok(_) => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect_named_rotated_rollout_segment_failed: path={}, error={error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    if segments.len() < 2 {
+        return Ok(Vec::new());
+    }
+    Ok(segments)
 }
 
 fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
     let (config_dir, paths) = paginated_rollout_paths()?;
-    let projection_db = projection_db_path(&config_dir);
+    let Some(projection_db) = projection_db_path(&config_dir) else {
+        return Ok(RolloutRepairPlan::default());
+    };
     let mut plan = RolloutRepairPlan::default();
-    for path in paths {
-        let source_id = match source_id_from_rollout_path(&path) {
-            Some(source_id) => source_id,
-            None => {
-                plan.blocked
-                    .push("paginated_rollout_source_id_unavailable".to_string());
+    for (source_id, path) in paths {
+        match rotated_rollout_segments(&source_id, &path) {
+            Ok(segments) if !segments.is_empty() => {
+                let affected_bytes = segments
+                    .iter()
+                    .filter_map(|segment| fs::metadata(segment).ok().map(|metadata| metadata.len()))
+                    .sum();
+                plan.rotated.push(RotatedRolloutRepairCandidate {
+                    thread_id: source_id.clone(),
+                    canonical_path: path.clone(),
+                    segments,
+                    projection_db: projection_db.clone(),
+                    affected_bytes,
+                });
                 continue;
             }
-        };
+            Ok(_) => {}
+            Err(error) => {
+                plan.blocked.push(error);
+                continue;
+            }
+        }
+        let repair =
+            match inspect_verified_duplicate_projection_cursor(&projection_db, &source_id, &path) {
+                Ok(Some(repair)) => repair,
+                Ok(None) => continue,
+                Err(error) => {
+                    plan.blocked.push(error);
+                    continue;
+                }
+            };
         let scan = match scan_rollout_ordinals(&path) {
             Ok(scan) => scan,
             Err(error) => {
@@ -495,34 +772,11 @@ fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
                 continue;
             }
         };
-        if scan.duplicate_count == 0 {
-            continue;
-        }
-        let Some((next_offset, next_ordinal)) =
-            projection_cursor(projection_db.as_deref(), &source_id)?
-        else {
-            continue;
-        };
-        let cursor_ordinal = match normalized_ordinal_at_byte_offset(&path, next_offset) {
-            Ok(cursor_ordinal) => cursor_ordinal,
-            Err(error) => {
-                plan.blocked.push(error);
-                continue;
-            }
-        };
-        match cursor_ordinal {
-            None => continue,
-            Some(cursor_ordinal) if cursor_ordinal == next_ordinal => {}
-            Some(cursor_ordinal) => {
-                plan.blocked.push(format!(
-                    "projection_cursor_does_not_match_normalized_rollout: expected={next_ordinal}, actual={cursor_ordinal}"
-                ));
-                continue;
-            }
-        }
         plan.candidates.push(RolloutRepairCandidate {
             path,
             source_id,
+            projection_db: projection_db.clone(),
+            repair,
             #[cfg(any(target_os = "windows", test))]
             scan,
         });
@@ -535,17 +789,24 @@ pub(crate) fn inspect_paginated_history_repair() -> Result<PaginatedHistoryRepai
 {
     let plan = build_repair_plan()?;
     Ok(PaginatedHistoryRepairPreflight {
-        affected_rollout_count: plan.candidates.len(),
+        affected_rollout_count: plan.candidates.len() + plan.rotated.len(),
         duplicate_ordinal_count: plan
             .candidates
             .iter()
-            .map(|candidate| candidate.scan.duplicate_count)
+            .map(|candidate| candidate.repair.skipped_duplicate_count)
             .sum(),
+        rotated_thread_count: plan.rotated.len(),
+        rotated_segment_count: plan.rotated.iter().map(|item| item.segments.len()).sum(),
         affected_bytes: plan
             .candidates
             .iter()
             .map(|candidate| candidate.scan.byte_len)
-            .sum(),
+            .sum::<u64>()
+            + plan
+                .rotated
+                .iter()
+                .map(|candidate| candidate.affected_bytes)
+                .sum::<u64>(),
         blocked_rollout_count: plan.blocked.len(),
         blocked_reason: plan.blocked.first().cloned(),
     })
@@ -555,20 +816,46 @@ pub(crate) fn repair_paginated_history_after_codex_exit(
 ) -> Result<PaginatedHistoryRepairOutcome, String> {
     let plan = build_repair_plan()?;
     let mut outcome = PaginatedHistoryRepairOutcome::default();
+    let config_dir = crate::codex_config::get_codex_config_dir();
+    for candidate in plan.rotated {
+        let coalesced = install_coalesced_rollout(&config_dir, &candidate)?;
+        outcome.repaired_rollout_count += 1;
+        outcome.repaired_rotated_thread_count += 1;
+        outcome.repaired_rotated_segment_count += coalesced.segment_count;
+        outcome.targets.push(ProjectionCatchUpTarget {
+            source_id: candidate.thread_id,
+            rollout_path: candidate.canonical_path,
+            minimum_next_ordinal: coalesced.last_ordinal.saturating_add(1),
+            minimum_next_byte_offset: coalesced.byte_len,
+        });
+    }
     for candidate in plan.candidates {
-        let normalized = normalize_rollout_ordinals(&candidate.path)?;
+        let Some(repaired) = repair_verified_duplicate_projection_cursor(
+            &candidate.projection_db,
+            &candidate.source_id,
+            &candidate.path,
+        )?
+        else {
+            continue;
+        };
         log::info!(
-            "Normalized Codex paginated history ordinals: source={}, duplicates={}, backup={}",
+            "Advanced Codex paginated history projection past verified duplicate metadata: source={}, duplicates={}, next_offset={}, next_ordinal={}",
             candidate.source_id,
-            normalized.duplicate_count,
-            normalized.backup_path.display()
+            repaired.skipped_duplicate_count,
+            repaired.minimum_next_byte_offset,
+            repaired.minimum_next_ordinal
         );
         outcome.repaired_rollout_count += 1;
-        outcome.repaired_duplicate_count += normalized.duplicate_count;
+        outcome.repaired_duplicate_count += repaired.skipped_duplicate_count;
         outcome.targets.push(ProjectionCatchUpTarget {
             source_id: candidate.source_id,
-            minimum_next_ordinal: normalized.last_normalized_ordinal.saturating_add(1),
-            minimum_next_byte_offset: normalized.byte_len,
+            rollout_path: candidate.path,
+            minimum_next_ordinal: candidate
+                .scan
+                .last_original_ordinal
+                .unwrap_or(repaired.minimum_next_ordinal.saturating_sub(1))
+                .saturating_add(1),
+            minimum_next_byte_offset: candidate.scan.byte_len,
         });
     }
     Ok(outcome)
@@ -599,9 +886,95 @@ pub(crate) fn repaired_projections_caught_up(
     Ok(true)
 }
 
+pub(crate) fn repair_newly_stalled_projection_cursors(
+    outcome: &PaginatedHistoryRepairOutcome,
+) -> Result<usize, String> {
+    if outcome.targets.is_empty() {
+        return Ok(0);
+    }
+    let config_dir = crate::codex_config::get_codex_config_dir();
+    let Some(projection_db) = projection_db_path(&config_dir) else {
+        return Ok(0);
+    };
+    repair_projection_cursors_at(&projection_db, outcome)
+}
+
+fn repair_projection_cursors_at(
+    projection_db: &Path,
+    outcome: &PaginatedHistoryRepairOutcome,
+) -> Result<usize, String> {
+    let mut repaired = 0;
+    for target in &outcome.targets {
+        if repair_verified_duplicate_projection_cursor(
+            &projection_db,
+            &target.source_id,
+            &target.rollout_path,
+        )?
+        .is_some()
+        {
+            repaired += 1;
+        }
+    }
+    Ok(repaired)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_session_segment(path: &Path, thread_id: &str, records: &[(u64, &str)]) {
+        let text = records
+            .iter()
+            .map(|(ordinal, payload_type)| {
+                if *payload_type == "session_meta" {
+                    format!(
+                        "{{\"ordinal\":{ordinal},\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread_id}\"}}}}\n"
+                    )
+                } else {
+                    format!(
+                        "{{\"ordinal\":{ordinal},\"type\":\"event_msg\",\"payload\":{{\"type\":\"{payload_type}\"}}}}\n"
+                    )
+                }
+            })
+            .collect::<String>();
+        std::fs::write(path, text).expect("write rotated rollout segment");
+    }
+
+    fn create_projection_fixture(path: &Path, ids: &[&str], malformed_items: bool) {
+        let connection = Connection::open(path).expect("projection db");
+        let item_schema = if malformed_items {
+            "CREATE TABLE thread_items (wrong_id TEXT PRIMARY KEY);"
+        } else {
+            "CREATE TABLE thread_items (thread_id TEXT PRIMARY KEY);"
+        };
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE thread_history_projection_state (thread_id TEXT PRIMARY KEY);
+                 {item_schema}
+                 CREATE TABLE thread_turns (thread_id TEXT PRIMARY KEY);
+                 CREATE TABLE thread_realtime_items (thread_id TEXT PRIMARY KEY);"
+            ))
+            .expect("projection schema");
+        for id in ids {
+            connection
+                .execute(
+                    "INSERT INTO thread_history_projection_state VALUES (?1)",
+                    [id],
+                )
+                .expect("projection state row");
+            if !malformed_items {
+                connection
+                    .execute("INSERT INTO thread_items VALUES (?1)", [id])
+                    .expect("thread item row");
+            }
+            connection
+                .execute("INSERT INTO thread_turns VALUES (?1)", [id])
+                .expect("thread turn row");
+            connection
+                .execute("INSERT INTO thread_realtime_items VALUES (?1)", [id])
+                .expect("thread realtime row");
+        }
+    }
 
     fn write_rollout(path: &Path, records: &[(u64, &str)]) {
         let mut text = String::new();
@@ -613,129 +986,453 @@ mod tests {
         std::fs::write(path, text).expect("write rollout fixture");
     }
 
-    fn read_ordinals(path: &Path) -> Vec<u64> {
-        std::fs::read_to_string(path)
-            .expect("read normalized rollout")
-            .lines()
-            .map(|line| {
-                serde_json::from_str::<serde_json::Value>(line)
-                    .expect("valid JSONL")
-                    .get("ordinal")
-                    .and_then(serde_json::Value::as_u64)
-                    .expect("top-level ordinal")
-            })
-            .collect()
-    }
-
     #[test]
-    fn normalization_preserves_duplicate_metadata_and_renumbers_every_record() {
+    fn verified_duplicate_metadata_repair_rewinds_expected_ordinal_without_rewriting_rollout() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("rollout-source.jsonl");
+        let rollout = temp
+            .path()
+            .join("rollout-2026-08-24T00-00-00-01a00000-0000-7000-8000-000000000001.jsonl");
         write_rollout(
-            &path,
+            &rollout,
             &[
-                (10306, "token_count"),
-                (10307, "token_count"),
-                (10307, "thread_settings_applied"),
-                (10308, "agent_message"),
+                (9, "agent_message"),
+                (10, "token_count"),
+                (10, "thread_settings_applied"),
+                (11, "task_started"),
+                (12, "agent_message"),
             ],
         );
+        let original = std::fs::read(&rollout).expect("read original rollout");
+        let duplicate_start = original
+            .windows(b"\"ordinal\":10,\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\"".len())
+            .position(|window| {
+                window
+                    == b"\"ordinal\":10,\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\""
+            })
+            .and_then(|marker| {
+                original[..marker]
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map(|newline| newline + 1)
+            })
+            .expect("duplicate record start") as u64;
+        let db = temp.path().join("thread_history_1.sqlite");
+        let connection = Connection::open(&db).expect("projection db");
+        connection
+            .execute_batch(
+                "CREATE TABLE thread_history_projection_state (
+                    thread_id TEXT PRIMARY KEY,
+                    next_rollout_byte_offset INTEGER NOT NULL,
+                    next_rollout_ordinal INTEGER NOT NULL
+                 );",
+            )
+            .expect("schema");
+        connection
+            .execute(
+                "INSERT INTO thread_history_projection_state
+                 (thread_id, next_rollout_byte_offset, next_rollout_ordinal)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "01a00000-0000-7000-8000-000000000001",
+                    duplicate_start,
+                    11_u64
+                ],
+            )
+            .expect("stalled cursor");
+        drop(connection);
 
-        let result = normalize_rollout_ordinals(&path).expect("normalize duplicate-only file");
+        let repaired = repair_verified_duplicate_projection_cursor(
+            &db,
+            "01a00000-0000-7000-8000-000000000001",
+            &rollout,
+        )
+        .expect("verified duplicate metadata repair")
+        .expect("repair was needed");
 
-        assert_eq!(result.duplicate_count, 1);
-        assert_eq!(read_ordinals(&path), vec![10306, 10307, 10308, 10309]);
-        let normalized = std::fs::read_to_string(&path).expect("read normalized text");
-        assert!(normalized.contains("thread_settings_applied"));
-        assert!(result.backup_path.exists());
+        assert_eq!(repaired.skipped_duplicate_count, 1);
+        assert_eq!(repaired.minimum_next_byte_offset, duplicate_start);
+        assert_eq!(repaired.minimum_next_ordinal, 10);
         assert_eq!(
-            read_ordinals(&result.backup_path),
-            vec![10306, 10307, 10307, 10308]
+            std::fs::read(&rollout).expect("rollout after repair"),
+            original
+        );
+        let connection = Connection::open(&db).expect("read projection db");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT next_rollout_byte_offset, next_rollout_ordinal
+                     FROM thread_history_projection_state WHERE thread_id = ?1",
+                    ["01a00000-0000-7000-8000-000000000001"],
+                    |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+                )
+                .expect("cursor after repair"),
+            (duplicate_start, 10)
         );
     }
 
     #[test]
-    fn normalization_keeps_duplicate_task_started_and_applies_cumulative_shift() {
+    fn verification_can_repair_a_later_duplicate_reached_after_the_initial_rewind() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("rollout-source.jsonl");
+        let source_id = "01a00000-0000-7000-8000-000000000006";
+        let rollout = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-00-00-{source_id}.jsonl"));
         write_rollout(
-            &path,
+            &rollout,
             &[
-                (10, "token_count"),
+                (9, "token_count"),
+                (9, "thread_settings_applied"),
                 (10, "task_started"),
-                (11, "agent_message"),
+                (11, "token_count"),
                 (11, "thread_settings_applied"),
                 (12, "task_complete"),
             ],
         );
+        let bytes = std::fs::read(&rollout).expect("rollout bytes");
+        let marker = b"\"ordinal\":11,\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\"";
+        let marker_offset = bytes
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("later duplicate marker");
+        let duplicate_start = bytes[..marker_offset]
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |newline| newline + 1) as u64;
+        let db = temp.path().join("thread_history_1.sqlite");
+        let connection = Connection::open(&db).expect("projection db");
+        connection
+            .execute_batch(
+                "CREATE TABLE thread_history_projection_state (
+                    thread_id TEXT PRIMARY KEY,
+                    next_rollout_byte_offset INTEGER NOT NULL,
+                    next_rollout_ordinal INTEGER NOT NULL
+                 );",
+            )
+            .expect("schema");
+        connection
+            .execute(
+                "INSERT INTO thread_history_projection_state VALUES (?1, ?2, ?3)",
+                rusqlite::params![source_id, duplicate_start, 12_u64],
+            )
+            .expect("later stalled cursor");
+        drop(connection);
+        let outcome = PaginatedHistoryRepairOutcome {
+            targets: vec![ProjectionCatchUpTarget {
+                source_id: source_id.to_string(),
+                rollout_path: rollout,
+                minimum_next_ordinal: 13,
+                minimum_next_byte_offset: bytes.len() as u64,
+            }],
+            ..Default::default()
+        };
 
-        let result = normalize_rollout_ordinals(&path).expect("normalize both duplicates");
-
-        assert_eq!(result.duplicate_count, 2);
-        assert_eq!(read_ordinals(&path), vec![10, 11, 12, 13, 14]);
-        let normalized = std::fs::read_to_string(&path).expect("read normalized text");
-        assert!(normalized.contains("task_started"));
-        assert!(normalized.contains("task_complete"));
+        assert_eq!(repair_projection_cursors_at(&db, &outcome), Ok(1));
+        let connection = Connection::open(&db).expect("read projection db");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT next_rollout_byte_offset, next_rollout_ordinal
+                     FROM thread_history_projection_state WHERE thread_id = ?1",
+                    [source_id],
+                    |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+                )
+                .expect("repaired later cursor"),
+            (duplicate_start, 11)
+        );
     }
 
     #[test]
-    fn gap_or_rewind_is_rejected_without_mutating_the_rollout() {
-        for records in [vec![(10, "a"), (12, "b")], vec![(10, "a"), (9, "b")]] {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let path = temp.path().join("rollout-source.jsonl");
-            write_rollout(&path, &records);
-            let before = std::fs::read(&path).expect("read original");
+    fn projection_repair_refuses_to_skip_a_duplicate_conversation_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rollout = temp
+            .path()
+            .join("rollout-2026-08-24T00-00-00-01a00000-0000-7000-8000-000000000002.jsonl");
+        write_rollout(
+            &rollout,
+            &[
+                (9, "token_count"),
+                (9, "agent_message"),
+                (10, "task_complete"),
+            ],
+        );
+        let bytes = std::fs::read(&rollout).expect("rollout");
+        let duplicate_start = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|newline| newline as u64 + 1)
+            .expect("second record");
+        let db = temp.path().join("thread_history_1.sqlite");
+        let connection = Connection::open(&db).expect("projection db");
+        connection
+            .execute_batch(
+                "CREATE TABLE thread_history_projection_state (
+                    thread_id TEXT PRIMARY KEY,
+                    next_rollout_byte_offset INTEGER NOT NULL,
+                    next_rollout_ordinal INTEGER NOT NULL
+                 );",
+            )
+            .expect("schema");
+        connection
+            .execute(
+                "INSERT INTO thread_history_projection_state VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "01a00000-0000-7000-8000-000000000002",
+                    duplicate_start,
+                    10_u64
+                ],
+            )
+            .expect("cursor");
+        drop(connection);
 
-            let error = normalize_rollout_ordinals(&path)
-                .expect_err("non duplicate-only anomaly must be rejected");
+        let error = repair_verified_duplicate_projection_cursor(
+            &db,
+            "01a00000-0000-7000-8000-000000000002",
+            &rollout,
+        )
+        .expect_err("conversation records must never be skipped");
 
-            assert!(error.contains("unsafe_rollout_ordinal_sequence"));
-            assert_eq!(std::fs::read(&path).expect("read unchanged file"), before);
+        assert!(error.contains("unsafe_projection_duplicate_record"));
+        assert_eq!(std::fs::read(&rollout).expect("unchanged rollout"), bytes);
+    }
+
+    #[test]
+    fn rotated_rollout_segments_are_coalesced_by_ordinal_with_newer_segment_winning_overlap() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let thread_id = "01a00000-0000-7000-8000-000000000003";
+        let parent = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-00-00-{thread_id}.jsonl"));
+        let second = temp.path().join(format!(
+            "rollout-2026-08-24T00-10-00-{thread_id}_01a00000-0000-7000-8000-000000000004.jsonl"
+        ));
+        let third = temp.path().join(format!(
+            "rollout-2026-08-24T00-20-00-{thread_id}_01a00000-0000-7000-8000-000000000005.jsonl"
+        ));
+        let write_segment = |path: &Path, records: &[(u64, &str)]| {
+            let text = records
+                .iter()
+                .map(|(ordinal, payload_type)| {
+                    if *payload_type == "session_meta" {
+                        format!(
+                            "{{\"ordinal\":{ordinal},\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread_id}\"}}}}\n"
+                        )
+                    } else {
+                        format!(
+                            "{{\"ordinal\":{ordinal},\"type\":\"event_msg\",\"payload\":{{\"type\":\"{payload_type}\"}}}}\n"
+                        )
+                    }
+                })
+                .collect::<String>();
+            std::fs::write(path, text).expect("segment");
+        };
+        write_segment(
+            &parent,
+            &[
+                (0, "session_meta"),
+                (1, "old_one"),
+                (2, "old_two"),
+                (3, "aborted_tail"),
+            ],
+        );
+        write_segment(
+            &second,
+            &[
+                (3, "session_meta"),
+                (4, "continued_four"),
+                (5, "aborted_again"),
+            ],
+        );
+        write_segment(
+            &third,
+            &[(5, "session_meta"), (6, "continued_six"), (7, "completed")],
+        );
+        let output = temp.path().join("coalesced.jsonl");
+
+        let result = write_coalesced_rollout(
+            thread_id,
+            &[parent.clone(), second.clone(), third.clone()],
+            &output,
+        )
+        .expect("coalesce safe rotated segments");
+
+        assert_eq!(result.segment_count, 3);
+        assert_eq!(result.first_ordinal, 0);
+        assert_eq!(result.last_ordinal, 7);
+        let rows = std::fs::read_to_string(&output).expect("coalesced output");
+        let values = rows
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values
+                .iter()
+                .map(|value| value.get("ordinal").and_then(serde_json::Value::as_u64))
+                .collect::<Vec<_>>(),
+            (0_u64..=7).map(Some).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            values[3].get("type").and_then(serde_json::Value::as_str),
+            Some("session_meta")
+        );
+        assert_eq!(
+            values[5].get("type").and_then(serde_json::Value::as_str),
+            Some("session_meta")
+        );
+        assert!(!rows.contains("aborted_tail"));
+        assert!(!rows.contains("aborted_again"));
+        assert!(rows.contains("continued_six"));
+    }
+
+    #[test]
+    fn rotated_rollout_detection_reports_a_corrupt_named_continuation_instead_of_ignoring_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let thread_id = "01a00000-0000-7000-8000-000000000007";
+        let canonical = temp
+            .path()
+            .join(format!("rollout-parent-{thread_id}.jsonl"));
+        let corrupt = temp.path().join(format!(
+            "rollout-child-{thread_id}_01a00000-0000-7000-8000-000000000008.jsonl"
+        ));
+        write_session_segment(&canonical, thread_id, &[(0, "session_meta"), (1, "first")]);
+        std::fs::write(&corrupt, b"not-json\n").expect("corrupt continuation");
+
+        let error = rotated_rollout_segments(thread_id, &canonical)
+            .expect_err("a corrupt continuation must block automatic repair");
+
+        assert!(error.contains("parse_rollout_session_metadata_failed"));
+    }
+
+    #[test]
+    fn installing_coalesced_rollout_backs_up_segments_and_clears_only_lineage_projection_rows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join(".codex");
+        let sessions_dir = config_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions");
+        let thread_id = "01a00000-0000-7000-8000-000000000010";
+        let child_id = "01a00000-0000-7000-8000-000000000011";
+        let unrelated_id = "01a00000-0000-7000-8000-000000000099";
+        let canonical_path =
+            sessions_dir.join(format!("rollout-2026-08-24T00-00-00-{thread_id}.jsonl"));
+        let child_path = sessions_dir.join(format!(
+            "rollout-2026-08-24T00-10-00-{thread_id}_{child_id}.jsonl"
+        ));
+        write_session_segment(
+            &canonical_path,
+            thread_id,
+            &[(0, "session_meta"), (1, "first"), (2, "interrupted")],
+        );
+        write_session_segment(
+            &child_path,
+            thread_id,
+            &[(2, "session_meta"), (3, "continued")],
+        );
+        let projection_db = config_dir.join("thread_history_1.sqlite");
+        create_projection_fixture(&projection_db, &[thread_id, child_id, unrelated_id], false);
+        let candidate = RotatedRolloutRepairCandidate {
+            thread_id: thread_id.to_string(),
+            canonical_path: canonical_path.clone(),
+            segments: vec![canonical_path.clone(), child_path.clone()],
+            projection_db: projection_db.clone(),
+            affected_bytes: 0,
+        };
+
+        let installed =
+            install_coalesced_rollout(&config_dir, &candidate).expect("install coalesced rollout");
+
+        assert_eq!(installed.segment_count, 2);
+        assert!(canonical_path.exists());
+        assert!(!child_path.exists());
+        let canonical = std::fs::read_to_string(&canonical_path).expect("canonical rollout");
+        assert!(canonical.contains("continued"));
+        assert!(!canonical.contains("interrupted"));
+        let backup_root = temp
+            .path()
+            .join(".cc-switch/backups/codex-paginated-history-repair-v2");
+        let backup_dir = std::fs::read_dir(&backup_root)
+            .expect("backup root")
+            .next()
+            .expect("backup directory")
+            .expect("backup entry")
+            .path();
+        assert_eq!(
+            std::fs::read_dir(backup_dir).expect("backup files").count(),
+            2
+        );
+        let connection = Connection::open(&projection_db).expect("projection db");
+        for table in [
+            "thread_history_projection_state",
+            "thread_items",
+            "thread_turns",
+            "thread_realtime_items",
+        ] {
+            let remaining = connection
+                .query_row(
+                    &format!("SELECT group_concat(thread_id) FROM {table}"),
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .expect("remaining projection rows");
+            assert_eq!(remaining.as_deref(), Some(unrelated_id));
         }
     }
 
     #[test]
-    fn normalization_keeps_the_stalled_projection_cursor_at_the_same_record_boundary() {
+    fn projection_reset_failure_restores_every_original_rotated_segment() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("rollout-source.jsonl");
-        write_rollout(
-            &path,
-            &[
-                (9, "agent_message"),
-                (10, "token_count"),
-                (10, "task_started"),
-                (11, "agent_message"),
-            ],
+        let config_dir = temp.path().join(".codex");
+        let sessions_dir = config_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions");
+        let thread_id = "01a00000-0000-7000-8000-000000000020";
+        let child_id = "01a00000-0000-7000-8000-000000000021";
+        let canonical_path =
+            sessions_dir.join(format!("rollout-2026-08-24T00-00-00-{thread_id}.jsonl"));
+        let child_path = sessions_dir.join(format!(
+            "rollout-2026-08-24T00-10-00-{thread_id}_{child_id}.jsonl"
+        ));
+        write_session_segment(
+            &canonical_path,
+            thread_id,
+            &[(0, "session_meta"), (1, "first"), (2, "interrupted")],
         );
-        let original = std::fs::read(&path).expect("read original");
-        let duplicate_marker =
-            b"\"ordinal\":10,\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"";
-        let stalled_offset = original
-            .windows(duplicate_marker.len())
-            .position(|window| window == duplicate_marker)
-            .expect("duplicate record marker");
-        let record_start = original[..stalled_offset]
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |newline| newline + 1);
-        let stalled_offset = (record_start + b"{\"timestamp\":\"".len()) as u64;
+        write_session_segment(
+            &child_path,
+            thread_id,
+            &[(2, "session_meta"), (3, "continued")],
+        );
+        let original_canonical = std::fs::read(&canonical_path).expect("canonical bytes");
+        let original_child = std::fs::read(&child_path).expect("child bytes");
+        let projection_db = config_dir.join("thread_history_1.sqlite");
+        create_projection_fixture(&projection_db, &[thread_id, child_id], true);
+        let candidate = RotatedRolloutRepairCandidate {
+            thread_id: thread_id.to_string(),
+            canonical_path: canonical_path.clone(),
+            segments: vec![canonical_path.clone(), child_path.clone()],
+            projection_db,
+            affected_bytes: 0,
+        };
 
+        let error = install_coalesced_rollout(&config_dir, &candidate)
+            .expect_err("malformed projection table must abort repair");
+
+        assert!(error.contains("reset_rotated_thread_projection_failed"));
         assert_eq!(
-            normalized_ordinal_at_byte_offset(&path, stalled_offset)
-                .expect("read normalized ordinal at existing cursor"),
-            Some(11)
+            std::fs::read(&canonical_path).expect("restored canonical"),
+            original_canonical
         );
-
-        normalize_rollout_ordinals(&path).expect("normalize rollout");
-
-        let normalized = std::fs::read(&path).expect("read normalized rollout");
         assert_eq!(
-            &normalized[record_start..stalled_offset as usize],
-            &original[record_start..stalled_offset as usize],
-            "normalization must preserve every byte before the existing projection cursor"
+            std::fs::read(&child_path).expect("restored child"),
+            original_child
         );
-        assert!(std::str::from_utf8(&normalized)
-            .expect("normalized rollout remains UTF-8")
-            .contains("task_started"));
+        let connection = Connection::open(&candidate.projection_db).expect("projection db");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM thread_history_projection_state",
+                    [],
+                    |row| row.get::<_, usize>(0),
+                )
+                .expect("projection rows remain"),
+            2
+        );
     }
 }

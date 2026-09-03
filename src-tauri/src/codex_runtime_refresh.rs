@@ -20,10 +20,35 @@ static CODEX_RUNTIME_REFRESH_LOCK: Lazy<tokio::sync::Mutex<()>> =
 const CODEX_RUNTIME_REFRESH_EVENT: &str = "codex-runtime-refresh-progress";
 const CODEX_GRACEFUL_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 const CODEX_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
+const CODEX_HISTORY_REBUILD_BYTES_PER_WINDOW: u64 = 100_000_000;
+const CODEX_HISTORY_REBUILD_WINDOW: Duration = Duration::from_secs(30);
+const CODEX_HISTORY_REBUILD_TIMEOUT_CAP: Duration = Duration::from_secs(15 * 60);
 /// renderer 兼容层通过 1.5s 定时注入收敛。验证时必须等待它真正收敛，
 /// 否则会在补丁尚未挂载时误报 `codex_history_compatibility_not_ready`，
 /// 导致新版本地历史目录和全 Provider 查询被判定为未修复。
 const CODEX_RENDERER_PATCH_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn runtime_verification_timeout(
+    history_repair: Option<&paginated_history::PaginatedHistoryRepairOutcome>,
+) -> Duration {
+    let Some(history_repair) = history_repair else {
+        return CODEX_RUNTIME_READY_TIMEOUT;
+    };
+    if history_repair.repaired_rotated_thread_count == 0 {
+        return CODEX_RUNTIME_READY_TIMEOUT;
+    }
+    let bytes = history_repair
+        .targets
+        .iter()
+        .map(|target| target.minimum_next_byte_offset)
+        .max()
+        .unwrap_or_default();
+    let windows = bytes.saturating_add(CODEX_HISTORY_REBUILD_BYTES_PER_WINDOW - 1)
+        / CODEX_HISTORY_REBUILD_BYTES_PER_WINDOW;
+    CODEX_RUNTIME_READY_TIMEOUT
+        .max(CODEX_HISTORY_REBUILD_WINDOW.saturating_mul(windows as u32))
+        .min(CODEX_HISTORY_REBUILD_TIMEOUT_CAP)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct RawCodexRuntimeProcess {
@@ -114,6 +139,8 @@ pub struct CodexRuntimeRefreshResult {
     pub closed_process_count: usize,
     pub repaired_history_rollout_count: usize,
     pub repaired_history_duplicate_count: usize,
+    pub repaired_history_rotated_thread_count: usize,
+    pub repaired_history_rotated_segment_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -262,6 +289,8 @@ where
         closed_process_count,
         repaired_history_rollout_count: history_repair.repaired_rollout_count,
         repaired_history_duplicate_count: history_repair.repaired_duplicate_count,
+        repaired_history_rotated_thread_count: history_repair.repaired_rotated_thread_count,
+        repaired_history_rotated_segment_count: history_repair.repaired_rotated_segment_count,
     })
 }
 
@@ -797,7 +826,8 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
         &mut self,
         config_written_at_ms: i64,
     ) -> Result<CodexRuntimeVerification, String> {
-        let deadline = Instant::now() + CODEX_RUNTIME_READY_TIMEOUT;
+        let deadline =
+            Instant::now() + runtime_verification_timeout(self.history_repair_outcome.as_ref());
         let mut last_core_error = None;
         loop {
             let targets = query_refresh_targets().await?;
@@ -820,6 +850,20 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
                         .transpose()?
                         .unwrap_or(true);
                     if !history_ready {
+                        if let Some(outcome) = self.history_repair_outcome.clone() {
+                            let repaired = tokio::task::spawn_blocking(move || {
+                                paginated_history::repair_newly_stalled_projection_cursors(&outcome)
+                            })
+                            .await
+                            .map_err(|error| {
+                                format!("paginated_history_followup_repair_join_failed: {error}")
+                            })??;
+                            if repaired > 0 {
+                                log::info!(
+                                    "Rewound {repaired} later Codex paginated-history projection cursor(s) during verification"
+                                );
+                            }
+                        }
                         last_core_error =
                             Some("codex_paginated_history_projection_not_caught_up".to_string());
                     } else {
@@ -1030,6 +1074,25 @@ mod tests {
 
         assert_eq!(targets.desktop_shells.len(), 1);
         assert_eq!(targets.desktop_shells[0].pid, 100);
+    }
+
+    #[test]
+    fn runtime_verification_budget_scales_for_large_projection_rebuilds() {
+        assert_eq!(
+            runtime_verification_timeout(None),
+            CODEX_RUNTIME_READY_TIMEOUT
+        );
+        let large_rebuild = paginated_history::PaginatedHistoryRepairOutcome {
+            repaired_rotated_thread_count: 1,
+            targets: vec![paginated_history::ProjectionCatchUpTarget {
+                source_id: "thread".to_string(),
+                rollout_path: PathBuf::from("rollout.jsonl"),
+                minimum_next_ordinal: 10,
+                minimum_next_byte_offset: 1_500_000_000,
+            }],
+            ..Default::default()
+        };
+        assert!(runtime_verification_timeout(Some(&large_rebuild)) >= Duration::from_secs(7 * 60));
     }
 
     #[test]
