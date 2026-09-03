@@ -20,6 +20,10 @@ static CODEX_RUNTIME_REFRESH_LOCK: Lazy<tokio::sync::Mutex<()>> =
 const CODEX_RUNTIME_REFRESH_EVENT: &str = "codex-runtime-refresh-progress";
 const CODEX_GRACEFUL_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 const CODEX_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
+/// renderer 兼容层通过 1.5s 定时注入收敛。验证时必须等待它真正收敛，
+/// 否则会在补丁尚未挂载时误报 `codex_history_compatibility_not_ready`，
+/// 导致新版本地历史目录和全 Provider 查询被判定为未修复。
+const CODEX_RENDERER_PATCH_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct RawCodexRuntimeProcess {
@@ -152,6 +156,12 @@ trait CodexRuntimeRefreshOperations {
     ) -> Result<paginated_history::PaginatedHistoryRepairOutcome, String>;
     async fn apply_ccsm_config(&mut self) -> Result<i64, String>;
     async fn launch_codex(&mut self) -> Result<(), String>;
+    /// 安装/探测 Codex renderer 兼容层。默认走真实 CDP 注入；测试可注入收敛序列。
+    async fn unlock_renderer_compatibility(
+        &mut self,
+    ) -> Result<crate::codex_desktop::CodexModelPickerUnlockResult, String> {
+        crate::codex_desktop::unlock_codex_model_picker().await
+    }
     async fn verify_fresh_runtime(
         &mut self,
         config_written_at_ms: i64,
@@ -813,26 +823,11 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
                         last_core_error =
                             Some("codex_paginated_history_projection_not_caught_up".to_string());
                     } else {
-                        return match crate::codex_desktop::unlock_codex_model_picker().await {
-                            Ok(result) => runtime_verification_result(
-                                true,
-                                true,
-                                result.injected,
-                                result.all_provider_history_patched,
-                                result.history_refresh_requested,
-                                Some(result.message),
-                            ),
-                            Err(error) => runtime_verification_result(
-                                true,
-                                true,
-                                false,
-                                false,
-                                false,
-                                Some(format!(
-                                    "codex_history_compatibility_install_failed: {error}"
-                                )),
-                            ),
-                        };
+                        return poll_renderer_compatibility(
+                            CODEX_RENDERER_PATCH_READY_TIMEOUT,
+                            CodexRendererProbe { operations: self },
+                        )
+                        .await;
                     }
                 }
             }
@@ -843,6 +838,73 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+    }
+}
+
+/// 可注入的 renderer 兼容层探测接口，供 `poll_renderer_compatibility` 使用；
+/// 生产实现包装 `SystemCodexRuntimeRefreshOperations`，测试用 mock 提供收敛序列。
+trait RendererCompatibilityProbe {
+    async fn probe(&mut self)
+        -> Result<crate::codex_desktop::CodexModelPickerUnlockResult, String>;
+}
+
+/// 生产探测包装：把真实 CCSM 操作借用给轮询器，避免闭包捕获 `&mut self`
+/// 返回值借用外部状态的限制。
+struct CodexRendererProbe<'a, 'b> {
+    operations: &'a mut SystemCodexRuntimeRefreshOperations<'b>,
+}
+
+impl RendererCompatibilityProbe for CodexRendererProbe<'_, '_> {
+    async fn probe(
+        &mut self,
+    ) -> Result<crate::codex_desktop::CodexModelPickerUnlockResult, String> {
+        self.operations.unlock_renderer_compatibility().await
+    }
+}
+
+/// 轮询 renderer 兼容层，直到全 Provider 历史查询补丁真正收敛或超时。
+///
+/// `unlock_codex_model_picker` 每次只读一份补丁快照；补丁通过 1.5s 定时注入逐步收敛，
+/// 单纯读取一次会在补丁尚未挂载时报 `codex_history_compatibility_not_ready`。这里在
+/// 收敛窗口内重复探测，收敛即判定 Ready，超时才降级为 CompletedWithWarnings。
+async fn poll_renderer_compatibility<P>(
+    timeout: Duration,
+    mut probe: P,
+) -> Result<CodexRuntimeVerification, String>
+where
+    P: RendererCompatibilityProbe,
+{
+    let deadline = Instant::now() + timeout;
+    #[allow(unused_assignments)]
+    let mut last_message = None;
+    loop {
+        match probe.probe().await {
+            Ok(result) => {
+                last_message = Some(result.message);
+                if result.injected
+                    && result.all_provider_history_patched
+                    && result.history_refresh_requested
+                {
+                    return runtime_verification_result(true, true, true, true, true, None);
+                }
+            }
+            Err(error) => {
+                last_message = Some(format!(
+                    "codex_history_compatibility_install_failed: {error}"
+                ));
+            }
+        }
+        if Instant::now() >= deadline {
+            return runtime_verification_result(
+                true,
+                true,
+                false,
+                false,
+                false,
+                last_message.or_else(|| Some("codex_history_compatibility_not_ready".to_string())),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -1064,6 +1126,108 @@ mod tests {
 
         assert!(runtime_verification_result(true, false, true, true, true, None).is_err());
         assert!(runtime_verification_result(false, true, true, true, true, None).is_err());
+    }
+
+    fn renderer_result(
+        injected: bool,
+        all_provider_history_patched: bool,
+        history_refresh_requested: bool,
+        message: String,
+    ) -> crate::codex_desktop::CodexModelPickerUnlockResult {
+        crate::codex_desktop::CodexModelPickerUnlockResult {
+            attempted_ports: vec![9229],
+            debug_port: Some(9229),
+            target_id: Some("codex-main".to_string()),
+            target_title: Some("Codex".to_string()),
+            target_url: Some("app://-/index.html".to_string()),
+            model_count: 1,
+            model_names: vec!["gpt-5.6-sol".to_string()],
+            injected,
+            launched: false,
+            codex_executable: None,
+            history_sync_requested: true,
+            history_catalog_complete: Some(true),
+            history_catalog_count: Some(1308),
+            all_provider_history_patched,
+            history_refresh_requested,
+            message,
+        }
+    }
+
+    struct MockRendererProbe {
+        responses: VecDeque<crate::codex_desktop::CodexModelPickerUnlockResult>,
+        fallback: crate::codex_desktop::CodexModelPickerUnlockResult,
+    }
+
+    impl RendererCompatibilityProbe for MockRendererProbe {
+        async fn probe(
+            &mut self,
+        ) -> Result<crate::codex_desktop::CodexModelPickerUnlockResult, String> {
+            Ok(self
+                .responses
+                .pop_front()
+                .unwrap_or_else(|| self.fallback.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn renderer_patch_poll_waits_for_convergence_instead_of_early_not_ready() {
+        let verification = poll_renderer_compatibility(
+            Duration::from_millis(1500),
+            MockRendererProbe {
+                responses: VecDeque::from([
+                    renderer_result(true, false, false, "patch not installed yet".to_string()),
+                    renderer_result(true, false, false, "patch still converging".to_string()),
+                    renderer_result(true, true, true, "all-provider history patched".to_string()),
+                ]),
+                fallback: renderer_result(
+                    true,
+                    true,
+                    true,
+                    "all-provider history patched".to_string(),
+                ),
+            },
+        )
+        .await
+        .expect("the renderer patch should converge before the timeout");
+
+        assert_eq!(verification.outcome, CodexRuntimeRefreshOutcome::Completed);
+        assert_eq!(
+            verification.renderer_compatibility_status,
+            CodexRuntimeCheckStatus::Ready
+        );
+        assert!(verification.renderer_compatibility_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn renderer_patch_poll_degrades_to_warning_when_not_converged_by_timeout() {
+        let verification = poll_renderer_compatibility(
+            Duration::from_millis(130),
+            MockRendererProbe {
+                responses: VecDeque::new(),
+                fallback: renderer_result(
+                    true,
+                    false,
+                    false,
+                    "renderer request client was not found".to_string(),
+                ),
+            },
+        )
+        .await
+        .expect("a non-converged renderer returns a warning result");
+
+        assert_eq!(
+            verification.outcome,
+            CodexRuntimeRefreshOutcome::CompletedWithWarnings
+        );
+        assert_eq!(
+            verification.renderer_compatibility_status,
+            CodexRuntimeCheckStatus::Warning
+        );
+        assert_eq!(
+            verification.renderer_compatibility_message.as_deref(),
+            Some("renderer request client was not found")
+        );
     }
 
     #[derive(Default)]
