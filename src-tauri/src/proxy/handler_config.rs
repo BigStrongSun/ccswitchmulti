@@ -53,6 +53,9 @@ pub fn codex_stream_usage_event_filter(data: &str) -> bool {
     // 是否进入 JSON 解析，不改变下游协议内容。
     data.contains("\"response.completed\"")
         || data.contains("\"response.done\"")
+        || data.contains("\"response.failed\"")
+        || data.contains("\"response.error\"")
+        || data.contains("\"error\"")
         || data.contains("\"usage\"")
 }
 

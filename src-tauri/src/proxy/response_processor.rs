@@ -29,6 +29,25 @@ use std::{
 use tokio::sync::Mutex;
 
 // ============================================================================
+
+fn codex_sse_failure_summary(events: &[Value]) -> Option<String> {
+    events.iter().find_map(|event| {
+        let kind = event.get("type").and_then(Value::as_str)?;
+        if !matches!(kind, "error" | "response.error" | "response.failed") { return None; }
+        let code = event.pointer("/response/error/code")
+            .or_else(|| event.pointer("/error/code"))
+            .or_else(|| event.get("code"))
+            .and_then(Value::as_str).unwrap_or("upstream_error");
+        let safe_code = match code {
+            "invalid_prompt" | "invalid_encrypted_content" | "context_length_exceeded"
+            | "rate_limit_exceeded" | "server_error" | "insufficient_quota"
+            | "bio_policy" | "cyber_policy" | "misalignment_policy_violation"
+            | "upstream_terminal_event_missing" => code,
+            _ => "upstream_error",
+        };
+        Some(format!("SSE {kind}: {safe_code}; HTTP success does not imply stream success; see codex-router.log / scoped error capture"))
+    })
+}
 // 响应头处理
 // ============================================================================
 
@@ -528,6 +547,14 @@ pub(crate) fn create_usage_collector(
         start_time,
         parser_config.stream_event_filter,
         move |events, first_token_ms| {
+            let stream_error = (app_type_str == "codex")
+                .then(|| codex_sse_failure_summary(&events))
+                .flatten();
+            let status_code = if stream_error.is_some() && (200..300).contains(&status_code) {
+                502
+            } else {
+                status_code
+            };
             if let Some(usage) = stream_parser(&events) {
                 let model = model_extractor(&events, &fallback_model);
                 let latency_ms = start_time.elapsed().as_millis() as u64;
@@ -552,6 +579,7 @@ pub(crate) fn create_usage_collector(
                         true, // is_streaming
                         status_code,
                         Some(session_id),
+                        stream_error,
                     )
                     .await;
                 });
@@ -578,6 +606,7 @@ pub(crate) fn create_usage_collector(
                         true, // is_streaming
                         status_code,
                         Some(session_id),
+                        stream_error,
                     )
                     .await;
                 });
@@ -631,6 +660,7 @@ fn spawn_log_usage(
             is_streaming,
             status_code,
             Some(session_id),
+            None,
         )
         .await;
     });
@@ -664,6 +694,7 @@ async fn log_usage_internal(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    error_message: Option<String>,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -703,6 +734,7 @@ async fn log_usage_internal(
         session_id,
         None, // provider_type
         is_streaming,
+        error_message,
     ) {
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }
@@ -826,12 +858,15 @@ pub fn create_logged_passthrough_stream_with_options(
                         while let Some(event_text) = take_sse_block(&mut buffer) {
                             if !event_text.trim().is_empty() {
                                 // 提取 data 部分；只有 usage collector 存在时才解析 JSON。
-                                for line in event_text.lines() {
-                                    if let Some(data) = strip_sse_field(line, "data") {
+                                let data = event_text.lines()
+                                    .filter_map(|line| strip_sse_field(line, "data"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                    if !data.is_empty() {
                                         if data.trim() != "[DONE]" {
                                             let collected = match &collector {
-                                                Some(c) if c.should_collect(data) => {
-                                                    match serde_json::from_str::<Value>(data) {
+                                                Some(c) if c.should_collect(&data) => {
+                                                    match serde_json::from_str::<Value>(&data) {
                                                         Ok(json_value) => {
                                                             c.push(json_value).await;
                                                             true
@@ -849,7 +884,6 @@ pub fn create_logged_passthrough_stream_with_options(
                                             log::debug!("[{tag}] <<< SSE: [DONE]");
                                         }
                                     }
-                                }
                             }
                         }
                     }
@@ -929,6 +963,105 @@ fn format_headers(headers: &HeaderMap) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn codex_failed_multiline_stream_is_collected() {
+        let stored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let callback_store = stored.clone();
+        let collector = SseUsageCollector::new(
+            std::time::Instant::now(),
+            Some(crate::proxy::handler_config::codex_stream_usage_event_filter),
+            move |events, _| {
+                *callback_store.lock().unwrap() = events;
+            },
+        );
+        let bytes = Bytes::from_static(b"event: response.failed\ndata: {\"type\":\"response.failed\",\ndata: \"response\":{\"error\":{\"code\":\"invalid_prompt\"}}}\n\n");
+        let upstream = futures::stream::iter(vec![Ok(bytes.clone())]);
+        let output = create_logged_passthrough_stream_with_options(
+            upstream,
+            "test",
+            Some(collector),
+            StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 0,
+            },
+            None,
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert_eq!(output[0].as_ref().unwrap(), &bytes);
+        let events = stored.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(codex_sse_failure_summary(&events)
+            .unwrap()
+            .contains("invalid_prompt"));
+    }
+
+    #[test]
+    fn codex_failed_stream_retains_reported_usage() {
+        let events = [
+            serde_json::json!({"type":"response.failed","response":{"id":"resp-failed","model":"model-a","error":{"code":"server_error"},"usage":{"input_tokens":10,"output_tokens":5}}}),
+        ];
+        let usage = TokenUsage::from_codex_stream_events_auto(&events)
+            .expect("failed responses can still report billable usage");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.model.as_deref(), Some("model-a"));
+        assert_eq!(usage.message_id.as_deref(), Some("resp-failed"));
+    }
+    #[tokio::test]
+    async fn codex_sse_failure_is_persisted_with_usage_and_session() -> Result<(), AppError> {
+        let db = Arc::new(Database::memory().unwrap());
+        insert_provider(&db, "failed-provider", "codex", ProviderMeta::default()).unwrap();
+        let state = build_state(db.clone());
+        let error = codex_sse_failure_summary(&[
+            serde_json::json!({"type":"response.failed","response":{"error":{"code":"invalid_prompt","message":"private"}}}),
+        ]);
+        log_usage_internal(
+            &state,
+            "failed-provider",
+            "codex",
+            "model",
+            "model",
+            "model",
+            TokenUsage {
+                output_tokens: 5,
+                ..TokenUsage::default()
+            },
+            10,
+            None,
+            true,
+            502,
+            Some("task-session".to_string()),
+            error,
+        )
+        .await;
+        let connection = crate::database::lock_conn!(db.conn);
+        let row: (u16, String, u32, String) = connection.query_row(
+            "SELECT status_code, error_message, output_tokens, session_id FROM proxy_request_logs WHERE provider_id='failed-provider'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+        assert_eq!(row.0, 502);
+        assert!(row.1.contains("invalid_prompt"));
+        assert!(!row.1.contains("private"));
+        assert_eq!(row.2, 5);
+        assert_eq!(row.3, "task-session");
+        Ok(())
+    }
+    #[test]
+    fn codex_sse_failure_reaches_usage_filter_with_safe_summary() {
+        let payload = serde_json::json!({"type":"response.failed","response":{"error":{"code":"invalid_prompt","message":"sk-private-prompt"}}});
+        assert!(
+            crate::proxy::handler_config::codex_stream_usage_event_filter(&payload.to_string())
+        );
+        let summary = super::codex_sse_failure_summary(&[payload])
+            .expect("stream rejection is not HTTP success");
+        assert!(summary.contains("invalid_prompt"));
+        assert!(!summary.contains("sk-private-prompt"));
+        assert!(super::codex_sse_failure_summary(&[
+            serde_json::json!({"type":"response.completed"})
+        ])
+        .is_none());
+    }
     use super::*;
     use crate::database::Database;
     use crate::error::AppError;
@@ -1210,6 +1343,7 @@ mod tests {
             false,
             200,
             None,
+            None,
         )
         .await;
 
@@ -1279,6 +1413,7 @@ mod tests {
             None,
             false,
             200,
+            None,
             None,
         )
         .await;
@@ -1359,6 +1494,7 @@ mod tests {
             None,
             false,
             200,
+            None,
             None,
         )
         .await;

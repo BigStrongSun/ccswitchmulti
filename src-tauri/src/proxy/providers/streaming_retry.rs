@@ -273,6 +273,19 @@ fn log_native_responses_sse_error(context: &StreamLogContext, block: &[u8], atte
     let Some(diagnostic) = native_responses_sse_error_diagnostic(block) else {
         return;
     };
+    if let Some(payload) = raw_responses_sse_payload(block) {
+        let error = payload
+            .pointer("/response/error")
+            .or_else(|| payload.get("error"))
+            .unwrap_or(&payload);
+        crate::proxy::codex_error_capture::capture_at(
+            &crate::config::get_app_config_dir(),
+            &context.session_id,
+            &diagnostic.event_name,
+            error,
+            chrono::Utc::now().timestamp(),
+        );
+    }
     crate::proxy::codex_router_log::append_event(
         "upstream_sse_error",
         &[
@@ -287,6 +300,50 @@ fn log_native_responses_sse_error(context: &StreamLogContext, block: &[u8], atte
             ("attempt", attempt.to_string()),
         ],
     );
+}
+
+fn native_responses_client_failure(block: Bytes, response_id: Option<&str>) -> Bytes {
+    if !matches!(
+        raw_responses_sse_event_name(&block).as_deref(),
+        Some("error" | "response.error")
+    ) {
+        return block;
+    }
+    let Some(payload) = raw_responses_sse_payload(&block) else {
+        return block;
+    };
+    let original = payload
+        .pointer("/response/error")
+        .or_else(|| payload.get("error"))
+        .unwrap_or(&payload);
+    if !original.is_object() {
+        return block;
+    }
+    let mut error = serde_json::Map::new();
+    for field in ["type", "code", "message", "param"] {
+        if let Some(value) = original.get(field) {
+            error.insert(field.to_string(), value.clone());
+        }
+    }
+    let mut response = json!({"status":"failed","error":error});
+    for field in ["id", "model", "usage"] {
+        if let Some(value) = payload
+            .get("response")
+            .and_then(|response| response.get(field))
+        {
+            response[field] = value.clone();
+        }
+    }
+    if let Some(id) = response_id {
+        if response.get("id").and_then(Value::as_str).is_none() {
+            response["id"] = json!(id);
+        }
+    }
+    let mut failure = json!({"type":"response.failed","response":response});
+    if let Some(sequence) = payload.get("sequence_number") {
+        failure["sequence_number"] = sequence.clone();
+    }
+    Bytes::from(format!("event: response.failed\ndata: {failure}\n\n"))
 }
 
 fn raw_sse_block_is_comment(block: &[u8]) -> bool {
@@ -336,7 +393,7 @@ fn native_responses_protocol_error_sse(code: &str, message: &str) -> Bytes {
 
 /// 原生 Codex Responses 的安全 SSE 重连。
 ///
-/// 与 Anthropic 转换路径不同，这里不重写协议字节。只有 `response.created` 和
+/// 除上游错误终态兼容转换外保留协议字节。只有 `response.created` 和
 /// SSE 注释已被发出时，重新执行同一上游请求仍可对客户端透明；任何其它事件
 /// （包括 malformed block）都可能已经进入 Codex 持久化/工具状态机，立即封死
 /// 重放路径。这样中途异常只会作为一次普通断流交给 Codex，而不会造成重复调用。
@@ -358,6 +415,7 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
     async_stream::stream! {
         let mut attempt = 0;
         let mut created_forwarded = false;
+        let mut response_id: Option<String> = None;
         let mut semantic_output_forwarded = false;
         let mut evidence = NativeResponsesEvidence::default();
         let mut current = Some(initial);
@@ -435,6 +493,7 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                         }
                         (Some("response.created"), _) => {
                             created_forwarded = true;
+                            response_id = payload.as_ref().and_then(|value| value.pointer("/response/id")).and_then(Value::as_str).map(str::to_string);
                             yield Ok(block);
                         }
                         (None, _) if raw_sse_block_is_comment(&block) => {
@@ -446,9 +505,11 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                             }
                             match disposition {
                                 NativeResponsesTerminalDisposition::Completed
-                                | NativeResponsesTerminalDisposition::Incomplete
-                                | NativeResponsesTerminalDisposition::Failed => {
+                                | NativeResponsesTerminalDisposition::Incomplete => {
                                     yield Ok(block);
+                                }
+                                NativeResponsesTerminalDisposition::Failed => {
+                                    yield Ok(native_responses_client_failure(block, response_id.as_deref()));
                                 }
                                 NativeResponsesTerminalDisposition::ProtocolError {
                                     code,
@@ -816,12 +877,59 @@ pub fn create_resilient_anthropic_sse_stream_from_responses(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_error_normalization_retains_response_metadata() {
+        let payload = json!({"type":"response.error","response":{"id":"resp-upstream","model":"model-a","usage":{"input_tokens":10,"output_tokens":5},"error":{"code":"server_error","message":"failed"}}});
+        let block = Bytes::from(format!("event: response.error\ndata: {payload}\n\n"));
+        let normalized = native_responses_client_failure(block, Some("resp-created"));
+        let result = raw_responses_sse_payload(&normalized).unwrap();
+        assert_eq!(result["response"]["id"], "resp-upstream");
+        assert_eq!(result["response"]["model"], "model-a");
+        assert_eq!(result["response"]["usage"]["input_tokens"], 10);
+    }
     use futures::stream;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn sse(event: &str, data: Value) -> String {
         format!("event: {event}\ndata: {data}\n\n")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_error_preserves_cause_in_client_terminal_without_proxy_retry() {
+        for (event, payload) in [
+            (
+                "error",
+                json!({"type":"error","error":{"type":"invalid_request_error","code":"invalid_prompt","message":"request rejected","param":"input"}}),
+            ),
+            (
+                "response.error",
+                json!({"type":"response.error","code":"server_error","message":"temporarily unavailable","param":null}),
+            ),
+        ] {
+            let (reconnector, calls) = scripted_reconnector(vec![]);
+            let first = ok_chunks(&[created().as_str(), sse(event, payload.clone()).as_str()]);
+            let out = collect(create_resilient_responses_sse_stream(
+                first,
+                Some(reconnector),
+            ))
+            .await;
+            let failed = out
+                .split("\n\n")
+                .find(|block| block.starts_with("event: response.failed"))
+                .expect(
+                    "Codex needs a response.failed terminal instead of an unhandled generic error",
+                );
+            let data: Value = serde_json::from_str(failed.split_once("data: ").unwrap().1).unwrap();
+            let original = payload.get("error").unwrap_or(&payload);
+            assert_eq!(data["response"]["error"]["code"], original["code"]);
+            assert_eq!(data["response"]["error"]["message"], original["message"]);
+            assert_eq!(data["response"]["error"]["param"], original["param"]);
+            assert_eq!(data["response"]["status"], "failed");
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(!out.contains("event: response.completed"));
+        }
     }
 
     fn created() -> String {
@@ -985,6 +1093,50 @@ mod tests {
         assert_eq!(out.matches("event: response.created").count(), 1);
         assert!(out.contains("hello"));
         assert!(out.contains("event: response.completed"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_clean_eof_before_content_recovers() {
+        let retry_body = [created(), text_delta("recovered"), completed()].concat();
+        let (reconnector, calls) =
+            scripted_reconnector(vec![Ok(streamed_response(&[&retry_body]))]);
+        let out = collect(create_resilient_responses_sse_stream(
+            ok_chunks(&[&created()]),
+            Some(reconnector),
+        ))
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(out.matches("event: response.created").count(), 1);
+        assert!(out.contains("recovered"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_transport_retry_budget_is_bounded() {
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let out = collect(create_resilient_responses_sse_stream(
+            chunks_then_error(&[&created()]),
+            Some(reconnector),
+        ))
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        assert!(out.contains("自动重连已耗尽"));
+        assert!(!out.contains("event: response.completed"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_failed_terminal_is_preserved_byte_for_byte() {
+        let failure = sse(
+            "response.failed",
+            json!({"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"try again later"}}}),
+        );
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let out = collect(create_resilient_responses_sse_stream(
+            ok_chunks(&[&failure]),
+            Some(reconnector),
+        ))
+        .await;
+        assert_eq!(out, failure);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]

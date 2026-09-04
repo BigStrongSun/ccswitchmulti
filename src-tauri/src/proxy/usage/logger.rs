@@ -459,6 +459,7 @@ impl<'a> UsageLogger<'a> {
         session_id: Option<String>,
         provider_type: Option<String>,
         is_streaming: bool,
+        error_message: Option<String>,
     ) -> Result<(), AppError> {
         let pricing = self.get_model_pricing(&pricing_model)?;
 
@@ -490,7 +491,7 @@ impl<'a> UsageLogger<'a> {
             latency_ms,
             first_token_ms,
             status_code,
-            error_message: None,
+            error_message,
             session_id,
             provider_type,
             is_streaming,
@@ -574,6 +575,7 @@ mod tests {
             None,
             Some("claude".to_string()),
             false,
+            None,
         )?;
 
         // 验证记录已插入

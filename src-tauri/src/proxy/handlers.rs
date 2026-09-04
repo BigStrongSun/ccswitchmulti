@@ -5742,6 +5742,7 @@ async fn log_usage(
         session_id,
         None, // provider_type
         is_streaming,
+        None,
     ) {
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }

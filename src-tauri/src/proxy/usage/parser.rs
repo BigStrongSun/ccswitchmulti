@@ -411,7 +411,10 @@ impl TokenUsage {
         // input_tokens/output_tokens 而被误判为“没有 usage”，导致新模型统计为 0。
         for event in events {
             if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
-                if matches!(event_type, "response.completed" | "response.done") {
+                if matches!(
+                    event_type,
+                    "response.completed" | "response.done" | "response.failed"
+                ) {
                     if let Some(response) = event.get("response") {
                         log::debug!("[Codex] 找到 {event_type} 响应事件");
                         if let Some(usage) = Self::from_codex_response_auto(response) {
