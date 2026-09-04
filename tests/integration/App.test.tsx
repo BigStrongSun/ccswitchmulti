@@ -774,8 +774,13 @@ describe("App integration with MSW", () => {
         ),
       );
       fireEvent.click(screen.getByText("open-multirouter-entry"));
-      const dialog = await screen.findByRole("dialog");
-      expect(within(dialog).getByText("My real router")).toBeInTheDocument();
+      // Startup notices may still be open while the picker refreshes providers.
+      const dialog = await screen.findByRole("dialog", {
+        name: "配置多路模型",
+      });
+      expect(
+        await within(dialog).findByText("My real router"),
+      ).toBeInTheDocument();
       expect(within(dialog).queryByText("Kimi protocol facade")).toBeNull();
     } finally {
       projection.mockRestore();

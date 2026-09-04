@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 v29 CI 对话框定位竞态
+
+- CI 33867296455 的 Frontend 唯一失败为 App 的 facade 排除测试：findByRole(dialog) 在旧方案选择器异步刷新前命中 firstRunNotice，失败 DOM 的标题/正文/按钮均明确指向首次启动提示，不是 Kimi 分类回归。Release 33867332049 已取消，尚无公开 v29 release。
+- 修正测试为按可访问名称“配置多路模型”等待目标弹窗，再等待 My real router 出现，最后维持 facade 不出现的断言；不修改产品代码、不隐藏真实启动提示、不放宽分类断言。App 21/21、全量168 files/1372 tests、TypeScript、Prettier、diff与严格UTF-8/noBOM/noFFFD通过，独立复审无问题；远端门禁继续执行。
+- v3.19.2-29 保持指向 c7a6709a，不删除或移动 tag。仅当修正后的 main CI 全绿、且与 tag 的差异确认只有测试和 memory 时，才重跑原 tag Release；发布产物不包含测试修正，但产品源码与 r10 已安装验收版一致。必须分别记录 main CI 与原 tag Release 结果。
+
 ## 2026-09-04 r10 最终安装验收与待发布状态
 
 - 最终产品源码097f2ce2，辅助程序6m50、renderer14.82s、主程序8m32及NSIS签名导出成功。installer SHA256 6BA27937496C4D338CF05B8C9D057BD72C6A4463301A08DACD913F52FF3EA0D3；安装EXE D73F12AA6F2C5E83D876237A53879E99761BBE57BA7D0FF607D74322B5EBD832。安全事务ccsm-20260904-191359-bed85d5d955b40e9b08659dd448b3811 Success，PID43032，Error/RollbackError均null；CDP9337仅loopback。
