@@ -1115,6 +1115,7 @@ impl RequestForwarder {
                     });
                 }
                 Err(error) => {
+                    crate::codex_egress_timezone::notify_proxy_failure(app_type_str, &error);
                     self.record_codex_pool_attempt(provider, classify_codex_pool_attempt(&error))
                         .await;
                     let category = self.categorize_proxy_error(&error, provider);
@@ -1416,6 +1417,7 @@ impl RequestForwarder {
                     });
                 }
                 Err(e) => {
+                    crate::codex_egress_timezone::notify_proxy_failure(app_type_str, &e);
                     self.record_codex_pool_attempt(provider, classify_codex_pool_attempt(&e))
                         .await;
                     // 检测是否需要触发整流器（仅 Claude/ClaudeAuth 供应商）

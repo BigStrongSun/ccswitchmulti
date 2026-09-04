@@ -1,8 +1,12 @@
 use super::codex_egress_timezone::{
-    build_detection_from_payloads, classify_timezone_match, is_non_public_ip, mask_ip,
-    parse_cloudflare_trace, resolve_launch_timezone, validate_iana_timezone,
-    validate_timezone_settings, CodexTimezoneMatch,
+    apply_automatic_detection, automatic_probe_cooldown_secs, build_detection_from_payloads,
+    classify_timezone_match, is_automatic_probe_due, is_non_public_ip, mask_ip,
+    monitor_status_from_parts, parse_cloudflare_trace, resolve_launch_timezone,
+    should_run_automatic_probe, should_trigger_probe_for_proxy_error, validate_iana_timezone,
+    validate_timezone_settings, AutomaticDetectionOutcome, CodexEgressMonitorRuntime,
+    CodexEgressMonitorState, CodexEgressProbeTrigger, CodexTimezoneMatch,
 };
+use crate::proxy::ProxyError;
 use crate::settings::{AppSettings, CodexEgressTimezoneMode, CodexEgressTimezoneSettings};
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -84,6 +88,13 @@ fn manual_timezone_validation_uses_the_real_iana_database() {
     assert!(validate_timezone_settings(&settings).is_err());
     settings.manual_timezone = Some("America/Los_Angeles".to_string());
     assert!(validate_timezone_settings(&settings).is_ok());
+    settings.mode = CodexEgressTimezoneMode::Auto;
+    settings.detected_timezone = Some("Asia/Taipei".to_string());
+    settings.monitor_interval_minutes = 1;
+    assert!(validate_timezone_settings(&settings).is_err());
+    settings.monitor_interval_minutes = 15;
+    settings.detected_timezone = None;
+    assert!(validate_timezone_settings(&settings).is_ok());
 }
 
 #[test]
@@ -113,4 +124,247 @@ fn detection_report_keeps_fake_dns_diagnostic_but_compares_the_real_egress_zone(
     assert_eq!(report.timezone_match, CodexTimezoneMatch::OffsetMatch);
     assert_eq!(report.current_utc_offset, "+08:00");
     assert_eq!(report.egress_utc_offset, "+08:00");
+}
+
+#[test]
+fn automatic_monitor_only_reacts_to_codex_transport_failures() {
+    assert!(should_trigger_probe_for_proxy_error(
+        "codex",
+        &ProxyError::Timeout("upstream first byte".to_string())
+    ));
+    assert!(should_trigger_probe_for_proxy_error(
+        "codex",
+        &ProxyError::ForwardFailed("TLS handshake failed".to_string())
+    ));
+    assert!(!should_trigger_probe_for_proxy_error(
+        "claude",
+        &ProxyError::Timeout("upstream first byte".to_string())
+    ));
+    assert!(!should_trigger_probe_for_proxy_error(
+        "codex",
+        &ProxyError::AuthError("expired token".to_string())
+    ));
+    assert!(!should_trigger_probe_for_proxy_error(
+        "codex",
+        &ProxyError::UpstreamError {
+            status: 429,
+            body: Some("rate limited".to_string()),
+        }
+    ));
+}
+
+#[test]
+fn automatic_monitor_uses_staleness_and_cooldown_without_probing_every_request() {
+    let mut settings = CodexEgressTimezoneSettings {
+        mode: CodexEgressTimezoneMode::Auto,
+        detected_at: Some(1_000),
+        monitor_interval_minutes: 15,
+        ..CodexEgressTimezoneSettings::default()
+    };
+
+    assert!(!is_automatic_probe_due(&settings, 1_899, None));
+    assert!(is_automatic_probe_due(&settings, 1_901, None));
+    assert!(!is_automatic_probe_due(&settings, 2_000, Some(1_950)));
+    assert!(is_automatic_probe_due(&settings, 2_041, Some(1_950)));
+
+    settings.mode = CodexEgressTimezoneMode::Off;
+    assert!(!is_automatic_probe_due(&settings, 10_000, None));
+}
+
+#[test]
+fn network_events_can_probe_fresh_cache_but_still_respect_global_cooldown() {
+    let settings = CodexEgressTimezoneSettings {
+        mode: CodexEgressTimezoneMode::Auto,
+        detected_at: Some(1_950),
+        monitor_interval_minutes: 15,
+        ..CodexEgressTimezoneSettings::default()
+    };
+
+    assert!(should_run_automatic_probe(
+        &settings,
+        CodexEgressProbeTrigger::ProxyFailure,
+        2_000,
+        None,
+    ));
+    assert!(!should_run_automatic_probe(
+        &settings,
+        CodexEgressProbeTrigger::Periodic,
+        2_000,
+        None,
+    ));
+    assert!(!should_run_automatic_probe(
+        &settings,
+        CodexEgressProbeTrigger::NetworkResume,
+        2_000,
+        Some(1_950),
+    ));
+}
+
+#[test]
+fn repeated_probe_failures_back_off_without_exceeding_thirty_minutes() {
+    assert_eq!(automatic_probe_cooldown_secs(0), 90);
+    assert_eq!(automatic_probe_cooldown_secs(1), 90);
+    assert_eq!(automatic_probe_cooldown_secs(2), 180);
+    assert_eq!(automatic_probe_cooldown_secs(20), 1_800);
+}
+
+#[test]
+fn changed_egress_timezone_marks_running_codex_for_safe_refresh() {
+    let mut settings = CodexEgressTimezoneSettings {
+        mode: CodexEgressTimezoneMode::Auto,
+        detected_timezone: Some("Asia/Taipei".to_string()),
+        last_applied_timezone: Some("Asia/Taipei".to_string()),
+        detected_egress_ip: Some("203.0.113.\u{2026}".to_string()),
+        ..CodexEgressTimezoneSettings::default()
+    };
+    let detection = build_detection_from_payloads(
+        "fl=29f421\nip=8.8.8.8\nloc=US\ncolo=LAX\n",
+        r#"{
+          "success": true,
+          "country_code": "US",
+          "region": "California",
+          "city": "Los Angeles",
+          "timezone": {"id": "America/Los_Angeles", "utc": "-07:00"}
+        }"#,
+        vec!["198.18.0.14".to_string()],
+        "Asia/Shanghai",
+        2_000,
+        "system_or_transparent",
+    )
+    .expect("valid changed egress");
+
+    let outcome = apply_automatic_detection(
+        &mut settings,
+        &detection,
+        CodexEgressProbeTrigger::ProxyFailure,
+        true,
+    );
+
+    assert_eq!(outcome, AutomaticDetectionOutcome::RestartRequired);
+    assert_eq!(
+        settings.detected_timezone.as_deref(),
+        Some("America/Los_Angeles")
+    );
+    assert_eq!(settings.detected_at, Some(2_000));
+    assert_eq!(
+        settings.last_probe_trigger.as_deref(),
+        Some("proxy_failure")
+    );
+}
+
+#[test]
+fn changed_ip_in_same_timezone_does_not_request_a_codex_restart() {
+    let mut settings = CodexEgressTimezoneSettings {
+        mode: CodexEgressTimezoneMode::Auto,
+        detected_timezone: Some("Asia/Taipei".to_string()),
+        last_applied_timezone: Some("Asia/Taipei".to_string()),
+        detected_egress_ip: Some("203.0.113.\u{2026}".to_string()),
+        ..CodexEgressTimezoneSettings::default()
+    };
+    let detection = build_detection_from_payloads(
+        "fl=29f421\nip=8.8.8.8\nloc=TW\ncolo=TPE\n",
+        r#"{
+          "success": true,
+          "country_code": "TW",
+          "region": "Taipei",
+          "city": "Taipei",
+          "timezone": {"id": "Asia/Taipei", "utc": "+08:00"}
+        }"#,
+        Vec::new(),
+        "Asia/Shanghai",
+        2_000,
+        "system_or_transparent",
+    )
+    .expect("valid same-zone egress");
+
+    assert_eq!(
+        apply_automatic_detection(
+            &mut settings,
+            &detection,
+            CodexEgressProbeTrigger::Periodic,
+            true,
+        ),
+        AutomaticDetectionOutcome::Updated
+    );
+}
+
+#[test]
+fn restart_requirement_compares_against_persisted_applied_timezone() {
+    let mut settings = CodexEgressTimezoneSettings {
+        mode: CodexEgressTimezoneMode::Auto,
+        // A previous monitor run already persisted the new detection before CCSM
+        // restarted, while the still-running Codex process retained the old TZ.
+        detected_timezone: Some("America/Los_Angeles".to_string()),
+        last_applied_timezone: Some("Asia/Taipei".to_string()),
+        ..CodexEgressTimezoneSettings::default()
+    };
+    let detection = build_detection_from_payloads(
+        "fl=29f421\nip=8.8.8.8\nloc=US\ncolo=LAX\n",
+        r#"{
+          "success": true,
+          "country_code": "US",
+          "region": "California",
+          "city": "Los Angeles",
+          "timezone": {"id": "America/Los_Angeles", "utc": "-07:00"}
+        }"#,
+        Vec::new(),
+        "Asia/Shanghai",
+        2_000,
+        "system_or_transparent",
+    )
+    .expect("valid changed egress");
+
+    assert_eq!(
+        apply_automatic_detection(
+            &mut settings,
+            &detection,
+            CodexEgressProbeTrigger::Startup,
+            true,
+        ),
+        AutomaticDetectionOutcome::RestartRequired
+    );
+}
+
+#[test]
+fn monitor_status_exposes_restart_requirement_and_next_automatic_check() {
+    let settings = CodexEgressTimezoneSettings {
+        mode: CodexEgressTimezoneMode::Auto,
+        detected_timezone: Some("Asia/Taipei".to_string()),
+        detected_at: Some(2_000),
+        monitor_interval_minutes: 15,
+        last_probe_trigger: Some("proxy_failure".to_string()),
+        ..CodexEgressTimezoneSettings::default()
+    };
+    let runtime = CodexEgressMonitorRuntime {
+        restart_required: true,
+        ..CodexEgressMonitorRuntime::default()
+    };
+
+    let status = monitor_status_from_parts(&settings, &runtime, 2_100);
+
+    assert_eq!(status.state, CodexEgressMonitorState::RestartRequired);
+    assert_eq!(status.next_check_at, Some(2_900));
+    assert_eq!(status.last_trigger.as_deref(), Some("proxy_failure"));
+    assert_eq!(status.detected_timezone.as_deref(), Some("Asia/Taipei"));
+}
+
+#[test]
+fn monitor_status_exposes_failure_backoff_as_the_next_check() {
+    let settings = CodexEgressTimezoneSettings {
+        mode: CodexEgressTimezoneMode::Auto,
+        detected_at: Some(1_000),
+        monitor_interval_minutes: 15,
+        ..CodexEgressTimezoneSettings::default()
+    };
+    let runtime = CodexEgressMonitorRuntime {
+        last_attempt_at: Some(2_000),
+        last_error: Some("network unavailable".to_string()),
+        consecutive_failures: 2,
+        ..CodexEgressMonitorRuntime::default()
+    };
+
+    let status = monitor_status_from_parts(&settings, &runtime, 2_010);
+
+    assert_eq!(status.state, CodexEgressMonitorState::Error);
+    assert_eq!(status.next_check_at, Some(2_180));
 }

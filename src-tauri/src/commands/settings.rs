@@ -87,6 +87,34 @@ fn merge_settings_for_save(
         }
         _ => {}
     }
+    // 自动监测会在设置页打开期间独立写回新的出口证据。前端全量保存若仍携带
+    // 打开页面时的旧快照，不能把更晚的后台探测覆盖回去；用户选择的模式、
+    // 周期和手动时区仍以本次提交为准。
+    if incoming.codex_egress_timezone.mode == crate::settings::CodexEgressTimezoneMode::Auto
+        && existing.codex_egress_timezone.mode == crate::settings::CodexEgressTimezoneMode::Auto
+        && existing.codex_egress_timezone.detected_at > incoming.codex_egress_timezone.detected_at
+    {
+        incoming.codex_egress_timezone.detected_timezone =
+            existing.codex_egress_timezone.detected_timezone.clone();
+        incoming.codex_egress_timezone.detected_at = existing.codex_egress_timezone.detected_at;
+        incoming.codex_egress_timezone.detected_egress_ip =
+            existing.codex_egress_timezone.detected_egress_ip.clone();
+        incoming.codex_egress_timezone.detected_country_code =
+            existing.codex_egress_timezone.detected_country_code.clone();
+        incoming.codex_egress_timezone.detected_region =
+            existing.codex_egress_timezone.detected_region.clone();
+        incoming.codex_egress_timezone.detected_city =
+            existing.codex_egress_timezone.detected_city.clone();
+        incoming.codex_egress_timezone.detected_colo =
+            existing.codex_egress_timezone.detected_colo.clone();
+        incoming.codex_egress_timezone.last_probe_trigger =
+            existing.codex_egress_timezone.last_probe_trigger.clone();
+    }
+    // 运行中的 Codex 实际应用了哪个 TZ 只能由后端启动链路确认。任何前端
+    // 全量保存都不得覆盖这份运行态证据，否则 CCSM 重启后会漏报安全刷新。
+    incoming.codex_egress_timezone.last_applied_timezone =
+        existing.codex_egress_timezone.last_applied_timezone.clone();
+    incoming.codex_egress_timezone.last_applied_at = existing.codex_egress_timezone.last_applied_at;
     // local_migrations 是纯后端状态（迁移完成标记），前端没有合法的修改场景，
     // 无条件取现有值。若按 incoming 透传：后端清掉 marker（如关闭统一会话
     // 开关）后、前端 query 缓存刷新前的一次全量保存会把旧 marker 重放回来，
@@ -410,6 +438,46 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::{build_app_update_info, merge_settings_for_save};
+    use crate::settings::{CodexEgressTimezoneMode, CodexEgressTimezoneSettings};
+
+    #[test]
+    fn stale_frontend_save_preserves_newer_automatic_egress_detection() {
+        let mut existing = crate::settings::AppSettings::default();
+        existing.codex_egress_timezone = CodexEgressTimezoneSettings {
+            mode: CodexEgressTimezoneMode::Auto,
+            detected_timezone: Some("America/Los_Angeles".to_string()),
+            detected_at: Some(2_000),
+            detected_egress_ip: Some("8.8.8.\u{2026}".to_string()),
+            last_probe_trigger: Some("proxy_failure".to_string()),
+            last_applied_timezone: Some("Asia/Taipei".to_string()),
+            last_applied_at: Some(1_900),
+            ..CodexEgressTimezoneSettings::default()
+        };
+        let mut incoming = existing.clone();
+        incoming.codex_egress_timezone.detected_timezone = Some("Asia/Taipei".to_string());
+        incoming.codex_egress_timezone.detected_at = Some(1_000);
+        incoming.codex_egress_timezone.detected_egress_ip = Some("203.0.113.\u{2026}".to_string());
+        incoming.codex_egress_timezone.monitor_interval_minutes = 30;
+        incoming.codex_egress_timezone.last_applied_timezone = None;
+        incoming.codex_egress_timezone.last_applied_at = None;
+
+        let merged = merge_settings_for_save(incoming, &existing);
+
+        assert_eq!(
+            merged.codex_egress_timezone.detected_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+        assert_eq!(merged.codex_egress_timezone.detected_at, Some(2_000));
+        assert_eq!(merged.codex_egress_timezone.monitor_interval_minutes, 30);
+        assert_eq!(
+            merged
+                .codex_egress_timezone
+                .last_applied_timezone
+                .as_deref(),
+            Some("Asia/Taipei")
+        );
+        assert_eq!(merged.codex_egress_timezone.last_applied_at, Some(1_900));
+    }
     use crate::settings::{
         AppSettings, CodexOfficialHistoryUnifyMigration, CodexProviderTemplateMigration,
         CodexThirdPartyHistoryProviderBucketMigration, LocalMigrations, S3SyncSettings,

@@ -77,7 +77,7 @@ impl CodexRuntimeRefreshTargets {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum CodexRuntimeLaunchTarget {
     #[cfg(target_os = "windows")]
     WindowsAumid(String),
@@ -475,13 +475,35 @@ Get-StartApps |
     (!aumid.is_empty()).then(|| aumid.to_string())
 }
 
-fn resolve_launch_target() -> Option<CodexRuntimeLaunchTarget> {
+fn select_launch_target(
+    aumid: Option<String>,
+    executable: Option<PathBuf>,
+    timezone_injection_enabled: bool,
+) -> Option<CodexRuntimeLaunchTarget> {
+    if timezone_injection_enabled {
+        if let Some(executable) = executable.clone() {
+            return Some(CodexRuntimeLaunchTarget::DesktopExecutable(executable));
+        }
+    }
     #[cfg(target_os = "windows")]
-    if let Some(aumid) = resolve_windows_codex_aumid() {
+    if let Some(aumid) = aumid {
         return Some(CodexRuntimeLaunchTarget::WindowsAumid(aumid));
     }
-    crate::codex_desktop::resolve_codex_executable()
-        .map(CodexRuntimeLaunchTarget::DesktopExecutable)
+    #[cfg(not(target_os = "windows"))]
+    let _ = aumid;
+    executable.map(CodexRuntimeLaunchTarget::DesktopExecutable)
+}
+
+fn resolve_launch_target() -> Option<CodexRuntimeLaunchTarget> {
+    let executable = crate::codex_desktop::resolve_codex_executable();
+    let timezone_injection_enabled =
+        crate::codex_egress_timezone::resolve_launch_timezone(&crate::settings::get_settings())
+            .is_some();
+    #[cfg(target_os = "windows")]
+    let aumid = resolve_windows_codex_aumid();
+    #[cfg(not(target_os = "windows"))]
+    let aumid = None;
+    select_launch_target(aumid, executable, timezone_injection_enabled)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -984,6 +1006,21 @@ pub async fn refresh_codex_runtime_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timezone_injection_prefers_executable_over_aumid_launch() {
+        let executable = PathBuf::from(r"C:\Program Files\WindowsApps\OpenAI.Codex\ChatGPT.exe");
+        let target = select_launch_target(
+            Some("OpenAI.Codex_123!App".to_string()),
+            Some(executable.clone()),
+            true,
+        );
+
+        assert_eq!(
+            target,
+            Some(CodexRuntimeLaunchTarget::DesktopExecutable(executable))
+        );
+    }
     use std::collections::VecDeque;
 
     fn process(

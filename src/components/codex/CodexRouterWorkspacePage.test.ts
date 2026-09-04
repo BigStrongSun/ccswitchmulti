@@ -103,6 +103,23 @@ vi.mock("@/lib/api/model-fetch", () => ({
   fetchModelsForConfig: vi.fn(),
 }));
 
+vi.mock("@/lib/api/codexEgressTimezone", () => ({
+  codexEgressTimezoneApi: {
+    monitorStatus: vi.fn().mockResolvedValue({
+      state: "ready",
+      detectedTimezone: "Asia/Taipei",
+      detectedEgressIp: "2407:cdc0:…",
+      detectedAt: 2_000,
+      lastAttemptAt: 2_000,
+      lastTrigger: "periodic",
+      nextCheckAt: 2_900,
+      monitorIntervalMinutes: 15,
+      restartRequired: false,
+    }),
+    triggerAutomaticProbe: vi.fn(),
+  },
+}));
+
 vi.mock("@/lib/api/codexSubagentV2", () => ({
   codexSubagentV2Api: {
     getReasoningCapabilities: vi.fn().mockResolvedValue({
@@ -325,7 +342,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig", () => {
+it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig", async () => {
   const provider: Provider = {
     id: "valid-provider",
     name: "Valid Provider",
@@ -345,6 +362,8 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
     ),
   ).not.toThrow();
   expect(screen.getByText("Codex 多模型路由工作台")).toBeInTheDocument();
+  expect(screen.getByText("Codex 出口环境自动监测")).toBeInTheDocument();
+  expect(await screen.findByText("监测正常")).toBeInTheDocument();
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {

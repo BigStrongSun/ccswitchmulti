@@ -7,6 +7,7 @@ import { CodexEgressTimezoneSettings } from "./CodexEgressTimezoneSettings";
 vi.mock("@/lib/api/codexEgressTimezone", () => ({
   codexEgressTimezoneApi: {
     detect: vi.fn(),
+    triggerAutomaticProbe: vi.fn(),
     inspectRuntime: vi.fn(),
     validate: vi.fn(),
   },
@@ -15,9 +16,38 @@ vi.mock("@/lib/api/codexEgressTimezone", () => ({
 describe("CodexEgressTimezoneSettings", () => {
   beforeEach(() => {
     vi.mocked(codexEgressTimezoneApi.detect).mockReset();
+    vi.mocked(codexEgressTimezoneApi.triggerAutomaticProbe).mockReset();
     vi.mocked(codexEgressTimezoneApi.inspectRuntime).mockReset();
     vi.mocked(codexEgressTimezoneApi.validate).mockReset();
     vi.mocked(codexEgressTimezoneApi.validate).mockResolvedValue(undefined);
+  });
+
+  it("enables automatic monitoring with one explicit privacy-aware action", async () => {
+    vi.mocked(codexEgressTimezoneApi.triggerAutomaticProbe).mockResolvedValue({
+      state: "not_tested",
+      monitorIntervalMinutes: 15,
+      restartRequired: false,
+    });
+    const onChange = vi.fn().mockResolvedValue(true);
+    render(
+      <CodexEgressTimezoneSettings
+        value={{ mode: "off" }}
+        onChange={onChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "开启自动监测" }));
+
+    await waitFor(() =>
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ mode: "auto", monitorIntervalMinutes: 15 }),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        codexEgressTimezoneApi.triggerAutomaticProbe,
+      ).toHaveBeenCalledOnce(),
+    );
   });
 
   it("detects the real ChatGPT egress behind fake-IP DNS and lets the user opt in", async () => {
@@ -47,7 +77,7 @@ describe("CodexEgressTimezoneSettings", () => {
       />,
     );
 
-    expect(screen.getByText("Codex 出口时区（实验）")).toBeInTheDocument();
+    expect(screen.getByText("Codex 出口时区自动监测")).toBeInTheDocument();
     expect(screen.getByText(/不会修改 Windows 系统时区/)).toBeInTheDocument();
     expect(
       screen.getByText(/没有官方证据证明时区不一致一定导致模型降级/),
@@ -103,6 +133,34 @@ describe("CodexEgressTimezoneSettings", () => {
         expect.objectContaining({
           mode: "manual",
           manualTimezone: "America/Los_Angeles",
+        }),
+      ),
+    );
+  });
+
+  it("lets automatic mode choose a bounded periodic fallback interval", async () => {
+    const onChange = vi.fn().mockResolvedValue(true);
+    render(
+      <CodexEgressTimezoneSettings
+        value={{
+          mode: "auto",
+          detectedTimezone: "Asia/Taipei",
+          monitorIntervalMinutes: 15,
+        }}
+        onChange={onChange}
+      />,
+    );
+
+    expect(screen.getByText(/已开启自动监测/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("自动检测周期"), {
+      target: { value: "30" },
+    });
+
+    await waitFor(() =>
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mode: "auto",
+          monitorIntervalMinutes: 30,
         }),
       ),
     );

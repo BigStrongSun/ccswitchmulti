@@ -1275,6 +1275,7 @@ pub fn run() {
                     }
                 }
             }
+            crate::codex_egress_timezone::start_automatic_monitor(app.handle().clone());
 
             // 异常退出恢复 + 代理状态自动恢复
             let app_handle = app.handle().clone();
@@ -1346,6 +1347,8 @@ pub fn run() {
                     false
                 };
 
+                crate::codex_egress_timezone::refresh_automatic_timezone_before_codex_launch()
+                    .await;
                 match crate::codex_startup::launch_after_startup_reconciliation(
                     &state,
                     codex_takeover_restore_ready,
@@ -1538,7 +1541,9 @@ pub fn run() {
             commands::read_live_provider_settings,
             commands::get_settings,
             codex_egress_timezone::detect_codex_egress_timezone,
+            codex_egress_timezone::get_codex_egress_timezone_monitor_status,
             codex_egress_timezone::inspect_codex_runtime_timezone,
+            codex_egress_timezone::trigger_codex_egress_timezone_probe,
             codex_egress_timezone::validate_codex_egress_timezone,
             codex_config_consistency::inspect_codex_config_consistency,
             codex_config_consistency::resolve_codex_config_consistency,

@@ -1,11 +1,210 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
+};
+use std::time::{Duration, Instant};
 
 use chrono::{Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 
+use crate::proxy::ProxyError;
 use crate::settings::{AppSettings, CodexEgressTimezoneMode, CodexEgressTimezoneSettings};
+
+const AUTOMATIC_PROBE_COOLDOWN_SECS: i64 = 90;
+
+pub(crate) fn automatic_probe_cooldown_secs(consecutive_failures: u32) -> i64 {
+    let exponent = consecutive_failures.saturating_sub(1).min(5);
+    (AUTOMATIC_PROBE_COOLDOWN_SECS * 2_i64.pow(exponent)).min(30 * 60)
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexEgressProbeTrigger {
+    Startup,
+    Periodic,
+    ProxyFailure,
+    NetworkResume,
+    Manual,
+}
+
+impl CodexEgressProbeTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Periodic => "periodic",
+            Self::ProxyFailure => "proxy_failure",
+            Self::NetworkResume => "network_resume",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AutomaticDetectionOutcome {
+    Updated,
+    RestartRequired,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexEgressMonitorState {
+    Disabled,
+    NotTested,
+    Checking,
+    Ready,
+    RestartRequired,
+    Error,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CodexEgressMonitorRuntime {
+    pub running: bool,
+    pub last_attempt_at: Option<i64>,
+    pub last_trigger: Option<String>,
+    pub last_error: Option<String>,
+    pub restart_required: bool,
+    pub consecutive_failures: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexEgressMonitorStatus {
+    pub state: CodexEgressMonitorState,
+    pub detected_timezone: Option<String>,
+    pub detected_egress_ip: Option<String>,
+    pub detected_at: Option<i64>,
+    pub last_attempt_at: Option<i64>,
+    pub last_trigger: Option<String>,
+    pub last_error: Option<String>,
+    pub next_check_at: Option<i64>,
+    pub monitor_interval_minutes: u32,
+    pub restart_required: bool,
+}
+
+static MONITOR_RUNTIME: OnceLock<Mutex<CodexEgressMonitorRuntime>> = OnceLock::new();
+static MONITOR_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn monitor_runtime() -> &'static Mutex<CodexEgressMonitorRuntime> {
+    MONITOR_RUNTIME.get_or_init(|| Mutex::new(CodexEgressMonitorRuntime::default()))
+}
+
+pub(crate) fn monitor_status_from_parts(
+    settings: &CodexEgressTimezoneSettings,
+    runtime: &CodexEgressMonitorRuntime,
+    _now: i64,
+) -> CodexEgressMonitorStatus {
+    let state = if settings.mode != CodexEgressTimezoneMode::Auto {
+        CodexEgressMonitorState::Disabled
+    } else if runtime.running {
+        CodexEgressMonitorState::Checking
+    } else if runtime.restart_required {
+        CodexEgressMonitorState::RestartRequired
+    } else if runtime.last_error.is_some() {
+        CodexEgressMonitorState::Error
+    } else if settings.detected_timezone.is_some() {
+        CodexEgressMonitorState::Ready
+    } else {
+        CodexEgressMonitorState::NotTested
+    };
+    let interval = settings.monitor_interval_minutes.clamp(5, 120);
+    CodexEgressMonitorStatus {
+        state,
+        detected_timezone: settings.detected_timezone.clone(),
+        detected_egress_ip: settings.detected_egress_ip.clone(),
+        detected_at: settings.detected_at,
+        last_attempt_at: runtime.last_attempt_at,
+        last_trigger: runtime
+            .last_trigger
+            .clone()
+            .or_else(|| settings.last_probe_trigger.clone()),
+        last_error: runtime.last_error.clone(),
+        next_check_at: if runtime.consecutive_failures > 0 {
+            runtime.last_attempt_at.map(|at| {
+                at.saturating_add(automatic_probe_cooldown_secs(runtime.consecutive_failures))
+            })
+        } else {
+            settings
+                .detected_at
+                .map(|at| at.saturating_add(i64::from(interval) * 60))
+        },
+        monitor_interval_minutes: interval,
+        restart_required: runtime.restart_required,
+    }
+}
+
+fn current_monitor_status() -> CodexEgressMonitorStatus {
+    let settings = crate::settings::get_settings().codex_egress_timezone;
+    let runtime = monitor_runtime()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    monitor_status_from_parts(&settings, &runtime, Utc::now().timestamp())
+}
+
+fn emit_monitor_status(app_handle: Option<&AppHandle>) {
+    let app_handle = app_handle.or_else(|| MONITOR_APP_HANDLE.get());
+    if let Some(app_handle) = app_handle {
+        let _ = app_handle.emit("codex-egress-timezone-status", current_monitor_status());
+    }
+}
+
+pub(crate) fn should_trigger_probe_for_proxy_error(app_type: &str, error: &ProxyError) -> bool {
+    if !app_type.eq_ignore_ascii_case("codex") {
+        return false;
+    }
+    match error {
+        ProxyError::ForwardFailed(_)
+        | ProxyError::Timeout(_)
+        | ProxyError::StreamIdleTimeout(_)
+        | ProxyError::ResponsePending(_) => true,
+        ProxyError::UpstreamError { status, .. } => (500..=599).contains(status),
+        _ => false,
+    }
+}
+
+pub(crate) fn is_automatic_probe_due(
+    settings: &CodexEgressTimezoneSettings,
+    now: i64,
+    last_attempt_at: Option<i64>,
+) -> bool {
+    if settings.mode != CodexEgressTimezoneMode::Auto {
+        return false;
+    }
+    if last_attempt_at.is_some_and(|last| now.saturating_sub(last) < AUTOMATIC_PROBE_COOLDOWN_SECS)
+    {
+        return false;
+    }
+    let interval_secs = i64::from(settings.monitor_interval_minutes.clamp(5, 120)) * 60;
+    settings
+        .detected_at
+        .is_none_or(|detected| now.saturating_sub(detected) > interval_secs)
+}
+
+pub(crate) fn should_run_automatic_probe(
+    settings: &CodexEgressTimezoneSettings,
+    trigger: CodexEgressProbeTrigger,
+    now: i64,
+    last_attempt_at: Option<i64>,
+) -> bool {
+    if settings.mode != CodexEgressTimezoneMode::Auto {
+        return false;
+    }
+    if last_attempt_at.is_some_and(|last| now.saturating_sub(last) < AUTOMATIC_PROBE_COOLDOWN_SECS)
+    {
+        return false;
+    }
+    match trigger {
+        CodexEgressProbeTrigger::ProxyFailure | CodexEgressProbeTrigger::NetworkResume => true,
+        CodexEgressProbeTrigger::Startup
+        | CodexEgressProbeTrigger::Periodic
+        | CodexEgressProbeTrigger::Manual => is_automatic_probe_due(settings, now, last_attempt_at),
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct CloudflareTrace {
@@ -45,6 +244,29 @@ pub struct CodexEgressTimezoneDetection {
     pub timezone_match: CodexTimezoneMatch,
     pub checked_at: i64,
     pub network_path: String,
+}
+
+pub(crate) fn apply_automatic_detection(
+    settings: &mut CodexEgressTimezoneSettings,
+    detection: &CodexEgressTimezoneDetection,
+    trigger: CodexEgressProbeTrigger,
+    codex_running: bool,
+) -> AutomaticDetectionOutcome {
+    let applied_timezone_changed =
+        settings.last_applied_timezone.as_deref() != Some(detection.egress_timezone.as_str());
+    settings.detected_timezone = Some(detection.egress_timezone.clone());
+    settings.detected_at = Some(detection.checked_at);
+    settings.detected_egress_ip = Some(detection.egress_ip.clone());
+    settings.detected_country_code = detection.country_code.clone();
+    settings.detected_region = detection.region.clone();
+    settings.detected_city = detection.city.clone();
+    settings.detected_colo = detection.colo.clone();
+    settings.last_probe_trigger = Some(trigger.as_str().to_string());
+    if applied_timezone_changed && codex_running {
+        AutomaticDetectionOutcome::RestartRequired
+    } else {
+        AutomaticDetectionOutcome::Updated
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +496,7 @@ pub async fn detect_codex_egress_timezone() -> Result<CodexEgressTimezoneDetecti
         client
             .get(CODEX_EGRESS_TRACE_URL)
             .header(reqwest::header::USER_AGENT, "CCSwitchMulti timezone probe")
+            .timeout(Duration::from_secs(8))
             .send()
             .await
             .map_err(|error| format!("Could not reach ChatGPT egress trace: {error}"))?,
@@ -286,6 +509,7 @@ pub async fn detect_codex_egress_timezone() -> Result<CodexEgressTimezoneDetecti
         client
             .get(&geolocation_url)
             .header(reqwest::header::USER_AGENT, "CCSwitchMulti timezone probe")
+            .timeout(Duration::from_secs(8))
             .send()
             .await
             .map_err(|error| format!("Could not geolocate the observed egress IP: {error}"))?,
@@ -306,6 +530,180 @@ pub async fn detect_codex_egress_timezone() -> Result<CodexEgressTimezoneDetecti
         Utc::now().timestamp(),
         network_path,
     )
+}
+
+async fn run_automatic_probe(
+    trigger: CodexEgressProbeTrigger,
+    force: bool,
+    app_handle: Option<&AppHandle>,
+) -> Result<CodexEgressMonitorStatus, String> {
+    let now = Utc::now().timestamp();
+    let settings = crate::settings::get_settings().codex_egress_timezone;
+    if settings.mode != CodexEgressTimezoneMode::Auto {
+        return Ok(current_monitor_status());
+    }
+
+    {
+        let mut runtime = monitor_runtime()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if runtime.running {
+            return Ok(monitor_status_from_parts(&settings, &runtime, now));
+        }
+        if !force
+            && runtime.last_attempt_at.is_some_and(|last| {
+                now.saturating_sub(last)
+                    < automatic_probe_cooldown_secs(runtime.consecutive_failures)
+            })
+        {
+            return Ok(monitor_status_from_parts(&settings, &runtime, now));
+        }
+        if !force && !should_run_automatic_probe(&settings, trigger, now, runtime.last_attempt_at) {
+            return Ok(monitor_status_from_parts(&settings, &runtime, now));
+        }
+        if force
+            && trigger != CodexEgressProbeTrigger::Manual
+            && runtime
+                .last_attempt_at
+                .is_some_and(|last| now.saturating_sub(last) < AUTOMATIC_PROBE_COOLDOWN_SECS)
+        {
+            return Ok(monitor_status_from_parts(&settings, &runtime, now));
+        }
+        runtime.running = true;
+        runtime.last_attempt_at = Some(now);
+        runtime.last_trigger = Some(trigger.as_str().to_string());
+        runtime.last_error = None;
+    }
+    emit_monitor_status(app_handle);
+
+    let result = detect_codex_egress_timezone().await;
+    match result {
+        Ok(detection) => {
+            let codex_running = crate::codex_desktop::is_codex_desktop_running();
+            let outcome = crate::settings::mutate_codex_egress_timezone(|settings| {
+                apply_automatic_detection(settings, &detection, trigger, codex_running)
+            })
+            .map_err(|error| error.to_string());
+            let mut runtime = monitor_runtime()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            runtime.running = false;
+            match outcome {
+                Ok(AutomaticDetectionOutcome::RestartRequired) => {
+                    runtime.restart_required = true;
+                    runtime.last_error = None;
+                    runtime.consecutive_failures = 0;
+                }
+                Ok(AutomaticDetectionOutcome::Updated) => {
+                    runtime.restart_required = false;
+                    runtime.last_error = None;
+                    runtime.consecutive_failures = 0;
+                }
+                Err(error) => {
+                    runtime.last_error = Some(error);
+                    runtime.consecutive_failures = runtime.consecutive_failures.saturating_add(1);
+                }
+            }
+        }
+        Err(error) => {
+            let mut runtime = monitor_runtime()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            runtime.running = false;
+            runtime.last_error = Some(error);
+            runtime.consecutive_failures = runtime.consecutive_failures.saturating_add(1);
+        }
+    }
+    emit_monitor_status(app_handle);
+    let status = current_monitor_status();
+    if let Some(error) = status.last_error.clone() {
+        Err(error)
+    } else {
+        Ok(status)
+    }
+}
+
+pub(crate) async fn refresh_automatic_timezone_before_codex_launch() {
+    // 启动是应用 TZ 的唯一确定边界，不能复用“尚未过期”的旧出口结果；
+    // 节点可能刚刚切换。仍保留单飞与 90 秒硬冷却，避免重复启动动作打爆探测端点。
+    if let Err(error) = run_automatic_probe(CodexEgressProbeTrigger::Startup, true, None).await {
+        log::warn!("Codex 出口时区启动前自动探测失败，继续使用最近一次有效结果: {error}");
+    }
+}
+
+pub(crate) fn notify_proxy_failure(app_type: &str, error: &ProxyError) {
+    if !should_trigger_probe_for_proxy_error(app_type, error) {
+        return;
+    }
+    tauri::async_runtime::spawn(async {
+        if let Err(error) =
+            run_automatic_probe(CodexEgressProbeTrigger::ProxyFailure, false, None).await
+        {
+            log::debug!("Codex 转发异常触发的出口时区探测未完成: {error}");
+        }
+    });
+}
+
+pub(crate) fn mark_codex_timezone_applied() {
+    let applied_timezone = resolve_launch_timezone(&crate::settings::get_settings());
+    if let Err(error) = crate::settings::mutate_codex_egress_timezone(|settings| {
+        settings.last_applied_timezone = applied_timezone;
+        settings.last_applied_at = Some(Utc::now().timestamp());
+    }) {
+        log::warn!("无法持久化 Codex 已应用的出口时区: {error}");
+    }
+    let mut runtime = monitor_runtime()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    runtime.restart_required = false;
+    drop(runtime);
+    emit_monitor_status(None);
+}
+
+pub(crate) fn start_automatic_monitor(app_handle: AppHandle) {
+    let _ = MONITOR_APP_HANDLE.set(app_handle.clone());
+    if MONITOR_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let settings = crate::settings::get_settings().codex_egress_timezone;
+    if settings.mode == CodexEgressTimezoneMode::Auto
+        && settings.detected_timezone.is_some()
+        && settings.detected_timezone != settings.last_applied_timezone
+        && crate::codex_desktop::is_codex_desktop_running()
+    {
+        monitor_runtime()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .restart_required = true;
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut last_tick = Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let elapsed = last_tick.elapsed();
+            last_tick = Instant::now();
+            let trigger = if elapsed > Duration::from_secs(90) {
+                CodexEgressProbeTrigger::NetworkResume
+            } else {
+                CodexEgressProbeTrigger::Periodic
+            };
+            if let Err(error) = run_automatic_probe(trigger, false, Some(&app_handle)).await {
+                log::debug!("Codex 出口时区后台探测未完成: {error}");
+            }
+        }
+    });
+}
+
+#[tauri::command]
+pub fn get_codex_egress_timezone_monitor_status() -> CodexEgressMonitorStatus {
+    current_monitor_status()
+}
+
+#[tauri::command]
+pub async fn trigger_codex_egress_timezone_probe(
+    app_handle: AppHandle,
+) -> Result<CodexEgressMonitorStatus, String> {
+    run_automatic_probe(CodexEgressProbeTrigger::Manual, true, Some(&app_handle)).await
 }
 
 pub(crate) fn resolve_launch_timezone(settings: &AppSettings) -> Option<String> {
@@ -337,12 +735,17 @@ pub(crate) fn validate_iana_timezone(timezone: &str) -> Result<String, String> {
 pub(crate) fn validate_timezone_settings(
     settings: &CodexEgressTimezoneSettings,
 ) -> Result<(), String> {
+    if !(5..=120).contains(&settings.monitor_interval_minutes) {
+        return Err("Codex 出口时区自动检测周期必须在 5 到 120 分钟之间".to_string());
+    }
     let configured = match settings.mode {
         CodexEgressTimezoneMode::Off => return Ok(()),
-        CodexEgressTimezoneMode::Auto => settings
-            .detected_timezone
-            .as_deref()
-            .ok_or_else(|| "自动出口时区缺少有效的探测结果，请先执行出口时区探测".to_string())?,
+        CodexEgressTimezoneMode::Auto => {
+            let Some(timezone) = settings.detected_timezone.as_deref() else {
+                return Ok(());
+            };
+            timezone
+        }
         CodexEgressTimezoneMode::Manual => settings
             .manual_timezone
             .as_deref()

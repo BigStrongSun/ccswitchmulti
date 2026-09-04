@@ -423,9 +423,9 @@ pub enum CodexEgressTimezoneMode {
 /// Codex Desktop 进程级出口时区设置。
 ///
 /// 仅在 CCSwitchMulti 启动 Codex 时通过子进程 `TZ` 环境变量生效，不会修改
-/// Windows 系统时区。`auto` 使用最近一次用户主动探测并保存的 IANA 时区，
-/// 启动阶段不依赖外部网络。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Windows 系统时区。`auto` 使用后台监测到的最新 IANA 时区；监测失败不会
+/// 阻塞 Codex 请求或启动。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexEgressTimezoneSettings {
     #[serde(default)]
@@ -446,6 +446,40 @@ pub struct CodexEgressTimezoneSettings {
     pub detected_city: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected_colo: Option<String>,
+    #[serde(default = "default_codex_egress_monitor_interval_minutes")]
+    pub monitor_interval_minutes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_probe_trigger: Option<String>,
+    /// 最近一次由 CCSM 启动 Codex 时实际注入的进程时区。该字段由后端维护，
+    /// 用于区分“已经探测到新出口”与“运行中的 Codex 已经应用新时区”。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_applied_timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_applied_at: Option<i64>,
+}
+
+fn default_codex_egress_monitor_interval_minutes() -> u32 {
+    15
+}
+
+impl Default for CodexEgressTimezoneSettings {
+    fn default() -> Self {
+        Self {
+            mode: CodexEgressTimezoneMode::Off,
+            manual_timezone: None,
+            detected_timezone: None,
+            detected_at: None,
+            detected_egress_ip: None,
+            detected_country_code: None,
+            detected_region: None,
+            detected_city: None,
+            detected_colo: None,
+            monitor_interval_minutes: default_codex_egress_monitor_interval_minutes(),
+            last_probe_trigger: None,
+            last_applied_timezone: None,
+            last_applied_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -896,30 +930,39 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     new_settings.env_injection.validate()?;
     crate::codex_egress_timezone::validate_timezone_settings(&new_settings.codex_egress_timezone)
         .map_err(AppError::InvalidInput)?;
-    save_settings_file(&new_settings)?;
-
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
         e.into_inner()
     });
+    // 文件与内存必须在同一写锁临界区更新。出口监测会在后台原子修改设置；
+    // 若先写文件再取锁，前端保存与探测写回交错时会造成磁盘和内存分别保留
+    // 两个不同版本，并在下一次启动时丢失其中一方的结果。
+    save_settings_file(&new_settings)?;
     *guard = new_settings;
     Ok(())
 }
 
-fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
+fn mutate_settings<F, R>(mutator: F) -> Result<R, AppError>
 where
-    F: FnOnce(&mut AppSettings),
+    F: FnOnce(&mut AppSettings) -> R,
 {
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
         e.into_inner()
     });
     let mut next = guard.clone();
-    mutator(&mut next);
+    let result = mutator(&mut next);
     next.normalize_paths();
     save_settings_file(&next)?;
     *guard = next;
-    Ok(())
+    Ok(result)
+}
+
+pub fn mutate_codex_egress_timezone<F, R>(mutator: F) -> Result<R, AppError>
+where
+    F: FnOnce(&mut CodexEgressTimezoneSettings) -> R,
+{
+    mutate_settings(|settings| mutator(&mut settings.codex_egress_timezone))
 }
 
 pub fn is_codex_third_party_history_provider_bucket_migrated() -> bool {

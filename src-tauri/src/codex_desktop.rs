@@ -1594,9 +1594,14 @@ pub(crate) fn launch_codex_with_debug_port(
                 let mut command = Command::new("open");
                 command.arg(bundle).arg("--args");
                 append_codex_debug_args(&mut command, debug_port);
-                return command.spawn().map(|_| ()).map_err(|error| {
-                    format!("failed to launch {}: {error}", executable.display())
-                });
+                return command
+                    .spawn()
+                    .map(|_| {
+                        crate::codex_egress_timezone::mark_codex_timezone_applied();
+                    })
+                    .map_err(|error| {
+                        format!("failed to launch {}: {error}", executable.display())
+                    });
             }
         } else {
             log::warn!(
@@ -1614,7 +1619,9 @@ pub(crate) fn launch_codex_with_debug_port(
     }
     command
         .spawn()
-        .map(|_| ())
+        .map(|_| {
+            crate::codex_egress_timezone::mark_codex_timezone_applied();
+        })
         .map_err(|error| format!("failed to launch {}: {error}", executable.display()))
 }
 

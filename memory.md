@@ -5223,3 +5223,13 @@ supported in one streaming turn`。
 - 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.2-28`，是非 draft、非 prerelease 的 Latest，共 19 个资产。全部资产下载后复算 SHA-256 均与 GitHub asset digest 一致；`latest.json` 版本为 `3.19.2-28`，包含 darwin/linux/windows 的 x64 与 ARM64 六个平台，URL 全部指向本 tag，签名全部非空。
 - v28 发布候选的本地门禁为：前端 167 files / 1349 tests，Rust library 3807 passed / 0 failed / 6 ignored，`pnpm typecheck`、Prettier、`cargo check --lib`、带 `history-repairer` feature 的 check、生产严格 Clippy、rustfmt、diff 和发布文件 UTF-8 no-BOM/no-U+FFFD 检查全部通过。GitHub 原生 Ubuntu/macOS 构建补足了 Windows 主机缺少 Linux linker 而无法完成的本地 cross-check。
 - 本轮只发布源码和多平台资产，没有安装、关闭、重启或替换当前机器的 CCSM/Codex，也没有操作正在写入的 1GB 级历史文件。发布成功、安装态验收和具体任务历史修复仍是不同证据层。
+
+## 2026-09-05 Codex 出口时区自动监测与安全应用边界
+
+- 出口时区检测不依赖 DNS 返回的地址：透明代理的 `198.18.0.0/15`、`192.168.0.0/16` 等 fake IP 只作为诊断信息；CCSM 通过 `chatgpt.com/cdn-cgi/trace` 取得 ChatGPT 域名实际观察到的公网出口，再把该明确 IP 交给地理时区服务。探测 client 与协议探测复用同一全局代理策略，因此覆盖 CCSM 显式代理与系统/透明代理两条路径。
+- 自动模式采用混合触发而不是逐请求探测：每次由 CCSM 启动 Codex 前强制复核，后台默认每 15 分钟检查，长时间睡眠恢复后检查，并在 Codex 转发网络失败、超时、流空闲、响应挂起或上游 5xx 时触发；认证错误与 429 不触发。所有后台触发单飞，首轮失败 90 秒后重试并指数退避，最多 30 分钟，不给正常模型请求增加等待。
+- 仅保存“最近探测时区”不足以判断运行态：CCSM 自己重启后，探测值可能已经更新，而仍在运行的 Codex 仍继承旧 `TZ`。设置中现在由后端持久化 `lastAppliedTimezone/lastAppliedAt`，探测始终与真实启动时注入值比较；不一致时只提示安全刷新，不强杀任务。Windows 安全刷新在启用 TZ 时必须优先直接启动可执行文件，不能走无法携带环境变量的 AUMID 路径。
+- 设置写入与后台探测原来缺少统一临界区，可能让磁盘与内存分别保留两个版本。`update_settings` 与后台原子 mutation 现在共用设置写锁；前端全量保存还会保留后端维护的最新探测证据和已应用证据，避免页面旧快照覆盖后台结果。
+- UI 在 Codex 路由工作台持续显示出口、IANA 时区、触发来源、周期、失败和刷新需求；设置 → 常规提供一键开启、5/15/30/60 分钟周期、立即检测和高级手动 IANA 覆盖。出口变化时可直接跳到现有 Codex 状态页执行安全刷新。检测本身不使用 CDP；CDP 只属于既有 renderer 历史/模型兼容层的可选同步与运行时核验。
+- fresh 门禁：前端排除仓库 `.local` 旧插件缓存后 169 files / 1376 tests，TypeScript 与 production renderer build 通过；Rust library 3863 passed / 0 failed / 6 ignored，`cargo check --all-targets` 与 rustfmt 通过。默认 Vitest 会误收集 `.local/CCSwitchMulti-Task6` 内 26 个外部插件测试套件而返回非零，产品测试本身无失败；这份缓存污染需作为独立清理/测试配置任务处理。本轮没有构建 installer、安装、关闭或重启当前 CCSM/Codex。
+- 外部核对由 Codex 内置 Web 与 Matrix WebSearch 两条独立链完成；两者对 Chrome CDP 时区覆盖只作用 renderer、Node `TZ` 为进程环境边界、以及 Codex 上游时区相关问题的结论一致。关于“时区不一致必然把特定模型降级到另一版本”的公开一手证据仍不足，因此 CCSM 将此功能定位为出口环境一致性与可诊断性控制，不承诺规避某个未公开路由策略。

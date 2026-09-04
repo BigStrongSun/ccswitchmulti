@@ -26,6 +26,10 @@ export const settingsSchema = z.object({
       detectedRegion: z.string().optional(),
       detectedCity: z.string().optional(),
       detectedColo: z.string().optional(),
+      monitorIntervalMinutes: z.number().int().min(5).max(120).optional(),
+      lastProbeTrigger: z.string().optional(),
+      lastAppliedTimezone: z.string().optional(),
+      lastAppliedAt: z.number().int().optional(),
     })
     .optional(),
   enableLocalProxy: z.boolean().optional(),

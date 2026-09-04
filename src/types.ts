@@ -627,6 +627,12 @@ export interface CodexEgressTimezoneSettings {
   detectedRegion?: string;
   detectedCity?: string;
   detectedColo?: string;
+  monitorIntervalMinutes?: number;
+  lastProbeTrigger?: string;
+  /** 后端维护：最近一次由 CCSM 启动 Codex 时实际注入的时区。 */
+  lastAppliedTimezone?: string;
+  /** 后端维护：最近一次成功注入的 Unix 秒时间戳。 */
+  lastAppliedAt?: number;
 }
 
 export interface Settings {

@@ -83,7 +83,24 @@ export function CodexEgressTimezoneSettings({
       detectedRegion: report.region,
       detectedCity: report.city,
       detectedColo: report.colo,
+      monitorIntervalMinutes: value.monitorIntervalMinutes ?? 15,
     });
+  };
+
+  const enableAutomatic = async () => {
+    setError("");
+    try {
+      const saved = await onChange({
+        ...value,
+        mode: "auto",
+        monitorIntervalMinutes: value.monitorIntervalMinutes ?? 15,
+      });
+      if (saved !== false) {
+        await codexEgressTimezoneApi.triggerAutomaticProbe();
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
   };
 
   const inspectRuntime = async () => {
@@ -127,18 +144,18 @@ export function CodexEgressTimezoneSettings({
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <Clock3 className="h-4 w-4 text-sky-500" />
-            <h3 className="text-sm font-medium">Codex 出口时区（实验）</h3>
+            <h3 className="text-sm font-medium">Codex 出口时区自动监测</h3>
           </div>
           <p className="max-w-3xl text-xs text-muted-foreground">
-            CCSwitchMulti 启动 Codex 时给子进程注入 TZ，并通过受管 CDP 对页面
-            renderer 应用同一 IANA 时区；不会修改 Windows 系统时区。已运行的
-            Codex 需要完全退出后再由 CCSM 拉起才会完整生效。
+            自动模式会在启动前、转发网络波动、睡眠/网络恢复和定时周期检查真实出口；不会阻塞模型请求，也不会修改
+            Windows 系统时区。启动 Codex 时通过子进程 TZ 应用结果；CDP
+            仅用于可选的页面 renderer 同步和验证。
           </p>
         </div>
         <span className="rounded-full border px-2 py-1 text-xs text-muted-foreground">
           {value.mode === "off"
             ? "已关闭"
-            : `${value.mode === "auto" ? "跟随探测" : "手动"} · ${activeTimezone ?? "未配置"}`}
+            : `${value.mode === "auto" ? "已开启自动监测" : "手动"} · ${activeTimezone ?? "未配置"}`}
         </span>
       </div>
 
@@ -152,6 +169,11 @@ export function CodexEgressTimezoneSettings({
       </div>
 
       <div className="flex flex-wrap gap-2">
+        {value.mode === "off" && (
+          <Button type="button" onClick={() => void enableAutomatic()}>
+            开启自动监测
+          </Button>
+        )}
         <Button
           type="button"
           variant="outline"
@@ -194,15 +216,41 @@ export function CodexEgressTimezoneSettings({
         )}
       </div>
 
+      {value.mode === "auto" && (
+        <div className="max-w-xs space-y-1">
+          <Label htmlFor="codex-egress-monitor-interval">自动检测周期</Label>
+          <select
+            id="codex-egress-monitor-interval"
+            className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+            value={value.monitorIntervalMinutes ?? 15}
+            onChange={(event) =>
+              void onChange({
+                ...value,
+                monitorIntervalMinutes: Number(event.target.value),
+              })
+            }
+          >
+            <option value={5}>5 分钟</option>
+            <option value={15}>15 分钟（推荐）</option>
+            <option value={30}>30 分钟</option>
+            <option value={60}>60 分钟</option>
+          </select>
+          <p className="text-xs text-muted-foreground">
+            这是正常网络下的兜底周期；检测到 Codex
+            转发连接失败或系统长时间休眠恢复时会提前检查，最短触发间隔为 90 秒。
+          </p>
+        </div>
+      )}
+
       <p className="text-xs text-muted-foreground">
         探测会访问 chatgpt.com/cdn-cgi/trace，并把该站点实际看到的公网出口 IP
         发送给 ipwho.is 查询 IANA 时区；不会发送 API Key、Cookie 或对话内容。
       </p>
 
       <p className="text-xs text-muted-foreground">
-        “检查运行中 Codex 页面”读取的是当前 renderer 的实际 IANA 时区和 UTC
-        偏移。app-server 只有在由 CCSM 直接拉起时才会继承
-        TZ；因此完整验证仍需先完全退出 Codex，再由 CCSM 启动。
+        出口检测与自动监测不需要 CDP。“检查运行中 Codex 页面”才会通过 CDP 读取
+        renderer 的实际时区；app-server 只有在由 CCSM 直接拉起时才会继承
+        TZ，因此完整应用新时区仍需安全刷新 Codex。
       </p>
 
       {error && (

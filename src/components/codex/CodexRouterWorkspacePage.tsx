@@ -128,6 +128,7 @@ import { normalizeCodexSubagentVersion } from "@/utils/codexSubagentVersion";
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
 import { HostedToolsSwitchPanel } from "./HostedToolsSwitchPanel";
 import { CodexSubagentProfileEditor } from "./CodexSubagentProfileEditor";
+import { CodexEgressTimezoneStatusCard } from "./CodexEgressTimezoneStatusCard";
 import type {
   CodexOfficialAuthConfig,
   CodexOfficialAuthMode,
@@ -3539,6 +3540,9 @@ export function CodexRouterWorkspacePage({
         <HeaderPanel
           onCreatePlan={handleCreatePlan}
           onJump={(tab) => setActiveTab(tab)}
+        />
+        <CodexEgressTimezoneStatusCard
+          onOpenCodexStatus={() => setActiveTab("status")}
         />
 
         <Tabs
