@@ -124,6 +124,31 @@ describe("single Codex Protocol Lab adapter", () => {
 });
 
 describe("batch Codex Protocol Lab adapter", () => {
+  it("re-probes nested stale receipts when the workflow requests preflight again", async () => {
+    const preflight = vi.fn(async () => ({
+      provider,
+      receiptIds: ["fresh"],
+      records: [],
+      observations: [],
+      protocolApplied: false,
+      adaptationPreview: {
+        persistence: "single" as const,
+        status: "ready" as const,
+        effectiveTransport: "open_ai_responses" as const,
+        models: [],
+      },
+    }));
+    const adapter = createBatchCodexProtocolLabAdapter({
+      preflightCodexProviderProtocolCompatibility: preflight,
+      prepareCodexProviderSetBatch: vi.fn(),
+      commitCodexProviderSetBatch: vi.fn(),
+    });
+    const result = await adapter.preflight(
+      { router: provider, sources: [{ provider, receiptIds: ["expired"] }] },
+      () => {},
+    );
+    expect(result.receiptIds).toEqual(["fresh"]);
+  });
   it("overlaps two providers, refills a free slot and preserves source/receipt order", async () => {
     const started: string[] = [];
     const release = new Map<string, () => void>();

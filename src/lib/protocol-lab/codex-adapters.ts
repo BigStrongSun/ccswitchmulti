@@ -253,10 +253,10 @@ export function createBatchCodexProtocolLabAdapter(
       let firstError: unknown;
       const probeSource = async (index: number) => {
         const source = draft.sources[index];
-        if (
-          !sourceNeedsProtocolProbe(source.provider) ||
-          source.receiptIds.length > 0
-        ) {
+        // Preflight is an explicit test or a stale-receipt retry. The workflow
+        // already skips preflight for reusable receipts via requiresProbe;
+        // keeping nested receiptIds here would reuse expired evidence forever.
+        if (!sourceNeedsProtocolProbe(source.provider)) {
           return;
         }
         const outcome = await api.preflightCodexProviderProtocolCompatibility(

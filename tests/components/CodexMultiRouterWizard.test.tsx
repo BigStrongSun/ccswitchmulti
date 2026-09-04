@@ -599,7 +599,7 @@ describe("CodexMultiRouterWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     expect(screen.getAllByText("环境检查").length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "跳过" }));
+    fireEvent.click(screen.getByRole("button", { name: "暂存并关闭" }));
     expect(localStorage.getItem(CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY)).toBe(
       "true",
     );

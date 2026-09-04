@@ -1,5 +1,15 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 向导暂存、失败模型排除与保存语义
+
+- 根因：App 关闭时卸载向导，打开时又重置状态；协议校验使用整批结果，没有失败模型排除入口。现在同一应用会话、同一当前方案隐藏再打开保留步骤、模型目录草稿、探测结果和排除项。切换方案或丢弃草稿会重新初始化；不承诺重启应用恢复，不把凭据或 Provider 序列化到 localStorage。
+- 探测不保存配置。用户取消失败项后下一步，最后“保存并发布”，启用仍是单独操作。排除不修改原始探测结论；提交时只携带保留模型对应 receipt，至少保留一个可继续模型。最终保存会在模型源上停用被排除模型，因此也会影响复用该来源的其他路由；全部排除的来源不提交。保存前不修改父层 Provider。
+- Provider 外部配置签名变化只作废对应源的旧结果；名称等非探测字段采用最新值，不重复探测。保留草稿中的目录刷新结果。服务端继续核验目标、版本、TTL、Verified 和 transport；显式重试不能因 nested receiptIds 非空跳过探测，否则过期 receipt 会永远重复使用。
+- 持续挂载的隔离边界：重新初始化必须重建新方案 ID，避免 Edit A 后 Create 覆盖 A；目录获取和探测回调校验草稿代次与来源签名；保存/启用回调只校验目标代次，避免旧操作推进新方案，同时允许保存引起 Provider 正常更新。迁移覆盖快照也仅限对应编辑目标。
+- 回归覆盖：关闭重开、失败排除且不重复探测、全部取消阻塞、外部事实变化、重命名不回滚、Edit→Create ID 隔离、旧目录请求和启用完成回调不污染新草稿，以及 Rust 实际 batch prepare 仅保留 Verified receipt 且不落库。浏览器使用真实组件+本地 mockIPC，已实测失败取消→下一步→暂存关闭→重开→排除状态保留；不等同于安装态或真实上游验收。
+- 检索：内置 web 与 Matrix 独立查询并交叉读取 React 官方 Preserving and Resetting State，确认卸载丢失组件状态；最终根因及修复以本地 App、Wizard、协议 workflow 和后端测试为准。没有修改安装、重启程序或推送发布。
+- 最终门禁：前端 167 files / 1357 tests 全通过；Rust library 3813 passed / 6 ignored；typecheck、renderer build、rustfmt、Prettier、diff --check 和 8 个变更文件 UTF-8 严格解码/no-BOM/no-U+FFFD 均通过。复审发现的方案 ID、延迟目录请求、旧名称覆盖及延迟启用回调均有回归覆盖，复审无剩余阻塞项。只做本地提交，单次禁用 post-commit 发布 hook，未发布或安装。
+
 ## 2026-09-04 深探测有限并发
 
 - 慢的直接根因是三层串行：`codex-adapters.ts` 逐 Provider 等待，commands `run_candidate_batch_with_observations` 逐模型等待，runner `run_probe` 逐 Responses/Chat 等待。不是 UI 渲染或需要额外 OS 线程。

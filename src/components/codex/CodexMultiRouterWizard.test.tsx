@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import * as modelFetchApi from "@/lib/api/model-fetch";
 import { describe, expect, it, vi } from "vitest";
 import type { Provider } from "@/types";
 import { providersApi } from "@/lib/api/providers";
@@ -60,29 +67,327 @@ vi.mock("@/lib/api/providers", () => ({
 
 function renderWizard(
   providers: Provider[],
-  options?: { mode?: "create" | "edit"; planId?: string },
+  options?: {
+    mode?: "create" | "edit";
+    planId?: string;
+    onEnablePlan?: (provider: Provider) => Promise<void>;
+  },
 ) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const view = (
+    open = true,
+    nextProviders = providers,
+    nextOptions = options,
+  ) => (
     <QueryClientProvider client={queryClient}>
       <CodexMultiRouterWizard
-        open
-        providers={providers}
-        mode={options?.mode ?? "create"}
-        planId={options?.planId}
+        open={open}
+        providers={nextProviders}
+        mode={nextOptions?.mode ?? "create"}
+        planId={nextOptions?.planId}
         onOpenChange={vi.fn()}
         onCreateProvider={vi.fn()}
         onOpenProviderConfig={vi.fn()}
         onOpenWorkspace={vi.fn()}
-        onEnablePlan={vi.fn()}
+        onEnablePlan={nextOptions?.onEnablePlan ?? vi.fn()}
       />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const rendered = render(view());
+  return {
+    ...rendered,
+    rerenderWizard: (
+      open = true,
+      nextProviders = providers,
+      nextOptions = options,
+    ) => rendered.rerender(view(open, nextProviders, nextOptions)),
+  };
 }
 
 describe("CodexMultiRouterWizard", () => {
+  it("does not mark a new draft enabled when the previous target finishes enabling", async () => {
+    const plan: Provider = {
+      id: "pending-enable",
+      name: "Pending Enable",
+      settingsConfig: {
+        codexRouting: { schemaVersion: 2, enabled: true, routes: [] },
+      },
+    };
+    let completeEnable!: () => void;
+    const onEnablePlan = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          completeEnable = resolve;
+        }),
+    );
+    const { rerenderWizard } = renderWizard([plan], {
+      mode: "edit",
+      planId: plan.id,
+      onEnablePlan,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
+    fireEvent.click(screen.getByRole("button", { name: "启用这个多路路由" }));
+    expect(onEnablePlan).toHaveBeenCalledWith(plan);
+    rerenderWizard(false);
+    rerenderWizard(true, [plan], { mode: "create" });
+    const statusBefore = screen.getByText(/状态机：/).textContent;
+    await act(async () => {
+      completeEnable();
+    });
+    expect(screen.queryByText("状态机：enabled")).not.toBeInTheDocument();
+    expect(screen.getByText(/状态机：/).textContent).toBe(statusBefore);
+  });
+
+  it("isolates an edited plan from a new draft and ignores its late model fetch", async () => {
+    const source: Provider = {
+      id: "isolated-source",
+      name: "Isolated Source",
+      meta: { codexProtocolMode: "manual", apiFormat: "openai_responses" },
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test-only" },
+        modelCatalog: { models: [{ model: "original" }] },
+      },
+    };
+    const plan: Provider = {
+      id: "existing-router",
+      name: "Existing Router",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "route",
+              targetProviderId: source.id,
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+    let finishFetch!: (models: modelFetchApi.FetchedModel[]) => void;
+    const fetchSpy = vi
+      .spyOn(modelFetchApi, "fetchModelsForConfig")
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFetch = resolve;
+          }),
+      );
+    prepareCodexProviderSetBatch.mockResolvedValue({
+      digest: "isolated",
+      sourcePreviews: [],
+      blocked: false,
+    });
+    commitCodexProviderSetBatch.mockImplementation(
+      async (_sources, router) => ({
+        router,
+        sourceSnapshots: [],
+        projections: [],
+        status: "committed",
+      }),
+    );
+    const providers = [
+      source,
+      { ...source, id: "second-source", name: "Second Source" },
+      plan,
+    ];
+    const { rerenderWizard } = renderWizard(providers, {
+      mode: "edit",
+      planId: plan.id,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "同步模型目录" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动获取模型列表" }));
+    expect(fetchSpy).toHaveBeenCalled();
+    rerenderWizard(false);
+    rerenderWizard(true, providers, { mode: "create" });
+    await act(async () => {
+      finishFetch([{ id: "late-model", ownedBy: null }]);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+    await screen.findByText("状态机：connectivityPartial");
+    fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    await waitFor(() => expect(commitCodexProviderSetBatch).toHaveBeenCalled());
+    const [sources, router] = commitCodexProviderSetBatch.mock.calls.at(-1)!;
+    expect(router.id).not.toBe(plan.id);
+    expect(sources).toHaveLength(2);
+    expect(
+      sources[0].provider.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["original"]);
+    fetchSpy.mockRestore();
+  });
+
+  it("retains the draft page when closed and reopened in the same application session", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const source: Provider = {
+      id: "cache-source",
+      name: "Cache Source",
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test-only" },
+        modelCatalog: { models: [{ model: "model-a" }] },
+      },
+    };
+    const props = {
+      providers: [source],
+      mode: "create" as const,
+      onOpenChange: vi.fn(),
+      onCreateProvider: vi.fn(),
+      onOpenProviderConfig: vi.fn(),
+      onOpenWorkspace: vi.fn(),
+      onEnablePlan: vi.fn(),
+    };
+    const view = (open: boolean) => (
+      <QueryClientProvider client={queryClient}>
+        <CodexMultiRouterWizard {...props} open={open} />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view(true));
+    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+    rerender(view(false));
+    rerender(view(true));
+    expect(screen.getByRole("heading", { name: "协议深探测" })).toBeVisible();
+  });
+
+  it("can exclude a failed model and save verified receipts without probing again", async () => {
+    const source: Provider = {
+      id: "mixed-probe",
+      name: "Mixed Probe",
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test-only" },
+        modelCatalog: { models: [{ model: "good" }, { model: "bad" }] },
+      },
+    };
+    preflightCodexProviderProtocolCompatibility.mockResolvedValueOnce({
+      provider: source,
+      receiptIds: ["receipt-good", "receipt-bad"],
+      observations: [],
+      protocolApplied: false,
+      adaptationPreview: {
+        persistence: "blocked",
+        status: "blocked",
+        models: [],
+      },
+      records: ["good", "bad"].map((model) => ({
+        target: {
+          public_model: model,
+          upstream_model: model,
+          transport: "open_ai_responses",
+        },
+        result: {
+          readiness: model === "good" ? "verified" : "unverified",
+          selected_transport: model === "good" ? "open_ai_responses" : null,
+          branches: [],
+        },
+      })),
+    });
+    prepareCodexProviderSetBatch.mockResolvedValue({
+      digest: "selected",
+      sourcePreviews: [],
+      blocked: false,
+    });
+    commitCodexProviderSetBatch.mockImplementation(
+      async (_sources, router) => ({
+        router,
+        sourceSnapshots: [],
+        projections: [],
+        status: "committed",
+      }),
+    );
+    const { rerenderWizard } = renderWizard([source]);
+    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+    await screen.findByText("状态机：connectivityFailed");
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    rerenderWizard(false);
+    rerenderWizard(true, [{ ...source, name: "Renamed Probe" }]);
+    expect(screen.getByRole("heading", { name: "协议深探测" })).toBeVisible();
+    expect(
+      screen.getByRole("checkbox", { name: "保留 Mixed Probe / bad" }),
+    ).toBeChecked();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "保留 Mixed Probe / bad" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    expect(screen.getByRole("heading", { name: "选择模型" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    await waitFor(() => expect(commitCodexProviderSetBatch).toHaveBeenCalled());
+    const sources = commitCodexProviderSetBatch.mock.calls.at(-1)![0];
+    expect(sources[0].provider.name).toBe("Renamed Probe");
+    expect(sources[0].receiptIds).toEqual(["receipt-good"]);
+    expect(sources[0].provider.settingsConfig.modelCatalog.models).toEqual([
+      { model: "good" },
+      { model: "bad", enabled: false },
+    ]);
+    expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalledTimes(
+      1,
+    );
+    expect(
+      source.settingsConfig.modelCatalog.models[1].enabled,
+    ).toBeUndefined();
+  });
+
+  it("invalidates only the edited source and never allows an empty retained selection", async () => {
+    const makeSource = (id: string): Provider => ({
+      id,
+      name: id,
+      meta: { codexProtocolMode: "manual", apiFormat: "openai_responses" },
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test-only" },
+        modelCatalog: { models: [{ model: `${id}-model` }] },
+      },
+    });
+    const a = makeSource("source-a");
+    const b = makeSource("source-b");
+    const { rerenderWizard } = renderWizard([a, b]);
+    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+    await screen.findByText("状态机：connectivityPartial");
+    rerenderWizard(false);
+    const changed = {
+      ...a,
+      settingsConfig: {
+        ...a.settingsConfig,
+        baseUrl: "https://changed.invalid/v1",
+      },
+    };
+    rerenderWizard(true, [changed, b]);
+    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+    expect(
+      screen.getByText(/模型源配置已修改，旧探测结果已失效/),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("checkbox", { name: "保留 source-b / *" }),
+    ).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "取消所有失败模型" }));
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "保留 source-b / *" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    expect(screen.getByRole("heading", { name: "协议深探测" })).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "保留 source-b / *" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    expect(screen.getByRole("heading", { name: "选择模型" })).toBeVisible();
+  });
+
   it("turns a missing batch probe source into a named failure instead of an all-zero summary", () => {
     const source: Provider = {
       id: "qwen-local",

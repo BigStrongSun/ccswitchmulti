@@ -2257,9 +2257,9 @@ function App() {
         </DialogContent>
       </Dialog>
 
-      {isCodexMultiRouterWizardOpen && (
+      {
         <CodexMultiRouterWizard
-          open
+          open={isCodexMultiRouterWizardOpen}
           providers={codexWizardProviders}
           mode={codexMultiRouterWizardMode}
           planId={codexMultiRouterWizardPlanId}
@@ -2287,7 +2287,7 @@ function App() {
           }
           onEnablePlan={handleEnableCodexMultiRouterPlan}
         />
-      )}
+      }
 
       <EditProviderDialog
         open={Boolean(editingProvider)}

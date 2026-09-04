@@ -2441,6 +2441,43 @@ mod tests {
     }
 
     #[test]
+    fn wizard_can_prepare_only_retained_verified_models_without_reprobing() {
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let mut provider = ordinary_provider();
+        let now = chrono::Utc::now().timestamp();
+        let receipt = remember_provider_set_receipt(
+            &state,
+            provider_set_record(
+                &provider,
+                "model-a",
+                "model-a",
+                TransportKind::OpenAiResponses,
+                now,
+            ),
+        );
+        provider.settings_config["modelCatalog"]["models"][1]["enabled"] = json!(false);
+        let (_, preview) = prepare_codex_provider_set_batch_internal(
+            &state,
+            PrepareCodexProviderSetBatchRequest {
+                sources: vec![CodexProviderSetBatchSourceRequest {
+                    provider,
+                    receipt_ids: vec![receipt],
+                }],
+                router: router_provider("provider-a"),
+            },
+            now,
+        )
+        .unwrap();
+        assert!(!preview.blocked);
+        assert_eq!(preview.source_previews[0].responses_models, vec!["model-a"]);
+        assert!(
+            db.get_all_providers("codex").unwrap().is_empty(),
+            "selection is still a draft until explicit commit"
+        );
+    }
+
+    #[test]
     fn wizard_batch_prepare_is_zero_write_and_commit_persists_sources_and_router_once() {
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
