@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 协议适配入口逻辑编辑视图与拆分证据恢复
+
+- 修复 Kimi 被误列为用户 MultiRouter：前端统一按 codexProtocolSet 的 facade/leaf 角色分类，不按名称猜测。新增只读 get_codex_editor_providers，通过后端既有逻辑源恢复和路由折叠机制生成编辑库存；原始 Provider 列表与运行时 SQLite 记录不变，外层方案中的内部叶子引用在编辑视图恢复为逻辑模型源，保留两种协议的模型目录。
+- 拆分保存会把选择 profile 绑定到 leaf，而原始 observations 留在逻辑源；精确按单一 Provider ID 查找导致刚保存的混合源无法复用。恢复入口仅收集经过 facade/leaf 归属验证的 ID，把绑定恢复为当前逻辑候选后仍逐项比较完整 target、profile 版本、Verified、selected transport、有效期及同次双协议 observations。无网络请求、无 DB 写入、不延长探测寿命；密钥改变不会复用旧凭证。
+- 独立审查补齐编辑投影安全边界：不隐藏孤立或额外冒充 leaf 的记录；折叠前检查 generated route 的版本、协议和真实目标。所有未标记的直接叶子引用均拒绝，包括与正常带标记路由混用的情况。异常时编辑入口明确报错，不把内部路由悄悄重定向或丢失。
+- TDD 已复现分类错误、混合源保存后证据缺失、被改目标的路由与混合未标记引用；对应实现后定向回归通过，全量最终结果和安装验收见后续记录。前端当前 168 files / 1367 tests 与 typecheck 通过。这里的源码状态替代下方“仅诊断/待修”的历史状态，不代表已安装或发布。
+- 最终源码门禁：Rust library 3817 passed / 6 ignored；完整 cargo test 的各集成套件通过（最终未标记引用修订随后再次通过全量 library）；生产 lib 严格 Clippy、Prettier、rustfmt、diff、UTF-8 strict/no-BOM/no-U+FFFD 通过。系统 Windows PowerShell 安装事务 Pester 71/71。独立审查已复核全部归属问题，无 Important 遗留；尚未据此宣称安装版通过。
+- 安装版 UI 自动化再次发现点击与窗口截图反馈不一致，暂不以此冒充验收。内置 Web 与 Matrix 独立检索并读取 Microsoft Learn / Playwright 官方 WebView2 文档，交叉确认可在安装事务启动的新进程中临时传入 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS，并通过仅本机 CDP 测试真实安装版 DOM；不修改全局环境或注册表，不把用户配置发往搜索服务。
+
 ## 2026-09-04 编辑旧 MultiRouter 复用已保存兼容性证据
 
 - 用户要求已保存方案可返回兼容性步骤主动重测，而不是每次编辑都强制重测。根因是向导初始化清空 connectivityResults，且上次原子提交已消耗内存 receipt；原代码没有从持久化探测证据恢复保存凭证的入口。只删除只读标签或直接把已有方案视为 Verified 都会绕过有效性边界。

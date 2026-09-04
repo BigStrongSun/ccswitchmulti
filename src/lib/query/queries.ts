@@ -20,6 +20,7 @@ import type {
 } from "@/types";
 import { usageKeys } from "@/lib/query/usage";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { isCodexProtocolSetMember } from "@/lib/codexProviderKind";
 
 const sortProviders = (
   providers: Record<string, Provider>,
@@ -47,6 +48,8 @@ const sortProviders = (
 export interface ProvidersQueryData {
   providers: Record<string, Provider>;
   currentProviderId: string;
+  codexEditorProviders?: Record<string, Provider>;
+  codexEditorError?: string;
 }
 
 export interface UseProvidersQueryOptions {
@@ -81,9 +84,26 @@ export const useProvidersQuery = (
         console.error("获取当前供应商失败:", error);
       }
 
+      let codexEditorProviders: Record<string, Provider> | undefined;
+      let codexEditorError: string | undefined;
+      if (
+        appId === "codex" &&
+        Object.values(providers).some(isCodexProtocolSetMember)
+      ) {
+        try {
+          codexEditorProviders = sortProviders(
+            await providersApi.getCodexEditorProviders(),
+          );
+        } catch {
+          codexEditorError =
+            "协议适配入口无法安全还原，请检查模型源配置后重试。";
+        }
+      }
       return {
         providers: sortProviders(providers),
         currentProviderId,
+        ...(codexEditorProviders ? { codexEditorProviders } : {}),
+        ...(codexEditorError ? { codexEditorError } : {}),
       };
     },
   });

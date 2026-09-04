@@ -1,3 +1,4 @@
+import { isUserCodexRoutingPlan as isCodexMultiRouterPlan } from "./codexProviderKind";
 import type {
   CodexApiFormat,
   CodexCacheConfig,
@@ -217,14 +218,7 @@ function isWizardModelEnabled(model: CodexCatalogModel): boolean {
 }
 
 // 判断 provider 是否是 MultiRouter 方案；向导只把普通 provider 当作上游模型源。
-export function isCodexMultiRouterPlan(provider: Provider): boolean {
-  const routing = provider.settingsConfig?.codexRouting;
-  return Boolean(
-    routing &&
-      typeof routing === "object" &&
-      (routing.enabled !== false || Array.isArray(routing.routes)),
-  );
-}
+export { isUserCodexRoutingPlan as isCodexMultiRouterPlan } from "./codexProviderKind";
 
 export const DEFAULT_CODEX_OFFICIAL_AUTH: CodexOfficialAuthConfig = {
   mode: "desktop_current_login",

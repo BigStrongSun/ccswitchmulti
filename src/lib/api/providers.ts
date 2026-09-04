@@ -201,6 +201,11 @@ export function normalizeProvidersPayload(
 }
 
 export const providersApi = {
+  async getCodexEditorProviders(): Promise<Record<string, Provider>> {
+    return normalizeProvidersPayload(
+      await invoke("get_codex_editor_providers"),
+    );
+  },
   async getAll(appId: AppId): Promise<Record<string, Provider>> {
     return normalizeProvidersPayload(
       await invoke<unknown>("get_providers", { app: appId }),

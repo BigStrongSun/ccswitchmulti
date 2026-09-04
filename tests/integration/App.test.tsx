@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
   fireEvent,
 } from "@testing-library/react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -736,6 +737,82 @@ describe("App integration with MSW", () => {
     const wizard = await screen.findByTestId("codex-multirouter-wizard");
     expect(wizard).toHaveAttribute("data-mode", "create");
     expect(wizard).toHaveAttribute("data-plan-id", "");
+  });
+
+  it("excludes internal protocol facades from the existing router picker", async () => {
+    const facade = {
+      id: "kimi-source",
+      name: "Kimi protocol facade",
+      category: "custom" as const,
+      settingsConfig: {
+        codexProtocolSet: { version: 1, role: "facade" },
+        codexRouting: { enabled: true, version: 2, routes: [] },
+      },
+    };
+    const router = {
+      id: "user-router",
+      name: "My real router",
+      category: "custom" as const,
+      settingsConfig: {
+        codexRouting: { enabled: true, version: 2, routes: [] },
+      },
+    };
+    setProviders("codex", { [facade.id]: facade, [router.id]: router });
+    const projection = vi
+      .spyOn(providersApi, "getCodexEditorProviders")
+      .mockResolvedValue({
+        [facade.id]: { ...facade, settingsConfig: {} },
+        [router.id]: router,
+      });
+    try {
+      const { default: App } = await import("@/App");
+      renderApp(App);
+      fireEvent.click(screen.getByText("switch-codex"));
+      await waitFor(() =>
+        expect(screen.getByTestId("provider-list").textContent).toContain(
+          "kimi-source",
+        ),
+      );
+      fireEvent.click(screen.getByText("open-multirouter-entry"));
+      const dialog = await screen.findByRole("dialog");
+      expect(within(dialog).getByText("My real router")).toBeInTheDocument();
+      expect(within(dialog).queryByText("Kimi protocol facade")).toBeNull();
+    } finally {
+      projection.mockRestore();
+    }
+  });
+
+  it("blocks router creation when owned protocol sources cannot be restored safely", async () => {
+    setProviders("codex", {
+      "broken-source": {
+        id: "broken-source",
+        name: "Broken source",
+        settingsConfig: {
+          codexProtocolSet: { version: 1, role: "facade" },
+        },
+      },
+    });
+    const projection = vi
+      .spyOn(providersApi, "getCodexEditorProviders")
+      .mockRejectedValue(new Error("invalid ownership"));
+    try {
+      const { default: App } = await import("@/App");
+      renderApp(App);
+      fireEvent.click(screen.getByText("switch-codex"));
+      await waitFor(() =>
+        expect(screen.getByTestId("provider-list").textContent).toContain(
+          "broken-source",
+        ),
+      );
+      fireEvent.click(screen.getByText("open-multirouter-entry"));
+      fireEvent.click(await screen.findByText("创建新配置"));
+      expect(screen.queryByTestId("codex-multirouter-wizard")).toBeNull();
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        expect.stringContaining("无法安全还原"),
+      );
+    } finally {
+      projection.mockRestore();
+    }
   });
 
   it("returns a provider created from the wizard to the same draft by its new id", async () => {

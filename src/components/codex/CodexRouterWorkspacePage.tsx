@@ -1,3 +1,4 @@
+import { isUserCodexRoutingPlan as isRoutingPlan } from "@/lib/codexProviderKind";
 import {
   useEffect,
   useMemo,
@@ -1205,12 +1206,7 @@ function normalizeLegacyCodexRoutingRoute(
 }
 
 /// 判断一个 Provider 是否已经承载 Codex 多模型路由；即使暂时关闭，只要有规则也归为路由方案方便继续编辑。
-export function isRoutingPlan(provider: Provider): boolean {
-  const routing = readCodexRouting(provider);
-  return Boolean(
-    routing && (routing.enabled !== false || (routing.routes?.length ?? 0) > 0),
-  );
-}
+export { isUserCodexRoutingPlan as isRoutingPlan } from "@/lib/codexProviderKind";
 
 /// 提取 route 的上游协议名，兼容历史字段和 UI 字段。
 function routeApiFormat(route: CodexRoute): string {

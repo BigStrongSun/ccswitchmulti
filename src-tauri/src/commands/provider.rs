@@ -48,6 +48,20 @@ pub fn get_current_provider(state: State<'_, AppState>, app: String) -> Result<S
 }
 
 #[tauri::command]
+pub fn get_codex_editor_providers(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, Provider>, String> {
+    let providers = state
+        .db
+        .get_all_providers("codex")
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .collect();
+    crate::codex_multirouter::provider_set::project_codex_editor_providers(&providers)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 #[allow(non_snake_case)]
 pub fn get_codex_logical_provider_for_editing(
     state: State<'_, AppState>,

@@ -756,6 +756,58 @@ pub fn restore_logical_codex_provider(
     Ok(restored)
 }
 
+/// Read-only editor projection. Runtime records and internal routing stay intact.
+pub fn project_codex_editor_providers(
+    providers: &HashMap<String, Provider>,
+) -> Result<HashMap<String, Provider>, CodexProviderSetError> {
+    let mut logical_sources = Vec::new();
+    let mut validated_leaf_ids = HashSet::new();
+    for provider in providers
+        .values()
+        .filter(|provider| is_codex_provider_set_facade(provider))
+    {
+        logical_sources.push(restore_logical_codex_provider(provider, providers)?);
+        for field in ["responsesProviderId", "chatProviderId"] {
+            if let Some(id) = provider.settings_config["codexProtocolSet"][field].as_str() {
+                validated_leaf_ids.insert(id.to_string());
+            }
+        }
+    }
+    let mut result = HashMap::new();
+    for provider in providers.values() {
+        if is_codex_provider_set_generated_leaf(provider) {
+            if !validated_leaf_ids.contains(&provider.id) {
+                return Err(error(
+                    "codex_provider_set_dependency_changed",
+                    "Generated leaf has no validated facade ownership",
+                ));
+            }
+            continue;
+        }
+        if let Some(source) = logical_sources
+            .iter()
+            .find(|source| source.id == provider.id)
+        {
+            result.insert(source.id.clone(), source.clone());
+            continue;
+        }
+        let mut projected = provider.clone();
+        if let Some(routing) = provider.settings_config.get("codexRouting") {
+            if let CodexRoutingDocument::V2(mut plan) =
+                CodexRoutingDocument::parse(routing).map_err(|err| error(err.code, err.message))?
+            {
+                for source in &logical_sources {
+                    fold_router_routes_for_single(source, &mut plan)?;
+                }
+                projected.settings_config["codexRouting"] = serde_json::to_value(plan)
+                    .map_err(|err| error("codex_editor_projection_failed", err.to_string()))?;
+            }
+        }
+        result.insert(projected.id.clone(), projected);
+    }
+    Ok(result)
+}
+
 pub fn rewrite_dependent_routers_for_provider_set(
     source: &Provider,
     persistence: &CodexProviderSetPersistence,
@@ -930,18 +982,16 @@ fn fold_router_routes_for_single(
                 .then_some(route_id.clone())
         })
         .collect::<HashSet<_>>();
+    let leaf_ids = [responses_leaf_id(&source.id), chat_leaf_id(&source.id)];
+    if plan.routes.iter().any(|route| {
+        leaf_ids.contains(&route.target_provider_id) && !source_marker_ids.contains(&route.id)
+    }) {
+        return Err(error(
+            "codex_provider_set_dependency_changed",
+            "A dependent MultiRouter directly references a generated leaf without an ownership marker",
+        ));
+    }
     if source_marker_ids.is_empty() {
-        let leaf_ids = [responses_leaf_id(&source.id), chat_leaf_id(&source.id)];
-        if plan
-            .routes
-            .iter()
-            .any(|route| leaf_ids.contains(&route.target_provider_id))
-        {
-            return Err(error(
-                "codex_provider_set_dependency_changed",
-                "A dependent MultiRouter directly references a generated leaf without an ownership marker",
-            ));
-        }
         return Ok(false);
     }
 
@@ -954,6 +1004,19 @@ fn fold_router_routes_for_single(
             continue;
         }
         let marker = markers.get(&route.id).expect("marker ID was collected");
+        let expected_target = match marker.get("transport").and_then(Value::as_str) {
+            Some("open_ai_responses") => Some(responses_leaf_id(&source.id)),
+            Some("open_ai_chat") => Some(chat_leaf_id(&source.id)),
+            _ => None,
+        };
+        if marker.get("version").and_then(Value::as_u64) != Some(CODEX_PROTOCOL_SET_VERSION as u64)
+            || expected_target.as_deref() != Some(route.target_provider_id.as_str())
+        {
+            return Err(error(
+                "codex_provider_set_dependency_changed",
+                "Generated route target or protocol ownership changed",
+            ));
+        }
         let original_route_id = marker
             .get("originalRouteId")
             .and_then(Value::as_str)
@@ -2467,6 +2530,78 @@ mod tests {
         );
         assert!(restored.settings_config.get("codexRouting").is_none());
         assert!(restored.settings_config.get("codexProtocolSet").is_none());
+    }
+
+    #[test]
+    fn editor_inventory_restores_sources_and_folds_owned_routes_without_mutating_runtime() {
+        let source = source_provider();
+        let prepared = split_prepared(&source);
+        let router = dependent_router(json!({"mode": "include", "models": ["model-a", "model-b"]}));
+        let initial = [(router.id.clone(), router)].into_iter().collect();
+        let expanded =
+            rewrite_dependent_routers_for_provider_set(&source, &prepared.persistence, &initial)
+                .unwrap();
+        let CodexProviderSetPersistence::Split {
+            facade,
+            responses_provider,
+            chat_provider,
+        } = prepared.persistence
+        else {
+            panic!("split");
+        };
+        let inventory = [
+            facade,
+            responses_provider,
+            chat_provider,
+            expanded[0].clone(),
+        ]
+        .into_iter()
+        .map(|provider| (provider.id.clone(), provider))
+        .collect::<HashMap<_, _>>();
+        let before = serde_json::to_value(&inventory).unwrap();
+        let projected = super::project_codex_editor_providers(&inventory).unwrap();
+        assert_eq!(projected.len(), 2);
+        assert_eq!(
+            model_names(&projected[&source.id]),
+            vec!["model-a", "model-b"]
+        );
+        assert!(projected[&source.id]
+            .settings_config
+            .get("codexRouting")
+            .is_none());
+        let routes = &projected[&expanded[0].id].settings_config["codexRouting"]["routes"];
+        assert_eq!(routes.as_array().unwrap().len(), 1);
+        assert_eq!(routes[0]["targetProviderId"], source.id);
+        assert_eq!(
+            routes[0]["modelSelection"]["models"],
+            json!(["model-a", "model-b"])
+        );
+        assert_eq!(serde_json::to_value(&inventory).unwrap(), before);
+        let mut retargeted = inventory.clone();
+        retargeted.get_mut(&expanded[0].id).unwrap().settings_config["codexRouting"]["routes"][0]
+            ["targetProviderId"] = json!("other-source");
+        assert!(
+            super::project_codex_editor_providers(&retargeted).is_err(),
+            "must reject retargeted generated routes"
+        );
+        let mut orphaned = inventory.clone();
+        orphaned.remove(&source.id);
+        assert!(
+            super::project_codex_editor_providers(&orphaned).is_err(),
+            "must reject orphan leaves"
+        );
+        let mut unmarked = inventory.clone();
+        let routes = unmarked.get_mut(&expanded[0].id).unwrap().settings_config["codexRouting"]
+            ["routes"]
+            .as_array_mut()
+            .unwrap();
+        let mut extra = routes[0].clone();
+        extra["id"] = json!("unmarked-direct-leaf");
+        routes.push(extra);
+        assert!(
+            super::project_codex_editor_providers(&unmarked).is_err(),
+            "must reject unmarked references alongside marked routes"
+        );
     }
 
     #[test]

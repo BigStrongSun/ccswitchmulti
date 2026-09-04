@@ -920,26 +920,78 @@ fn restore_provider_protocol_evidence(
     if is_router || candidates.is_empty() {
         return Ok(None);
     }
+    // Persisted split profiles belong to owned leaves, while original observations
+    // belong to the logical source. Rebind only within a validated Provider Set.
+    let mut related_ids = vec![provider.id.clone()];
+    if let Some(facade) = providers.get(&provider.id).filter(|persisted| {
+        crate::codex_multirouter::provider_set::is_codex_provider_set_facade(persisted)
+    }) {
+        crate::codex_multirouter::provider_set::restore_logical_codex_provider(facade, &providers)
+            .map_err(|error| error.to_string())?;
+        for field in ["responsesProviderId", "chatProviderId"] {
+            if let Some(id) = facade.settings_config["codexProtocolSet"][field].as_str() {
+                related_ids.push(id.to_string());
+            }
+        }
+    }
+    let mut profiles = Vec::new();
+    let mut stored = Vec::new();
+    for id in related_ids {
+        profiles.extend(
+            state
+                .db
+                .list_protocol_compatibility_profiles(&id)
+                .map_err(|error| error.to_string())?,
+        );
+        stored.extend(
+            state
+                .db
+                .list_protocol_probe_observations(&id)
+                .map_err(|error| error.to_string())?,
+        );
+    }
     let mut records = Vec::new();
     let mut observations = Vec::new();
     for candidate in candidates {
-        let Some(record) = find_cached_candidate_record(state, &candidate, now)? else {
-            return Ok(None);
-        };
-        let stored = state
-            .db
-            .list_protocol_probe_observations(&record.target.provider_id)
-            .map_err(|error| error.to_string())?;
+        let mut matching = Vec::new();
         for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
             let target = target_for_candidate(&candidate, transport)?;
-            let Some(observation) = stored.iter().find(|observation| {
-                observation.target == target
-                    && observation.tested_at == record.tested_at
-                    && observation.probe_version == record.probe_version
-            }) else {
+            for profile in &profiles {
+                let mut rebound = profile.clone();
+                rebound.target.provider_id = target.provider_id.clone();
+                rebound.target.route_id = target.route_id.clone();
+                if rebound.target == target
+                    && rebound.probe_version == PROBE_PROFILE_VERSION
+                    && rebound.expires_at >= now
+                    && rebound.result.readiness == ProbeReadiness::Verified
+                    && rebound.result.selected_transport == Some(transport)
+                {
+                    matching.push(rebound);
+                }
+            }
+        }
+        let Some(record) = matching.into_iter().max_by_key(|record| record.tested_at) else {
+            return Ok(None);
+        };
+        for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
+            let target = target_for_candidate(&candidate, transport)?;
+            let Some(observation) = stored
+                .iter()
+                .cloned()
+                .map(|mut observation| {
+                    observation.target.provider_id = target.provider_id.clone();
+                    observation.target.route_id = target.route_id.clone();
+                    observation
+                })
+                .find(|observation| {
+                    observation.target == target
+                        && observation.tested_at == record.tested_at
+                        && observation.probe_version == record.probe_version
+                })
+            else {
                 return Ok(None);
             };
-            observations.push(observation.clone());
+            observations.push(observation);
         }
         records.push(record);
     }
@@ -2054,6 +2106,91 @@ mod tests {
             .list_protocol_probe_observations("provider-a")
             .expect("read observations after prepare")
             .is_empty());
+    }
+
+    #[test]
+    fn saved_split_source_can_restore_committed_evidence_without_reprobing() {
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let provider = ordinary_provider();
+        let now = chrono::Utc::now().timestamp();
+        let receipt_ids = [
+            ("model-a", TransportKind::OpenAiResponses),
+            ("model-b", TransportKind::OpenAiChat),
+        ]
+        .into_iter()
+        .map(|(model, transport)| {
+            let record = provider_set_record(&provider, model, model, transport, now);
+            let observations = [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
+                .into_iter()
+                .map(|branch| {
+                    let mut observation = provider_set_record(&provider, model, model, branch, now);
+                    observation.result.selected_transport = Some(transport);
+                    observation
+                })
+                .collect();
+            state
+                .remember_codex_provider_set_probe_receipt(record, observations)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+        let preview = prepare_codex_provider_set_internal(
+            &state,
+            PrepareCodexProviderSetRequest {
+                provider: provider.clone(),
+                receipt_ids: receipt_ids.clone(),
+            },
+            now,
+        )
+        .unwrap();
+        let outcome = commit_codex_provider_set_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetRequest {
+                provider,
+                receipt_ids,
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::AcceptAuto,
+            },
+            now,
+            |artifact| {
+                Ok(
+                    crate::codex_multirouter::projection::ProjectionReadBack::verified(
+                        artifact.dependency_fingerprint.clone(),
+                    ),
+                )
+            },
+        )
+        .unwrap();
+        let logical = outcome.snapshot.logical_provider;
+        let restored =
+            super::restore_provider_protocol_evidence(&state, logical.clone(), now).unwrap();
+        assert!(restored.is_some(), "saved split evidence must be reusable");
+        let restored = restored.unwrap();
+        assert_eq!(restored.records.len(), 2);
+        assert!(restored
+            .records
+            .iter()
+            .all(|record| record.tested_at == now && record.expires_at == now + 600));
+        let preview = prepare_codex_provider_set_internal(
+            &state,
+            PrepareCodexProviderSetRequest {
+                provider: logical.clone(),
+                receipt_ids: restored.receipt_ids,
+            },
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            preview.plan,
+            crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. }
+        ));
+        let mut changed = logical;
+        changed.settings_config["auth"]["OPENAI_API_KEY"] = json!("rotated");
+        assert!(
+            super::restore_provider_protocol_evidence(&state, changed, now)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

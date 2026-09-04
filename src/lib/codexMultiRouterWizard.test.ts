@@ -4,7 +4,9 @@ import {
   buildCodexMultiRouterWizardPlan,
   initialWizardCatalogModelOrder,
   initialWizardSelectedSourceIds,
+  isCodexMultiRouterPlan,
 } from "./codexMultiRouterWizard";
+import { isRoutingPlan } from "@/components/codex/CodexRouterWorkspacePage";
 
 const deepseekSource: Provider = {
   id: "deepseek-source",
@@ -20,6 +22,30 @@ const deepseekSource: Provider = {
 };
 
 describe("buildCodexMultiRouterWizardPlan subagent version", () => {
+  it("does not classify protocol facade routing as a user MultiRouter", () => {
+    const facade: Provider = {
+      id: "any-source",
+      name: "Not name based",
+      settingsConfig: {
+        codexProtocolSet: {
+          version: 1,
+          role: "facade",
+          responsesProviderId: "r",
+          chatProviderId: "c",
+          sourceModelCatalog: { models: [{ model: "one" }] },
+        },
+        codexRouting: { enabled: true, routes: [{ id: "internal" }] },
+      },
+    };
+    expect(isRoutingPlan(facade)).toBe(false);
+    expect(isCodexMultiRouterPlan(facade)).toBe(false);
+    const router = {
+      ...facade,
+      settingsConfig: { codexRouting: facade.settingsConfig.codexRouting },
+    };
+    expect(isRoutingPlan(router)).toBe(true);
+    expect(isCodexMultiRouterPlan(router)).toBe(true);
+  });
   it("initializes an existing schema-v2 plan from its route Provider ids", () => {
     const unusedSource: Provider = {
       ...deepseekSource,

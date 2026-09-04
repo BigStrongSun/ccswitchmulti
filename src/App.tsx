@@ -513,8 +513,11 @@ function App() {
   });
   const providers = useMemo(() => data?.providers ?? {}, [data]);
   const codexWizardProviders = useMemo(
-    () => (activeApp === "codex" ? Object.values(providers) : []),
-    [activeApp, providers],
+    () =>
+      activeApp === "codex"
+        ? Object.values(data?.codexEditorProviders ?? providers)
+        : [],
+    [activeApp, providers, data?.codexEditorProviders],
   );
   const codexRoutingPlans = useMemo(
     () => codexWizardProviders.filter(isRoutingPlan),
@@ -1161,6 +1164,10 @@ function App() {
   };
 
   const handleCreateCodexMultiRouter = () => {
+    if (data?.codexEditorError) {
+      toast.error(data.codexEditorError);
+      return;
+    }
     setActiveApp("codex");
     setCodexMultiRouterWizardMode("create");
     setCodexMultiRouterWizardPlanId(undefined);
@@ -1170,6 +1177,10 @@ function App() {
   };
 
   const handleEditCodexMultiRouter = (provider: Provider) => {
+    if (data?.codexEditorError) {
+      toast.error(data.codexEditorError);
+      return;
+    }
     setActiveApp("codex");
     setCodexMultiRouterWizardMode("edit");
     setCodexMultiRouterWizardPlanId(provider.id);
@@ -1321,9 +1332,15 @@ function App() {
         case "openaiApi":
           return <OpenAICompatibleApiPage />;
         case "codexRouter":
+          if (data?.codexEditorError)
+            return (
+              <div role="alert" className="p-6">
+                {data.codexEditorError}
+              </div>
+            );
           return (
             <CodexRouterWorkspacePage
-              providers={Object.values(providers)}
+              providers={codexWizardProviders}
               proxyStatus={proxyStatus}
               isProxyRunning={isProxyRunning}
               isCodexTakeoverActive={Boolean(takeoverStatus?.codex)}
