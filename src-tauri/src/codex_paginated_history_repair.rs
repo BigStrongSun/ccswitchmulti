@@ -1,12 +1,19 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::{
+    fs::OpenOptions,
+    io::{BufWriter, Write},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 static REPAIR_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -60,18 +67,7 @@ struct RolloutRepairCandidate {
 #[derive(Default)]
 struct RolloutRepairPlan {
     candidates: Vec<RolloutRepairCandidate>,
-    rotated: Vec<RotatedRolloutRepairCandidate>,
     blocked: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-struct RotatedRolloutRepairCandidate {
-    thread_id: String,
-    canonical_path: PathBuf,
-    segments: Vec<PathBuf>,
-    projection_db: PathBuf,
-    #[cfg(any(target_os = "windows", test))]
-    affected_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,6 +79,16 @@ struct ProjectionCursorRepair {
     minimum_next_ordinal: u64,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct RotatedRolloutRepairCandidate {
+    thread_id: String,
+    canonical_path: PathBuf,
+    segments: Vec<PathBuf>,
+    projection_db: PathBuf,
+}
+
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CoalescedRollout {
     segment_count: usize,
@@ -91,6 +97,7 @@ struct CoalescedRollout {
     byte_len: u64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct RolloutSegment {
     path: PathBuf,
@@ -98,7 +105,23 @@ struct RolloutSegment {
     last_ordinal: u64,
 }
 
-fn rollout_session_id(path: &Path) -> Result<String, String> {
+#[derive(Clone, Debug, Deserialize)]
+struct RolloutSessionMetadata {
+    id: String,
+    #[serde(default)]
+    history_mode: Option<String>,
+    #[serde(default)]
+    history_base: Option<RolloutHistoryBase>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RolloutHistoryBase {
+    thread_id: String,
+    end_ordinal_exclusive: u64,
+    end_byte_offset: u64,
+}
+
+fn rollout_session_metadata(path: &Path) -> Result<RolloutSessionMetadata, String> {
     let file = File::open(path)
         .map_err(|error| format!("open_rollout_session_metadata_failed: {error}"))?;
     let mut reader = BufReader::new(file);
@@ -115,13 +138,98 @@ fn rollout_session_id(path: &Path) -> Result<String, String> {
     if value.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
         return Err("rollout_does_not_start_with_session_metadata".to_string());
     }
-    value
-        .pointer("/payload/id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| "rollout_session_metadata_missing_id".to_string())
+    serde_json::from_value(
+        value
+            .get("payload")
+            .cloned()
+            .ok_or_else(|| "rollout_session_metadata_missing_payload".to_string())?,
+    )
+    .map_err(|error| format!("parse_rollout_session_payload_failed: {error}"))
 }
 
+#[cfg(test)]
+fn rollout_session_id(path: &Path) -> Result<String, String> {
+    Ok(rollout_session_metadata(path)?.id)
+}
+
+fn resolve_active_rollout_lineage(
+    expected_thread_id: &str,
+    active_path: &Path,
+    candidate_paths: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
+    let mut paths_by_rollout_id = HashMap::new();
+    for path in candidate_paths {
+        let Some(rollout_id) = source_id_from_rollout_path(path) else {
+            continue;
+        };
+        if let Some(previous) = paths_by_rollout_id.insert(rollout_id.clone(), path.clone()) {
+            if previous != *path {
+                return Err(format!(
+                    "ambiguous_rollout_id: rollout_id={rollout_id}, first={}, second={}",
+                    previous.display(),
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    let mut lineage = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = active_path.to_path_buf();
+    loop {
+        let rollout_id = source_id_from_rollout_path(&current)
+            .ok_or_else(|| format!("invalid_rollout_filename: {}", current.display()))?;
+        if !seen.insert(rollout_id.clone()) {
+            return Err(format!("cyclic_history_base: rollout_id={rollout_id}"));
+        }
+        let metadata = rollout_session_metadata(&current)?;
+        if metadata.id != expected_thread_id {
+            return Err(format!(
+                "rollout_session_id_mismatch: expected={expected_thread_id}, actual={}",
+                metadata.id
+            ));
+        }
+        if metadata.history_mode.as_deref() != Some("paginated") {
+            return Err(format!(
+                "rollout_lineage_is_not_paginated: path={}",
+                current.display()
+            ));
+        }
+        lineage.push(current.clone());
+        let Some(base) = metadata.history_base else {
+            break;
+        };
+        if base.end_ordinal_exclusive == 0 {
+            return Err(format!(
+                "invalid_history_base_cutoff: rollout_id={}",
+                base.thread_id
+            ));
+        }
+        let parent = paths_by_rollout_id
+            .get(&base.thread_id.to_ascii_lowercase())
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "missing_history_base_rollout: rollout_id={}",
+                    base.thread_id
+                )
+            })?;
+        let parent_len = fs::metadata(&parent)
+            .map_err(|error| format!("read_history_base_metadata_failed: {error}"))?
+            .len();
+        if base.end_byte_offset > parent_len {
+            return Err(format!(
+                "history_base_offset_past_end: rollout_id={}, offset={}, file_len={parent_len}",
+                base.thread_id, base.end_byte_offset
+            ));
+        }
+        current = parent;
+    }
+    lineage.reverse();
+    Ok(lineage)
+}
+
+#[cfg(test)]
 fn write_coalesced_rollout(
     expected_session_id: &str,
     paths: &[PathBuf],
@@ -446,6 +554,7 @@ pub(crate) fn scan_rollout_ordinals(path: &Path) -> Result<RolloutOrdinalScan, S
     })
 }
 
+#[cfg(test)]
 fn unique_sibling_path(path: &Path, label: &str) -> Result<PathBuf, String> {
     let parent = path
         .parent()
@@ -471,6 +580,7 @@ fn unique_sibling_path(path: &Path, label: &str) -> Result<PathBuf, String> {
     Err("could_not_allocate_rollout_repair_sibling_path".to_string())
 }
 
+#[cfg(test)]
 fn rollback_rotated_segment_moves(moved: &[(PathBuf, PathBuf)]) {
     for (original, backup) in moved.iter().rev() {
         if backup.exists() && !original.exists() {
@@ -479,6 +589,7 @@ fn rollback_rotated_segment_moves(moved: &[(PathBuf, PathBuf)]) {
     }
 }
 
+#[cfg(test)]
 fn install_coalesced_rollout(
     config_dir: &Path,
     candidate: &RotatedRolloutRepairCandidate,
@@ -689,6 +800,7 @@ fn paginated_rollout_paths() -> Result<(PathBuf, Vec<(String, PathBuf)>), String
     Ok((config_dir, paths))
 }
 
+#[cfg(test)]
 fn rotated_rollout_segments(
     thread_id: &str,
     canonical_path: &Path,
@@ -729,38 +841,64 @@ fn rotated_rollout_segments(
     Ok(segments)
 }
 
-fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
-    let (config_dir, paths) = paginated_rollout_paths()?;
-    let Some(projection_db) = projection_db_path(&config_dir) else {
-        return Ok(RolloutRepairPlan::default());
-    };
-    let mut plan = RolloutRepairPlan::default();
-    for (source_id, path) in paths {
-        match rotated_rollout_segments(&source_id, &path) {
-            Ok(segments) if !segments.is_empty() => {
-                #[cfg(any(target_os = "windows", test))]
-                let affected_bytes = segments
-                    .iter()
-                    .filter_map(|segment| fs::metadata(segment).ok().map(|metadata| metadata.len()))
-                    .sum();
-                plan.rotated.push(RotatedRolloutRepairCandidate {
-                    thread_id: source_id.clone(),
-                    canonical_path: path.clone(),
-                    segments,
-                    projection_db: projection_db.clone(),
-                    #[cfg(any(target_os = "windows", test))]
-                    affected_bytes,
-                });
-                continue;
-            }
-            Ok(_) => {}
-            Err(error) => {
-                plan.blocked.push(error);
-                continue;
+fn collect_rollout_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut directories = vec![root.to_path_buf()];
+    let mut paths = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| format!("read_rollout_directory_failed: {error}"))?
+        {
+            let entry = entry.map_err(|error| format!("read_rollout_entry_failed: {error}"))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("read_rollout_entry_type_failed: {error}"))?;
+            if file_type.is_dir() {
+                directories.push(path);
+            } else if file_type.is_file()
+                && path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+                && source_id_from_rollout_path(&path).is_some()
+            {
+                paths.push(path);
             }
         }
-        let _repair =
-            match inspect_verified_duplicate_projection_cursor(&projection_db, &source_id, &path) {
+    }
+    Ok(paths)
+}
+
+fn build_repair_plan_for_paths(
+    projection_db: &Path,
+    active_paths: &[(String, PathBuf)],
+    all_rollout_paths: &[PathBuf],
+) -> RolloutRepairPlan {
+    let mut plan = RolloutRepairPlan::default();
+    let mut inspected_rollouts = HashSet::new();
+    for (thread_id, active_path) in active_paths {
+        let lineage =
+            match resolve_active_rollout_lineage(thread_id, active_path, all_rollout_paths) {
+                Ok(lineage) => lineage,
+                Err(error) => {
+                    plan.blocked.push(error);
+                    continue;
+                }
+            };
+        for path in lineage {
+            let Some(rollout_id) = source_id_from_rollout_path(&path) else {
+                plan.blocked
+                    .push(format!("invalid_rollout_filename: {}", path.display()));
+                continue;
+            };
+            if !inspected_rollouts.insert(rollout_id.clone()) {
+                continue;
+            }
+            let repair = match inspect_verified_duplicate_projection_cursor(
+                projection_db,
+                &rollout_id,
+                &path,
+            ) {
                 Ok(Some(repair)) => repair,
                 Ok(None) => continue,
                 Err(error) => {
@@ -768,23 +906,37 @@ fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
                     continue;
                 }
             };
-        let scan = match scan_rollout_ordinals(&path) {
-            Ok(scan) => scan,
-            Err(error) => {
-                plan.blocked.push(error);
-                continue;
-            }
-        };
-        plan.candidates.push(RolloutRepairCandidate {
-            path,
-            source_id,
-            projection_db: projection_db.clone(),
-            #[cfg(any(target_os = "windows", test))]
-            repair: _repair,
-            scan,
-        });
+            let scan = match scan_rollout_ordinals(&path) {
+                Ok(scan) => scan,
+                Err(error) => {
+                    plan.blocked.push(error);
+                    continue;
+                }
+            };
+            plan.candidates.push(RolloutRepairCandidate {
+                path,
+                source_id: rollout_id,
+                projection_db: projection_db.to_path_buf(),
+                #[cfg(any(target_os = "windows", test))]
+                repair,
+                scan,
+            });
+        }
     }
-    Ok(plan)
+    plan
+}
+
+fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
+    let (config_dir, paths) = paginated_rollout_paths()?;
+    let Some(projection_db) = projection_db_path(&config_dir) else {
+        return Ok(RolloutRepairPlan::default());
+    };
+    let all_rollout_paths = collect_rollout_paths(&config_dir.join("sessions"))?;
+    Ok(build_repair_plan_for_paths(
+        &projection_db,
+        &paths,
+        &all_rollout_paths,
+    ))
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -792,24 +944,21 @@ pub(crate) fn inspect_paginated_history_repair() -> Result<PaginatedHistoryRepai
 {
     let plan = build_repair_plan()?;
     Ok(PaginatedHistoryRepairPreflight {
-        affected_rollout_count: plan.candidates.len() + plan.rotated.len(),
+        affected_rollout_count: plan.candidates.len(),
         duplicate_ordinal_count: plan
             .candidates
             .iter()
             .map(|candidate| candidate.repair.skipped_duplicate_count)
             .sum(),
-        rotated_thread_count: plan.rotated.len(),
-        rotated_segment_count: plan.rotated.iter().map(|item| item.segments.len()).sum(),
+        // `thread/revert` legitimately creates multiple immutable rollout files joined by
+        // `history_base`. They are not damaged "rotated" files and must never be flattened.
+        rotated_thread_count: 0,
+        rotated_segment_count: 0,
         affected_bytes: plan
             .candidates
             .iter()
             .map(|candidate| candidate.scan.byte_len)
-            .sum::<u64>()
-            + plan
-                .rotated
-                .iter()
-                .map(|candidate| candidate.affected_bytes)
-                .sum::<u64>(),
+            .sum::<u64>(),
         blocked_rollout_count: plan.blocked.len(),
         blocked_reason: plan.blocked.first().cloned(),
     })
@@ -819,19 +968,6 @@ pub(crate) fn repair_paginated_history_after_codex_exit(
 ) -> Result<PaginatedHistoryRepairOutcome, String> {
     let plan = build_repair_plan()?;
     let mut outcome = PaginatedHistoryRepairOutcome::default();
-    let config_dir = crate::codex_config::get_codex_config_dir();
-    for candidate in plan.rotated {
-        let coalesced = install_coalesced_rollout(&config_dir, &candidate)?;
-        outcome.repaired_rollout_count += 1;
-        outcome.repaired_rotated_thread_count += 1;
-        outcome.repaired_rotated_segment_count += coalesced.segment_count;
-        outcome.targets.push(ProjectionCatchUpTarget {
-            source_id: candidate.thread_id,
-            rollout_path: candidate.canonical_path,
-            minimum_next_ordinal: coalesced.last_ordinal.saturating_add(1),
-            minimum_next_byte_offset: coalesced.byte_len,
-        });
-    }
     for candidate in plan.candidates {
         let Some(repaired) = repair_verified_duplicate_projection_cursor(
             &candidate.projection_db,
@@ -924,6 +1060,7 @@ fn repair_projection_cursors_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn write_session_segment(path: &Path, thread_id: &str, records: &[(u64, &str)]) {
         let text = records
@@ -941,6 +1078,37 @@ mod tests {
             })
             .collect::<String>();
         std::fs::write(path, text).expect("write rotated rollout segment");
+    }
+
+    fn write_paginated_lineage_segment(
+        path: &Path,
+        thread_id: &str,
+        first_ordinal: u64,
+        history_base: Option<(&str, u64, u64)>,
+    ) {
+        let history_base = history_base.map(|(rollout_id, end_ordinal, end_offset)| {
+            json!({
+                "thread_id": rollout_id,
+                "end_ordinal_exclusive": end_ordinal,
+                "end_byte_offset": end_offset,
+            })
+        });
+        let metadata = json!({
+            "ordinal": first_ordinal,
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "history_mode": "paginated",
+                "history_base": history_base,
+            }
+        });
+        let next = json!({
+            "ordinal": first_ordinal + 1,
+            "type": "event_msg",
+            "payload": { "type": "agent_message" }
+        });
+        std::fs::write(path, format!("{metadata}\n{next}\n"))
+            .expect("write paginated lineage segment");
     }
 
     fn create_projection_fixture(path: &Path, ids: &[&str], malformed_items: bool) {
@@ -1199,6 +1367,93 @@ mod tests {
     }
 
     #[test]
+    fn active_history_base_lineage_ignores_sibling_revert_branches() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let thread_id = "01a00000-0000-7000-8000-000000000030";
+        let active_rollout_id = "01a00000-0000-7000-8000-000000000031";
+        let sibling_rollout_id = "01a00000-0000-7000-8000-000000000032";
+        let root = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-00-00-{thread_id}.jsonl"));
+        let active = temp.path().join(format!(
+            "rollout-2026-08-24T00-10-00-{thread_id}_{active_rollout_id}.jsonl"
+        ));
+        let sibling = temp.path().join(format!(
+            "rollout-2026-08-24T00-20-00-{thread_id}_{sibling_rollout_id}.jsonl"
+        ));
+        write_paginated_lineage_segment(&root, thread_id, 0, None);
+        let root_len = std::fs::metadata(&root).expect("root metadata").len();
+        write_paginated_lineage_segment(&active, thread_id, 3, Some((thread_id, 2, root_len)));
+        write_paginated_lineage_segment(&sibling, thread_id, 3, Some((thread_id, 2, root_len)));
+
+        let lineage = resolve_active_rollout_lineage(
+            thread_id,
+            &active,
+            &[root.clone(), active.clone(), sibling],
+        )
+        .expect("valid active lineage");
+
+        assert_eq!(lineage, vec![root, active]);
+    }
+
+    #[test]
+    fn active_history_base_lineage_rejects_a_missing_parent_rollout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let thread_id = "01a00000-0000-7000-8000-000000000040";
+        let active_rollout_id = "01a00000-0000-7000-8000-000000000041";
+        let missing_rollout_id = "01a00000-0000-7000-8000-000000000042";
+        let active = temp.path().join(format!(
+            "rollout-2026-08-24T00-10-00-{thread_id}_{active_rollout_id}.jsonl"
+        ));
+        write_paginated_lineage_segment(&active, thread_id, 3, Some((missing_rollout_id, 2, 100)));
+
+        let error = resolve_active_rollout_lineage(thread_id, &active, &[active.clone()])
+            .expect_err("missing history base must block repair");
+
+        assert!(error.contains("missing_history_base_rollout"));
+        assert!(
+            active.exists(),
+            "inspection must not rewrite the active rollout"
+        );
+    }
+
+    #[test]
+    fn repair_plan_does_not_classify_a_valid_revert_lineage_as_damage() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let thread_id = "01a00000-0000-7000-8000-000000000050";
+        let active_rollout_id = "01a00000-0000-7000-8000-000000000051";
+        let root = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-00-00-{thread_id}.jsonl"));
+        let active = temp.path().join(format!(
+            "rollout-2026-08-24T00-10-00-{thread_id}_{active_rollout_id}.jsonl"
+        ));
+        write_paginated_lineage_segment(&root, thread_id, 0, None);
+        let root_len = std::fs::metadata(&root).expect("root metadata").len();
+        write_paginated_lineage_segment(&active, thread_id, 3, Some((thread_id, 2, root_len)));
+        let projection_db = temp.path().join("thread_history_1.sqlite");
+        Connection::open(&projection_db)
+            .expect("projection db")
+            .execute_batch(
+                "CREATE TABLE thread_history_projection_state (
+                    thread_id TEXT PRIMARY KEY,
+                    next_rollout_byte_offset INTEGER NOT NULL,
+                    next_rollout_ordinal INTEGER NOT NULL
+                 );",
+            )
+            .expect("projection schema");
+
+        let plan = build_repair_plan_for_paths(
+            &projection_db,
+            &[(thread_id.to_string(), active.clone())],
+            &[root, active],
+        );
+
+        assert!(plan.candidates.is_empty());
+        assert!(plan.blocked.is_empty());
+    }
+
+    #[test]
     fn rotated_rollout_segments_are_coalesced_by_ordinal_with_newer_segment_winning_overlap() {
         let temp = tempfile::tempdir().expect("tempdir");
         let thread_id = "01a00000-0000-7000-8000-000000000003";
@@ -1336,7 +1591,6 @@ mod tests {
             canonical_path: canonical_path.clone(),
             segments: vec![canonical_path.clone(), child_path.clone()],
             projection_db: projection_db.clone(),
-            affected_bytes: 0,
         };
 
         let installed =
@@ -1411,7 +1665,6 @@ mod tests {
             canonical_path: canonical_path.clone(),
             segments: vec![canonical_path.clone(), child_path.clone()],
             projection_db,
-            affected_bytes: 0,
         };
 
         let error = install_coalesced_rollout(&config_dir, &candidate)

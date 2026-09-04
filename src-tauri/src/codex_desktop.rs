@@ -14,7 +14,7 @@ pub(crate) const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
 pub(crate) const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
-const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV7";
+const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV8";
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
 #[cfg(any(target_os = "macos", test))]
 const CODEX_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.openai.codex";
@@ -1012,7 +1012,7 @@ fn guardian_v2_compatibility_patch_core_script() -> &'static str {
 /// 覆盖历史线程保存的旧入口标签，使跨 Provider 历史在冷恢复后重新经过 CCSM Router。
 fn app_server_request_normalization_core_script() -> &'static str {
     r#"
-  const appServerRequestPatchVersion = "7";
+  const appServerRequestPatchVersion = "8";
   const appServerRequestClientNeedsPatch = (client) => client?.__ccSwitchModelRequestPatch !== appServerRequestPatchVersion;
   const appServerMethod = (method, params) => method === "send-cli-request-for-host" && params?.method ? String(params.method) : String(method || "");
   const currentModelProvider = () => {
@@ -1042,12 +1042,83 @@ fn app_server_request_normalization_core_script() -> &'static str {
 "#
 }
 
+/// Codex Desktop refreshes thread metadata independently from the loaded transcript. After
+/// `thread/revert`, the stable thread ID remains unchanged while `thread.path` moves to a new
+/// rollout. An already loaded conversation can therefore retain the old rollout path and turns.
+/// Rehydrate only idle conversations whose cached path is demonstrably stale; active turns are
+/// deferred so the compatibility layer never interrupts live work.
+fn history_lineage_hydration_core_script() -> &'static str {
+    r#"
+  const normalizedRolloutPath = (value) => typeof value === "string"
+    ? value.replaceAll("\\", "/").replace(/^\/\/?\?\//, "").toLowerCase()
+    : "";
+  const conversationHasActiveTurn = (conversation) => Array.isArray(conversation?.turns)
+    && conversation.turns.some((turn) => turn?.status === "inProgress");
+  const planHistoryLineageRehydration = (manager) => {
+    const repair = [];
+    const deferred = [];
+    const conversations = typeof manager?.getCachedConversations === "function"
+      ? manager.getCachedConversations()
+      : [];
+    const metadata = manager?.threadStore?.threadsById;
+    for (const conversation of Array.isArray(conversations) ? conversations : []) {
+      const id = typeof conversation?.id === "string" ? conversation.id : "";
+      if (!id || !metadata || typeof metadata.get !== "function") continue;
+      const currentPath = normalizedRolloutPath(conversation.rolloutPath);
+      const activePath = normalizedRolloutPath(metadata.get(id)?.path);
+      if (!currentPath || !activePath || currentPath === activePath) continue;
+      const streaming = typeof manager?.isConversationStreaming === "function"
+        && manager.isConversationStreaming(id);
+      if (streaming || conversationHasActiveTurn(conversation)) deferred.push(id);
+      else repair.push(id);
+    }
+    return { repair, deferred };
+  };
+  const rehydrateStaleHistoryLineages = async (manager) => {
+    const plan = planHistoryLineageRehydration(manager);
+    const repaired = [];
+    const failed = [];
+    for (const id of plan.repair) {
+      const previous = manager.getConversation(id);
+      const activePath = manager.threadStore.threadsById.get(id)?.path;
+      try {
+        manager.updateConversationState(id, (conversation) => {
+          conversation.rolloutPath = activePath;
+          conversation.turns = [];
+          conversation.turnsPagination = {
+            olderCursor: null,
+            oldestLoadedTurnId: null,
+            isLoadingOlder: false,
+            hasLoadedOldest: false,
+          };
+          conversation.resumeState = "needs_resume";
+        });
+        await manager.resumeConversationForUnavailableOwner({
+          conversationId: id,
+          model: null,
+          serviceTier: null,
+          reasoningEffort: null,
+          workspaceRoots: previous?.cwd ? [previous.cwd] : ["/"],
+          collaborationMode: previous?.latestCollaborationMode || null,
+        });
+        repaired.push(id);
+      } catch (error) {
+        if (previous) manager.setConversation(previous);
+        failed.push({ id, error: String(error?.message || error) });
+      }
+    }
+    return { repaired, deferred: plan.deferred, failed };
+  };
+"#
+}
+
 /// 构造 renderer 注入脚本：触发新版本地历史目录同步，并修复模型白名单和缓存。
 fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> String {
     let payload = serde_json::to_string(catalog).unwrap_or_else(|_| "{}".to_string());
     let model_patch_core = model_picker_patch_core_script();
     let guardian_v2_patch_core = guardian_v2_compatibility_patch_core_script();
     let request_normalization_core = app_server_request_normalization_core_script();
+    let history_lineage_hydration_core = history_lineage_hydration_core_script();
     format!(
         r#"
 (async () => {{
@@ -1067,6 +1138,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
 {model_patch_core}
 {guardian_v2_patch_core}
 {request_normalization_core}
+{history_lineage_hydration_core}
   const patchStatsigConfig = (name, config, repairLegacyPollution = false) => {{
     const prepared = prepareStatsigDynamicConfig(name, config, repairLegacyPollution);
     config = prepared.config;
@@ -1342,6 +1414,26 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
             throw error;
           }});
         }}
+        if (state.historyQueryRefreshCompleted
+            && !state.historyLineageHydrationPromise
+            && typeof value?.getCachedConversations === "function"
+            && typeof value?.getConversation === "function"
+            && typeof value?.updateConversationState === "function"
+            && typeof value?.setConversation === "function"
+            && typeof value?.resumeConversationForUnavailableOwner === "function") {{
+          state.historyLineageHydrationPromise = Promise.resolve()
+            .then(() => rehydrateStaleHistoryLineages(value))
+            .then((result) => {{
+              state.historyLineageHydration = result;
+              for (const failure of result.failed || []) recordFailure(failure.error);
+              return result;
+            }})
+            .catch((error) => {{
+              state.historyLineageHydration = {{ repaired: [], deferred: [], failed: [{{ error: String(error?.message || error) }}] }};
+              recordFailure(error);
+            }})
+            .finally(() => {{ state.historyLineageHydrationPromise = null; }});
+        }}
       }}
 
       if (depth >= 14) continue;
@@ -1361,6 +1453,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       patched: patched > 0,
       clientCount: patched,
       refreshRequested: Boolean(state.historyQueryRefreshCompleted),
+      lineageHydration: state.historyLineageHydration || null,
     }};
     return patched;
   }};
@@ -1385,9 +1478,19 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
         await state.historyQueryRefreshPromise;
       }} catch {{}}
     }}
+    // The first traversal starts the native thread-list refresh. Traverse once more after it
+    // settles so stale rollout paths are repaired during this explicit action instead of waiting
+    // for the background interval. The hydration promise itself uses Codex's resume pipeline.
+    if (state.historyQueryRefreshCompleted) patched += patchReactAppServerClients();
+    if (state.historyLineageHydrationPromise) {{
+      try {{
+        await state.historyLineageHydrationPromise;
+      }} catch {{}}
+    }}
     state.historyQueryPatch = {{
       ...(state.historyQueryPatch || {{}}),
       refreshRequested: Boolean(state.historyQueryRefreshCompleted),
+      lineageHydration: state.historyLineageHydration || null,
     }};
     state.appServerPatchInstalled = patched > 0;
     if (patched > 0 && state.historyQueryRefreshCompleted) {{
@@ -2620,6 +2723,158 @@ mod tests {
         })
     }
 
+    fn run_history_lineage_hydration_probe(probe: &str) -> serde_json::Value {
+        let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
+        let script = format!("{}\n{}", history_lineage_hydration_core_script(), probe);
+
+        context.with(|ctx| {
+            let json_text: String = ctx
+                .eval(script)
+                .expect("execute history lineage hydration core");
+            serde_json::from_str(&json_text).expect("parse history lineage hydration result")
+        })
+    }
+
+    fn run_async_history_lineage_hydration_probe(probe: &str) -> serde_json::Value {
+        let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
+        let script = format!("{}\n{}", history_lineage_hydration_core_script(), probe);
+        context.with(|ctx| {
+            ctx.eval::<(), _>(script)
+                .expect("start async history lineage hydration probe");
+        });
+        while runtime
+            .execute_pending_job()
+            .expect("execute history lineage hydration job")
+        {}
+        context.with(|ctx| {
+            let json_text: String = ctx
+                .eval("globalThis.__historyLineageResult")
+                .expect("read async history lineage hydration result");
+            serde_json::from_str(&json_text).expect("parse async history lineage hydration result")
+        })
+    }
+
+    #[test]
+    fn history_lineage_hydration_repairs_only_idle_conversations_with_a_changed_rollout_path() {
+        let result = run_history_lineage_hydration_probe(
+            r#"
+const conversations = [
+  {id: "idle-stale", rolloutPath: "root.jsonl", turns: []},
+  {id: "running-stale", rolloutPath: "root.jsonl", turns: [{status: "inProgress"}]},
+  {id: "current", rolloutPath: "active.jsonl", turns: []},
+];
+const manager = {
+  getCachedConversations: () => conversations,
+  isConversationStreaming: (id) => id === "running-stale",
+  threadStore: {threadsById: new Map([
+    ["idle-stale", {path: "branch.jsonl"}],
+    ["running-stale", {path: "branch.jsonl"}],
+    ["current", {path: "active.jsonl"}],
+  ])},
+};
+JSON.stringify(planHistoryLineageRehydration(manager));
+"#,
+        );
+
+        assert_eq!(result["repair"], json!(["idle-stale"]));
+        assert_eq!(result["deferred"], json!(["running-stale"]));
+    }
+
+    #[test]
+    fn history_lineage_hydration_uses_codex_resume_without_evicting_the_conversation() {
+        let result = run_async_history_lineage_hydration_probe(
+            r#"
+let conversation = {
+  id: "idle-stale",
+  cwd: "C:/workspace",
+  rolloutPath: "root.jsonl",
+  turns: [{status: "completed"}],
+  latestCollaborationMode: {mode: "default"},
+  resumeState: "resumed",
+};
+let resumeParams = null;
+let evictionCalled = false;
+const manager = {
+  getCachedConversations: () => [conversation],
+  getConversation: () => conversation,
+  isConversationStreaming: () => false,
+  updateConversationState: (_id, update) => {
+    const next = JSON.parse(JSON.stringify(conversation));
+    update(next);
+    conversation = next;
+  },
+  setConversation: (value) => { conversation = value; },
+  resumeConversationForUnavailableOwner: async (params) => { resumeParams = params; },
+  threadStore: {
+    threadsById: new Map([["idle-stale", {path: "branch.jsonl"}]]),
+    removeConversationFromCache: () => { evictionCalled = true; },
+  },
+};
+rehydrateStaleHistoryLineages(manager).then((outcome) => {
+  globalThis.__historyLineageResult = JSON.stringify({
+    outcome,
+    conversation,
+    resumeParams,
+    evictionCalled,
+  });
+});
+"#,
+        );
+
+        assert_eq!(result["outcome"]["repaired"], json!(["idle-stale"]));
+        assert_eq!(result["conversation"]["rolloutPath"], "branch.jsonl");
+        assert_eq!(result["conversation"]["turns"], json!([]));
+        assert_eq!(result["conversation"]["resumeState"], "needs_resume");
+        assert_eq!(
+            result["resumeParams"]["workspaceRoots"],
+            json!(["C:/workspace"])
+        );
+        assert_eq!(result["evictionCalled"], false);
+    }
+
+    #[test]
+    fn history_lineage_hydration_restores_the_cached_transcript_when_resume_fails() {
+        let result = run_async_history_lineage_hydration_probe(
+            r#"
+let conversation = {
+  id: "idle-stale",
+  cwd: "C:/workspace",
+  rolloutPath: "root.jsonl",
+  turns: [{status: "completed", id: "old-turn"}],
+  latestCollaborationMode: {mode: "default"},
+  resumeState: "resumed",
+};
+const manager = {
+  getCachedConversations: () => [conversation],
+  getConversation: () => conversation,
+  isConversationStreaming: () => false,
+  updateConversationState: (_id, update) => {
+    const next = JSON.parse(JSON.stringify(conversation));
+    update(next);
+    conversation = next;
+  },
+  setConversation: (value) => { conversation = value; },
+  resumeConversationForUnavailableOwner: async () => { throw new Error("resume failed"); },
+  threadStore: {threadsById: new Map([["idle-stale", {path: "branch.jsonl"}]])},
+};
+rehydrateStaleHistoryLineages(manager).then((outcome) => {
+  globalThis.__historyLineageResult = JSON.stringify({outcome, conversation});
+});
+"#,
+        );
+
+        assert_eq!(result["outcome"]["repaired"], json!([]));
+        assert_eq!(result["outcome"]["failed"][0]["id"], "idle-stale");
+        assert_eq!(result["conversation"]["rolloutPath"], "root.jsonl");
+        assert_eq!(
+            result["conversation"]["turns"],
+            json!([{ "status": "completed", "id": "old-turn" }])
+        );
+        assert_eq!(result["conversation"]["resumeState"], "resumed");
+    }
+
     #[test]
     fn codex_app_request_normalization_routes_resumed_threads_through_active_provider() {
         let result = run_app_server_request_normalization_probe_with_payload(
@@ -2728,7 +2983,8 @@ JSON.stringify({
 JSON.stringify({
   v5NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "5" }),
   v6NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "6" }),
-  currentNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "7" }),
+  v7NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "7" }),
+  currentNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "8" }),
   missingNeedsPatch: appServerRequestClientNeedsPatch({}),
   patchVersion: appServerRequestPatchVersion,
 });
@@ -2737,9 +2993,10 @@ JSON.stringify({
 
         assert_eq!(result["v5NeedsPatch"], true);
         assert_eq!(result["v6NeedsPatch"], true);
+        assert_eq!(result["v7NeedsPatch"], true);
         assert_eq!(result["currentNeedsPatch"], false);
         assert_eq!(result["missingNeedsPatch"], true);
-        assert_eq!(result["patchVersion"], "7");
+        assert_eq!(result["patchVersion"], "8");
     }
 
     #[test]
@@ -3011,8 +3268,9 @@ JSON.stringify({
         assert!(script.contains("isModelListMethod(method)"));
         assert!(script.contains("await installAppServerPatch()"));
         assert!(script.contains("!state.requestIds.has(requestId)"));
-        assert!(script.contains("__ccSwitchCodexAppCompatibilityV7"));
-        assert!(script.contains("appServerRequestPatchVersion = \"7\""));
+        assert!(script.contains("__ccSwitchCodexAppCompatibilityV8"));
+        assert!(script.contains("appServerRequestPatchVersion = \"8\""));
+        assert!(script.contains("rehydrateStaleHistoryLineages(value)"));
         assert!(
             script.contains("state.reactRequestClientPatchVersion = appServerRequestPatchVersion")
         );
