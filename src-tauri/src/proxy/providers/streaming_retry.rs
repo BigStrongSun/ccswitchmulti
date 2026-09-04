@@ -98,18 +98,28 @@ impl StreamReconnector {
     }
 
     async fn connect(&self) -> Result<ProxyResponse, ProxyError> {
-        if self.first_byte_timeout.is_zero() {
-            (self.connect)().await
-        } else {
-            tokio::time::timeout(self.first_byte_timeout, (self.connect)())
-                .await
-                .map_err(|_| {
-                    ProxyError::Timeout(format!(
-                        "Responses stream reconnect timed out after {}s",
-                        self.first_byte_timeout.as_secs()
-                    ))
-                })?
+        let diagnostic = crate::proxy::error_journal::Context::new(
+            "responses_reconnect",
+            &http::HeaderMap::new(),
+        );
+        let result = async {
+            if self.first_byte_timeout.is_zero() {
+                (self.connect)().await
+            } else {
+                tokio::time::timeout(self.first_byte_timeout, (self.connect)())
+                    .await
+                    .map_err(|_| {
+                        ProxyError::Timeout(format!(
+                            "Responses stream reconnect timed out after {}s",
+                            self.first_byte_timeout.as_secs()
+                        ))
+                    })?
+            }
         }
+        .await;
+        result
+            .inspect_err(|error| diagnostic.failed(error))
+            .map(|response| diagnostic.observe(response))
     }
 }
 
@@ -566,7 +576,10 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                         current = Some(Box::pin(response.bytes_stream()));
                         continue 'attempts;
                     }
-                    Ok(response) => reason = format!("reconnect got HTTP {} from upstream", response.status().as_u16()),
+                    Ok(response) => {
+                        reason = format!("reconnect got HTTP {} from upstream", response.status().as_u16());
+                        crate::proxy::error_journal::capture_discarded_response(response);
+                    }
                     Err(error) => reason = format!("reconnect failed: {error}"),
                 }
             }
@@ -864,6 +877,7 @@ pub fn create_resilient_anthropic_sse_stream_from_responses(
                             "reconnect got HTTP {} from upstream",
                             response.status().as_u16()
                         );
+                        crate::proxy::error_journal::capture_discarded_response(response);
                     }
                     Err(error) => {
                         reason = format!("reconnect failed: {error}");

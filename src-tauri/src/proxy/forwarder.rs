@@ -6799,6 +6799,43 @@ async fn send_forwarder_upstream_request(
     preserve_exact_header_case: bool,
     upstream_proxy_url: Option<&str>,
 ) -> Result<ProxyResponse, ProxyError> {
+    let diagnostic = super::error_journal::Context::new(&target_for_log, &headers);
+    send_forwarder_upstream_request_inner(
+        method,
+        url,
+        target_for_log,
+        headers,
+        extensions,
+        body_bytes,
+        timeout,
+        request_is_streaming,
+        non_streaming_timeout,
+        streaming_first_byte_timeout,
+        is_socks_proxy,
+        preserve_exact_header_case,
+        upstream_proxy_url,
+    )
+    .await
+    .inspect_err(|error| diagnostic.failed(error))
+    .map(|response| diagnostic.observe(response))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_forwarder_upstream_request_inner(
+    method: http::Method,
+    url: String,
+    target_for_log: String,
+    headers: http::HeaderMap,
+    extensions: Extensions,
+    body_bytes: Vec<u8>,
+    timeout: std::time::Duration,
+    request_is_streaming: bool,
+    non_streaming_timeout: std::time::Duration,
+    streaming_first_byte_timeout: std::time::Duration,
+    is_socks_proxy: bool,
+    preserve_exact_header_case: bool,
+    upstream_proxy_url: Option<&str>,
+) -> Result<ProxyResponse, ProxyError> {
     if is_socks_proxy || !preserve_exact_header_case {
         log::debug!(
             "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy})"

@@ -87,6 +87,8 @@ pub enum ProxyError {
 
 impl IntoResponse for ProxyError {
     fn into_response(self) -> Response {
+        super::error_journal::Context::new("client_error_response", &http::HeaderMap::new())
+            .failed(&self);
         let (status, body) = match &self {
             ProxyError::UpstreamError {
                 status: upstream_status,

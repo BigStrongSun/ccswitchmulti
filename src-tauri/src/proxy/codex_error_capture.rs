@@ -14,7 +14,7 @@ struct CaptureControl {
     max_events: u32,
 }
 
-fn redact(value: &str, limit: usize) -> String {
+pub(crate) fn redact(value: &str, limit: usize) -> String {
     static PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
         [
             r"(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)",
