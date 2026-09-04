@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
@@ -1649,6 +1649,10 @@ pub(crate) fn launch_codex_with_debug_port(
     let mut command = Command::new(executable);
     append_codex_debug_args(&mut command, debug_port);
     apply_codex_launch_timezone(&mut command, launch_timezone.as_deref());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;

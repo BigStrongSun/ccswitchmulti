@@ -16,3 +16,10 @@
 主要归类为“最新修复已在主分支，但未实装”；同时状态页存在固定待验证标签，不能用它判断真实成功/失败。现有 release EXE 也没有最新 V9，不应直接把它当作最新修复安装。需要从明确包含 3a21791a 的源码重新构建，校验 V9 和产物哈希，再经授权通过可回滚升级事务替换运行安装，最后独立验收配置、磁盘历史、renderer 历史。未经实际验收不能声称 V9 已解决当前新桌面版本的问题。
 
 本次只读取证，没有重启、关闭、替换 CCSM/Codex，没有点击破坏性刷新或修改真实 rollout。内置搜索与 Matrix 搜索分别执行；官方故障排查页仅提供通用诊断，Matrix 结果不相关，两者都不证明本机修复状态。结论由进程路径、二进制标识/哈希、源码和本机修复日志交叉确认。
+
+## 首次实装失败与新增根因
+
+- 2026-09-05 01:35 从提交 16bf866b 重建完成，冻结产物确认包含 V9、`getCompleteConversationTurns`、活动 lineage 诊断和 `proxy-errors.jsonl`；原始 EXE SHA256 为 `5DCFD77B9BF1339CF931F4D32E9DB89975BEB5CB30EECBBFCB8A0579BC0BA71A`，安装后预期 SHA256 为 `80BE1D15AB7CEC36DA0F89EC23BD2B38C2795A2E5CADB0AB3F2A5FD5646497ED`。
+- 可回滚事务停止 PID 65480 后，端口 15721 仍以已经不存在的 65480 为 owner 保留到 120 秒超时。备份事务 `ccsm-20260905-013527-afff442ed28347649a4ced16634d212c` 记录 `timed out waiting for port 15721 release`。旧安装目录与 SHA256 已恢复，guardian 后续恢复健康服务。
+- 运行时链路证明 Codex Desktop 是 CCSM 的子进程。CCSM 启动 Codex 时没有显式隔离标准句柄；Windows 子进程保留了代理监听句柄，导致父进程退出后端口仍不释放。修复应在启动边界把 Codex 的 stdin/stdout/stderr 显式接到 NUL，避免继承 CCSM 的运行时句柄，不能把事务等待时间继续加长来掩盖问题。
+- 当前旧安装首次升级仍需要一次 Codex Desktop 退出才能释放已经继承的旧句柄。后续由修复版 CCSM 启动的 Codex 不应再阻塞 CCSM 独立升级。未经一次真实的“Codex 保持运行、CCSM 单独重启、端口正常释放”验收前，不宣称该根因已在安装态验证。
