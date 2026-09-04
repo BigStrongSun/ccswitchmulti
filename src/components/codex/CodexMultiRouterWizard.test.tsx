@@ -9,6 +9,7 @@ import {
 import * as modelFetchApi from "@/lib/api/model-fetch";
 import { describe, expect, it, vi } from "vitest";
 import type { Provider } from "@/types";
+import type { ComponentProps } from "react";
 import { providersApi } from "@/lib/api/providers";
 import {
   buildWizardConnectivityResultsFromBatchOutcome,
@@ -75,6 +76,10 @@ function renderWizard(
     planId?: string;
     newlyCreatedProviderIds?: string[];
     onEnablePlan?: (provider: Provider) => Promise<void>;
+    onOpenChange?: (open: boolean) => void;
+    onOpenWorkspace?: ComponentProps<
+      typeof CodexMultiRouterWizard
+    >["onOpenWorkspace"];
   },
 ) {
   const queryClient = new QueryClient({
@@ -92,10 +97,10 @@ function renderWizard(
         mode={nextOptions?.mode ?? "create"}
         planId={nextOptions?.planId}
         newlyCreatedProviderIds={nextOptions?.newlyCreatedProviderIds}
-        onOpenChange={vi.fn()}
+        onOpenChange={nextOptions?.onOpenChange ?? vi.fn()}
         onCreateProvider={vi.fn()}
         onOpenProviderConfig={vi.fn()}
-        onOpenWorkspace={vi.fn()}
+        onOpenWorkspace={nextOptions?.onOpenWorkspace ?? vi.fn()}
         onEnablePlan={nextOptions?.onEnablePlan ?? vi.fn()}
       />
     </QueryClientProvider>
@@ -112,6 +117,37 @@ function renderWizard(
 }
 
 describe("CodexMultiRouterWizard", () => {
+  it.each(["关闭", "打开状态页完成验收"])(
+    "dismisses the acceptance overlay through %s without claiming acceptance",
+    async (button) => {
+      const plan: Provider = {
+        id: "acceptance-plan",
+        name: "Acceptance Plan",
+        settingsConfig: {
+          codexRouting: { schemaVersion: 2, enabled: true, routes: [] },
+        },
+      };
+      const onOpenChange = vi.fn();
+      const onOpenWorkspace = vi.fn();
+      renderWizard([plan], {
+        mode: "edit",
+        planId: plan.id,
+        onEnablePlan: vi.fn().mockResolvedValue(undefined),
+        onOpenChange,
+        onOpenWorkspace,
+      });
+      fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
+      fireEvent.click(screen.getByRole("button", { name: "启用这个多路路由" }));
+      await screen.findByText("状态机：enabled");
+      fireEvent.click(screen.getByRole("button", { name: button }));
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+      expect(screen.getByText("状态机：enabled")).toBeInTheDocument();
+      if (button === "打开状态页完成验收") {
+        expect(onOpenWorkspace).toHaveBeenCalledWith(plan, "status");
+      }
+    },
+  );
+
   it.each([false, true])(
     "reopens a saved plan and saves with reusable evidence (initial prepare failure: %s)",
     async (failFirstPrepare) => {

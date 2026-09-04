@@ -1,5 +1,20 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 安装终检发现验收页退出动作未接入关闭生命周期
+
+- r8核心保存与真实请求通过后，终检发现底部“关闭”仍调用acceptance分支toast，而“打开状态页完成验收”只导航底层页面、不收起portal；暂存并关闭正常。源码与实机共同确认是动作绑定问题，不是保存、路由或请求失败。
+- 两个入口统一走已有closeWizard(true)，仅关闭并保留草稿，工作台入口随后打开status；不dispatch COMPLETE，不冒充真实请求验收成功。两条组件回归均先RED（onOpenChange调用0次），修复后向导27/27通过；下一安装候选r9必须重建，r8不包含本退出修复。
+- fresh全量前端168 files/1371 tests、typecheck、Prettier、diff、UTF-8 strict/no-BOM/no-U+FFFD通过；独立窄审无Important问题。后端与r8完全相同，不重复修改或替换sidecar。
+
+## 2026-09-04 v29 r8 安装版最终验收
+
+- 发布候选源码882ae63e；完整Windows sidecar、renderer、主程序、NSIS及签名导出通过。r8安装包SHA256为DB21AB06E0E8116390DE43EEB1BF45FC0DC87B75E24630F4DCEF46B566243734；安装EXE SHA256为7A69EBC5A77D75763203D46EB1AB5110EF0566F67AAB89EEF4CC452D7CEF4131。
+- 使用已授权的脱离会话、可回滚升级事务ccsm-20260904-180515-a11f7c49afa947ca924dff8b409038fb；result.json为Success，Error/RollbackError均null，安装PID50384，15721正常。进程级CDP9335仅监听127.0.0.1；没有修改全局调试环境，也没有重启Codex。
+- 安装UI确认Kimi为自动适配入口，不在旧MultiRouter方案列表中。恢复4源有效证据后底部下一步可用，原11/17模型选择完整。连续三次保存、暂存关闭后恢复、已保存后丢弃临时草稿并冷打开再第四次保存全部成功。后三次IPC合计restore evidence12、prepare3、commit3，没有付费protocol preflight。SQLite只读复核六条运行路由、Kimi两个旧alias、k3选择、鉴权策略hash与current保持正确。
+- 启用同一方案后工作台显示在线、已接管、当前方案转发成功和11条目录映射同步。独立最小Qwen请求收到HTTP200及response.completed，输出OK，usage52（输入15/输出37）。测试脚本须使用Python3.11，且带Codex客户端标识；普通urllib身份会被明确分到未启用的External API并返回403，不是MultiRouter保存回归。测试未修改产品鉴权策略。
+- GLM主动重测、费用确认、历史与运行进度隔离、适配说明已在r6相同代码实测；失败模型取消选择有组件/后端门禁，不在用户当前方案破坏性删模型。当前Codex启动快照/CDP警告单独保留：未执行完整Codex退出重启、模型菜单注入或历史修复，不能宣称这些额外范围通过。
+- 发布前源码全量门禁记录见上一节；安全安装Pester71/71。安装包在仓库旁ccswitchmulti-v3.19.2-29-editor-r8，验收截图.tmp/r8-installed-acceptance.png。GitHub多平台发布和远端资产验证仍须另行确认。
+
 ## 2026-09-04 连续保存必须回读逻辑Router而不是运行时叶子图
 
 - 审查并以组件回归确认：batch回包router是运行时split路由，Wizard直接setSavedPlan(outcome.router)后第二次保存仅按逻辑source ID查既有aliases，匹配不到leaf路由，旧别名变为空。编辑模式查询刷新有时会恢复逻辑视图，但create模式、结构共享未触发effect或查询失败都不能依赖该时序。新测试用真实形态的叶子回包+逻辑sourceSnapshots稳定RED（legacy-good别名变成{}），不是凭静态推测改动。

@@ -1725,9 +1725,7 @@ export function CodexMultiRouterWizard({
         });
         return;
       case "acceptance":
-        toast.info("请在 Codex 发送一次真实请求，并在状态页完成验收。", {
-          closeButton: true,
-        });
+        closeWizard(true);
         return;
       default:
         return;
@@ -3570,7 +3568,10 @@ export function CodexMultiRouterWizard({
                   <div className="flex flex-wrap gap-3">
                     <Button
                       type="button"
-                      onClick={() => onOpenWorkspace(savedPlan, "status")}
+                      onClick={() => {
+                        closeWizard(true);
+                        onOpenWorkspace(savedPlan, "status");
+                      }}
                     >
                       <Route className="mr-2 h-4 w-4" />
                       打开状态页完成验收
