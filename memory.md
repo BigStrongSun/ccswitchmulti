@@ -1,5 +1,15 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 编辑旧 MultiRouter 复用已保存兼容性证据
+
+- 用户要求已保存方案可返回兼容性步骤主动重测，而不是每次编辑都强制重测。根因是向导初始化清空 connectivityResults，且上次原子提交已消耗内存 receipt；原代码没有从持久化探测证据恢复保存凭证的入口。只删除只读标签或直接把已有方案视为 Verified 都会绕过有效性边界。
+- 新增 restore_codex_provider_protocol_evidence：仅从 SQLite 查普通模型源的自动探测记录，精确匹配候选目标（含地址、凭据与请求策略指纹）、当前 profile、Verified、selected transport、有效期；同时恢复同次双协议 observations，再签发当前进程内提交凭证。无上游网络请求、无数据库写入、不刷新 testedAt/expiresAt；缺失任一所需记录返回不可复用。真正保存仍走原有 prepare/commit/receipt claim 和目标校验。
+- 旧 schema-v2 方案初始化异步恢复来源证据；有效证据解锁后续步骤，保留明确重新探测按钮及费用确认。恢复回包受目标/草稿代次保护，配置变更不会被晚到回包覆盖。记录已消耗 receipt，连续保存同一草稿时重新读取持久化证据，避免无故计费重测。新建草稿仍保留原探测门禁；缺失或过期不自动发起付费探测。
+- TDD 首次前端回归明确失败于选择模型按钮 data-read-only=true，实施后旧方案恢复、直接保存、再次保存、主动重测确认与无证据仍阻止后续步骤通过。相关Rust最终31/31通过（含恢复receipt进入正式prepare且DB有效期不变），Rust全量3815 passed/6 ignored，TypeScript通过。审查新增来源竞态回归后前端最终全量168 files /1364 tests通过；审查复核无Critical/Important遗留。Prettier、rustfmt、diff与严格UTF-8无BOM无替换字符检查通过。存在既有act/MSW/browser-data警告，新增异步恢复也要求同步测试等待更新。
+- 只读审查发现恢复进行中新增Provider的路径未增加草稿代次，晚到旧结果会错误解锁缺少新来源证据的后续页。新回归先复现错误解锁RED，再在新增来源的状态边界使旧恢复任务失效，GREEN通过；后端始终保留保存门禁。完整normalized sourceSnapshots回读在先前回归单独覆盖，本轮重复保存测试没有把空snapshots模拟当作真实安装验收。
+- 本轮是源码改动，未构建或替换安装包、未操作用户模型接口、未push/tag/release。Kimi facade误分类属于上一条独立待修问题，当前恢复入口不把任意内部路由当普通模型源；混合协议逻辑源在向导中的分类与回读仍须单独修复验收，不能宣称整个安装版流程已完成。
+- 内置Web与Matrix独立检索React异步Effect；Matrix搜索结果较泛，随后open成功读取React官方Synchronizing with Effects，与内置Web交叉确认过期异步结果应忽略。产品逻辑依据本地源码和测试，不向搜索服务发送用户配置。
+
 ## 2026-09-04 Kimi 被误列为 MultiRouter 的只读诊断
 
 - 用户截图的“编辑旧配置”来自 App.tsx 的 codexRoutingPlans，调用工作台 isRoutingPlan；此函数仅检查 codexRouting 是否启用或有规则。向导 isCodexMultiRouterPlan 也仅检查 routing，没有区分协议适配入口与用户路由方案。

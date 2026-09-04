@@ -48,6 +48,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { providersApi } from "@/lib/api/providers";
+import { restoreCodexProviderProtocolEvidence } from "@/lib/api/protocol-compatibility";
 import type { CodexMultiRouterMigrationPreview } from "@/lib/api/providers";
 import {
   fetchCodexOauthCachedModels,
@@ -876,6 +877,9 @@ export function CodexMultiRouterWizard({
     WizardConnectivityResult[]
   >([]);
   const [probeDialogOpen, setProbeDialogOpen] = useState(false);
+  const [restoredEvidence, setRestoredEvidence] =
+    useState<CodexProviderSetBatchProbeOutcome | null>(null);
+  const [isRestoringEvidence, setIsRestoringEvidence] = useState(false);
   const [excludedProbeModels, setExcludedProbeModels] = useState<string[]>([]);
   const [wizardIssues, setWizardIssues] = useState<WizardIssue[]>([]);
   const [modelFetchCards, setModelFetchCards] = useState<
@@ -899,6 +903,7 @@ export function CodexMultiRouterWizard({
   const handledCreatedProviderIdsRef = useRef(new Set<string>());
   const createPlanIdRef = useRef<string | null>(null);
   const saveInFlightRef = useRef<Promise<void> | null>(null);
+  const consumedReceiptIdsRef = useRef(new Set<string>());
   const lastProtocolLabIssueRef = useRef<string | null>(null);
 
   const resolvedMode =
@@ -945,10 +950,10 @@ export function CodexMultiRouterWizard({
     [draftSources],
   );
   const protocolLabOutcomeById = new Map(
-    (batchProtocolLab.probeOutcome?.outcomes ?? []).map((entry) => [
-      entry.providerId,
-      entry,
-    ]),
+    [
+      ...(restoredEvidence?.outcomes ?? []),
+      ...(batchProtocolLab.probeOutcome?.outcomes ?? []),
+    ].map((entry) => [entry.providerId, entry]),
   );
   const excludedProbeModelSet = new Set(excludedProbeModels);
   const probeModelKey = (providerId: string, model: string) =>
@@ -1176,7 +1181,66 @@ export function CodexMultiRouterWizard({
           ) ?? []),
     );
     setConnectivityResults([]);
+    setRestoredEvidence(null);
     batchProtocolLab.reset();
+    if (existingPlan?.settingsConfig?.codexRouting?.schemaVersion === 2) {
+      const generation = draftGenerationRef.current;
+      const restoreTargetGeneration = targetGenerationRef.current;
+      const initialSources = providerModelSources.filter((source) =>
+        initialSourceIdSet.has(source.id),
+      );
+      setIsRestoringEvidence(true);
+      void Promise.all(
+        initialSources.map(async (provider) => {
+          if (skipsWizardDeepProtocolProbe(provider)) return null;
+          try {
+            const outcome =
+              await restoreCodexProviderProtocolEvidence(provider);
+            return outcome
+              ? { providerId: provider.id, inputProvider: provider, outcome }
+              : null;
+          } catch {
+            // Missing/old evidence must leave the gate closed, never trigger paid requests.
+            return null;
+          }
+        }),
+      ).then((entries) => {
+        if (targetGenerationRef.current === restoreTargetGeneration)
+          setIsRestoringEvidence(false);
+        if (draftGenerationRef.current !== generation) return;
+        const outcomes = entries.filter(
+          (entry): entry is NonNullable<typeof entry> => entry !== null,
+        );
+        const restored: CodexProviderSetBatchProbeOutcome = {
+          outcomes,
+          sources: initialSources.map((provider) => ({
+            provider,
+            receiptIds:
+              outcomes.find((entry) => entry.providerId === provider.id)
+                ?.outcome.receiptIds ?? [],
+          })),
+        };
+        setRestoredEvidence(restored);
+        setConnectivityResults(
+          buildWizardConnectivityResultsFromBatchOutcome(
+            initialSources,
+            restored,
+            hasCodexOauthAccount,
+          ).map((result) =>
+            result.canContinue
+              ? result
+              : {
+                  ...result,
+                  detail:
+                    "未找到可复用的完整证据（可能缺失、过期或配置已改变），请重新探测该来源。",
+                },
+          ),
+        );
+        setIsRestoringEvidence(false);
+      });
+    } else {
+      setIsRestoringEvidence(false);
+    }
     setProbeDialogOpen(false);
     setWizardIssues([]);
     setModelFetchCards(
@@ -1206,6 +1270,10 @@ export function CodexMultiRouterWizard({
       createdIdSet.has(provider.id),
     );
     if (createdProviders.length === 0) return;
+    // Integrating a newly created source changes the probe target set too.
+    // A pending restore for the previous set must not reopen the later steps.
+    draftGenerationRef.current += 1;
+    setIsRestoringEvidence(false);
     createdProviders.forEach((provider) =>
       handledCreatedProviderIdsRef.current.add(provider.id),
     );
@@ -2012,10 +2080,10 @@ export function CodexMultiRouterWizard({
       },
     );
     const previousSources = new Map(
-      (batchProtocolLab.state.draft?.sources ?? []).map((source) => [
-        source.provider.id,
-        source,
-      ]),
+      [
+        ...(restoredEvidence?.sources ?? []),
+        ...(batchProtocolLab.state.draft?.sources ?? []),
+      ].map((source) => [source.provider.id, source]),
     );
     const currentInputSources = new Map(
       draftSources.map((source) => [source.id, source]),
@@ -2038,6 +2106,9 @@ export function CodexMultiRouterWizard({
                     .records[index];
                   return (
                     record &&
+                    !consumedReceiptIdsRef.current.has(
+                      (previousSources.get(source.id)?.receiptIds ?? [])[index],
+                    ) &&
                     !isProbeModelExcluded(source.id, record.target.public_model)
                   );
                 },
@@ -2100,6 +2171,8 @@ export function CodexMultiRouterWizard({
   }
 
   const requestConnectivityProbe = () => {
+    draftGenerationRef.current += 1;
+    setIsRestoringEvidence(false);
     const isCurrent = captureDraftOperation();
     clearWizardIssuesForStage("protocol");
     const validation = batchProtocolLab.validate(buildBatchDraft(false));
@@ -2151,12 +2224,35 @@ export function CodexMultiRouterWizard({
       });
       return;
     }
-    const saveOperation = batchProtocolLab
-      .save(
+    const saveOperation = (async () => {
+      // A successful commit consumes its receipts. Re-editing the same draft
+      // must restore persisted evidence instead of spending tokens again.
+      draft.sources = await Promise.all(
+        draft.sources.map(async (source) => {
+          if (
+            source.receiptIds.length ||
+            skipsWizardDeepProtocolProbe(source.provider)
+          )
+            return source;
+          const evidence = await restoreCodexProviderProtocolEvidence(
+            source.provider,
+          );
+          return evidence
+            ? { ...source, receiptIds: evidence.receiptIds }
+            : source;
+        }),
+      );
+      if (targetGeneration !== targetGenerationRef.current)
+        throw new ProtocolLabCancelled();
+      return batchProtocolLab.save(
         draft,
         draft.sources.flatMap((source) => source.receiptIds),
-      )
+      );
+    })()
       .then(async (outcome) => {
+        draft.sources
+          .flatMap((source) => source.receiptIds)
+          .forEach((id) => consumedReceiptIdsRef.current.add(id));
         if (targetGeneration !== targetGenerationRef.current) return;
         setSavedPlan(outcome.router);
         committedSourceFactsRef.current = new Map(
@@ -2926,8 +3022,19 @@ export function CodexMultiRouterWizard({
                   <div className="rounded-lg border p-3 text-sm leading-6">
                     探测完成后无需在这里保存。取消勾选失败模型后点击“下一步”，最后到“保存并启用”页保存方案。
                     取消项会在最终保存时停用该模型源中的对应模型；若该来源全部取消，则不保存该来源。
-                    草稿与探测结果在本次应用会话内保留，关闭再回来可继续；退出应用后需重新校验。
+                    未保存草稿在本次应用会话内保留。编辑已保存方案时自动恢复仍有效的探测证据，无需每次重测；也可随时主动重新探测。证据缺失、过期或模型源发生相关变更时，需要重新探测。
                   </div>
+                  {isRestoringEvidence && (
+                    <p role="status">
+                      正在读取已保存的兼容性证据，不发送模型请求…
+                    </p>
+                  )}
+                  {restoredEvidence && (
+                    <p role="status">
+                      已检查保存记录：复用 {restoredEvidence.outcomes.length}{" "}
+                      个模型源的有效证据。未恢复的来源仍需探测。
+                    </p>
+                  )}
                   <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900 dark:text-amber-200">
                     每个普通 Provider/模型会分别验证 Responses 与 Chat
                     Completions 的基础响应、流式
@@ -2939,6 +3046,7 @@ export function CodexMultiRouterWizard({
                     disabled={
                       isRefreshingModels ||
                       isProbingConnectivity ||
+                      isRestoringEvidence ||
                       draftSources.length === 0
                     }
                   >
@@ -2949,7 +3057,9 @@ export function CodexMultiRouterWizard({
                     />
                     {isProbingConnectivity
                       ? "正在运行协议深探测"
-                      : "开始兼容性深度探测"}
+                      : restoredEvidence?.outcomes.length
+                        ? "重新进行兼容性深度探测"
+                        : "开始兼容性深度探测"}
                   </Button>
                   {connectivityResults.length > 0 && (
                     <Button

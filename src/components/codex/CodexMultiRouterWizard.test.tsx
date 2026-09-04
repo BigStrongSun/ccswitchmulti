@@ -19,10 +19,12 @@ const {
   preflightCodexProviderProtocolCompatibility,
   prepareCodexProviderSetBatch,
   commitCodexProviderSetBatch,
+  restoreCodexProviderProtocolEvidence,
 } = vi.hoisted(() => ({
   preflightCodexProviderProtocolCompatibility: vi.fn(),
   prepareCodexProviderSetBatch: vi.fn(),
   commitCodexProviderSetBatch: vi.fn(),
+  restoreCodexProviderProtocolEvidence: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => ({
@@ -32,6 +34,7 @@ vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => ({
   preflightCodexProviderProtocolCompatibility,
   prepareCodexProviderSetBatch,
   commitCodexProviderSetBatch,
+  restoreCodexProviderProtocolEvidence,
 }));
 
 vi.mock("@/components/providers/forms/hooks/useCodexOauth", () => ({
@@ -70,6 +73,7 @@ function renderWizard(
   options?: {
     mode?: "create" | "edit";
     planId?: string;
+    newlyCreatedProviderIds?: string[];
     onEnablePlan?: (provider: Provider) => Promise<void>;
   },
 ) {
@@ -87,6 +91,7 @@ function renderWizard(
         providers={nextProviders}
         mode={nextOptions?.mode ?? "create"}
         planId={nextOptions?.planId}
+        newlyCreatedProviderIds={nextOptions?.newlyCreatedProviderIds}
         onOpenChange={vi.fn()}
         onCreateProvider={vi.fn()}
         onOpenProviderConfig={vi.fn()}
@@ -107,6 +112,256 @@ function renderWizard(
 }
 
 describe("CodexMultiRouterWizard", () => {
+  it("reopens a saved plan with reusable evidence and allows saving without a paid probe", async () => {
+    const source: Provider = {
+      id: "saved-source",
+      name: "Saved Source",
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test-only" },
+        modelCatalog: { models: [{ model: "good" }] },
+      },
+    };
+    const plan: Provider = {
+      id: "saved-plan",
+      name: "Saved Plan",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "saved-route",
+              targetProviderId: source.id,
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+    const restoredOutcome = {
+      provider: source,
+      receiptIds: ["restored-receipt"],
+      observations: [],
+      protocolApplied: false,
+      adaptationPreview: { persistence: "single", status: "ready", models: [] },
+      records: [
+        {
+          probeVersion: 1,
+          testedAt: 100,
+          expiresAt: 4102444800,
+          target: {
+            provider_id: source.id,
+            public_model: "good",
+            upstream_model: "good",
+            transport: "open_ai_responses",
+            endpoint_fingerprint: "endpoint",
+            credential_fingerprint: "credential",
+            request_policy_fingerprint: "policy",
+          },
+          result: {
+            readiness: "verified",
+            selected_transport: "open_ai_responses",
+            branches: [],
+          },
+        },
+      ],
+    };
+    restoreCodexProviderProtocolEvidence.mockResolvedValueOnce(restoredOutcome);
+    prepareCodexProviderSetBatch.mockResolvedValue({
+      digest: "saved",
+      sourcePreviews: [],
+      blocked: false,
+    });
+    commitCodexProviderSetBatch.mockResolvedValue({
+      router: plan,
+      sourceSnapshots: [],
+      projections: [],
+      status: "committed",
+    });
+    const probeCalls =
+      preflightCodexProviderProtocolCompatibility.mock.calls.length;
+    renderWizard([source, plan], { mode: "edit", planId: plan.id });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "选择模型" }),
+      ).not.toHaveAttribute("data-read-only"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    await waitFor(() => expect(commitCodexProviderSetBatch).toHaveBeenCalled());
+    expect(
+      prepareCodexProviderSetBatch.mock.calls.at(-1)![0][0].receiptIds,
+    ).toEqual(["restored-receipt"]);
+    expect(preflightCodexProviderProtocolCompatibility.mock.calls.length).toBe(
+      probeCalls,
+    );
+    await screen.findByText("状态机：published");
+    restoreCodexProviderProtocolEvidence.mockResolvedValueOnce({
+      ...restoredOutcome,
+      receiptIds: ["restored-again"],
+    });
+    const commits = commitCodexProviderSetBatch.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    await waitFor(() =>
+      expect(commitCodexProviderSetBatch.mock.calls.length).toBe(commits + 1),
+    );
+    expect(
+      prepareCodexProviderSetBatch.mock.calls.at(-1)![0][0].receiptIds,
+    ).toEqual(["restored-again"]);
+    expect(preflightCodexProviderProtocolCompatibility.mock.calls.length).toBe(
+      probeCalls,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+    expect(
+      screen.getByRole("button", { name: "重新进行兼容性深度探测" }),
+    ).toBeEnabled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "重新进行兼容性深度探测" }),
+    );
+    expect(screen.getByRole("button", { name: "确认测试" })).toBeVisible();
+  });
+  it("keeps later steps gated when persisted evidence is missing without starting a probe", async () => {
+    const source: Provider = {
+      id: "no-evidence",
+      name: "No Evidence",
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test" },
+        modelCatalog: { models: [{ model: "good" }] },
+      },
+    };
+    const plan: Provider = {
+      id: "old-plan",
+      name: "Old Plan",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "r",
+              targetProviderId: source.id,
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+    restoreCodexProviderProtocolEvidence.mockResolvedValueOnce(null);
+    const calls = preflightCodexProviderProtocolCompatibility.mock.calls.length;
+    renderWizard([source, plan], { mode: "edit", planId: plan.id });
+    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+    await screen.findByText(/已检查保存记录：复用 0/);
+    expect(screen.getByRole("button", { name: "选择模型" })).toHaveAttribute(
+      "data-read-only",
+      "true",
+    );
+    expect(
+      screen.getByRole("button", { name: "开始兼容性深度探测" }),
+    ).toBeEnabled();
+    expect(preflightCodexProviderProtocolCompatibility.mock.calls.length).toBe(
+      calls,
+    );
+  });
+  it("ignores late saved evidence after a newly created source is integrated", async () => {
+    const source: Provider = {
+      id: "saved",
+      name: "Saved",
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test" },
+        modelCatalog: { models: [{ model: "good" }] },
+      },
+    };
+    const added: Provider = {
+      ...source,
+      id: "added",
+      name: "Added",
+      settingsConfig: {
+        ...source.settingsConfig,
+        modelCatalog: { models: [{ model: "new-model" }] },
+      },
+    };
+    const plan: Provider = {
+      id: "old-plan",
+      name: "Old Plan",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "r",
+              targetProviderId: source.id,
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+    let finish!: (value: unknown) => void;
+    restoreCodexProviderProtocolEvidence.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { rerenderWizard } = renderWizard([source, plan], {
+      mode: "edit",
+      planId: plan.id,
+    });
+    rerenderWizard(true, [source, added, plan], {
+      mode: "edit",
+      planId: plan.id,
+      newlyCreatedProviderIds: [added.id],
+    });
+    await act(async () =>
+      finish({
+        provider: source,
+        receiptIds: ["old-receipt"],
+        observations: [],
+        protocolApplied: false,
+        adaptationPreview: {
+          persistence: "single",
+          status: "ready",
+          models: [],
+        },
+        records: [
+          {
+            probeVersion: 1,
+            testedAt: 100,
+            expiresAt: 4102444800,
+            target: {
+              provider_id: source.id,
+              public_model: "good",
+              upstream_model: "good",
+              transport: "open_ai_responses",
+              endpoint_fingerprint: "endpoint",
+              credential_fingerprint: "credential",
+              request_policy_fingerprint: "policy",
+            },
+            result: {
+              readiness: "verified",
+              selected_transport: "open_ai_responses",
+              branches: [],
+            },
+          },
+        ],
+      }),
+    );
+    expect(screen.getByRole("button", { name: "选择模型" })).toHaveAttribute(
+      "data-read-only",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+    expect(
+      screen.getByRole("button", { name: "开始兼容性深度探测" }),
+    ).toBeEnabled();
+  });
   it("does not mark a new draft enabled when the previous target finishes enabling", async () => {
     const plan: Provider = {
       id: "pending-enable",

@@ -175,6 +175,13 @@ export interface CodexProviderProtocolPreflightOutcome {
   probeUsage?: CodexProtocolProbeUsageSummary;
 }
 
+/** Reissue commit receipts from valid persisted evidence; never sends model requests. */
+export async function restoreCodexProviderProtocolEvidence(
+  provider: Provider,
+): Promise<CodexProviderProtocolPreflightOutcome | null> {
+  return invoke("restore_codex_provider_protocol_evidence", { provider });
+}
+
 export interface CodexProviderSetBlockedModel {
   model: string;
   upstreamModel: string;

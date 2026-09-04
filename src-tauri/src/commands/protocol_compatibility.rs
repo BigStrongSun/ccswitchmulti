@@ -891,6 +891,78 @@ pub async fn preflight_codex_provider_protocol_compatibility(
     .await
 }
 
+/// Restore persisted evidence without sending requests or extending its lifetime.
+#[tauri::command]
+pub fn restore_codex_provider_protocol_evidence(
+    state: State<'_, AppState>,
+    provider: Provider,
+) -> Result<Option<CodexProviderProtocolPreflightOutcome>, String> {
+    restore_provider_protocol_evidence(state.inner(), provider, Utc::now().timestamp())
+}
+
+fn restore_provider_protocol_evidence(
+    state: &AppState,
+    provider: Provider,
+    now: i64,
+) -> Result<Option<CodexProviderProtocolPreflightOutcome>, String> {
+    let providers = state
+        .db
+        .get_all_providers("codex")
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let (candidates, is_router) = compile_preflight_candidates(
+        &provider,
+        &providers,
+        CodexProtocolProbeScope::AutomaticModels,
+    )?;
+    // This endpoint restores source evidence, never an arbitrary router graph.
+    if is_router || candidates.is_empty() {
+        return Ok(None);
+    }
+    let mut records = Vec::new();
+    let mut observations = Vec::new();
+    for candidate in candidates {
+        let Some(record) = find_cached_candidate_record(state, &candidate, now)? else {
+            return Ok(None);
+        };
+        let stored = state
+            .db
+            .list_protocol_probe_observations(&record.target.provider_id)
+            .map_err(|error| error.to_string())?;
+        for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
+            let target = target_for_candidate(&candidate, transport)?;
+            let Some(observation) = stored.iter().find(|observation| {
+                observation.target == target
+                    && observation.tested_at == record.tested_at
+                    && observation.probe_version == record.probe_version
+            }) else {
+                return Ok(None);
+            };
+            observations.push(observation.clone());
+        }
+        records.push(record);
+    }
+    let adaptation_preview = crate::commands::provider::build_codex_provider_adaptation_preview(
+        &provider,
+        &records,
+        &observations,
+        &providers,
+        now,
+    )
+    .map_err(|error| error.to_string())?;
+    let receipt_ids = remember_candidate_batch_receipts(state, &records, &observations)?;
+    Ok(Some(CodexProviderProtocolPreflightOutcome {
+        provider,
+        adaptation_preview,
+        records,
+        observations,
+        receipt_ids,
+        protocol_applied: false,
+        probe_usage: CodexProtocolProbeUsageSummary::default(),
+    }))
+}
+
 #[tauri::command]
 pub async fn preflight_universal_codex_protocol_compatibility(
     state: State<'_, AppState>,
@@ -1212,6 +1284,14 @@ fn find_cached_candidate_result(
     candidate: &ProbeCandidate,
     now: i64,
 ) -> Result<Option<ProtocolCompatibilityProbeResult>, String> {
+    Ok(find_cached_candidate_record(state, candidate, now)?.map(|record| record.result))
+}
+
+fn find_cached_candidate_record(
+    state: &AppState,
+    candidate: &ProbeCandidate,
+    now: i64,
+) -> Result<Option<ProtocolCompatibilityRecord>, String> {
     let mut newest: Option<ProtocolCompatibilityRecord> = None;
     for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
         let target = target_for_candidate(candidate, transport)?;
@@ -1236,7 +1316,7 @@ fn find_cached_candidate_result(
             newest = Some(record);
         }
     }
-    Ok(newest.map(|record| record.result))
+    Ok(newest)
 }
 
 async fn run_candidate_batch_with<F, Fut>(
@@ -1850,6 +1930,79 @@ mod tests {
         state
             .remember_codex_provider_set_probe_receipt(record, observations)
             .expect("remember Provider Set receipt bundle")
+    }
+
+    #[test]
+    fn restore_saved_evidence_preserves_lifetime_and_reissues_committable_receipts() {
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let provider = ordinary_provider();
+        db.save_provider("codex", &provider).unwrap();
+        for model in ["model-a", "model-b"] {
+            let record =
+                provider_set_record(&provider, model, model, TransportKind::OpenAiResponses, 100);
+            let observations = [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
+                .into_iter()
+                .map(|transport| {
+                    let mut observation =
+                        provider_set_record(&provider, model, model, transport, 100);
+                    observation.result.selected_transport = record.result.selected_transport;
+                    observation
+                })
+                .collect::<Vec<_>>();
+            db.save_protocol_probe_bundle(&record, &observations)
+                .unwrap();
+        }
+        let restored = super::restore_provider_protocol_evidence(&state, provider.clone(), 200)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.records.len(), 2);
+        assert_eq!(restored.observations.len(), 4);
+        assert_eq!(restored.records[0].tested_at, 100);
+        assert_eq!(restored.records[0].expires_at, 700);
+        let (records, observations) =
+            super::load_codex_provider_set_probe_receipts(&state, &restored.receipt_ids).unwrap();
+        assert_eq!(records, restored.records);
+        assert_eq!(observations, restored.observations);
+        let preview = prepare_codex_provider_set_internal(
+            &state,
+            PrepareCodexProviderSetRequest {
+                provider: provider.clone(),
+                receipt_ids: restored.receipt_ids,
+            },
+            200,
+        )
+        .unwrap();
+        assert!(matches!(
+            preview.plan,
+            crate::codex_multirouter::provider_set::CodexProviderSetPlan::Single { .. }
+        ));
+        assert_eq!(
+            db.get_protocol_compatibility_result(&records[0].target)
+                .unwrap()
+                .unwrap()
+                .expires_at,
+            700
+        );
+        assert!(
+            super::restore_provider_protocol_evidence(&state, provider.clone(), 701)
+                .unwrap()
+                .is_none()
+        );
+        let mut changed = provider.clone();
+        changed.settings_config["auth"]["OPENAI_API_KEY"] = json!("rotated");
+        assert!(
+            super::restore_provider_protocol_evidence(&state, changed, 200)
+                .unwrap()
+                .is_none()
+        );
+        let mut renamed = provider;
+        renamed.name = "Renamed source".to_string();
+        assert!(
+            super::restore_provider_protocol_evidence(&state, renamed, 200)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
