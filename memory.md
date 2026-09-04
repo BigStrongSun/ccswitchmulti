@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 r9 安装验收揭示通用更新的隐式探测与TTL续期
+
+- r9（2b20ce65）Windows重建安装成功；installer DC25155B497A2F5369103205CC9DFF0A6A0CA1C2FAAAE252175638284989F2ED，安装EXE356DB786477416F2BD5DEFE37845DEA36BED46BBD26DDF84877BD820A2BE5E2C。事务ccsm-20260904-183316-49f6fde5fa0d4130a86554b21b44f6ef成功，PID56484，15721 healthy、CDP9336仅loopback。末页关闭、草稿恢复、打开状态页收起向导实测通过，旧方案4源证据/11模型/保存无preflight通过；最小Qwen请求response.completed、53tokens。
+- 复测误入工作台“创建多路路由”，仅新建空codex-multirouter-2，未启用/未保存规则；经get_providers确认routes为空后用delete_provider清理，affectedPlanIds/removedCandidates等均空。原current、11模型及两个Kimi公开别名保持。不能混淆工作台创建与供应商页“配置多路模型”向导。
+- 保存后比对发现kimi-for-coding内部协议由Responses迁至Chat；备份中的selection tested_at1788495787，当前为1788518137（18:35:37），完整请求策略指纹相同。独立审查和源码确认Workspace自动目录refresh调用通用update_provider，后者旧automatic_codex_provider_preflight只按精确source ID查缓存，无法命中owned leaf；会隐式付费重测。即使命中缓存也只取result，在batch重建record时刷新tested_at/TTL。随后向导复用新证据，故仅统计显式preflight IPC不足以证明全流程无网络探测。
+- 根修只针对通用update：复用与显式恢复共用的只读完整证据收集器，保留profile/observation时间和有效期，不登记多余receipt，不网络回退。缺失、过期、凭据/策略变化即probe_required；固定官方/手动/Router仍可更新。混合源保留split_confirmation_required，必须用已有ProviderSet编辑器/向导确认，不能为自动目录写回放宽拆分事务门禁。Workspace给出明确中文操作指引，不把写回保护误报成网络失败。
+- 实际update入口回归先证明旧代码把tested_at提升120秒，再GREEN；另覆盖本地TCP监听零请求、失效证据数据库零写入、owned split恢复后仍安全拒绝普通保存。r9不含此后端修复，暂不发布，需下一候选完整后端重建/安装验证。
+- fresh门禁：完整cargo test退出0（library3821 passed/6 ignored及全部integration），前端168 files/1372 tests、typecheck、生产lib严格Clippy、rustfmt、Prettier、diff、严格UTF-8均通过，独立审查无Important问题。普通add/Universal旧自动流程不在此通用update修复范围，不能宣称所有隐式探测入口均已移除。
+
 ## 2026-09-04 安装终检发现验收页退出动作未接入关闭生命周期
 
 - r8核心保存与真实请求通过后，终检发现底部“关闭”仍调用acceptance分支toast，而“打开状态页完成验收”只导航底层页面、不收起portal；暂存并关闭正常。源码与实机共同确认是动作绑定问题，不是保存、路由或请求失败。

@@ -907,6 +907,21 @@ fn restore_provider_protocol_evidence(
     provider: Provider,
     now: i64,
 ) -> Result<Option<CodexProviderProtocolPreflightOutcome>, String> {
+    let Some(mut outcome) = collect_saved_provider_protocol_evidence(state, provider, now)? else {
+        return Ok(None);
+    };
+    outcome.receipt_ids =
+        remember_candidate_batch_receipts(state, &outcome.records, &outcome.observations)?;
+    Ok(Some(outcome))
+}
+
+/// Read-only evidence reuse for ordinary metadata updates. Never grants a new
+/// paid-probe authorization or extends the lifetime of a stored observation.
+pub(crate) fn collect_saved_provider_protocol_evidence(
+    state: &AppState,
+    provider: Provider,
+    now: i64,
+) -> Result<Option<CodexProviderProtocolPreflightOutcome>, String> {
     let providers = state
         .db
         .get_all_providers("codex")
@@ -1005,13 +1020,12 @@ fn restore_provider_protocol_evidence(
         now,
     )
     .map_err(|error| error.to_string())?;
-    let receipt_ids = remember_candidate_batch_receipts(state, &records, &observations)?;
     Ok(Some(CodexProviderProtocolPreflightOutcome {
         provider,
         adaptation_preview,
         records,
         observations,
-        receipt_ids,
+        receipt_ids: Vec::new(),
         protocol_applied: false,
         probe_usage: CodexProtocolProbeUsageSummary::default(),
     }))

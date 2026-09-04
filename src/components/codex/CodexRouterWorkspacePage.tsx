@@ -662,6 +662,14 @@ function withModelRefreshTimeout<T>(
 export function workspaceErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const knownMessages: Array<[string, string]> = [
+    [
+      "codex_provider_set_probe_required",
+      "已有兼容性证据缺失、过期或与当前配置不匹配；未自动发送探测请求。请在模型源编辑器或配置向导中显式探测并确认保存。",
+    ],
+    [
+      "codex_provider_set_split_confirmation_required",
+      "此模型源包含多种协议，需要在模型源编辑器或配置向导中确认保存；可复用有效证据，未自动发送探测请求。原配置保持不变。",
+    ],
     ["include_models_empty", "请至少选择一个上游模型"],
     [
       "include_models_duplicate_or_empty",
@@ -3089,7 +3097,7 @@ export function CodexRouterWorkspacePage({
             ...current,
             [provider.id]: {
               status: "error",
-              message: `获取模型列表失败，请检查当前供应商配置：${workspaceErrorMessage(error)}`,
+              message: `模型目录读取或写回未完成：${workspaceErrorMessage(error)}`,
             },
           }));
         });

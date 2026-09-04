@@ -882,7 +882,23 @@ async fn update_provider_internal(
     provider: Provider,
 ) -> Result<bool, AppError> {
     update_provider_internal_with_probe(state, app_type, original_id, provider, |provider| {
-        crate::commands::protocol_compatibility::automatic_codex_provider_preflight(state, provider)
+        std::future::ready((|| {
+            // A route edit does not authorize requests to its upstream sources.
+            // Source mutations keep their normal Provider Set validation below.
+            if provider.uses_fixed_codex_responses_transport()
+                || provider.settings_config.get("codexRouting").is_some()
+            {
+                return Ok((provider, Vec::new(), Vec::new()));
+            }
+            let restored =
+                crate::commands::protocol_compatibility::collect_saved_provider_protocol_evidence(
+                    state,
+                    provider,
+                    chrono::Utc::now().timestamp(),
+                )?
+                .ok_or_else(|| "codex_provider_set_probe_required".to_string())?;
+            Ok((restored.provider, restored.records, restored.observations))
+        })())
     })
     .await
 }
@@ -2892,6 +2908,193 @@ mod codex_protocol_preflight_save_tests {
                 observation
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn ordinary_update_keeps_manual_official_and_router_metadata_editable() {
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let mut manual = codex_provider();
+        manual.meta.as_mut().unwrap().codex_protocol_mode = Some(CodexProtocolMode::Manual);
+        let mut official = Provider::with_id(
+            "codex-official".into(),
+            "Official".into(),
+            json!({"auth": {}, "config": "", "modelCatalog": {"models": [{"model": "gpt-test"}]}}),
+            None,
+        );
+        official.category = Some("official".into());
+        let router = codex_router("metadata-router");
+        for provider in [&manual, &official, &router] {
+            db.save_provider("codex", provider).unwrap();
+        }
+        for mut provider in [manual, official, router] {
+            provider.notes = Some("metadata edit".into());
+            super::update_provider_internal(&state, AppType::Codex, None, provider.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                db.get_provider_by_id(&provider.id, "codex")
+                    .unwrap()
+                    .unwrap()
+                    .notes,
+                provider.notes
+            );
+            assert!(db
+                .list_protocol_compatibility_profiles(&provider.id)
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_update_reuses_complete_evidence_without_refreshing_its_lifetime() {
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let provider = codex_provider();
+        db.save_provider("codex", &provider).unwrap();
+        let (candidate, mut record) = chat_record();
+        record.tested_at -= 120;
+        record.expires_at -= 120;
+        let observations = transport_observations(&candidate, &record);
+        db.save_protocol_probe_bundle(&record, &observations)
+            .unwrap();
+        let mut updated = provider.clone();
+        updated.notes = Some("metadata-only edit".into());
+        super::update_provider_internal(&state, AppType::Codex, None, updated)
+            .await
+            .unwrap();
+        let saved = db
+            .get_provider_by_id(&provider.id, "codex")
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.notes.as_deref(), Some("metadata-only edit"));
+        let profiles = db
+            .list_protocol_compatibility_profiles(&provider.id)
+            .unwrap();
+        assert!(!profiles.is_empty());
+        for profile in profiles {
+            assert_eq!(profile.tested_at, record.tested_at);
+            assert_eq!(profile.expires_at, record.expires_at);
+        }
+        for observation in db.list_protocol_probe_observations(&provider.id).unwrap() {
+            assert_eq!(observation.tested_at, record.tested_at);
+            assert_eq!(observation.expires_at, record.expires_at);
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_update_requires_explicit_probe_without_network_or_writes() {
+        for scenario in ["missing", "expired", "changed-credential"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+            let db = Arc::new(Database::memory().unwrap());
+            let state = AppState::new(db.clone());
+            let mut provider = codex_provider();
+            provider.settings_config["config"] = json!(provider.settings_config["config"]
+                .as_str()
+                .unwrap()
+                .replace("https://vllm.example/v1", &endpoint));
+            db.save_provider("codex", &provider).unwrap();
+            let before = serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap();
+            if scenario != "missing" {
+                let candidate =
+                    crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+                        &provider,
+                        "qwen-visible".into(),
+                        "Qwen/Qwen3.8".into(),
+                    )
+                    .unwrap();
+                let (_, mut record) = chat_record();
+                record.target = candidate.target_key(TransportKind::OpenAiChat).unwrap();
+                if scenario == "expired" {
+                    record.expires_at = chrono::Utc::now().timestamp() - 1;
+                }
+                db.save_protocol_probe_bundle(
+                    &record,
+                    &transport_observations(&candidate, &record),
+                )
+                .unwrap();
+            }
+            if scenario == "changed-credential" {
+                provider.settings_config["auth"]["OPENAI_API_KEY"] = json!("changed-test-key");
+            }
+            provider.notes = Some("must not persist".into());
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                super::update_provider_internal(&state, AppType::Codex, None, provider),
+            )
+            .await
+            .expect("metadata update must not wait for network");
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("codex_provider_set_probe_required"),
+                "{scenario}"
+            );
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "{scenario}"
+            );
+            assert_eq!(
+                before,
+                serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap(),
+                "{scenario}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_update_reuses_owned_split_evidence_but_keeps_confirmation_gate() {
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let mut provider = codex_provider();
+        provider.settings_config["modelCatalog"]["models"] = json!([
+            {"model": "qwen-visible", "upstreamModel": "Qwen/Qwen3.8"},
+            {"model": "second", "upstreamModel": "second"}
+        ]);
+        let mut profiles = Vec::new();
+        let mut observations = Vec::new();
+        for (model, upstream, transport) in [
+            ("qwen-visible", "Qwen/Qwen3.8", TransportKind::OpenAiChat),
+            ("second", "second", TransportKind::OpenAiResponses),
+        ] {
+            let candidate =
+                crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+                    &provider,
+                    model.into(),
+                    upstream.into(),
+                )
+                .unwrap();
+            let (_, mut record) = chat_record();
+            record.target = candidate.target_key(transport).unwrap();
+            record.result.selected_transport = Some(transport);
+            observations.extend(transport_observations(&candidate, &record));
+            profiles.push(record);
+        }
+        let prepared = crate::codex_multirouter::provider_set::plan_codex_provider_set(
+            &provider,
+            &profiles,
+            &HashMap::new(),
+            chrono::Utc::now().timestamp(),
+        )
+        .unwrap();
+        crate::codex_multirouter::mutation::apply_codex_provider_set_mutation_with_observations_and_publisher(
+            db.as_ref(), prepared, observations,
+            |artifact| Ok(crate::codex_multirouter::projection::ProjectionReadBack::verified(artifact.dependency_fingerprint.clone()))
+        ).unwrap();
+        let before = serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap();
+        let result = super::update_provider_internal(&state, AppType::Codex, None, provider).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("codex_provider_set_split_confirmation_required"));
+        assert_eq!(
+            before,
+            serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap()
+        );
     }
 
     #[tokio::test]

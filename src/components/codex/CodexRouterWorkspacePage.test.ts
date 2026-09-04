@@ -348,6 +348,18 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("explains safe metadata refresh refusal without implying a network failure", () => {
+    expect(
+      workspaceErrorMessage("codex_provider_set_probe_required"),
+    ).toContain("显式探测");
+    expect(
+      workspaceErrorMessage("codex_provider_set_split_confirmation_required"),
+    ).toContain("配置向导");
+    expect(
+      workspaceErrorMessage("codex_provider_set_split_confirmation_required"),
+    ).toContain("未自动发送探测请求");
+  });
+
   it("turns backend route validation codes into Chinese messages", () => {
     expect(
       workspaceErrorMessage(
@@ -1686,7 +1698,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          "获取模型列表失败，请检查当前供应商配置：操作失败，请检查当前配置或查看日志中的详细原因",
+          "模型目录读取或写回未完成：操作失败，请检查当前配置或查看日志中的详细原因",
         ),
       ).toBeInTheDocument(),
     );
@@ -1845,7 +1857,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
     expect(
       screen.getByText(
-        "获取模型列表失败，请检查当前供应商配置：模型列表读取或写回超过 30 秒，请检查网络、供应商的 /models 接口或本地配置写入状态。",
+        "模型目录读取或写回未完成：模型列表读取或写回超过 30 秒，请检查网络、供应商的 /models 接口或本地配置写入状态。",
       ),
     ).toBeInTheDocument();
   });
@@ -1901,7 +1913,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
     expect(
       screen.getByText(
-        "获取模型列表失败，请检查当前供应商配置：模型列表读取或写回超过 30 秒，请检查网络、供应商的 /models 接口或本地配置写入状态。",
+        "模型目录读取或写回未完成：模型列表读取或写回超过 30 秒，请检查网络、供应商的 /models 接口或本地配置写入状态。",
       ),
     ).toBeInTheDocument();
 
