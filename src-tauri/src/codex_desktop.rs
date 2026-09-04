@@ -14,7 +14,7 @@ pub(crate) const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
 pub(crate) const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
-const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV8";
+const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV9";
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
 #[cfg(any(target_os = "macos", test))]
 const CODEX_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.openai.codex";
@@ -623,6 +623,10 @@ fn codex_app_compatibility_evidence_from_evaluation(
         .ok_or_else(|| "Codex App compatibility script returned no value".to_string())?;
     let history_sync = value.get("historySync").unwrap_or(&Value::Null);
     let history_query_patch = value.get("historyQueryPatch").unwrap_or(&Value::Null);
+    let history_hydration_failed = history_query_patch
+        .pointer("/lineageHydration/failed")
+        .and_then(Value::as_array)
+        .is_some_and(|failures| !failures.is_empty());
     Ok(CodexAppCompatibilityEvidence {
         history_sync_requested: history_sync
             .get("requested")
@@ -640,7 +644,8 @@ fn codex_app_compatibility_evidence_from_evaluation(
         history_refresh_requested: history_query_patch
             .get("refreshRequested")
             .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .unwrap_or(false)
+            && !history_hydration_failed,
     })
 }
 
@@ -1012,7 +1017,7 @@ fn guardian_v2_compatibility_patch_core_script() -> &'static str {
 /// 覆盖历史线程保存的旧入口标签，使跨 Provider 历史在冷恢复后重新经过 CCSM Router。
 fn app_server_request_normalization_core_script() -> &'static str {
     r#"
-  const appServerRequestPatchVersion = "8";
+  const appServerRequestPatchVersion = "9";
   const appServerRequestClientNeedsPatch = (client) => client?.__ccSwitchModelRequestPatch !== appServerRequestPatchVersion;
   const appServerMethod = (method, params) => method === "send-cli-request-for-host" && params?.method ? String(params.method) : String(method || "");
   const currentModelProvider = () => {
@@ -1052,8 +1057,25 @@ fn history_lineage_hydration_core_script() -> &'static str {
   const normalizedRolloutPath = (value) => typeof value === "string"
     ? value.replaceAll("\\", "/").replace(/^\/\/?\?\//, "").toLowerCase()
     : "";
-  const conversationHasActiveTurn = (conversation) => Array.isArray(conversation?.turns)
-    && conversation.turns.some((turn) => turn?.status === "inProgress");
+  const conversationHasActiveTurn = (conversation) => {
+    if (Array.isArray(conversation?.turns)
+        && conversation.turns.some((turn) => turn?.status === "inProgress")) return true;
+    const history = conversation?.turnHistory?.kind === "canonical"
+      ? conversation.turnHistory.history
+      : null;
+    const entities = history?.entitiesByKey;
+    return entities && typeof entities === "object"
+      ? Object.values(entities).some((turn) => turn?.status === "inProgress")
+      : false;
+  };
+  const canonicalHistoryIsFragmented = (conversation) => {
+    const history = conversation?.turnHistory?.kind === "canonical"
+      ? conversation.turnHistory.history
+      : null;
+    return history?.isComplete !== true
+      && Array.isArray(history?.islands)
+      && history.islands.length > 1;
+  };
   const planHistoryLineageRehydration = (manager) => {
     const repair = [];
     const deferred = [];
@@ -1066,7 +1088,9 @@ fn history_lineage_hydration_core_script() -> &'static str {
       if (!id || !metadata || typeof metadata.get !== "function") continue;
       const currentPath = normalizedRolloutPath(conversation.rolloutPath);
       const activePath = normalizedRolloutPath(metadata.get(id)?.path);
-      if (!currentPath || !activePath || currentPath === activePath) continue;
+      if (!activePath) continue;
+      const pathChanged = currentPath !== activePath;
+      if (!pathChanged && !canonicalHistoryIsFragmented(conversation)) continue;
       const streaming = typeof manager?.isConversationStreaming === "function"
         && manager.isConversationStreaming(id);
       if (streaming || conversationHasActiveTurn(conversation)) deferred.push(id);
@@ -1085,6 +1109,10 @@ fn history_lineage_hydration_core_script() -> &'static str {
         manager.updateConversationState(id, (conversation) => {
           conversation.rolloutPath = activePath;
           conversation.turns = [];
+          // Codex 26.901 renders canonical turnHistory when present. Clearing only the
+          // legacy turns overlay leaves the stale islands visible and causes resume to
+          // merge the new tail into the broken cache instead of replacing it.
+          delete conversation.turnHistory;
           conversation.turnsPagination = {
             olderCursor: null,
             oldestLoadedTurnId: null,
@@ -1093,7 +1121,7 @@ fn history_lineage_hydration_core_script() -> &'static str {
           };
           conversation.resumeState = "needs_resume";
         });
-        await manager.resumeConversationForUnavailableOwner({
+        const resume = await manager.resumeConversationForUnavailableOwner({
           conversationId: id,
           model: null,
           serviceTier: null,
@@ -1101,6 +1129,15 @@ fn history_lineage_hydration_core_script() -> &'static str {
           workspaceRoots: previous?.cwd ? [previous.cwd] : ["/"],
           collaborationMode: previous?.latestCollaborationMode || null,
         });
+        if (resume?.status === "not-ready") {
+          throw new Error(`Codex App could not resume history: ${String(resume.reason || "not-ready")}`);
+        }
+        // Resume intentionally hydrates only the newest page for paginated histories.
+        // Ask Codex's own pagination layer to close every remaining boundary so a
+        // fragmented middle cannot remain hidden behind a stale virtual-list island.
+        if (typeof manager.getCompleteConversationTurns === "function") {
+          await manager.getCompleteConversationTurns(id);
+        }
         repaired.push(id);
       } catch (error) {
         if (previous) manager.setConversation(previous);
@@ -2790,6 +2827,113 @@ JSON.stringify(planHistoryLineageRehydration(manager));
     }
 
     #[test]
+    fn history_lineage_hydration_repairs_fragmented_canonical_history_without_path_drift() {
+        let result = run_history_lineage_hydration_probe(
+            r#"
+const fragmentedHistory = {
+  kind: "canonical",
+  history: {
+    isComplete: false,
+    islands: [
+      {id: "old", entries: []},
+      {id: "tail", entries: []},
+    ],
+    entitiesByKey: {},
+  },
+};
+const normalTail = {
+  kind: "canonical",
+  history: {
+    isComplete: false,
+    islands: [{id: "tail", entries: []}],
+    entitiesByKey: {},
+  },
+};
+const activeFragmentedHistory = {
+  kind: "canonical",
+  history: {
+    isComplete: false,
+    islands: [{id: "old", entries: []}, {id: "tail", entries: []}],
+    entitiesByKey: {running: {status: "inProgress"}},
+  },
+};
+const conversations = [
+  {id: "fragmented", rolloutPath: "active.jsonl", turns: [], turnHistory: fragmentedHistory},
+  {id: "normal-tail", rolloutPath: "active.jsonl", turns: [], turnHistory: normalTail},
+  {id: "active-fragmented", rolloutPath: "active.jsonl", turns: [], turnHistory: activeFragmentedHistory},
+];
+const manager = {
+  getCachedConversations: () => conversations,
+  isConversationStreaming: () => false,
+  threadStore: {threadsById: new Map([
+    ["fragmented", {path: "active.jsonl"}],
+    ["normal-tail", {path: "active.jsonl"}],
+    ["active-fragmented", {path: "active.jsonl"}],
+  ])},
+};
+JSON.stringify(planHistoryLineageRehydration(manager));
+"#,
+        );
+
+        assert_eq!(result["repair"], json!(["fragmented"]));
+        assert_eq!(result["deferred"], json!(["active-fragmented"]));
+    }
+
+    #[test]
+    fn history_lineage_hydration_discards_canonical_cache_and_loads_complete_history() {
+        let result = run_async_history_lineage_hydration_probe(
+            r#"
+let conversation = {
+  id: "fragmented",
+  cwd: "C:/workspace",
+  rolloutPath: "active.jsonl",
+  turns: [{status: "completed", id: "legacy-overlay"}],
+  turnHistory: {
+    kind: "canonical",
+    history: {
+      isComplete: false,
+      islands: [{id: "old", entries: []}, {id: "tail", entries: []}],
+      entitiesByKey: {},
+    },
+  },
+  resumeState: "resumed",
+};
+let turnHistoryPresentDuringResume = null;
+let completeHistoryLoads = 0;
+const manager = {
+  getCachedConversations: () => [conversation],
+  getConversation: () => conversation,
+  isConversationStreaming: () => false,
+  updateConversationState: (_id, update) => {
+    const next = JSON.parse(JSON.stringify(conversation));
+    update(next);
+    conversation = next;
+  },
+  setConversation: (value) => { conversation = value; },
+  resumeConversationForUnavailableOwner: async () => {
+    turnHistoryPresentDuringResume = conversation.turnHistory != null;
+    conversation.resumeState = "resumed";
+    return {status: "ready"};
+  },
+  getCompleteConversationTurns: async () => { completeHistoryLoads += 1; return []; },
+  threadStore: {threadsById: new Map([["fragmented", {path: "active.jsonl"}]])},
+};
+rehydrateStaleHistoryLineages(manager).then((outcome) => {
+  globalThis.__historyLineageResult = JSON.stringify({
+    outcome,
+    turnHistoryPresentDuringResume,
+    completeHistoryLoads,
+  });
+});
+"#,
+        );
+
+        assert_eq!(result["outcome"]["repaired"], json!(["fragmented"]));
+        assert_eq!(result["turnHistoryPresentDuringResume"], false);
+        assert_eq!(result["completeHistoryLoads"], 1);
+    }
+
+    #[test]
     fn history_lineage_hydration_uses_codex_resume_without_evicting_the_conversation() {
         let result = run_async_history_lineage_hydration_probe(
             r#"
@@ -2991,7 +3135,8 @@ JSON.stringify({
   v5NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "5" }),
   v6NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "6" }),
   v7NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "7" }),
-  currentNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "8" }),
+  v8NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "8" }),
+  currentNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "9" }),
   missingNeedsPatch: appServerRequestClientNeedsPatch({}),
   patchVersion: appServerRequestPatchVersion,
 });
@@ -3001,9 +3146,10 @@ JSON.stringify({
         assert_eq!(result["v5NeedsPatch"], true);
         assert_eq!(result["v6NeedsPatch"], true);
         assert_eq!(result["v7NeedsPatch"], true);
+        assert_eq!(result["v8NeedsPatch"], true);
         assert_eq!(result["currentNeedsPatch"], false);
         assert_eq!(result["missingNeedsPatch"], true);
-        assert_eq!(result["patchVersion"], "8");
+        assert_eq!(result["patchVersion"], "9");
     }
 
     #[test]
@@ -3275,8 +3421,8 @@ JSON.stringify({
         assert!(script.contains("isModelListMethod(method)"));
         assert!(script.contains("await installAppServerPatch()"));
         assert!(script.contains("!state.requestIds.has(requestId)"));
-        assert!(script.contains("__ccSwitchCodexAppCompatibilityV8"));
-        assert!(script.contains("appServerRequestPatchVersion = \"8\""));
+        assert!(script.contains("__ccSwitchCodexAppCompatibilityV9"));
+        assert!(script.contains("appServerRequestPatchVersion = \"9\""));
         assert!(script.contains("rehydrateStaleHistoryLineages(value)"));
         assert!(
             script.contains("state.reactRequestClientPatchVersion = appServerRequestPatchVersion")
@@ -3343,6 +3489,33 @@ JSON.stringify({
         assert_eq!(evidence.history_catalog_count, Some(17));
         assert!(evidence.all_provider_history_patched);
         assert!(evidence.history_refresh_requested);
+    }
+
+    #[test]
+    fn compatibility_evidence_does_not_report_history_ready_after_hydration_failure() {
+        let evaluation = json!({
+            "result": {
+                "result": {
+                    "value": {
+                        "historySync": {"requested": true, "complete": true},
+                        "historyQueryPatch": {
+                            "patched": true,
+                            "refreshRequested": true,
+                            "lineageHydration": {
+                                "repaired": [],
+                                "deferred": [],
+                                "failed": [{"id": "thread-1", "error": "resume failed"}]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let evidence = codex_app_compatibility_evidence_from_evaluation(&evaluation)
+            .expect("compatibility evidence");
+        assert!(evidence.all_provider_history_patched);
+        assert!(!evidence.history_refresh_requested);
     }
 
     /// 验证 Desktop 可执行文件缺失时，错误信息不会被误读成不支持 CLI/app-server。

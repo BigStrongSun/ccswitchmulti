@@ -5233,3 +5233,10 @@ supported in one streaming turn`。
 - UI 在 Codex 路由工作台持续显示出口、IANA 时区、触发来源、周期、失败和刷新需求；设置 → 常规提供一键开启、5/15/30/60 分钟周期、立即检测和高级手动 IANA 覆盖。出口变化时可直接跳到现有 Codex 状态页执行安全刷新。检测本身不使用 CDP；CDP 只属于既有 renderer 历史/模型兼容层的可选同步与运行时核验。
 - fresh 门禁：前端排除仓库 `.local` 旧插件缓存后 169 files / 1376 tests，TypeScript 与 production renderer build 通过；Rust library 3863 passed / 0 failed / 6 ignored，`cargo check --all-targets` 与 rustfmt 通过。默认 Vitest 会误收集 `.local/CCSwitchMulti-Task6` 内 26 个外部插件测试套件而返回非零，产品测试本身无失败；这份缓存污染需作为独立清理/测试配置任务处理。本轮没有构建 installer、安装、关闭或重启当前 CCSM/Codex。
 - 外部核对由 Codex 内置 Web 与 Matrix WebSearch 两条独立链完成；两者对 Chrome CDP 时区覆盖只作用 renderer、Node `TZ` 为进程环境边界、以及 Codex 上游时区相关问题的结论一致。关于“时区不一致必然把特定模型降级到另一版本”的公开一手证据仍不足，因此 CCSM 将此功能定位为出口环境一致性与可诊断性控制，不承诺规避某个未公开路由策略。
+
+## 2026-09-05 Codex 单任务局部历史缺失的 canonical hydration 根修
+
+- `75c209c2` 已修正第一层误判：`thread/revert`/编辑消息会创建由 `history_base` 连接的合法不可变 rollout，磁盘检查必须从 `state_5.sqlite.threads.rollout_path` 指向的活动段向后解析唯一 lineage，不能把同逻辑 ID 的兄弟分支按文件名或 ordinal 全部合并。当前 JSONL、投影 SQLite 与 app-server `thread/turns/list` 均能读到最新数据时，故障边界已在 Desktop renderer，而不是历史被删除。
+- 对安装版 `OpenAI.Codex_26.901.2854.0` 的 `app.asar` 做只读取证确认：新版 renderer 在启用 canonical history 时优先渲染 `conversation.turnHistory.history`，`turns` 只是兼容/overlay；resume 会先把旧 `wS(conversation)` 与最新五轮合并，再按 `turnsPagination` 继续加载。因此旧 V8 修复只清空 `turns`、保留 `turnHistory`，会把新尾页继续合入旧的多-island缓存，正好造成“当前消息存在，但中间一段仍不显示”。
+- V9 renderer 修复同时识别 rollout path 漂移与同路径下未完成的多 canonical island。仅空闲任务进入恢复；streaming、legacy overlay 或 canonical entity 中存在 `inProgress` 的任务延迟。恢复前同时清空 `turns` 与 `turnHistory`，重置分页状态并调用 Codex 自己的 `resumeConversationForUnavailableOwner`；随后调用 `getCompleteConversationTurns` 闭合全部分页边界。任一步失败都恢复原 conversation，且兼容层证据不再把 hydration 失败误报为 history ready。
+- QuickJS 行为测试覆盖同路径 fragmented history、正常单-island tail 不误修、canonical active turn 延迟、恢复前清除 canonical cache、完整分页加载以及失败回滚；Codex Desktop 聚焦测试 43/43 通过。该修复只改源码与模拟 renderer 状态，不重启当前 Codex、不修改正在写入的真实 rollout；安装版视觉验收仍需后续安全构建替换后执行。
