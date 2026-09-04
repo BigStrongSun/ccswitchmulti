@@ -569,6 +569,22 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
     }
     compile_v2_strict(&plan, &virtual_providers)
         .map_err(|error| AppError::InvalidInput(format!("{}: {}", error.code, error.message)))?;
+    if router
+        .settings_config
+        .pointer("/codexRouting/subagentV2")
+        .is_some()
+    {
+        let effective =
+            effective_settings_for_candidate_with_providers(&router, true, &virtual_providers)?;
+        let provider_context = crate::codex_config::ProviderClassificationContext::from_providers(
+            virtual_providers.values(),
+        );
+        crate::codex_config::validate_codex_subagent_v2_candidate(
+            &effective,
+            Some(&provider_context),
+            true,
+        )?;
+    }
     mutations.insert(router.id.clone(), Some(router.clone()));
     projection_router_ids.push(router.id.clone());
     projection_router_ids.sort();

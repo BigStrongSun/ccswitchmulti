@@ -464,9 +464,8 @@ fn prepare_codex_provider_set_batch_internal(
         };
         sources.push((provider, records));
     }
-    let router =
-        ProviderService::prepare_provider_for_mutation(state, &AppType::Codex, request.router)
-            .map_err(|error| error.to_string())?;
+    let router = ProviderService::prepare_codex_batch_router_for_mutation(state, request.router)
+        .map_err(|error| error.to_string())?;
     let prepared = crate::codex_multirouter::mutation::prepare_codex_provider_set_batch_commit(
         state.db.as_ref(),
         sources,
@@ -2175,7 +2174,7 @@ mod tests {
             &state,
             PrepareCodexProviderSetRequest {
                 provider: logical.clone(),
-                receipt_ids: restored.receipt_ids,
+                receipt_ids: restored.receipt_ids.clone(),
             },
             now,
         )
@@ -2184,6 +2183,51 @@ mod tests {
             preview.plan,
             crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. }
         ));
+        // An edited Router references the logical source until the batch planner
+        // expands it. The persisted facade's catalog is not that candidate view.
+        let mut router = router_provider(&logical.id);
+        router.settings_config["codexRouting"]["routes"][0]["modelSelection"] =
+            json!({"mode": "include", "models": ["model-a", "model-b"]});
+        router.settings_config["codexRouting"]["subagentVersion"] = json!("v2");
+        router.settings_config["codexRouting"]["subagentV2"] = json!({
+            "schemaVersion": 2, "selectionPolicy": "balanced", "profiles": {}
+        });
+        let sources = vec![CodexProviderSetBatchSourceRequest {
+            provider: logical.clone(),
+            receipt_ids: restored.receipt_ids,
+        }];
+        let before = serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap();
+        let (prepared, _) = prepare_codex_provider_set_batch_internal(
+            &state,
+            PrepareCodexProviderSetBatchRequest {
+                sources: sources.clone(),
+                router: router.clone(),
+            },
+            now,
+        )
+        .expect("validate Sub-Agent against the expanded batch, not persisted facade");
+        assert!(!prepared.blocked);
+        assert_eq!(
+            prepared.router.settings_config["codexRouting"]["routes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        router.settings_config["codexRouting"]["subagentV2"]["schemaVersion"] = json!(999);
+        assert!(
+            prepare_codex_provider_set_batch_internal(
+                &state,
+                PrepareCodexProviderSetBatchRequest { sources, router },
+                now,
+            )
+            .is_err(),
+            "deferred validation must still reject invalid Sub-Agent storage"
+        );
+        assert_eq!(
+            before,
+            serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap()
+        );
         let mut changed = logical;
         changed.settings_config["auth"]["OPENAI_API_KEY"] = json!("rotated");
         assert!(

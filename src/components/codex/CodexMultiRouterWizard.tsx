@@ -1499,8 +1499,13 @@ export function CodexMultiRouterWizard({
     });
     if (batchProtocolLab.state.phase === "failed") {
       toast.error(`MultiRouter 保存失败：${message}`, { closeButton: true });
+      // This page owns the save error and offers a new Save action, not the
+      // protocol dialog's retry action. Settle the failed operation so its
+      // pending promise cannot hold saveInFlightRef after the user fixes it.
+      batchProtocolLab.cancel(new Error(message));
     }
   }, [
+    batchProtocolLab.cancel,
     batchProtocolLab.state.draft,
     batchProtocolLab.state.errorDetail,
     batchProtocolLab.state.pendingIntent,

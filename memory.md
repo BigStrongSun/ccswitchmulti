@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 r6 安装验收与批次引用校验顺序根修
+
+- r6（81297c21）构建安装成功：installer BC999F4A831F0FB655A238AD00A6329FDBE7C3ED187640DE36793733B7919E0B，安装EXE AD03CEA61574CB442257A810F359B8FF22CE3DB6A7EF8F5A1B9AC90A2F1688E1。事务 ccsm-20260904-171648-0ab779dab9c840c689bb894a19ed1c94，PID56012，15721 healthy，临时进程级CDP9334仅127.0.0.1。
+- 实机确认旧方案列表不含Kimi facade；恢复4源有效证据后底部下一步进入第7页，原11个模型全部保留（含Kimi三个，k3-256k仍排除）。实际保存预校验却报 selected_model_missing k3；数据库仍保持原6条运行路由、原鉴权策略与current，没有保存坏候选。r6不满足发布条件。
+- 根因：batch命令用普通prepare_provider_for_mutation处理逻辑Router，已有subagentV2触发依赖校验，提前使用数据库旧facade目录而不是待提交的逻辑源及拆分叶子。根修分离纯规范化与依赖校验，batch专用入口仅接受schema-v2 Router，全部source/leaf候选及路由展开完成后在同一virtual_providers上严格编译并校验Sub-Agent；普通保存保持原完整检查，事务写入前拒绝非法内容。
+- 新回归先以已保存split源、有效receipt、include模型和已有subagentV2复现相同selected_model_missing；修复后通过，并验证非法Sub-Agent schema仍被拒绝、预校验DB零写入。协议命令32/32通过。
+- 实机还发现首次保存失败后再次点击无IPC：协议工作流保留pending Promise供其内部重试，而向导没有使用该重试入口，saveInFlightRef一直占用。向导把非validate的failed保存交回本页错误后取消该操作，使Promise拒绝并由finally释放锁；blocked和探测retry仍走原有专用流程。新增首次prepare失败后再次保存回归RED→GREEN，前端168 files/1369 tests及typecheck通过。两项独立窄审均无Important遗留，完整Rust门禁与下一安装候选另记。
+- 本修复fresh门禁：完整cargo test退出0，library3817 passed/6 ignored及所有integration suites通过；生产lib严格Clippy、rustfmt、diff与严格UTF-8/no-BOM/no-U+FFFD检查通过。下一候选r7重新构建辅助程序与主程序，不能复用r6作为修复后的安装证明。
+
 ## 2026-09-04 实际 GLM 复测与历史结果覆盖实时进度根修
 
 - r4 安装版经本机 WebView2 CDP 发起真实 GLM 双模型复测：glm-5.3 和 glm-5.3-flash 均为 Chat Verified，Responses 404；上游报告 5,202 tokens（输入 3,829，输出 1,373），无定价不能估算费用。界面展示 Chat→Responses、reasoning_content 映射、Moonshot MFJS 工具请求重试与工具续轮通过。只进行了授权探测，未保存源配置或坏的向导预览。

@@ -5829,6 +5829,30 @@ impl ProviderService {
     pub(crate) fn prepare_provider_for_mutation(
         state: &AppState,
         app_type: &AppType,
+        provider: Provider,
+    ) -> Result<Provider, AppError> {
+        let provider = Self::normalize_provider_for_mutation(state, app_type, provider)?;
+        Self::validate_codex_subagent_v2_provider_candidate(state, &provider)?;
+        Ok(provider)
+    }
+
+    /// Batch Router references are validated by the batch planner after all source
+    /// and leaf candidates exist. Never resolve these against the old database.
+    pub(crate) fn prepare_codex_batch_router_for_mutation(
+        state: &AppState,
+        provider: Provider,
+    ) -> Result<Provider, AppError> {
+        if !Self::is_codex_schema_v2_router(&AppType::Codex, &provider) {
+            return Err(AppError::InvalidInput(
+                "codex_provider_set_batch_router_requires_v2".to_string(),
+            ));
+        }
+        Self::normalize_provider_for_mutation(state, &AppType::Codex, provider)
+    }
+
+    fn normalize_provider_for_mutation(
+        state: &AppState,
+        app_type: &AppType,
         mut provider: Provider,
     ) -> Result<Provider, AppError> {
         Self::ensure_codex_provider_is_user_operable(app_type, &provider)?;
@@ -5842,7 +5866,6 @@ impl ProviderService {
         Self::validate_provider_settings(app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), app_type, &mut provider)?;
         Self::normalize_usage_script_credential_overrides(app_type, &mut provider);
-        Self::validate_codex_subagent_v2_provider_candidate(state, &provider)?;
         Ok(provider)
     }
 

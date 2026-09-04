@@ -112,119 +112,140 @@ function renderWizard(
 }
 
 describe("CodexMultiRouterWizard", () => {
-  it("reopens a saved plan with reusable evidence and allows saving without a paid probe", async () => {
-    const source: Provider = {
-      id: "saved-source",
-      name: "Saved Source",
-      settingsConfig: {
-        baseUrl: "https://example.invalid/v1",
-        auth: { OPENAI_API_KEY: "test-only" },
-        modelCatalog: { models: [{ model: "good" }] },
-      },
-    };
-    const plan: Provider = {
-      id: "saved-plan",
-      name: "Saved Plan",
-      settingsConfig: {
-        codexRouting: {
-          schemaVersion: 2,
-          enabled: true,
-          routes: [
-            {
-              id: "saved-route",
-              targetProviderId: source.id,
-              modelSelection: { mode: "all" },
-              authPolicy: { source: "provider_config" },
+  it.each([false, true])(
+    "reopens a saved plan and saves with reusable evidence (initial prepare failure: %s)",
+    async (failFirstPrepare) => {
+      const source: Provider = {
+        id: "saved-source",
+        name: "Saved Source",
+        settingsConfig: {
+          baseUrl: "https://example.invalid/v1",
+          auth: { OPENAI_API_KEY: "test-only" },
+          modelCatalog: { models: [{ model: "good" }] },
+        },
+      };
+      const plan: Provider = {
+        id: "saved-plan",
+        name: "Saved Plan",
+        settingsConfig: {
+          codexRouting: {
+            schemaVersion: 2,
+            enabled: true,
+            routes: [
+              {
+                id: "saved-route",
+                targetProviderId: source.id,
+                modelSelection: { mode: "all" },
+                authPolicy: { source: "provider_config" },
+              },
+            ],
+          },
+        },
+      };
+      const restoredOutcome = {
+        provider: source,
+        receiptIds: ["restored-receipt"],
+        observations: [],
+        protocolApplied: false,
+        adaptationPreview: {
+          persistence: "single",
+          status: "ready",
+          models: [],
+        },
+        records: [
+          {
+            probeVersion: 1,
+            testedAt: 100,
+            expiresAt: 4102444800,
+            target: {
+              provider_id: source.id,
+              public_model: "good",
+              upstream_model: "good",
+              transport: "open_ai_responses",
+              endpoint_fingerprint: "endpoint",
+              credential_fingerprint: "credential",
+              request_policy_fingerprint: "policy",
             },
-          ],
-        },
-      },
-    };
-    const restoredOutcome = {
-      provider: source,
-      receiptIds: ["restored-receipt"],
-      observations: [],
-      protocolApplied: false,
-      adaptationPreview: { persistence: "single", status: "ready", models: [] },
-      records: [
-        {
-          probeVersion: 1,
-          testedAt: 100,
-          expiresAt: 4102444800,
-          target: {
-            provider_id: source.id,
-            public_model: "good",
-            upstream_model: "good",
-            transport: "open_ai_responses",
-            endpoint_fingerprint: "endpoint",
-            credential_fingerprint: "credential",
-            request_policy_fingerprint: "policy",
+            result: {
+              readiness: "verified",
+              selected_transport: "open_ai_responses",
+              branches: [],
+            },
           },
-          result: {
-            readiness: "verified",
-            selected_transport: "open_ai_responses",
-            branches: [],
-          },
-        },
-      ],
-    };
-    restoreCodexProviderProtocolEvidence.mockResolvedValueOnce(restoredOutcome);
-    prepareCodexProviderSetBatch.mockResolvedValue({
-      digest: "saved",
-      sourcePreviews: [],
-      blocked: false,
-    });
-    commitCodexProviderSetBatch.mockResolvedValue({
-      router: plan,
-      sourceSnapshots: [],
-      projections: [],
-      status: "committed",
-    });
-    const probeCalls =
-      preflightCodexProviderProtocolCompatibility.mock.calls.length;
-    renderWizard([source, plan], { mode: "edit", planId: plan.id });
-    await waitFor(() =>
+        ],
+      };
+      restoreCodexProviderProtocolEvidence.mockResolvedValueOnce(
+        restoredOutcome,
+      );
+      prepareCodexProviderSetBatch.mockResolvedValue({
+        digest: "saved",
+        sourcePreviews: [],
+        blocked: false,
+      });
+      if (failFirstPrepare) {
+        prepareCodexProviderSetBatch.mockRejectedValueOnce(
+          new Error("candidate-invalid"),
+        );
+      }
+      commitCodexProviderSetBatch.mockResolvedValue({
+        router: plan,
+        sourceSnapshots: [],
+        projections: [],
+        status: "committed",
+      });
+      const probeCalls =
+        preflightCodexProviderProtocolCompatibility.mock.calls.length;
+      renderWizard([source, plan], { mode: "edit", planId: plan.id });
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "选择模型" }),
+        ).not.toHaveAttribute("data-read-only"),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+      fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+      expect(screen.getByText("第 7 / 13 步")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
+      fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+      if (failFirstPrepare) {
+        await screen.findByText("candidate-invalid");
+        await screen.findByText("状态机：saveFailed");
+        fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+      }
+      await waitFor(() =>
+        expect(commitCodexProviderSetBatch).toHaveBeenCalled(),
+      );
       expect(
-        screen.getByRole("button", { name: "选择模型" }),
-      ).not.toHaveAttribute("data-read-only"),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
-    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    expect(screen.getByText("第 7 / 13 步")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
-    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
-    await waitFor(() => expect(commitCodexProviderSetBatch).toHaveBeenCalled());
-    expect(
-      prepareCodexProviderSetBatch.mock.calls.at(-1)![0][0].receiptIds,
-    ).toEqual(["restored-receipt"]);
-    expect(preflightCodexProviderProtocolCompatibility.mock.calls.length).toBe(
-      probeCalls,
-    );
-    await screen.findByText("状态机：published");
-    restoreCodexProviderProtocolEvidence.mockResolvedValueOnce({
-      ...restoredOutcome,
-      receiptIds: ["restored-again"],
-    });
-    const commits = commitCodexProviderSetBatch.mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
-    await waitFor(() =>
-      expect(commitCodexProviderSetBatch.mock.calls.length).toBe(commits + 1),
-    );
-    expect(
-      prepareCodexProviderSetBatch.mock.calls.at(-1)![0][0].receiptIds,
-    ).toEqual(["restored-again"]);
-    expect(preflightCodexProviderProtocolCompatibility.mock.calls.length).toBe(
-      probeCalls,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
-    expect(
-      screen.getByRole("button", { name: "重新进行兼容性深度探测" }),
-    ).toBeEnabled();
-    fireEvent.click(
-      screen.getByRole("button", { name: "重新进行兼容性深度探测" }),
-    );
-    expect(screen.getByRole("button", { name: "确认测试" })).toBeVisible();
-  });
+        prepareCodexProviderSetBatch.mock.calls.at(-1)![0][0].receiptIds,
+      ).toEqual(["restored-receipt"]);
+      expect(
+        preflightCodexProviderProtocolCompatibility.mock.calls.length,
+      ).toBe(probeCalls);
+      await screen.findByText("状态机：published");
+      restoreCodexProviderProtocolEvidence.mockResolvedValueOnce({
+        ...restoredOutcome,
+        receiptIds: ["restored-again"],
+      });
+      const commits = commitCodexProviderSetBatch.mock.calls.length;
+      fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+      await waitFor(() =>
+        expect(commitCodexProviderSetBatch.mock.calls.length).toBe(commits + 1),
+      );
+      expect(
+        prepareCodexProviderSetBatch.mock.calls.at(-1)![0][0].receiptIds,
+      ).toEqual(["restored-again"]);
+      expect(
+        preflightCodexProviderProtocolCompatibility.mock.calls.length,
+      ).toBe(probeCalls);
+      fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+      expect(
+        screen.getByRole("button", { name: "重新进行兼容性深度探测" }),
+      ).toBeEnabled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "重新进行兼容性深度探测" }),
+      );
+      expect(screen.getByRole("button", { name: "确认测试" })).toBeVisible();
+    },
+  );
   it("keeps later steps gated when persisted evidence is missing without starting a probe", async () => {
     const source: Provider = {
       id: "no-evidence",
