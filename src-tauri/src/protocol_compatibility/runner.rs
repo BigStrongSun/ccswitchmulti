@@ -87,12 +87,26 @@ impl RedactedProbeFailure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityRule {
+    ToolSchema,
+    ReasoningTextReplay,
+    OmitReasoning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
 pub enum ProtocolProbeProgressEvent {
+    CompatibilityRetry {
+        model: String,
+        transport: TransportKind,
+        stage: ProbeProgressStage,
+        rule: CompatibilityRule,
+    },
     CandidateStarted {
         model: String,
     },
@@ -525,6 +539,12 @@ where
         })
     ) {
         tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
+        reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
+            model: candidate.public_model.clone(),
+            transport,
+            stage: ProbeProgressStage::ForcedTool,
+            rule: CompatibilityRule::ToolSchema,
+        });
         forced = send_case(
             candidate,
             client,
@@ -576,6 +596,12 @@ where
             evidence.push(exchange.evidence().clone());
         }
         tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
+        reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
+            model: candidate.public_model.clone(),
+            transport,
+            stage: ProbeProgressStage::ForcedTool,
+            rule: CompatibilityRule::ToolSchema,
+        });
         forced = send_case(
             candidate,
             client,
@@ -707,6 +733,12 @@ where
         && is_bounded_replay_shape_rejection(&continuation)
     {
         history_replay = HistoryReplay::ResponsesReasoningTextContent;
+        reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
+            model: candidate.public_model.clone(),
+            transport,
+            stage: ProbeProgressStage::Continuation,
+            rule: CompatibilityRule::ReasoningTextReplay,
+        });
         continuation = send_case(
             candidate,
             client,
@@ -719,6 +751,12 @@ where
         .await;
         if is_bounded_replay_shape_rejection(&continuation) {
             history_replay = HistoryReplay::Omit;
+            reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
+                model: candidate.public_model.clone(),
+                transport,
+                stage: ProbeProgressStage::Continuation,
+                rule: CompatibilityRule::OmitReasoning,
+            });
             continuation = send_case(
                 candidate,
                 client,

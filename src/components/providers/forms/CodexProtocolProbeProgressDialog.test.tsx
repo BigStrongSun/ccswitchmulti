@@ -238,6 +238,12 @@ describe("CodexProtocolProbeProgressDialog", () => {
     expect(screen.getByText("历史续轮：reasoning_content")).toBeInTheDocument();
     expect(screen.getByText("上游原生摘要")).toBeInTheDocument();
     expect(screen.getByText("原始推理正文")).toBeInTheDocument();
+    expect(screen.getAllByText("适配后通过")).toHaveLength(2);
+    expect(screen.getByText(/上游返回 reasoning_content/)).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/默认工具请求被拒绝或未返回有效工具调用/),
+    ).toHaveLength(2);
+    expect(screen.getByText(/原生推理历史结构不被接受/)).toBeInTheDocument();
     expect(screen.getByText(/本次上游已报告 1,500 tokens/)).toBeInTheDocument();
     expect(screen.getByText(/估算费用约 US\$0\.0123/)).toBeInTheDocument();
     expect(
@@ -320,6 +326,52 @@ describe("CodexProtocolProbeProgressDialog", () => {
         /深度探测会向每个模型的 Responses 和 Chat 端点发送多次真实请求，会消耗 Token 并可能产生费用/,
       ),
     ).toBeInTheDocument();
+  });
+
+  it("shows a real repair attempt as pending and does not promote a failed retry", () => {
+    const events: CodexProtocolProbeProgressEvent[] = [
+      {
+        kind: "compatibility_retry",
+        model: "glm-test",
+        transport: "open_ai_responses",
+        stage: "continuation",
+        rule: "omit_reasoning",
+      },
+    ];
+    const props = {
+      open: true,
+      running: true,
+      expectedModels: ["glm-test"],
+      events,
+      outcome: null,
+      error: "",
+      onOpenChange: vi.fn(),
+    };
+    const { rerender } = render(
+      <CodexProtocolProbeProgressDialog {...props} />,
+    );
+    expect(screen.getByText("正在自动适配并重试")).toBeInTheDocument();
+    expect(
+      screen.getByText(/仅移除推理项，保留工具调用和工具结果/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("适配后通过")).not.toBeInTheDocument();
+    rerender(
+      <CodexProtocolProbeProgressDialog
+        {...props}
+        running={false}
+        events={[
+          ...events,
+          {
+            kind: "branch_finished",
+            model: "glm-test",
+            transport: "open_ai_responses",
+            readiness: "partial",
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText("适配仍未通过")).toBeInTheDocument();
+    expect(screen.queryByText("正在自动适配并重试")).not.toBeInTheDocument();
   });
 
   it("aggregates reported token usage and mappings across provider outcomes", () => {

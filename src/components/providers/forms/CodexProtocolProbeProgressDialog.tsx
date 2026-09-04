@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import type {
+  CodexCompatibilityRule,
   CodexProtocolCompatibilityRecord,
   CodexProtocolProbeFailure,
   CodexProtocolProbeReadiness,
@@ -34,10 +35,12 @@ import type {
   CodexProviderScopedProtocolProbeProgressEvent,
 } from "@/lib/protocol-lab/codex-adapters";
 import type { CodexHistoryReplay, CodexToolSchemaDialect } from "@/types";
+import { CodexCompatibilitySummary } from "./CodexCompatibilitySummary";
 
 type VisibleStageStatus = CodexProtocolProbeStageStatus | "pending" | "running";
 
 interface BranchProgress {
+  retries: CodexCompatibilityRule[];
   touched: boolean;
   stages: Record<CodexProtocolProbeStage, VisibleStageStatus>;
   reasoningSemantic: CodexReasoningSemantic | null;
@@ -87,6 +90,7 @@ const TRANSPORTS: CodexProtocolTransport[] = [
 
 function emptyBranch(): BranchProgress {
   return {
+    retries: [],
     touched: false,
     stages: {
       baseline: "pending",
@@ -214,7 +218,10 @@ function buildProgress(
     }
     const branch = model.branches[event.transport];
     branch.touched = true;
-    if (event.kind === "stage_started") {
+    if (event.kind === "compatibility_retry") {
+      branch.retries.push(event.rule);
+      branch.stages[event.stage] = "running";
+    } else if (event.kind === "stage_started") {
       branch.stages[event.stage] = "running";
     } else if (event.kind === "stage_finished") {
       branch.stages[event.stage] = event.stageStatus;
@@ -702,6 +709,13 @@ export function CodexProtocolProbeProgressDialog({
                         </p>
                       ) : (
                         <div className="space-y-2">
+                          <CodexCompatibilitySummary
+                            {...branch}
+                            transport={transport}
+                            baselinePassed={branch.stages.baseline === "passed"}
+                            running={running}
+                            selected={model.selectedTransport === transport}
+                          />
                           {STAGES.map((stage) => {
                             const status = statusPresentation(
                               branch.stages[stage.id],

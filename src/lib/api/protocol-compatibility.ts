@@ -23,6 +23,10 @@ export type CodexProtocolProbeStageStatus =
   | "skipped";
 export type CodexProtocolProbeReadiness = "verified" | "partial" | "unverified";
 export type CodexProtocolProbeScope = "automatic_models" | "all_enabled_models";
+export type CodexCompatibilityRule =
+  | "tool_schema"
+  | "reasoning_text_replay"
+  | "omit_reasoning";
 export type CodexReasoningSemantic = "readable" | "summary" | "opaque" | "none";
 export type CodexReasoningSource =
   | "reasoning_content"
@@ -48,6 +52,13 @@ export interface CodexProtocolProbeFailure {
 
 export type CodexProtocolProbeProgressEvent =
   | { kind: "candidate_started"; model: string }
+  | {
+      kind: "compatibility_retry";
+      model: string;
+      transport: CodexProtocolTransport;
+      stage: CodexProtocolProbeStage;
+      rule: CodexCompatibilityRule;
+    }
   | {
       kind: "stage_started";
       model: string;

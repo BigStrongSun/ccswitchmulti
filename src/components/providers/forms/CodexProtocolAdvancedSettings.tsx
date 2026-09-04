@@ -41,6 +41,12 @@ export function CodexProtocolAdvancedSettings({
 }: CodexProtocolAdvancedSettingsProps) {
   return (
     <div className="space-y-3 rounded-md border border-border-default p-3">
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        这里编辑的是 CCSM
+        的协议与字段适配规则，不是修改模型服务本身或历史响应正文。
+        实际发现的差异、自动处理内容和验证结果，请查看探测详情中的“自动兼容处理”；
+        只有保存并启用后，后续请求才按最终配置处理。手动修改规则后需要重新验证。
+      </p>
       <div className="space-y-1.5">
         <Label>协议配置方式</Label>
         <Select value={mode} onValueChange={onModeChange}>

@@ -1120,6 +1120,52 @@ async fn reports_ordered_redacted_progress_for_every_deep_probe_stage() {
 }
 
 #[tokio::test]
+async fn reports_actual_compatibility_retries_without_response_content() {
+    for (mode, expected) in [
+        (ResponsesMode::MoonshotToolSchemaOnly, vec!["tool_schema"]),
+        (
+            ResponsesMode::OmitReasoningReplayOnly,
+            vec!["reasoning_text_replay", "omit_reasoning"],
+        ),
+        (ResponsesMode::Complete, vec![]),
+    ] {
+        let fixture = spawn_fixture(mode).await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let reported = events.clone();
+        run_protocol_compatibility_probe_with_reporter(
+            candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+            &reqwest::Client::new(),
+            move |event| reported.lock().unwrap().push(event),
+        )
+        .await;
+        let serialized = serde_json::to_value(&*events.lock().unwrap()).unwrap();
+        let retries: Vec<_> = serialized
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                event["kind"] == "compatibility_retry" && event["transport"] == "open_ai_responses"
+            })
+            .collect();
+        assert_eq!(
+            retries
+                .iter()
+                .map(|event| event["rule"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for retry in retries {
+            assert_eq!(
+                retry.as_object().unwrap().len(),
+                5,
+                "only kind/model/transport/stage/rule may leave the runner"
+            );
+        }
+        assert!(!serialized.to_string().contains("private tool reasoning"));
+    }
+}
+
+#[tokio::test]
 async fn parseable_but_invalid_success_json_does_not_pass_responses_baseline() {
     let fixture = spawn_fixture(ResponsesMode::InvalidSuccessfulJson).await;
     let result = run_protocol_compatibility_probe(

@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 兼容适配过程与结果可见化
+
+- 用户要求复测安装，并让用户明确知道模型响应与 Codex 要求的差异、CCSM 自动处理了什么、是否通过。原界面主要是阶段通过/失败与折叠字段映射，实际 Schema/历史重试没有独立进度事件，无法准确显示“正在自动适配”。
+- 新增默认可见的 CodexCompatibilitySummary：Chat→Responses 结构转换、推理来源映射、工具 Schema 兼容、reasoning_text 历史重建、仅移除推理历史的降级均以证据展示。区分检测中、实际适配重试中、适配后通过、仍未通过；额外说明推荐/备用分支、探测不保存、保存启用后按最终配置运行、手动覆盖不是验证通过。高级设置说明编辑的是兼容规则，不是模型服务或历史响应正文。
+- runner 仅在真实 Schema 或推理历史重试前发送 compatibility_retry，字段只有 kind/model/transport/stage/rule，不增加请求、重试或响应正文存储。普通400/422只能证明触发尝试，UI 不断言根因；未得到有效基础响应时不宣称模型无推理能力，有效 none/opaque 不会伪造可读思考。
+- TDD：新增重试进度测试旧版返回空事件 RED，前端旧版缺摘要与运行状态 RED，失败基础响应误报无推理的负例 RED；修正后相关前端19/19、全量168 files /1361 tests、Rust runner34/34、Rust全量3814 passed/6 ignored、typecheck通过。既有act/MSW及浏览器数据警告未作无关修改。
+- 内置Web和Matrix独立检索并交叉读取官方 openai-node/docs/tools.md，确认完成事件和function_call_output闭环；具体适配语义以本地 runner、streaming_codex_chat、transform_codex_chat 和测试为准。只展示脱敏结构与规则，不复制用户响应或凭据。本条记录时尚未完成新候选安装验收，发布仍由安装验收门禁控制。
+
 ## 2026-09-04 保存回读误作废协议探测
 
 - 用户报告安装版 v29 保存页在探测完成后仍要求探测。源码回归已复现一条确定路径：原子保存返回协议规范化、失败模型停用后的 sourceSnapshots，随后 Providers 查询回读；外部配置检测仅比较旧 sourceFactsRef，把本次保存自身产生的变更也判定为外部编辑，替换为失败结果并锁住启用页。截图没有完整操作轨迹，不能断言现场只存在这一条原因。
