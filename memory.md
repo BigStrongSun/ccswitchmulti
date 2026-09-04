@@ -2,6 +2,11 @@
 
 ## 2026-09-04 兼容适配过程与结果可见化
 
+- 后续安装复测：实现提交 a875d3e9（包含上一提交6524e354的保存回读根修），新导出目录 C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.19.2-29-retest；NSIS 13,209,442字节，SHA256 3813EE3474B96759EBB7BBF590196C0A487DF66C153C461330BF9A589504F45C，预期安装EXE A306F539AF18DFB01A39DD0E9BF3F76831260F485336B23D1ACDD0D8F3F64BFC。sidecar Release 6m08s、主程序7m34s、renderer及NSIS均成功。
+- r3独立系统Windows PowerShell事务 ccsm-20260904-132351-78769011171548d7896db005c4800fb7 返回Success，NewPid46100，Error/RollbackError null；备份在 LocalAppData/CCSwitchMultiTransactionBackups/v3.19.2-29-20260904-r3。安装后重新读取版本3.19.2-29、上述EXE哈希、marker PID46100及/health healthy一致。临时安装launcher起初用了错误导出文件名和未创建的backup目录，两次均在preflight停止、未停服务；修正后才执行安装。
+- 安全脚本门禁须使用系统 Windows PowerShell：本轮内置pwsh环境旧Pester运行67/71（含缺少PSHOME/powershell.exe等兼容失败），系统 C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe 下71/71、退出0。没有以退出0掩盖内置pwsh失败，也没有为了过门禁修改生产安装脚本。
+- 浏览器隔离页使用真实组件+脱敏fixture，实际渲染“适配后通过”、原始reasoning_content来源、降级影响与保存启用边界。安装版桌面自动化出现AX控件树与截图不一致、点击位置偏移；未可靠完成探测→保存→启用全链路，停止进一步输入，未新增/保存QA Provider或切换当前路由。因此当前证据为源码/构建/安全安装/健康通过，不是安装版完整交互验收通过；未push/tag/release。
+
 - 用户要求复测安装，并让用户明确知道模型响应与 Codex 要求的差异、CCSM 自动处理了什么、是否通过。原界面主要是阶段通过/失败与折叠字段映射，实际 Schema/历史重试没有独立进度事件，无法准确显示“正在自动适配”。
 - 新增默认可见的 CodexCompatibilitySummary：Chat→Responses 结构转换、推理来源映射、工具 Schema 兼容、reasoning_text 历史重建、仅移除推理历史的降级均以证据展示。区分检测中、实际适配重试中、适配后通过、仍未通过；额外说明推荐/备用分支、探测不保存、保存启用后按最终配置运行、手动覆盖不是验证通过。高级设置说明编辑的是兼容规则，不是模型服务或历史响应正文。
 - runner 仅在真实 Schema 或推理历史重试前发送 compatibility_retry，字段只有 kind/model/transport/stage/rule，不增加请求、重试或响应正文存储。普通400/422只能证明触发尝试，UI 不断言根因；未得到有效基础响应时不宣称模型无推理能力，有效 none/opaque 不会伪造可读思考。
