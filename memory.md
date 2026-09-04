@@ -6,6 +6,7 @@
 - 实测现有安装为 3.19.2-25，进程 12728，路径 C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe，监听 127.0.0.1:15721；当前 Codex 配置使用该端口。本会话依赖此服务，安装需要独立可恢复事务和维护窗口，不得在中断后依赖当前会话完成恢复。
 - GitHub 只读核验 Latest 为 v3.19.2-28，v29 tag 尚不存在。直接 gh 访问 fake-IP 超时；仅为当前命令使用系统配置中已有的 10.106.130.5:3128 代理后查询成功，没有更改系统代理设置。内置 Web 与 Matrix 独立检索并读取 Tauri 官方 Windows Installer 文档，确认 NSIS 构建流程；本地脚本另行签 updater signature，不等于 Windows Authenticode 签名。
 - 完整执行门禁记录于 docs/superpowers/plans/2026-09-04-windows-v29-release.md；未安装验收前不能创建/推送发布 tag。
+- v29 候选提交 18b6a52e：新一轮前端1357通过、Rust3813通过/6忽略、安装事务和构建配置Pester 71通过，typecheck、cargo check --tests、rustfmt、Prettier和UTF-8检查通过。构建session 61355在2026-09-04 11:53启动，输出目标为 C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.19.2-29-candidate；附属程序Release编译和renderer build已通过，主程序Release编译仍在进行。后续先读取该session/产物确认完成，不重复启动构建。当前停在安装维护窗口确认前，尚未安装/验收/发布。
 
 ## 2026-09-04 向导暂存、失败模型排除与保存语义
 
