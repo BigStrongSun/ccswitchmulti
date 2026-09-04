@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 r10 最终安装验收与待发布状态
+
+- 最终产品源码097f2ce2，辅助程序6m50、renderer14.82s、主程序8m32及NSIS签名导出成功。installer SHA256 6BA27937496C4D338CF05B8C9D057BD72C6A4463301A08DACD913F52FF3EA0D3；安装EXE D73F12AA6F2C5E83D876237A53879E99761BBE57BA7D0FF607D74322B5EBD832。安全事务ccsm-20260904-191359-bed85d5d955b40e9b08659dd448b3811 Success，PID43032，Error/RollbackError均null；CDP9337仅loopback。
+- r10实际进入工作台路由页自动刷新目录：DeepSeek/Qwen/Kimi/GLM写回成功；官方在线目录30秒超时，原目录保持，没有作为全平台/全上游在线验收通过。刷新前后以及随后向导保存后，profiles9条SHA256 fae837768a53aab0caadfaa22e366cb9bd5cb7e40d2e8bc08c67bee0db992b77、observations34条ed9c1e2c259371175fdaee79556a93015bc44f9c460f56ffde7d3930a98676a3、routes239a85aafc4230c0befd816a05199596eaa03b3363519e7941ce7f5cc204e89d全部一致。证明完整记录、验证时间/期限和协议分组不再因通用刷新写回或旧方案保存改变。
+- 向导从旧方案恢复4源证据，底部Next进入模型选择，11/17保留，最终状态published；真实Qwen请求HTTP200、response.completed、输出OK、53tokens。r9已实测且r10未改动的末页关闭/恢复草稿/状态页关闭覆盖层同属此最终源码。未重启Codex，旧进程快照和Desktop CDP/历史修复仍不在验收范围。
+- 本地安装验收通过后才开始推送fork main和v3.19.2-29；GitHub CI、多平台构建、公开Release与资产摘要仍须跟踪，不把本记录当远端发布完成证明。
+
 ## 2026-09-04 r9 安装验收揭示通用更新的隐式探测与TTL续期
 
 - r9（2b20ce65）Windows重建安装成功；installer DC25155B497A2F5369103205CC9DFF0A6A0CA1C2FAAAE252175638284989F2ED，安装EXE356DB786477416F2BD5DEFE37845DEA36BED46BBD26DDF84877BD820A2BE5E2C。事务ccsm-20260904-183316-49f6fde5fa0d4130a86554b21b44f6ef成功，PID56484，15721 healthy、CDP9336仅loopback。末页关闭、草稿恢复、打开状态页收起向导实测通过，旧方案4源证据/11模型/保存无preflight通过；最小Qwen请求response.completed、53tokens。
