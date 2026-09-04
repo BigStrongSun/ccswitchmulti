@@ -38,3 +38,5 @@ Codex 运行日志直接确认每轮是首次请求加五次客户端重试。CC
 实现与测试在独立工作树进行，避开同时开发的时区功能；本次不修改该功能。最终测试结果另记于提交说明/交付回复，不把开发中途的部分通过写成安装验收。
 
 最终独立工作树验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib proxy:: -- --quiet --test-threads=4`，1855 passed / 0 failed。新增失败响应元数据保留用例先红后绿，转换保留上游 response.id/model/usage，缺少 ID 时才使用 response.created 的 ID。Cookie、多行 SSE、失败用量用例均有先失败后通过证据。代码只读复审通过；修改文件 rustfmt、git diff --check、UTF-8 严格解码/无 BOM/无 U+FFFD 校验通过。Windows PowerShell 5.1 的 enable/status/disable 在临时目录验证通过，没有启用真实配置目录的采集。
+
+源码已通过 `738a50ea` 合入主工作区，其他任务未提交修改保持原状。合入后在主工作区再次执行同一 proxy 测试命令：1855 passed / 0 failed，包含当时工作区的并发改动；这不是已安装版本的运行验收。主工作区本次文件的 UTF-8/无 BOM 校验通过。
