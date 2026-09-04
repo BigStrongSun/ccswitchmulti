@@ -1,10 +1,20 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 v3.19.2-29 发布完成
+
+- 本地Windows x64 r10已安装验收，产品源码097f2ce2；发布tag v3.19.2-29的远端peeled commit保持c7a6709af617960f7db7988cc2feb52fb56c1404，未删除或移动。main测试修正74af3919ba5c8cd133c31d0f8a3bba23b6cf9e58与tag仅相差App测试和memory，产品源码/构建配置没有变化，未重复安装或重启Codex。
+- main CI33868862335整体success，前端168文件/1372测试及Windows/Linux/macOS后端门禁均通过。原tag Release33867332049第二次运行整体success，五个构建任务、Publish GitHub Release和Assemble latest.json均通过，2026-09-04T12:56:22Z结束。原tag仍不含main的测试定位修正，不能混称tag测试已被修改。
+- 正式地址https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.2-29；公开、非draft、非prerelease，并已核实为Latest。中文发布说明完整包含仓库说明。19个资产全部下载至LLMservice/ccswitchmulti-v3.19.2-29-github-verified并逐一复算SHA256，与GitHub asset digest一致；latest.json版本3.19.2-29，恰好六个平台，URL全部指向本tag且签名与下载的.sig一致，校验脚本退出码0。
+- 功能边界：旧配置自动复用仍有效且匹配的已保存证据，可主动重测；失败模型可取消选择后继续，最终保存才生效；草稿只保证当前应用会话内保留。Kimi内部适配入口不再冒充用户MultiRouter；自动适配解释来自真实证据。实际UI验收包含r10目录刷新和旧方案保存、真实Qwen response.completed，但官方在线目录曾超时并保留旧目录，不应声称全部上游在线目录刷新成功。
+- 本轮内置Web和Matrix分别核对Microsoft WebView2与Playwright官方文档，进程级调试参数/CDP连接与本地源码、监听和UI证据相符。GitHub CLI曾遇到EOF/连接超时，改用公开只读API继续观察，匿名额度耗尽后恢复认证CLI；没有修改代理、DNS、CCSM或Codex运行配置。最终发布状态和资产校验均取得新鲜远端证据。
+
 ## 2026-09-04 v29 CI 对话框定位竞态
 
 - CI 33867296455 的 Frontend 唯一失败为 App 的 facade 排除测试：findByRole(dialog) 在旧方案选择器异步刷新前命中 firstRunNotice，失败 DOM 的标题/正文/按钮均明确指向首次启动提示，不是 Kimi 分类回归。Release 33867332049 已取消，尚无公开 v29 release。
 - 修正测试为按可访问名称“配置多路模型”等待目标弹窗，再等待 My real router 出现，最后维持 facade 不出现的断言；不修改产品代码、不隐藏真实启动提示、不放宽分类断言。App 21/21、全量168 files/1372 tests、TypeScript、Prettier、diff与严格UTF-8/noBOM/noFFFD通过，独立复审无问题；远端门禁继续执行。
 - v3.19.2-29 保持指向 c7a6709a，不删除或移动 tag。仅当修正后的 main CI 全绿、且与 tag 的差异确认只有测试和 memory 时，才重跑原 tag Release；发布产物不包含测试修正，但产品源码与 r10 已安装验收版一致。必须分别记录 main CI 与原 tag Release 结果。
+- 执行调整：main 74af3919 的 CI33868862335 前端、Linux/macOS任务成功，Windows Clippy和Run tests也在11:55:35Z成功，仅构建缓存上传尚未结束。因此在全部测试门禁已过、产品树差异为零的基础上并行恢复Release33867332049，继续等待CI缓存收尾；不能提前称整个CI run success。原tag仍为c7a6709a，未改写。
+- 后续远端复核确认CI33868862335整体completed/success，Frontend与Windows/Linux/macOS四项全部成功。Release33867332049重跑仍在构建，尚未形成公开发布验收结论。
 
 ## 2026-09-04 r10 最终安装验收与待发布状态
 
