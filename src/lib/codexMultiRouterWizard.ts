@@ -1202,7 +1202,14 @@ export function initialWizardCatalogModelOrder(
     return null;
   }
 
-  const sources = resolveWizardModelNameCollisions(sourceProviders);
+  // Use the same source scope as the active draft. An unselected source must
+  // not rename restored choices into aliases absent from the draft catalog.
+  const selectedSourceIds = new Set(
+    initialWizardSelectedSourceIds(existingPlan, sourceProviders),
+  );
+  const sources = resolveWizardModelNameCollisions(
+    sourceProviders.filter((source) => selectedSourceIds.has(source.id)),
+  );
   const sourceById = new Map(
     sources.map((provider) => [provider.id, provider]),
   );

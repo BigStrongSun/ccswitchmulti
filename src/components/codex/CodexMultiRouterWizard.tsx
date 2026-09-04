@@ -1643,12 +1643,9 @@ export function CodexMultiRouterWizard({
         });
         return;
       case "protocol":
-        if (
-          flowState.connectivitySummary === undefined ||
-          connectivityResults.length === 0
-        ) {
+        if (connectivityResults.length === 0) {
           toast.info(
-            "请先运行协议深探测；已有协议配置不能代替本次向导的真实事务测试。",
+            "尚无可用的兼容性证据，请先恢复有效的保存记录或运行协议深探测。",
             { closeButton: true },
           );
           return;

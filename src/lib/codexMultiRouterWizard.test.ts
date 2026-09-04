@@ -22,6 +22,43 @@ const deepseekSource: Provider = {
 };
 
 describe("buildCodexMultiRouterWizardPlan subagent version", () => {
+  it("restores model selection without collision aliases from unselected sources", () => {
+    const unused = { ...deepseekSource, id: "unused-source", name: "Unused" };
+    const plan: Provider = {
+      id: "plan",
+      name: "Plan",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "selected-route",
+              targetProviderId: deepseekSource.id,
+              modelSelection: { mode: "include", models: ["deepseek-v4-pro"] },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+    expect(
+      initialWizardCatalogModelOrder(plan, [deepseekSource, unused]),
+    ).toEqual(["deepseek-v4-pro"]);
+    plan.settingsConfig.codexRouting.routes.push({
+      id: "disabled-route",
+      targetProviderId: unused.id,
+      enabled: false,
+      modelSelection: { mode: "all" },
+      authPolicy: { source: "provider_config" },
+    });
+    expect(
+      initialWizardSelectedSourceIds(plan, [deepseekSource, unused]),
+    ).toEqual([deepseekSource.id, unused.id]);
+    expect(
+      initialWizardCatalogModelOrder(plan, [deepseekSource, unused]),
+    ).toEqual(["deepseek-v4-pro-deepseek"]);
+  });
   it("does not classify protocol facade routing as a user MultiRouter", () => {
     const facade: Provider = {
       id: "any-source",

@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 安装版验收发现的向导入口与模型选择修订
+
+- 8fc618ad 的 r4 安装包构建、独立事务安装成功。installer SHA256 093E82796B454ABA76599D997E328F465D4EFE6117C82BEC15799DC421F545CD，安装 EXE 3C2074E0BA4CF44AB5531109373ECFC8E3650771F40421A637FCB27795B34ED4；事务 ccsm-20260904-163635-4cf51c36bdce4293a950f49a292a890a，PID50860，health healthy。进程级 CDP9333 仅监听127.0.0.1，实际 WebView2 页为 http://tauri.localhost/；无全局环境/注册表改动。
+- 实际安装版确认：旧方案列表只显示 New Codex MultiRouter，Kimi 显示自动适配入口；打开方案后恢复4个模型源有效证据，无新探测；关闭再打开保留第7步草稿。但底部下一步仍因 flowState.connectivitySummary 未赋值而被旧门禁拦截，虽然侧栏已解锁。根修去掉重复的历史流程摘要判定，统一以 connectivityResults 及 retained evidence 决定是否可继续；仍不放行空证据或失败模型。新增真实 footer Next 回归先RED后GREEN。
+- 保存预览还发现Kimi原3个选中模型只剩1个：initialWizardCatalogModelOrder 按全部可用来源做重名消歧，而草稿目录只按所选来源计算。未选择的第二个Kimi源使前者生成额外别名，后者没有这些别名，交集导致模型被丢弃。改为复用 initialWizardSelectedSourceIds 的同一来源集合（含其既有disabled-route选择语义），不另写不同的enabled过滤。未选重复来源与disabled重复来源均有回归；未点击保存，生产模型选择未被改写。
+- 前端全量168 files/1368 tests通过，最后来源集合一致性细化后typecheck和34项定向回归通过。此次只有前端业务改动，r5构建复用r4已验证的历史辅助程序，但重新执行Tauri前端构建、主程序打包、NSIS、签名和导出。r4不满足最终验收，不能发布；后续安装与发布状态另记。
+
 ## 2026-09-04 协议适配入口逻辑编辑视图与拆分证据恢复
 
 - 修复 Kimi 被误列为用户 MultiRouter：前端统一按 codexProtocolSet 的 facade/leaf 角色分类，不按名称猜测。新增只读 get_codex_editor_providers，通过后端既有逻辑源恢复和路由折叠机制生成编辑库存；原始 Provider 列表与运行时 SQLite 记录不变，外层方案中的内部叶子引用在编辑视图恢复为逻辑模型源，保留两种协议的模型目录。

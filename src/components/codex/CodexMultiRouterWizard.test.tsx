@@ -188,6 +188,9 @@ describe("CodexMultiRouterWizard", () => {
         screen.getByRole("button", { name: "选择模型" }),
       ).not.toHaveAttribute("data-read-only"),
     );
+    fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    expect(screen.getByText("第 7 / 13 步")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
     fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
     await waitFor(() => expect(commitCodexProviderSetBatch).toHaveBeenCalled());
