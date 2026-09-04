@@ -136,6 +136,7 @@ describe("CodexMultiRouterWizard", () => {
                 id: "saved-route",
                 targetProviderId: source.id,
                 modelSelection: { mode: "all" },
+                aliases: { "legacy-good": "good" },
                 authPolicy: { source: "provider_config" },
               },
             ],
@@ -188,8 +189,23 @@ describe("CodexMultiRouterWizard", () => {
         );
       }
       commitCodexProviderSetBatch.mockResolvedValue({
-        router: plan,
-        sourceSnapshots: [],
+        router: {
+          ...plan,
+          settingsConfig: {
+            ...plan.settingsConfig,
+            codexRouting: {
+              ...plan.settingsConfig.codexRouting,
+              routes: [
+                {
+                  targetProviderId: `${source.id}--ccsm-responses`,
+                  aliases: { "legacy-good": "good" },
+                },
+              ],
+            },
+          },
+        },
+        editorRouter: plan,
+        sourceSnapshots: [{ logicalProvider: source }],
         projections: [],
         status: "committed",
       });
@@ -233,6 +249,10 @@ describe("CodexMultiRouterWizard", () => {
       expect(
         prepareCodexProviderSetBatch.mock.calls.at(-1)![0][0].receiptIds,
       ).toEqual(["restored-again"]);
+      expect(
+        prepareCodexProviderSetBatch.mock.calls.at(-1)![1].settingsConfig
+          .codexRouting.routes[0].aliases,
+      ).toEqual({ "legacy-good": "good" });
       expect(
         preflightCodexProviderProtocolCompatibility.mock.calls.length,
       ).toBe(probeCalls);
@@ -465,6 +485,7 @@ describe("CodexMultiRouterWizard", () => {
     commitCodexProviderSetBatch.mockImplementation(
       async (_sources, router) => ({
         router,
+        editorRouter: router,
         sourceSnapshots: [],
         projections: [],
         status: "committed",
@@ -579,6 +600,7 @@ describe("CodexMultiRouterWizard", () => {
     });
     commitCodexProviderSetBatch.mockImplementation(async (sources, router) => ({
       router,
+      editorRouter: router,
       sourceSnapshots: sources.map((item: { provider: Provider }) => ({
         logicalProvider: {
           ...item.provider,
@@ -922,6 +944,7 @@ describe("CodexMultiRouterWizard", () => {
       | ((value: {
           preview: Record<string, unknown>;
           router: Provider;
+          editorRouter: Provider;
           sourceSnapshots: never[];
           projections: never[];
           status: "committed";
@@ -931,6 +954,7 @@ describe("CodexMultiRouterWizard", () => {
     const firstCommit = new Promise<{
       preview: Record<string, unknown>;
       router: Provider;
+      editorRouter: Provider;
       sourceSnapshots: never[];
       projections: never[];
       status: "committed";
@@ -959,6 +983,7 @@ describe("CodexMultiRouterWizard", () => {
         },
         router,
         sourceSnapshots: [],
+        editorRouter: router,
         projections: [],
         status: "committed" as const,
         projectionErrorCode: null,
@@ -1004,6 +1029,7 @@ describe("CodexMultiRouterWizard", () => {
         blocked: false,
       },
       router: firstRouter,
+      editorRouter: firstRouter,
       sourceSnapshots: [],
       projections: [],
       status: "committed",

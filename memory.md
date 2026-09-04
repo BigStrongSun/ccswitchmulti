@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 连续保存必须回读逻辑Router而不是运行时叶子图
+
+- 审查并以组件回归确认：batch回包router是运行时split路由，Wizard直接setSavedPlan(outcome.router)后第二次保存仅按逻辑source ID查既有aliases，匹配不到leaf路由，旧别名变为空。编辑模式查询刷新有时会恢复逻辑视图，但create模式、结构共享未触发effect或查询失败都不能依赖该时序。新测试用真实形态的叶子回包+逻辑sourceSnapshots稳定RED（legacy-good别名变成{}），不是凭静态推测改动。
+- Prepared batch在最终virtual_providers上复用project_codex_editor_providers生成editor_router，且在DB写入前生成；回包新增editorRouter，原router继续表示运行时结构。Wizard只把editorRouter作为后续编辑依据。投影克隆不改变事务记录；校验失败不会造成部分保存。它复用全库存安全检查，无关损坏条目也可能触发安全拒绝。
+- 前端连续保存别名保留回归GREEN，后端回包字段由Null RED到逻辑source route GREEN；两项独立窄审无Important遗留。r7构建在主程序阶段主动终止，未安装/未发布；下一候选必须重新构建，不能使用中途修改源码的残余产物。
+- 最新完整门禁：frontend168 files/1369 tests通过（新增回包字段同步全部测试夹具后fresh重跑）；完整cargo test退出0、所有integration suites通过；TypeScript、生产lib严格Clippy、rustfmt、Prettier、diff与UTF-8 strict/no-BOM/no-U+FFFD通过。
+
 ## 2026-09-04 r6 安装验收与批次引用校验顺序根修
 
 - r6（81297c21）构建安装成功：installer BC999F4A831F0FB655A238AD00A6329FDBE7C3ED187640DE36793733B7919E0B，安装EXE AD03CEA61574CB442257A810F359B8FF22CE3DB6A7EF8F5A1B9AC90A2F1688E1。事务 ccsm-20260904-171648-0ab779dab9c840c689bb894a19ed1c94，PID56012，15721 healthy，临时进程级CDP9334仅127.0.0.1。
@@ -8,6 +15,7 @@
 - 新回归先以已保存split源、有效receipt、include模型和已有subagentV2复现相同selected_model_missing；修复后通过，并验证非法Sub-Agent schema仍被拒绝、预校验DB零写入。协议命令32/32通过。
 - 实机还发现首次保存失败后再次点击无IPC：协议工作流保留pending Promise供其内部重试，而向导没有使用该重试入口，saveInFlightRef一直占用。向导把非validate的failed保存交回本页错误后取消该操作，使Promise拒绝并由finally释放锁；blocked和探测retry仍走原有专用流程。新增首次prepare失败后再次保存回归RED→GREEN，前端168 files/1369 tests及typecheck通过。两项独立窄审均无Important遗留，完整Rust门禁与下一安装候选另记。
 - 本修复fresh门禁：完整cargo test退出0，library3817 passed/6 ignored及所有integration suites通过；生产lib严格Clippy、rustfmt、diff与严格UTF-8/no-BOM/no-U+FFFD检查通过。下一候选r7重新构建辅助程序与主程序，不能复用r6作为修复后的安装证明。
+- r7构建等待期间，在r6实机完成历史结果→主动重新探测→费用确认→实时进度→最终结果验收。开始时精确Verified标签为0，两模型的Responses/Chat均显示本轮检测中；完成后才显示Chat Verified 2（Responses 404）。该轮上游4,761 tokens（输入3,766/输出995），无定价；未保存GLM草稿。该证据验证81297c21的进度隔离与适配说明，不代表cca2e150保存修复已安装。
 
 ## 2026-09-04 实际 GLM 复测与历史结果覆盖实时进度根修
 

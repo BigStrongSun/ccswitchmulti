@@ -239,6 +239,7 @@ export interface CodexProviderSetBatchPreview {
 export interface CodexProviderSetBatchCommitOutcome {
   preview: CodexProviderSetBatchPreview;
   router: Provider;
+  editorRouter: Provider;
   sourceSnapshots: CodexProviderEditorSnapshot[];
   projections: CodexRoutingProjectionStatus[];
   status: "committed" | "committed_with_projection_error";

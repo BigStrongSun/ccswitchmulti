@@ -153,6 +153,7 @@ beforeEach(() => {
         blocked: false,
       },
       router,
+      editorRouter: router,
       sourceSnapshots: [],
       projections: [],
       status: "committed",

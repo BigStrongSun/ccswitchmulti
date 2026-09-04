@@ -2256,7 +2256,7 @@ export function CodexMultiRouterWizard({
           .flatMap((source) => source.receiptIds)
           .forEach((id) => consumedReceiptIdsRef.current.add(id));
         if (targetGeneration !== targetGenerationRef.current) return;
-        setSavedPlan(outcome.router);
+        setSavedPlan(outcome.editorRouter);
         committedSourceFactsRef.current = new Map(
           outcome.sourceSnapshots.map((snapshot) => [
             snapshot.logicalProvider.id,

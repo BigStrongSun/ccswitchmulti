@@ -339,6 +339,7 @@ pub struct CommitCodexProviderSetBatchRequest {
 pub struct CodexProviderSetBatchCommitOutcome {
     pub preview: CodexProviderSetBatchPreview,
     pub router: Provider,
+    pub editor_router: Provider,
     pub source_snapshots: Vec<crate::commands::provider::CodexProviderEditorSnapshot>,
     pub projections: Vec<crate::codex_multirouter::projection::CodexRoutingProjectionStatus>,
     pub status: CodexProviderSetCommitStatus,
@@ -530,6 +531,7 @@ where
     }
 
     let router = prepared.router.clone();
+    let editor_router = prepared.editor_router.clone();
     let projection_router_ids = prepared.projection_router_ids.clone();
     let (_, observations) =
         protocol_state_from_provider_set_receipt_bundles(receipt_claim.bundles());
@@ -565,6 +567,7 @@ where
     Ok(CodexProviderSetBatchCommitOutcome {
         preview,
         router,
+        editor_router,
         source_snapshots,
         projections,
         status,
@@ -2880,6 +2883,12 @@ mod tests {
         .expect("commit batch");
 
         assert_eq!(outcome.router.id, "router-provider");
+        let response = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(
+            response["editorRouter"]["settingsConfig"]["codexRouting"]["routes"][0]
+                ["targetProviderId"],
+            "provider-a"
+        );
         assert_eq!(outcome.source_snapshots.len(), 1);
         assert_eq!(
             outcome.source_snapshots[0].adaptation.persistence,

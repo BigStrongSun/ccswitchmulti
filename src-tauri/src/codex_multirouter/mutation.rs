@@ -33,6 +33,7 @@ pub(crate) struct PreparedCodexProviderSetBatchCommit {
     pub projection_router_ids: Vec<String>,
     pub source_previews: Vec<CodexProviderSetPreview>,
     pub router: Provider,
+    pub editor_router: Provider,
     pub blocked: bool,
 }
 
@@ -519,6 +520,7 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
             transaction: None,
             projection_router_ids: Vec::new(),
             source_previews,
+            editor_router: router.clone(),
             router,
             blocked: true,
         });
@@ -585,6 +587,12 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
             true,
         )?;
     }
+    // Keep the logical editing contract alongside the runtime leaf graph. Build
+    // it before any writes, using exactly the candidate graph being committed.
+    let editor_router = super::provider_set::project_codex_editor_providers(&virtual_providers)
+        .map_err(provider_set_error)?
+        .remove(&router.id)
+        .ok_or_else(|| AppError::InvalidInput("codex_editor_router_missing".to_string()))?;
     mutations.insert(router.id.clone(), Some(router.clone()));
     projection_router_ids.push(router.id.clone());
     projection_router_ids.sort();
@@ -617,6 +625,7 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
         projection_router_ids,
         source_previews,
         router,
+        editor_router,
         blocked: false,
     })
 }
