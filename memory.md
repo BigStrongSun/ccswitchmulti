@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 Kimi 被误列为 MultiRouter 的只读诊断
+
+- 用户截图的“编辑旧配置”来自 App.tsx 的 codexRoutingPlans，调用工作台 isRoutingPlan；此函数仅检查 codexRouting 是否启用或有规则。向导 isCodexMultiRouterPlan 也仅检查 routing，没有区分协议适配入口与用户路由方案。
+- 现场 SQLite mode=ro 白名单核对：截图两个 Kimi Provider 均有 codexProtocolSet.version=1、role=facade，各引用两个有 parentProviderId 的 Chat/Responses leaf；不是凭名字后缀猜测。当前 New Codex MultiRouter 没有该标记，且实际引用 Kimi For Coding-responses 的两个 leaf，因此不得删除内部记录来隐藏列表。
+- provider_set.rs::build_facade 克隆源 Provider，保存结构化 facade 标记和内部 codexRouting；ProviderService::list 只隐藏 leaf，保留 facade 原形。App.tsx:519 的分类忽略该标记，导致截图列表误收录；工作台模型源排除和向导分类亦受同类判断影响。正确修复边界应统一逻辑 Provider/用户 MultiRouter/内部协议路由分类，并恢复逻辑模型目录，而不是只隐藏 Kimi 名称或移除运行时路由。
+- 本轮仅诊断，未改产品代码、用户配置、当前路由或安装；问题尚未修复，release 仍暂停。两个原始 Kimi 记录最初为何分别建立不由当前快照证明，不推测其历史来源。
+- 内置 Web 与 Matrix 独立搜索 SQLite 只读 URI；Matrix 搜索返回无关结果，随后通过 open 读取 SQLite 官方 uri.html，与内置 Web 交叉确认 mode=ro。网络只核实诊断方法，具体根因以本地源码、截图和当前脱敏 DB 字段为准，未上传配置或凭据。
+
 ## 2026-09-04 兼容适配过程与结果可见化
 
 - 后续安装复测：实现提交 a875d3e9（包含上一提交6524e354的保存回读根修），新导出目录 C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.19.2-29-retest；NSIS 13,209,442字节，SHA256 3813EE3474B96759EBB7BBF590196C0A487DF66C153C461330BF9A589504F45C，预期安装EXE A306F539AF18DFB01A39DD0E9BF3F76831260F485336B23D1ACDD0D8F3F64BFC。sidecar Release 6m08s、主程序7m34s、renderer及NSIS均成功。
