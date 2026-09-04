@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 v29 Windows 安装候选准备
+
+- 用户要求先本地构建 Windows installer，安装测试通过后再发布 GitHub。候选版本 3.19.2-29，包含 d980ed9d 的有限并发和 14c53a9e 的向导缓存/失败排除修复。
+- 实测现有安装为 3.19.2-25，进程 12728，路径 C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe，监听 127.0.0.1:15721；当前 Codex 配置使用该端口。本会话依赖此服务，安装需要独立可恢复事务和维护窗口，不得在中断后依赖当前会话完成恢复。
+- GitHub 只读核验 Latest 为 v3.19.2-28，v29 tag 尚不存在。直接 gh 访问 fake-IP 超时；仅为当前命令使用系统配置中已有的 10.106.130.5:3128 代理后查询成功，没有更改系统代理设置。内置 Web 与 Matrix 独立检索并读取 Tauri 官方 Windows Installer 文档，确认 NSIS 构建流程；本地脚本另行签 updater signature，不等于 Windows Authenticode 签名。
+- 完整执行门禁记录于 docs/superpowers/plans/2026-09-04-windows-v29-release.md；未安装验收前不能创建/推送发布 tag。
+
 ## 2026-09-04 向导暂存、失败模型排除与保存语义
 
 - 根因：App 关闭时卸载向导，打开时又重置状态；协议校验使用整批结果，没有失败模型排除入口。现在同一应用会话、同一当前方案隐藏再打开保留步骤、模型目录草稿、探测结果和排除项。切换方案或丢弃草稿会重新初始化；不承诺重启应用恢复，不把凭据或 Provider 序列化到 localStorage。
