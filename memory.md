@@ -1,5 +1,18 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 深探测有限并发
+
+- 慢的直接根因是三层串行：`codex-adapters.ts` 逐 Provider 等待，commands `run_candidate_batch_with_observations` 逐模型等待，runner `run_probe` 逐 Responses/Chat 等待。不是 UI 渲染或需要额外 OS 线程。
+- 前端批量向导同时最多 2 个 Provider；每次后端 preflight 同时最多 3 个唯一物理模型；每个模型 Responses/Chat 用 `tokio::join!` 并发。单 preflight 上限 6 条协议链，单向导上限 12 条，不是进程级全局限流。分支内 baseline、SSE、工具调用、工具续轮及兼容重试保持原依赖顺序；没有扩大探测用例或主动重试次数。
+- 后端先按 credential/request-policy-aware `lease_key` 去重，再 `buffer_unordered(3)`，最终按原候选顺序组装 selection records 和每条记录对应的两个 observations，避免乱序完成导致 receipt 串位。前端按 source 索引组装结果，progress 继续携带 Provider ID 和模型名。
+- 前端一个 IPC 失败后停止派发排队 Provider，等待已启动 IPC 结束再报告失败，避免重试与旧请求重叠。后端 `try_collect` 错误返回会 drop 同批 pending futures，现有 RAII lease 随之释放；不是 detached spawn。
+- 审查补充：物理 `lease_key` 不包含 Provider ID，跨 Provider 并发不能继续直接 try-lock，否则同 endpoint/key/upstream-model 的不同 Provider 会使整批报 `probe_in_progress`。显式 preflight 使用 `AppState::acquire_protocol_probe` 等待同目标 lease，Drop 用 Notify 唤醒，先注册通知再检查锁防丢失唤醒；180 秒排队上限。不同目标不互相阻塞，取消等待不会占用 lease。直接 try-lock API 保留原拒绝语义。跨 Provider 同目标仍分别探测、串行执行，不宣称跨 Provider 请求去重。
+- TDD 已先复现模型仅启动 1 个、双协议 barrier 超时、Provider 仅启动 1 个；修复后定向 Rust 127/127、前端 48/48、Rust library 3809 passed / 6 ignored、TypeScript 和 renderer build 通过。未安装或重启 CCSM/Codex，未做真实上游耗时/限流基准或桌面视觉验收，不能承诺固定加速倍数。
+- 内置 Web 与 Matrix 独立检索；Matrix 搜索质量差、MDN 抓取失败，随后 Matrix 成功读取 futures 官方 docs.rs，交叉确认 `buffer_unordered(n)` 有界并发、按完成顺序输出的语义。来源：https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html 。
+- 仓库 `.git/hooks/post-commit` 会启动本地 release pipeline。本次仅做本地代码提交，命令级禁用该钩子，不修改持久 Git 配置，不发布或推送，不影响现有安装态。
+- 前端全量 167 files / 1351 tests 通过；现有 React act、浏览器兼容数据过期及 Vite chunk 提示仍存在，本次未做无关依赖升级。Notify 的唤醒语义也经内置 Web 与 Matrix 独立读取 Tokio 官方 docs.rs 交叉核对。
+- 同目标排队修复后最终 Rust library 3812 passed / 0 failed / 6 ignored，审查无阻塞项；Notify 不保证 FIFO，多窗口/多独立 preflight 的竞争仍受 180 秒排队超时约束，而非无限等待。
+
 ## 2026-09-03 深探测详情入口与实验性 Codex 出口时区
 
 - `v3.19.2-25` 安装版仍可能在第三方 Provider 历史切回官方 ChatGPT 时出现 `[ArrayParam] input[n].content array too long; maximum length 0`。根因不是 Qwen/DeepSeek 输出字数过长，而是冷恢复任务可能在 renderer request-client 包裹完成前携带 built-in `openai` 直连官方 backend，从而绕过 CCSM 已有的 Responses 历史归一化。提交 `3f87531f` 已把 built-in `openai` 的接管 base URL 也指向本地 Router、持续重扫新建 app-server client，并只从已知非 content item 删除冗余 `content`；message、agent_message 与未知未来类型保守保留。该提交晚于 v25 tag，因此 v25 安装态不会自动获得修复。

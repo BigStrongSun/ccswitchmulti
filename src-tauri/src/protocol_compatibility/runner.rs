@@ -227,11 +227,25 @@ where
         model: candidate.public_model.clone(),
     });
     let nonce = Uuid::new_v4().simple().to_string();
-    let mut branches = Vec::with_capacity(2);
-
-    for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
-        branches.push(run_branch(&candidate, client, transport, &nonce, reporter).await);
-    }
+    // Protocol branches share no history. Keep dependent stages sequential
+    // inside each branch, but don't let a slow Responses endpoint stall Chat.
+    let (responses, chat) = tokio::join!(
+        run_branch(
+            &candidate,
+            client,
+            TransportKind::OpenAiResponses,
+            &nonce,
+            reporter
+        ),
+        run_branch(
+            &candidate,
+            client,
+            TransportKind::OpenAiChat,
+            &nonce,
+            reporter
+        ),
+    );
+    let branches = vec![responses, chat];
 
     let candidates = branches
         .iter()

@@ -575,7 +575,7 @@ export function CodexProtocolProbeProgressDialog({
           <DialogTitle>Codex 兼容性深度探测</DialogTitle>
           <DialogDescription>
             {running
-              ? `正在验证模型 ${completed}/${models.length || "…"}。每个模型会依次检查 Responses 与 Chat。`
+              ? `正在验证模型 ${completed}/${models.length || "…"}。模型采用有限并发，Responses 与 Chat 同时检查；工具续轮按顺序验证。`
               : hasMissingResults
                 ? `探测未完成：${missingResultCount} 个模型没有结果。`
                 : batchSummaries.length > 0 || completed > 0

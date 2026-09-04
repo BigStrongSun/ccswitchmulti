@@ -124,6 +124,126 @@ describe("single Codex Protocol Lab adapter", () => {
 });
 
 describe("batch Codex Protocol Lab adapter", () => {
+  it("overlaps two providers, refills a free slot and preserves source/receipt order", async () => {
+    const started: string[] = [];
+    const release = new Map<string, () => void>();
+    const sources = ["a", "b", "c", "d"].map((id) => ({
+      provider: { ...provider, id },
+      receiptIds: [] as string[],
+    }));
+    const adapter = createBatchCodexProtocolLabAdapter({
+      preflightCodexProviderProtocolCompatibility: async (input, progress) => {
+        started.push(input.id);
+        await new Promise<void>((resolve) => release.set(input.id, resolve));
+        progress?.({
+          kind: "candidate_finished",
+          model: "qwen3.8",
+          selectedTransport: "open_ai_chat",
+          readiness: "verified",
+        });
+        return {
+          provider: input,
+          receiptIds: [`receipt-${input.id}`],
+          records: [],
+          observations: [],
+          protocolApplied: false,
+          adaptationPreview: {
+            persistence: "single",
+            status: "ready",
+            effectiveTransport: "open_ai_chat",
+            models: [],
+          },
+        };
+      },
+      prepareCodexProviderSetBatch: vi.fn(),
+      commitCodexProviderSetBatch: vi.fn(),
+    });
+    const progress = vi.fn();
+    const pending = adapter.preflight({ sources, router: provider }, progress);
+    expect(started).toEqual(["a", "b"]);
+    release.get("b")!();
+    await vi.waitFor(() => expect(started).toEqual(["a", "b", "c"]));
+    release.get("c")!();
+    await vi.waitFor(() => expect(started).toEqual(["a", "b", "c", "d"]));
+    release.get("d")!();
+    release.get("a")!();
+    const result = await pending;
+    expect(result.receiptIds).toEqual([
+      "receipt-a",
+      "receipt-b",
+      "receipt-c",
+      "receipt-d",
+    ]);
+    expect(result.outcome.outcomes.map((entry) => entry.providerId)).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+    ]);
+    expect(progress.mock.calls[0][0]).toMatchObject({
+      providerId: "b",
+      model: "qwen3.8",
+    });
+  });
+
+  it("stops queued providers on error and drains in-flight work before allowing retry", async () => {
+    const started: string[] = [];
+    let fail!: (error: Error) => void;
+    let finish!: () => void;
+    const adapter = createBatchCodexProtocolLabAdapter({
+      preflightCodexProviderProtocolCompatibility: async (input) => {
+        started.push(input.id);
+        if (input.id === "a")
+          await new Promise<void>((_, reject) => {
+            fail = reject;
+          });
+        else
+          await new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+        return {
+          provider: input,
+          receiptIds: [],
+          records: [],
+          observations: [],
+          protocolApplied: false,
+          adaptationPreview: {
+            persistence: "single",
+            status: "ready",
+            effectiveTransport: "open_ai_chat",
+            models: [],
+          },
+        };
+      },
+      prepareCodexProviderSetBatch: vi.fn(),
+      commitCodexProviderSetBatch: vi.fn(),
+    });
+    let settled = false;
+    const pending = adapter
+      .preflight(
+        {
+          router: provider,
+          sources: ["a", "b", "c"].map((id) => ({
+            provider: { ...provider, id },
+            receiptIds: [],
+          })),
+        },
+        () => {},
+      )
+      .catch((error) => {
+        settled = true;
+        return error;
+      });
+    expect(started).toEqual(["a", "b"]);
+    fail(new Error("probe failed"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(started).toEqual(["a", "b"]);
+    finish();
+    expect((await pending).message).toBe("probe failed");
+    expect(started).toEqual(["a", "b"]);
+  });
+
   it("returns normalized sources and receipts as the authoritative probe outcome", async () => {
     const manualProvider = {
       ...provider,

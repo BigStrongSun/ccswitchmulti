@@ -101,6 +101,57 @@ async fn spawn_fixture(responses_mode: ResponsesMode) -> FixtureServer {
     }
 }
 
+#[tokio::test]
+async fn concurrent_transports_start_before_either_baseline_finishes() {
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let app = Router::new()
+        .route(
+            "/v1/responses",
+            post(
+                |State(barrier): State<Arc<tokio::sync::Barrier>>| async move {
+                    barrier.wait().await;
+                    StatusCode::SERVICE_UNAVAILABLE
+                },
+            ),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(
+                |State(barrier): State<Arc<tokio::sync::Barrier>>| async move {
+                    barrier.wait().await;
+                    StatusCode::SERVICE_UNAVAILABLE
+                },
+            ),
+        )
+        .with_state(barrier);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fixture = FixtureServer {
+        base_url: format!("http://{address}"),
+        requests: Arc::new(Mutex::new(Vec::new())),
+        task: tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        run_protocol_compatibility_probe(
+            candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+            &reqwest::Client::new(),
+        ),
+    )
+    .await
+    .expect("both baseline requests must reach the server concurrently");
+    assert_eq!(result.branches.len(), 2);
+    assert_eq!(
+        result.branches[0].assessment.transport,
+        TransportKind::OpenAiResponses
+    );
+    assert_eq!(
+        result.branches[1].assessment.transport,
+        TransportKind::OpenAiChat
+    );
+    assert_eq!(result.readiness, ProbeReadiness::Unverified);
+}
+
 async fn upstream(
     State(state): State<FixtureState>,
     uri: Uri,

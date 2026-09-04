@@ -20,6 +20,7 @@ pub struct AppState {
     pub proxy_service: ProxyService,
     pub usage_cache: Arc<UsageCache>,
     protocol_probes_in_flight: Arc<Mutex<HashSet<String>>>,
+    protocol_probe_released: Arc<tokio::sync::Notify>,
     protocol_probe_receipts: Arc<Mutex<HashMap<String, ProtocolProbeReceipt>>>,
     codex_provider_set_probe_receipts: Arc<Mutex<HashMap<String, CodexProviderSetProbeReceipt>>>,
     codex_startup_reconciliation_pending: AtomicBool,
@@ -107,6 +108,7 @@ impl Drop for CodexProviderSetProbeReceiptClaim {
 pub struct ProtocolProbeLease {
     key: String,
     in_flight: Arc<Mutex<HashSet<String>>>,
+    released: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for ProtocolProbeLease {
@@ -114,6 +116,7 @@ impl Drop for ProtocolProbeLease {
         if let Ok(mut in_flight) = self.in_flight.lock() {
             in_flight.remove(&self.key);
         }
+        self.released.notify_waiters();
     }
 }
 
@@ -127,6 +130,7 @@ impl AppState {
             proxy_service,
             usage_cache: Arc::new(UsageCache::new()),
             protocol_probes_in_flight: Arc::new(Mutex::new(HashSet::new())),
+            protocol_probe_released: Arc::new(tokio::sync::Notify::new()),
             protocol_probe_receipts: Arc::new(Mutex::new(HashMap::new())),
             codex_provider_set_probe_receipts: Arc::new(Mutex::new(HashMap::new())),
             // Tests, CLI helpers and command-only AppState instances do not run the
@@ -165,7 +169,27 @@ impl AppState {
         Ok(ProtocolProbeLease {
             key: key.to_string(),
             in_flight: self.protocol_probes_in_flight.clone(),
+            released: self.protocol_probe_released.clone(),
         })
+    }
+
+    /// Concurrent Provider preflights may share a physical target. Serialize
+    /// only that target, leaving unrelated probes free to run.
+    pub async fn acquire_protocol_probe(&self, key: &str) -> Result<ProtocolProbeLease, String> {
+        tokio::time::timeout(Duration::from_secs(180), async {
+            loop {
+                // Register before checking the lease so a release between the
+                // check and await cannot be lost (notify_waiters semantics).
+                let released = self.protocol_probe_released.notified();
+                match self.try_acquire_protocol_probe(key) {
+                    Ok(lease) => return Ok(lease),
+                    Err(error) if error == "probe_in_progress" => released.await,
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .await
+        .map_err(|_| "protocol probe queue timed out".to_string())?
     }
 
     pub(crate) fn remember_protocol_probe_receipt(
@@ -345,6 +369,44 @@ mod tests {
         assert!(state.try_acquire_protocol_probe("target-b").is_ok());
         drop(first);
         assert!(state.try_acquire_protocol_probe("target-a").is_ok());
+    }
+
+    #[tokio::test]
+    async fn queued_probe_lease_wakes_and_does_not_block_other_targets() {
+        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let first = state.try_acquire_protocol_probe("shared").unwrap();
+        let mut second = Box::pin(state.acquire_protocol_probe("shared"));
+        let mut third = Box::pin(state.acquire_protocol_probe("shared"));
+        assert!(futures::poll!(&mut second).is_pending());
+        assert!(futures::poll!(&mut third).is_pending());
+        let unrelated = state.acquire_protocol_probe("other").await.unwrap();
+        drop(unrelated);
+        assert!(futures::poll!(&mut second).is_pending());
+        drop(first);
+        let second_lease = tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(futures::poll!(&mut third).is_pending());
+        drop(second_lease);
+        let third_lease = tokio::time::timeout(Duration::from_secs(1), third)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(third_lease);
+        assert!(state.try_acquire_protocol_probe("shared").is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelled_probe_waiter_does_not_own_or_leak_a_lease() {
+        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let first = state.try_acquire_protocol_probe("shared").unwrap();
+        let mut waiter = Box::pin(state.acquire_protocol_probe("shared"));
+        assert!(futures::poll!(&mut waiter).is_pending());
+        drop(waiter);
+        assert!(state.try_acquire_protocol_probe("shared").is_err());
+        drop(first);
+        assert!(state.try_acquire_protocol_probe("shared").is_ok());
     }
 
     #[test]

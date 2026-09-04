@@ -243,15 +243,21 @@ export function createBatchCodexProtocolLabAdapter(
       return false;
     },
     async preflight(draft, onProgress) {
-      const outcomes: CodexProviderSetBatchProbeOutcome["outcomes"] = [];
-      const sources: CodexProviderSetBatchSource[] = [];
-      for (const source of draft.sources) {
+      const outcomesByIndex = new Map<
+        number,
+        CodexProviderSetBatchProbeOutcome["outcomes"][number]
+      >();
+      const sources = [...draft.sources];
+      let nextIndex = 0;
+      let failed = false;
+      let firstError: unknown;
+      const probeSource = async (index: number) => {
+        const source = draft.sources[index];
         if (
           !sourceNeedsProtocolProbe(source.provider) ||
           source.receiptIds.length > 0
         ) {
-          sources.push(source);
-          continue;
+          return;
         }
         const outcome = await api.preflightCodexProviderProtocolCompatibility(
           source.provider,
@@ -262,16 +268,37 @@ export function createBatchCodexProtocolLabAdapter(
               providerName: source.provider.name,
             }),
         );
-        outcomes.push({
+        outcomesByIndex.set(index, {
           providerId: source.provider.id,
           inputProvider: source.provider,
           outcome,
         });
-        sources.push({
+        sources[index] = {
           provider: outcome.provider,
           receiptIds: outcome.receiptIds,
-        });
-      }
+        };
+      };
+      // Bound Provider fan-out as well as the backend's model fan-out. Drain
+      // in-flight IPC calls on failure: rejecting early would let retry overlap
+      // still-running (billable) probes from this attempt.
+      const worker = async () => {
+        while (!failed && nextIndex < draft.sources.length) {
+          const index = nextIndex++;
+          try {
+            await probeSource(index);
+          } catch (error) {
+            if (!failed) firstError = error;
+            failed = true;
+          }
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(2, sources.length) }, worker),
+      );
+      if (failed) throw firstError;
+      const outcomes = [...outcomesByIndex.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([, outcome]) => outcome);
       return {
         outcome: { outcomes, sources },
         receiptIds: sources.flatMap((source) => source.receiptIds),

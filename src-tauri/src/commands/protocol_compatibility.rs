@@ -1,4 +1,5 @@
 use chrono::Utc;
+use futures::{stream, StreamExt, TryStreamExt};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -36,6 +37,7 @@ use crate::{
 
 const VERIFIED_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 const UNVERIFIED_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
+const PROBE_MODEL_CONCURRENCY: usize = 3;
 const OVERRIDE_PLAN_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1157,7 +1159,7 @@ async fn run_candidate_result_with_reporter<F>(
 where
     F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
 {
-    let _lease = state.try_acquire_protocol_probe(&candidate.lease_key())?;
+    let _lease = state.acquire_protocol_probe(&candidate.lease_key()).await?;
     let client = crate::proxy::http_client::build_protocol_probe_client()?;
     Ok(run_protocol_compatibility_probe_with_reporter(candidate, &client, reporter).await)
 }
@@ -1264,18 +1266,29 @@ where
     F: FnMut(ProbeCandidate) -> Fut,
     Fut: Future<Output = Result<ProtocolCompatibilityProbeResult, String>>,
 {
-    let mut results_by_target: HashMap<String, ProtocolCompatibilityProbeResult> = HashMap::new();
+    // Deduplicate before scheduling: aliases must not race for the same lease
+    // or issue duplicate billable requests. Keep assembly in original order.
+    let mut seen = BTreeSet::new();
+    let unique_candidates = candidates
+        .iter()
+        .filter(|candidate| seen.insert(candidate.lease_key()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let results_by_target: HashMap<String, ProtocolCompatibilityProbeResult> =
+        stream::iter(unique_candidates)
+            .map(|candidate| {
+                let key = candidate.lease_key();
+                let result = execute(candidate);
+                async move { result.await.map(|result| (key, result)) }
+            })
+            .buffer_unordered(PROBE_MODEL_CONCURRENCY)
+            .try_collect()
+            .await?;
     let mut records = Vec::with_capacity(candidates.len());
     let mut observations = Vec::with_capacity(candidates.len() * 2);
     for candidate in candidates {
         let execution_key = candidate.lease_key();
-        let result = if let Some(result) = results_by_target.get(&execution_key) {
-            result.clone()
-        } else {
-            let result = execute(candidate.clone()).await?;
-            results_by_target.insert(execution_key, result.clone());
-            result
-        };
+        let result = results_by_target[&execution_key].clone();
         observations.extend(build_observation_records_for_result(&candidate, &result)?);
         records.push(build_record_for_result(&candidate, result)?);
     }
@@ -3058,6 +3071,96 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["model-a", "model-b"]
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_provider_preflight_waits_for_same_physical_target() {
+        let state = AppState::new(Arc::new(crate::database::Database::memory().unwrap()));
+        let candidate = alias_candidate("provider-b", "route-b", "alias-b");
+        let lease = state
+            .try_acquire_protocol_probe(&candidate.lease_key())
+            .unwrap();
+        let reporter = |_| {};
+        let pending = super::run_candidate_result_with_reporter(&state, candidate, &reporter);
+        tokio::pin!(pending);
+        assert!(
+            futures::poll!(&mut pending).is_pending(),
+            "a concurrent Provider must wait, not fail with probe_in_progress"
+        );
+        drop(lease);
+        // Do not poll again: this test verifies admission without sending a paid request.
+    }
+
+    #[tokio::test]
+    async fn concurrent_batch_bounds_work_refills_slots_and_preserves_alias_order() {
+        let mut candidates = Vec::new();
+        let mut releases = HashMap::new();
+        let mut senders = Vec::new();
+        for index in 0..5 {
+            let mut candidate = alias_candidate("provider", "route", &format!("model-{index}"));
+            candidate.upstream_model = format!("upstream-{index}");
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            releases.insert(candidate.upstream_model.clone(), rx);
+            senders.push(Some(tx));
+            candidates.push(candidate);
+        }
+        let mut alias = candidates[0].clone();
+        alias.public_model = "alias-0".into();
+        candidates.insert(1, alias);
+        let started = Arc::new(AtomicUsize::new(0));
+        let count = started.clone();
+        let batch = run_candidate_batch_with_observations(candidates, move |candidate| {
+            let release = releases
+                .remove(&candidate.upstream_model)
+                .expect("deduplicated");
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                release.await.unwrap();
+                Ok(ProtocolCompatibilityProbeResult {
+                    selected_transport: Some(TransportKind::OpenAiChat),
+                    readiness: ProbeReadiness::Partial,
+                    branches: Vec::new(),
+                })
+            }
+        });
+        tokio::pin!(batch);
+        assert!(futures::poll!(&mut batch).is_pending());
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            3,
+            "three models must overlap, aliases must not occupy a slot"
+        );
+        senders[1].take().unwrap().send(()).unwrap();
+        assert!(futures::poll!(&mut batch).is_pending());
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            4,
+            "a fast model frees a slot even while the first is pending"
+        );
+        for sender in senders.into_iter().flatten() {
+            sender.send(()).unwrap();
+        }
+        let result = batch.await.unwrap();
+        assert_eq!(started.load(Ordering::SeqCst), 5);
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .map(|r| r.target.public_model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model-0", "alias-0", "model-1", "model-2", "model-3", "model-4"]
+        );
+        assert_eq!(result.observations.len(), 12);
+        for (record, observations) in result
+            .records
+            .iter()
+            .zip(result.observations.chunks_exact(2))
+        {
+            assert!(observations
+                .iter()
+                .all(|o| o.target.public_model == record.target.public_model));
+        }
     }
 
     #[tokio::test]
