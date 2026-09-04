@@ -517,9 +517,21 @@ export function CodexProtocolProbeProgressDialog({
         expectedTargets,
         events,
         resolvedOutcomes,
-        storedRecords,
+        // Saved evidence is a historical view, never the result of a new run.
+        // Keep failed/incomplete retries visible instead of falling back to Verified.
+        running || events.length > 0 || resolvedOutcomes.length > 0 || error
+          ? []
+          : storedRecords,
       ),
-    [expectedModels, expectedTargets, events, resolvedOutcomes, storedRecords],
+    [
+      expectedModels,
+      expectedTargets,
+      events,
+      resolvedOutcomes,
+      storedRecords,
+      running,
+      error,
+    ],
   );
   const completedModels = models.filter((model) => model.readiness !== null);
   const completed = completedModels.length;

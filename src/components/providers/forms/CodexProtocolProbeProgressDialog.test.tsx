@@ -219,7 +219,7 @@ describe("CodexProtocolProbeProgressDialog", () => {
       ],
     } as CodexProviderProtocolPreflightOutcome;
 
-    render(
+    const { rerender } = render(
       <CodexProtocolProbeProgressDialog
         open
         running={false}
@@ -306,6 +306,37 @@ describe("CodexProtocolProbeProgressDialog", () => {
         "工具调用与工具结果保持 Responses 原结构",
       ),
     ).toBeInTheDocument();
+    rerender(
+      <CodexProtocolProbeProgressDialog
+        open
+        running={false}
+        expectedModels={["kimi-k2"]}
+        events={[]}
+        outcome={null}
+        storedRecords={outcome.records}
+        error=""
+        onOpenChange={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByText("适配后通过")).toHaveLength(2);
+    for (const running of [true, false]) {
+      rerender(
+        <CodexProtocolProbeProgressDialog
+          open
+          running={running}
+          expectedModels={["kimi-k2"]}
+          events={[]}
+          outcome={null}
+          storedRecords={outcome.records}
+          error={running ? "" : "本轮请求失败"}
+          onOpenChange={vi.fn()}
+        />,
+      );
+      expect(screen.queryAllByText("适配后通过")).toHaveLength(0);
+      expect(screen.queryAllByText("Verified", { exact: true })).toHaveLength(
+        0,
+      );
+    }
   });
 
   it("warns before completion that deep probing sends billable model requests", () => {

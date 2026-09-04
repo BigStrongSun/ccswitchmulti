@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 实际 GLM 复测与历史结果覆盖实时进度根修
+
+- r4 安装版经本机 WebView2 CDP 发起真实 GLM 双模型复测：glm-5.3 和 glm-5.3-flash 均为 Chat Verified，Responses 404；上游报告 5,202 tokens（输入 3,829，输出 1,373），无定价不能估算费用。界面展示 Chat→Responses、reasoning_content 映射、Moonshot MFJS 工具请求重试与工具续轮通过。只进行了授权探测，未保存源配置或坏的向导预览。
+- 发现重新探测期间 buildProgress 仍混入 storedRecords，使旧 Verified 盖住本轮实时状态。根修区分历史查看与新一轮证据：running、events、outcomes 或 error 任一存在即不合并历史记录；只有纯历史查看才展示持久化证据，不把失败重试回退成旧成功。
+- 回归先确认旧实现错误显示两处“适配后通过”，修正后同时覆盖历史可查看、运行中不提前成功、失败不回退旧成功。定向14/14、前端全量168 files/1368 tests、typecheck通过。r5包含6cf6d1ab但不含本修复，不能当最终安装候选；r6重建包含本修复，安装验收另记。
+
 ## 2026-09-04 安装版验收发现的向导入口与模型选择修订
 
 - 8fc618ad 的 r4 安装包构建、独立事务安装成功。installer SHA256 093E82796B454ABA76599D997E328F465D4EFE6117C82BEC15799DC421F545CD，安装 EXE 3C2074E0BA4CF44AB5531109373ECFC8E3650771F40421A637FCB27795B34ED4；事务 ccsm-20260904-163635-4cf51c36bdce4293a950f49a292a890a，PID50860，health healthy。进程级 CDP9333 仅监听127.0.0.1，实际 WebView2 页为 http://tauri.localhost/；无全局环境/注册表改动。
