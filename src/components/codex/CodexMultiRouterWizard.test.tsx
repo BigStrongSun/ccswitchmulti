@@ -298,14 +298,23 @@ describe("CodexMultiRouterWizard", () => {
       sourcePreviews: [],
       blocked: false,
     });
-    commitCodexProviderSetBatch.mockImplementation(
-      async (_sources, router) => ({
-        router,
-        sourceSnapshots: [],
-        projections: [],
-        status: "committed",
-      }),
-    );
+    commitCodexProviderSetBatch.mockImplementation(async (sources, router) => ({
+      router,
+      sourceSnapshots: sources.map((item: { provider: Provider }) => ({
+        logicalProvider: {
+          ...item.provider,
+          meta: { ...item.provider.meta, apiFormat: "openai_responses" },
+        },
+        adaptation: {
+          persistence: "single",
+          status: "ready",
+          effectiveTransport: "open_ai_responses",
+          models: [],
+        },
+      })),
+      projections: [],
+      status: "committed",
+    }));
     const { rerenderWizard } = renderWizard([source]);
     fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
     fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
@@ -339,6 +348,38 @@ describe("CodexMultiRouterWizard", () => {
     expect(
       source.settingsConfig.modelCatalog.models[1].enabled,
     ).toBeUndefined();
+    await screen.findByText("状态机：published");
+    const committed =
+      await commitCodexProviderSetBatch.mock.results.at(-1)!.value;
+    // A query can still render its previous snapshot before the save refetch arrives.
+    rerenderWizard(true, [{ ...source, name: "Renamed Probe" }]);
+    expect(
+      screen.getByRole("button", { name: "启用这个多路路由" }),
+    ).toBeEnabled();
+    rerenderWizard(true, [
+      ...committed.sourceSnapshots.map(
+        (snapshot: { logicalProvider: Provider }) => snapshot.logicalProvider,
+      ),
+      committed.router,
+    ]);
+    expect(
+      screen.getByRole("button", { name: "启用这个多路路由" }),
+    ).toBeEnabled();
+    expect(screen.queryByText("当前步骤暂不可编辑")).not.toBeInTheDocument();
+    const savedSource = committed.sourceSnapshots[0].logicalProvider;
+    rerenderWizard(true, [
+      {
+        ...savedSource,
+        settingsConfig: {
+          ...savedSource.settingsConfig,
+          baseUrl: "https://changed.invalid/v1",
+        },
+      },
+      committed.router,
+    ]);
+    expect(
+      screen.getByRole("button", { name: "启用这个多路路由" }),
+    ).toBeDisabled();
   });
 
   it("invalidates only the edited source and never allows an empty retained selection", async () => {

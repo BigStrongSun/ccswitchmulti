@@ -895,6 +895,7 @@ export function CodexMultiRouterWizard({
   const latestProvidersRef = useRef(providers);
   latestProvidersRef.current = providers;
   const sourceFactsRef = useRef(new Map<string, string>());
+  const committedSourceFactsRef = useRef(new Map<string, string>());
   const handledCreatedProviderIdsRef = useRef(new Set<string>());
   const createPlanIdRef = useRef<string | null>(null);
   const saveInFlightRef = useRef<Promise<void> | null>(null);
@@ -1119,6 +1120,7 @@ export function CodexMultiRouterWizard({
     targetGenerationRef.current += 1;
     initializedTargetRef.current = targetKey;
     handledCreatedProviderIdsRef.current.clear();
+    committedSourceFactsRef.current.clear();
     sourceFactsRef.current = new Map(
       providerModelSources.map((provider) => [
         provider.id,
@@ -1237,10 +1239,13 @@ export function CodexMultiRouterWizard({
       providerModelSources
         .filter((provider) => {
           const previous = sourceFactsRef.current.get(provider.id);
-          return (
-            previous !== undefined &&
-            previous !== protocolProbeProviderSignature(provider)
-          );
+          const next = protocolProbeProviderSignature(provider);
+          if (previous === next) return false;
+          // Only the exact atomic-save response is an expected change. Keep the
+          // observed baseline until refetch arrives so old query renders remain safe.
+          const committed = committedSourceFactsRef.current.get(provider.id);
+          committedSourceFactsRef.current.delete(provider.id);
+          return previous !== undefined && next !== committed;
         })
         .map((provider) => provider.id),
     );
@@ -2154,6 +2159,12 @@ export function CodexMultiRouterWizard({
       .then(async (outcome) => {
         if (targetGeneration !== targetGenerationRef.current) return;
         setSavedPlan(outcome.router);
+        committedSourceFactsRef.current = new Map(
+          outcome.sourceSnapshots.map((snapshot) => [
+            snapshot.logicalProvider.id,
+            protocolProbeProviderSignature(snapshot.logicalProvider),
+          ]),
+        );
         setDraftSources(
           outcome.sourceSnapshots.length > 0
             ? outcome.sourceSnapshots.map(

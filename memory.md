@@ -1,12 +1,21 @@
 # CC Switch Repository Memory
 
+## 2026-09-04 保存回读误作废协议探测
+
+- 用户报告安装版 v29 保存页在探测完成后仍要求探测。源码回归已复现一条确定路径：原子保存返回协议规范化、失败模型停用后的 sourceSnapshots，随后 Providers 查询回读；外部配置检测仅比较旧 sourceFactsRef，把本次保存自身产生的变更也判定为外部编辑，替换为失败结果并锁住启用页。截图没有完整操作轨迹，不能断言现场只存在这一条原因。
+- 根修在保存成功边界记录精确已提交来源签名，查询同步仅接纳与该结果一致的变更，并消耗预期签名；旧查询快照出现时仍保留旧观测基线，不提前改基线造成反向误判。真实地址、凭据等变化仍使证据失效，切换目标清空预期值；没有全局绕过前置门禁或把失败证据改成通过。
+- 回归使用完整 sourceSnapshots，先验证旧实现保存回读后启用按钮 disabled 的 RED，再验证旧快照延迟回读、提交快照到达后仍可启用，以及随后真实地址修改必须禁用。此前空 snapshots 的模拟无法代表真实保存回读，不作为根因依据。定向 21/21、前端全量 167 files / 1357 tests、typecheck、renderer production build 通过；既有 act/MSW、浏览器数据和大 bundle 提示仍存在。
+- 本轮检索沿用本任务已完成的内置 Web 与 Matrix 两条链，交叉读取 React 官方 Synchronizing with Effects；Matrix 独立搜索结果相关性差，官方页读取成功。项目特定根因以本地回归为证，官方文档不能证明截图现场轨迹。该新增修复目前仅源码验证，尚未重新生成或安装；GitHub 发布保持暂停，未继续操作用户界面。
+
 ## 2026-09-04 v29 Windows 安装候选准备
 
 - 用户要求先本地构建 Windows installer，安装测试通过后再发布 GitHub。候选版本 3.19.2-29，包含 d980ed9d 的有限并发和 14c53a9e 的向导缓存/失败排除修复。
 - 实测现有安装为 3.19.2-25，进程 12728，路径 C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe，监听 127.0.0.1:15721；当前 Codex 配置使用该端口。本会话依赖此服务，安装需要独立可恢复事务和维护窗口，不得在中断后依赖当前会话完成恢复。
 - GitHub 只读核验 Latest 为 v3.19.2-28，v29 tag 尚不存在。直接 gh 访问 fake-IP 超时；仅为当前命令使用系统配置中已有的 10.106.130.5:3128 代理后查询成功，没有更改系统代理设置。内置 Web 与 Matrix 独立检索并读取 Tauri 官方 Windows Installer 文档，确认 NSIS 构建流程；本地脚本另行签 updater signature，不等于 Windows Authenticode 签名。
 - 完整执行门禁记录于 docs/superpowers/plans/2026-09-04-windows-v29-release.md；未安装验收前不能创建/推送发布 tag。
-- v29 候选提交 18b6a52e：新一轮前端1357通过、Rust3813通过/6忽略、安装事务和构建配置Pester 71通过，typecheck、cargo check --tests、rustfmt、Prettier和UTF-8检查通过。构建session 61355在2026-09-04 11:53启动，输出目标为 C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.19.2-29-candidate；附属程序Release编译和renderer build已通过，主程序Release编译仍在进行。后续先读取该session/产物确认完成，不重复启动构建。当前停在安装维护窗口确认前，尚未安装/验收/发布。
+- v29 候选提交 18b6a52e：新一轮前端1357通过、Rust3813通过/6忽略、安装事务和构建配置Pester 71通过，typecheck、cargo check --tests、rustfmt、Prettier和UTF-8检查通过。构建 session 61355 已成功完成，输出 C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.19.2-29-candidate，NSIS SHA256 B9D42CFD49C61E3D54F534FBAA4135EA8B541148B2DBC41EDCA478BF04D14623，13,217,350 字节；有 updater .sig，不代表 Authenticode。
+- 经用户许可使用独立 pwsh 安装事务。首次 ccsm-20260904-121440-c972de8fbea5420dbade72bf5ef7b481 在停止后 run-marker 身份检查失败，未进入安装；结果明确为 RollbackFailed（等待旧运行态健康超时），不能称回滚成功。恢复启动旧 v25 时数据库过新，日志记录其自动更新至 v28；旧磁盘与 marker 不一致的更早原因尚无充分证据。首次备份保留于 LocalAppData/CCSwitchMultiTransactionBackups/v3.19.2-29-20260904。
+- 重新验证 v28 基线后第二次事务 ccsm-20260904-121806-3adcd9ec945a49bdb2c30b496e7519c8 成功，备份目录 v3.19.2-29-20260904-r2/result.json 为 Success、Error/RollbackError 均 null。12:34 再读安装文件版本 3.19.2-29、PID 52588、路径 LocalAppData/CCSwitchMulti/cc-switch.exe、SHA256 FA098572082EAA2CB680A224040DA141B712FEA2DDA9EF0892D6D999668B398E，/health healthy。已安装不等于向导验收通过：用户 Esc 中止 UI 自动化后又报告保存页问题，因此未 push/tag/release，新增修复须另行构建安装验收。
 
 ## 2026-09-04 向导暂存、失败模型排除与保存语义
 
