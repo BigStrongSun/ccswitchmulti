@@ -1357,7 +1357,9 @@ pub(crate) fn resolve_codex_request_compatibility(
                         .iter()
                         .find(|branch| branch.assessment.transport == transport)
                     {
-                        if branch.assessment.forced_tool == ProbeStageStatus::Passed {
+                        if branch.assessment.forced_tool == ProbeStageStatus::Passed
+                            && allows_profile_tool_schema_override(provider)
+                        {
                             compatibility.tool_schema_dialect = branch.tool_schema_dialect;
                         }
                         if branch.assessment.continuation == ProbeStageStatus::Passed {
@@ -1389,6 +1391,16 @@ pub(crate) fn resolve_codex_request_compatibility(
     }
 
     compatibility
+}
+
+fn allows_profile_tool_schema_override(provider: &Provider) -> bool {
+    !matches!(
+        provider_codex_base_url(provider)
+            .and_then(|base_url| url::Url::parse(&base_url).ok())
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+            .as_deref(),
+        Some("api.deepseek.com")
+    )
 }
 
 fn compile_provider_probe_candidate_for_request(
@@ -8255,6 +8267,42 @@ wire_api = "responses"
         assert_eq!(
             compatibility.tool_schema_dialect,
             crate::protocol_compatibility::ToolSchemaDialect::MoonshotMfjs
+        );
+        assert_eq!(
+            compatibility.history_replay,
+            crate::protocol_compatibility::HistoryReplay::ResponsesReasoningTextContent
+        );
+    }
+
+    #[test]
+    fn deepseek_responses_profile_cannot_inherit_moonshot_schema_dialect() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"deepseek-v4-flash-vision-exp\"\nbase_url = \"https://api.deepseek.com\"\nwire_api = \"responses\"\n",
+            "base_url": "https://api.deepseek.com"
+        }));
+        provider.id = "deepseek-provider".to_string();
+        save_verified_responses_request_compatibility(
+            &db,
+            &provider,
+            "deepseek-v4-flash-vision-exp",
+            "deepseek-v4-flash-vision-exp",
+            "moonshot_mfjs",
+            "responses_reasoning_text_content",
+        );
+
+        let compatibility = resolve_codex_request_compatibility(
+            &provider,
+            "deepseek-v4-flash-vision-exp",
+            "deepseek-v4-flash-vision-exp",
+            TransportKind::OpenAiResponses,
+            &db,
+            150,
+        );
+        assert_eq!(
+            compatibility.tool_schema_dialect,
+            crate::protocol_compatibility::ToolSchemaDialect::OpenAi
         );
         assert_eq!(
             compatibility.history_replay,

@@ -233,6 +233,10 @@ impl ProbeCandidate {
         self.endpoint.to_string()
     }
 
+    pub(crate) fn endpoint_host(&self) -> Option<String> {
+        self.endpoint.host_str().map(str::to_ascii_lowercase)
+    }
+
     pub fn with_full_url(mut self, is_full_url: bool) -> Self {
         self.is_full_url = is_full_url;
         if let Some(policy) = self.request_policy.take() {

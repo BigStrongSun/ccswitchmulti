@@ -587,7 +587,7 @@ where
                     .as_ref()
                     .is_none_or(|call| !valid_probe_tool_call(call, nonce))
         });
-    if should_retry_with_moonshot {
+    if should_retry_with_moonshot && allows_moonshot_behavior_fallback(candidate) {
         if let Ok(exchange) = &forced {
             update_shape(
                 &mut reasoning_shape,
@@ -965,6 +965,13 @@ fn probe_request_options(
         history_replay: Some(history_replay),
         ..CodexRequestOptions::default()
     }
+}
+
+fn allows_moonshot_behavior_fallback(candidate: &ProbeCandidate) -> bool {
+    matches!(
+        candidate.endpoint_host().as_deref(),
+        Some("api.kimi.com" | "api.moonshot.cn")
+    )
 }
 
 fn build_continuation_request(
@@ -1463,5 +1470,37 @@ fn semantic_information_rank(semantic: ReasoningSemantic) -> u8 {
         ReasoningSemantic::Opaque => 1,
         ReasoningSemantic::Readable => 2,
         ReasoningSemantic::Summary => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moonshot_behavior_fallback_is_limited_to_moonshot_endpoints() {
+        let kimi = ProbeCandidate::new(
+            Some("provider"),
+            None::<String>,
+            "model",
+            "model",
+            TransportKind::OpenAiResponses,
+            "https://api.kimi.com/coding/v1",
+            "bearer",
+        )
+        .expect("valid Kimi candidate");
+        let deepseek = ProbeCandidate::new(
+            Some("provider"),
+            None::<String>,
+            "model",
+            "model",
+            TransportKind::OpenAiResponses,
+            "https://api.deepseek.com",
+            "bearer",
+        )
+        .expect("valid DeepSeek candidate");
+
+        assert!(allows_moonshot_behavior_fallback(&kimi));
+        assert!(!allows_moonshot_behavior_fallback(&deepseek));
     }
 }
