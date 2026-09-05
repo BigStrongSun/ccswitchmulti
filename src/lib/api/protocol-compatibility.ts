@@ -30,6 +30,7 @@ export type CodexCompatibilityRule =
 export type CodexToolSchemaEvidence =
   | "unspecified"
   | "explicit_rejection"
+  | "ambiguous_rejection"
   | "negotiated_tool_call";
 export type CodexReasoningSemantic = "readable" | "summary" | "opaque" | "none";
 export type CodexReasoningSource =

@@ -54,7 +54,7 @@ pub use profile::ProtocolCompatibilityRecord;
 
 pub(crate) mod endpoint;
 
-pub const PROBE_PROFILE_VERSION: u32 = 7;
+pub const PROBE_PROFILE_VERSION: u32 = 8;
 pub(crate) const PROBE_MAX_OUTPUT_TOKENS: u32 = 1024;
 
 const BASELINE_PROMPT: &str =
@@ -146,7 +146,14 @@ pub enum ToolSchemaEvidence {
     #[default]
     Unspecified,
     ExplicitRejection,
+    AmbiguousRejection,
     NegotiatedToolCall,
+}
+
+impl ToolSchemaEvidence {
+    pub fn allows_runtime_inheritance(self) -> bool {
+        !matches!(self, Self::Unspecified)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

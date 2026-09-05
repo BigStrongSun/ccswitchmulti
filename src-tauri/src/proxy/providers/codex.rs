@@ -24,8 +24,8 @@ use crate::{
     protocol_compatibility::{
         compile_provider_probe_candidate_for_model, compile_provider_probe_candidates,
         HistoryReplay, ProbeCandidate, ProbeReadiness, ProbeStageStatus, ProbeTargetKey,
-        ProtocolCompatibilityRecord, ReasoningProjection, ToolSchemaDialect, ToolSchemaEvidence,
-        TransportKind, PROBE_PROFILE_VERSION,
+        ProtocolCompatibilityRecord, ReasoningProjection, ToolSchemaDialect, TransportKind,
+        PROBE_PROFILE_VERSION,
     },
 };
 use regex::Regex;
@@ -1358,6 +1358,7 @@ pub(crate) fn resolve_codex_request_compatibility(
                         .find(|branch| branch.assessment.transport == transport)
                     {
                         if branch.assessment.forced_tool == ProbeStageStatus::Passed
+                            && branch.assessment.continuation == ProbeStageStatus::Passed
                             && should_inherit_probe_tool_schema(branch)
                         {
                             compatibility.tool_schema_dialect = branch.tool_schema_dialect;
@@ -1397,7 +1398,7 @@ fn should_inherit_probe_tool_schema(
     branch: &crate::protocol_compatibility::TransportBranchResult,
 ) -> bool {
     branch.tool_schema_dialect == ToolSchemaDialect::OpenAi
-        || branch.tool_schema_evidence != ToolSchemaEvidence::Unspecified
+        || branch.tool_schema_evidence.allows_runtime_inheritance()
 }
 
 fn compile_provider_probe_candidate_for_request(
@@ -8195,6 +8196,7 @@ wire_api = "responses"
         tool_schema_dialect: &str,
         history_replay: &str,
         tool_schema_evidence: Option<&str>,
+        continuation: &str,
     ) {
         use crate::protocol_compatibility::{
             ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
@@ -8214,7 +8216,7 @@ wire_api = "responses"
                 "baseline": "passed",
                 "streaming": "passed",
                 "forced_tool": "passed",
-                "continuation": "passed"
+                "continuation": continuation
             },
         });
         branch["reasoning_shape"] = json!({
@@ -8257,6 +8259,7 @@ wire_api = "responses"
             "moonshot_mfjs",
             "responses_reasoning_text_content",
             Some("negotiated_tool_call"),
+            "passed",
         );
 
         let compatibility = resolve_codex_request_compatibility(
@@ -8294,6 +8297,7 @@ wire_api = "responses"
             "moonshot_mfjs",
             "responses_reasoning_text_content",
             None,
+            "passed",
         );
 
         let compatibility = resolve_codex_request_compatibility(
@@ -8311,6 +8315,40 @@ wire_api = "responses"
         assert_eq!(
             compatibility.history_replay,
             crate::protocol_compatibility::HistoryReplay::ResponsesReasoningTextContent
+        );
+    }
+
+    #[test]
+    fn schema_dialect_requires_verified_tool_result_continuation_before_inheritance() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"third-party-model\"\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n",
+            "base_url": "https://relay.example/v1"
+        }));
+        provider.id = "relay-provider".to_string();
+        save_verified_responses_request_compatibility(
+            &db,
+            &provider,
+            "third-party-model",
+            "third-party-model",
+            "moonshot_mfjs",
+            "native_only",
+            Some("ambiguous_rejection"),
+            "unsupported",
+        );
+
+        let compatibility = resolve_codex_request_compatibility(
+            &provider,
+            "third-party-model",
+            "third-party-model",
+            TransportKind::OpenAiResponses,
+            &db,
+            150,
+        );
+        assert_eq!(
+            compatibility.tool_schema_dialect,
+            crate::protocol_compatibility::ToolSchemaDialect::OpenAi
         );
     }
 
@@ -8344,6 +8382,7 @@ wire_api = "responses"
             "moonshot_mfjs",
             "responses_reasoning_text_content",
             Some("negotiated_tool_call"),
+            "passed",
         );
 
         let compatibility = resolve_codex_request_compatibility(

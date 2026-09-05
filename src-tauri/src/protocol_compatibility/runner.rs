@@ -538,16 +538,18 @@ where
         probe_request_options(tool_schema_dialect, history_replay),
     )
     .await;
-    if matches!(
-        &forced,
+    let schema_rejection_evidence = match &forced {
         Err(ProbeCaptureError::ToolSchemaRejected {
-            status_code: 400 | 422
-        }) | Err(ProbeCaptureError::HttpStatus {
-            status_code: 400 | 422
-        })
-    ) {
+            status_code: 400 | 422,
+        }) => Some(ToolSchemaEvidence::ExplicitRejection),
+        Err(ProbeCaptureError::HttpStatus {
+            status_code: 400 | 422,
+        }) => Some(ToolSchemaEvidence::AmbiguousRejection),
+        _ => None,
+    };
+    if let Some(evidence_origin) = schema_rejection_evidence {
         tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
-        tool_schema_evidence = ToolSchemaEvidence::ExplicitRejection;
+        tool_schema_evidence = evidence_origin;
         reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
             model: candidate.public_model.clone(),
             transport,

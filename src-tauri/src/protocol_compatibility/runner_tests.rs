@@ -823,8 +823,9 @@ async fn generic_forced_tool_400_negotiates_the_moonshot_schema_dialect_once() {
     assert_eq!(result.readiness, ProbeReadiness::Verified);
     assert!(result.branches.iter().all(|branch| {
         branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
-            && branch.tool_schema_evidence == super::ToolSchemaEvidence::ExplicitRejection
+            && branch.tool_schema_evidence == super::ToolSchemaEvidence::AmbiguousRejection
             && branch.assessment.forced_tool == ProbeStageStatus::Passed
+            && branch.assessment.continuation == ProbeStageStatus::Passed
     }));
     assert_eq!(fixture.requests.lock().unwrap().len(), 12);
 }

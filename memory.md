@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-06 工具 Schema 方言协商证据分层
+
+- 工具 Schema 协商必须把“为何尝试候选方言”和“候选方言是否可用于生产”分开。分类器明确识别的 Schema 400/422 记为 `explicit_rejection`；未能归因到 Schema 的通用 400/422 只记为 `ambiguous_rejection`，不得冒充显式拒绝；OpenAI Schema 请求完整但没有有效工具调用、而替代方言成功时记为 `negotiated_tool_call`。
+- 非默认方言只有在证据来源非 `unspecified`，并且同一协议分支的强制工具调用与工具结果续轮都通过时，才允许运行时继承。通用 400/422 仍可触发安全候选探测，以兼容本地化或厂商异形错误，但仅有错误码或仅能发起工具调用都不构成生产兼容结论。
+- `PROBE_PROFILE_VERSION` 从 7 升至 8，旧档案不会套用新继承语义。UI 对模糊拒绝显示“模糊请求拒绝后完整验证”，使触发来源与最终验证强度都可见；规则不包含 Provider、模型名或主机特例。
+
 ## 2026-09-04 v3.19.2-29 发布完成
 
 - 本地Windows x64 r10已安装验收，产品源码097f2ce2；发布tag v3.19.2-29的远端peeled commit保持c7a6709af617960f7db7988cc2feb52fb56c1404，未删除或移动。main测试修正74af3919ba5c8cd133c31d0f8a3bba23b6cf9e58与tag仅相差App测试和memory，产品源码/构建配置没有变化，未重复安装或重启Codex。

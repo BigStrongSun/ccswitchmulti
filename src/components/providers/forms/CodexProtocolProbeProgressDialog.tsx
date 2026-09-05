@@ -422,6 +422,9 @@ function toolSchemaLabel(
   if (evidence === "explicit_rejection") {
     return "Moonshot MFJS（显式拒绝后协商）";
   }
+  if (evidence === "ambiguous_rejection") {
+    return "Moonshot MFJS（模糊请求拒绝后完整验证）";
+  }
   if (evidence === "negotiated_tool_call") {
     return "Moonshot MFJS（行为协商后验证）";
   }

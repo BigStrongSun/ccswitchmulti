@@ -282,6 +282,7 @@ describe("CodexProtocolProbeProgressDialog", () => {
                   pre_tool_visible_content: "absent",
                 },
                 tool_schema_dialect: "moonshot_mfjs",
+                tool_schema_evidence: "ambiguous_rejection",
                 history_replay: "responses_reasoning_text_content",
                 failures: [],
               },
@@ -323,8 +324,11 @@ describe("CodexProtocolProbeProgressDialog", () => {
     );
 
     expect(
-      screen.getAllByText("工具 Schema：Moonshot MFJS（无来源，不自动生效）"),
-    ).toHaveLength(2);
+      screen.getByText("工具 Schema：Moonshot MFJS（模糊请求拒绝后完整验证）"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("工具 Schema：Moonshot MFJS（无来源，不自动生效）"),
+    ).toBeInTheDocument();
     expect(
       screen.getByText("历史续轮：reasoning_text content"),
     ).toBeInTheDocument();

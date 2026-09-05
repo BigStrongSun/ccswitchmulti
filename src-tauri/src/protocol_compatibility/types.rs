@@ -1,6 +1,6 @@
 use super::{
     HistoryReplay, ManualReasoningOverride, ProbeCandidate, ProbeReadiness, ProbeTargetKey,
-    ReasoningProjection, ReasoningSemantic, ReasoningSource, TransportKind,
+    ReasoningProjection, ReasoningSemantic, ReasoningSource, ToolSchemaEvidence, TransportKind,
 };
 
 #[test]
@@ -156,6 +156,28 @@ fn readiness_only_allows_automatic_projection_after_full_verification() {
     assert!(ProbeReadiness::Verified.allows_automatic_projection());
     assert!(!ProbeReadiness::Partial.allows_automatic_projection());
     assert!(!ProbeReadiness::Unverified.allows_automatic_projection());
+}
+
+#[test]
+fn tool_schema_evidence_serializes_each_origin_and_legacy_unspecified_fails_closed() {
+    for (evidence, serialized) in [
+        (
+            ToolSchemaEvidence::ExplicitRejection,
+            "\"explicit_rejection\"",
+        ),
+        (
+            ToolSchemaEvidence::AmbiguousRejection,
+            "\"ambiguous_rejection\"",
+        ),
+        (
+            ToolSchemaEvidence::NegotiatedToolCall,
+            "\"negotiated_tool_call\"",
+        ),
+    ] {
+        assert_eq!(serde_json::to_string(&evidence).unwrap(), serialized);
+        assert!(evidence.allows_runtime_inheritance());
+    }
+    assert!(!ToolSchemaEvidence::Unspecified.allows_runtime_inheritance());
 }
 
 #[test]
