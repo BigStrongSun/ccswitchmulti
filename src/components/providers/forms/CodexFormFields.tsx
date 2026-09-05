@@ -1714,8 +1714,24 @@ export function CodexFormFields({
         events={protocolProbeEvents}
         outcome={protocolProbeOutcome}
         storedRecords={storedProtocolRecords}
+        manualSelections={Object.fromEntries(
+          Object.entries(protocolOverrides).map(([model, choice]) => [
+            model,
+            choice === "openai_chat" ? "open_ai_chat" : "open_ai_responses",
+          ]),
+        )}
         error={protocolProbeError}
         onOpenChange={setIsProtocolProbeProgressOpen}
+        onSelectVerifiedTransport={({ model, transport }) => {
+          const override =
+            transport === "open_ai_chat" ? "openai_chat" : "openai_responses";
+          onProtocolOverridesChange(
+            setCodexProtocolOverride(protocolOverrides, model, override),
+          );
+          toast.success(
+            `${model} 已选择 ${transport === "open_ai_chat" ? "Chat Completions" : "Responses"}，保存 Provider 后生效。`,
+          );
+        }}
         onRetry={() => {
           setIsProtocolProbeProgressOpen(false);
           setIsProtocolProbeConfirmOpen(true);

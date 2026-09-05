@@ -131,6 +131,97 @@ describe("CodexProtocolProbeProgressDialog", () => {
     expect(screen.getByText("Kimi Chat")).toBeInTheDocument();
   });
 
+  it("lets a verified alternate branch become the manual model selection", () => {
+    const onSelectVerifiedTransport = vi.fn();
+    const verifiedBranch = {
+      assessment: {
+        transport: "open_ai_responses",
+        baseline: "passed",
+        streaming: "passed",
+        forced_tool: "passed",
+        continuation: "passed",
+      },
+      reasoning_shape: {
+        semantic: "readable",
+        source: "reasoning_content",
+        pre_tool_visible_content: "absent",
+      },
+      tool_schema_dialect: "openai",
+      history_replay: "chat_reasoning_content",
+      failures: [],
+    };
+    const outcome = {
+      provider: { id: "provider", name: "Qwen", settingsConfig: {} },
+      adaptationPreview: {
+        persistence: "single",
+        status: "ready",
+        effectiveTransport: "open_ai_responses",
+        models: [],
+      },
+      receiptIds: ["receipt-qwen"],
+      protocolApplied: true,
+      probeUsage: undefined,
+      observations: [],
+      records: [
+        {
+          probeVersion: 6,
+          target: {
+            provider_id: "provider",
+            route_id: null,
+            public_model: "qwen3.8",
+            upstream_model: "qwen3.8",
+            transport: "open_ai_responses",
+            endpoint_fingerprint: "endpoint",
+            authentication_kind: "bearer",
+            credential_fingerprint: "credential",
+            request_policy_fingerprint: "policy",
+          },
+          result: {
+            selected_transport: "open_ai_responses",
+            readiness: "verified",
+            branches: [
+              verifiedBranch,
+              {
+                ...verifiedBranch,
+                assessment: {
+                  ...verifiedBranch.assessment,
+                  transport: "open_ai_chat",
+                },
+              },
+            ],
+          },
+          testedAt: 1,
+          expiresAt: 2,
+        },
+      ],
+    } as CodexProviderProtocolPreflightOutcome;
+
+    render(
+      <CodexProtocolProbeProgressDialog
+        open
+        running={false}
+        expectedModels={["qwen3.8"]}
+        events={[]}
+        outcome={outcome}
+        error=""
+        onOpenChange={vi.fn()}
+        onSelectVerifiedTransport={onSelectVerifiedTransport}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "qwen3.8 选择 Chat Completions",
+      }),
+    );
+
+    expect(onSelectVerifiedTransport).toHaveBeenCalledWith({
+      model: "qwen3.8",
+      providerId: null,
+      transport: "open_ai_chat",
+    });
+  });
+
   it("shows the verified tool schema and history replay strategy for each branch", () => {
     const outcome = {
       provider: {

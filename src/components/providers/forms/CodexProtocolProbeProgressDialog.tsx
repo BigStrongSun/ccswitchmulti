@@ -36,6 +36,7 @@ import type {
 } from "@/lib/protocol-lab/codex-adapters";
 import type { CodexHistoryReplay, CodexToolSchemaDialect } from "@/types";
 import { CodexCompatibilitySummary } from "./CodexCompatibilitySummary";
+import { normalizeCodexPublicModelKey } from "@/lib/protocol-lab/codex-overrides";
 
 type VisibleStageStatus = CodexProtocolProbeStageStatus | "pending" | "running";
 
@@ -70,9 +71,15 @@ interface CodexProtocolProbeProgressDialogProps {
   outcome: CodexProviderProtocolPreflightOutcome | null;
   outcomes?: CodexProviderProtocolPreflightOutcome[];
   storedRecords?: CodexProtocolCompatibilityRecord[];
+  manualSelections?: Record<string, CodexProtocolTransport>;
   error: string;
   onOpenChange: (open: boolean) => void;
   onRetry?: () => void;
+  onSelectVerifiedTransport?: (input: {
+    model: string;
+    providerId: string | null;
+    transport: CodexProtocolTransport;
+  }) => void;
 }
 
 const STAGES: Array<{ id: CodexProtocolProbeStage; label: string }> = [
@@ -110,6 +117,16 @@ function emptyBranch(): BranchProgress {
 
 function progressKey(model: string, providerId?: string | null): string {
   return providerId ? `${providerId}\u0000${model}` : model;
+}
+
+function selectedTransportFor(
+  model: ModelProgress,
+  manualSelections?: Record<string, CodexProtocolTransport>,
+): CodexProtocolTransport | null {
+  return (
+    manualSelections?.[normalizeCodexPublicModelKey(model.model)] ??
+    model.selectedTransport
+  );
 }
 
 function emptyModel(
@@ -499,9 +516,11 @@ export function CodexProtocolProbeProgressDialog({
   outcome,
   outcomes = [],
   storedRecords = [],
+  manualSelections,
   error,
   onOpenChange,
   onRetry,
+  onSelectVerifiedTransport,
 }: CodexProtocolProbeProgressDialogProps) {
   const [expandedMappings, setExpandedMappings] = useState<Set<string>>(
     () => new Set(),
@@ -684,9 +703,12 @@ export function CodexProtocolProbeProgressDialog({
                   )}
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  {model.selectedTransport && (
+                  {selectedTransportFor(model, manualSelections) && (
                     <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-sky-700 dark:text-sky-300">
-                      选择 {transportLabel(model.selectedTransport)}
+                      已选{" "}
+                      {transportLabel(
+                        selectedTransportFor(model, manualSelections)!,
+                      )}
                     </span>
                   )}
                   <span className="rounded-full border px-2 py-0.5 text-muted-foreground">
@@ -700,6 +722,10 @@ export function CodexProtocolProbeProgressDialog({
                   const branch = model.branches[transport];
                   const mappingKey = `${model.key}\u0000${transport}`;
                   const mappingExpanded = expandedMappings.has(mappingKey);
+                  const displaySelected = selectedTransportFor(
+                    model,
+                    manualSelections,
+                  );
                   return (
                     <section
                       key={transport}
@@ -709,9 +735,38 @@ export function CodexProtocolProbeProgressDialog({
                         <h4 className="text-sm font-medium">
                           {transportLabel(transport)}
                         </h4>
-                        <span className="text-xs text-muted-foreground">
-                          {readinessLabel(branch.readiness)}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground">
+                            {readinessLabel(branch.readiness)}
+                          </span>
+                          {!running &&
+                            branch.readiness === "verified" &&
+                            onSelectVerifiedTransport && (
+                              <Button
+                                type="button"
+                                variant={
+                                  displaySelected === transport
+                                    ? "secondary"
+                                    : "outline"
+                                }
+                                size="sm"
+                                className="h-7 px-2 text-xs"
+                                aria-pressed={displaySelected === transport}
+                                aria-label={`${model.model} 选择 ${transportLabel(transport)}`}
+                                onClick={() =>
+                                  onSelectVerifiedTransport({
+                                    model: model.model,
+                                    providerId: model.providerId,
+                                    transport,
+                                  })
+                                }
+                              >
+                                {displaySelected === transport
+                                  ? "已选"
+                                  : `选择 ${transportLabel(transport)}`}
+                              </Button>
+                            )}
+                        </div>
                       </div>
                       {!branch.touched ? (
                         <p className="text-xs text-muted-foreground">
@@ -726,7 +781,7 @@ export function CodexProtocolProbeProgressDialog({
                             transport={transport}
                             baselinePassed={branch.stages.baseline === "passed"}
                             running={running}
-                            selected={model.selectedTransport === transport}
+                            selected={displaySelected === transport}
                           />
                           {STAGES.map((stage) => {
                             const status = statusPresentation(
