@@ -919,6 +919,7 @@ export function providerWithFetchedModelCatalog(
               supports_image: fetched.supportsImage,
             }
           : {}),
+        ...(fetched.reasoning ? { reasoning: fetched.reasoning } : {}),
       };
       continue;
     }
@@ -940,6 +941,7 @@ export function providerWithFetchedModelCatalog(
             supports_image: fetched.supportsImage,
           }
         : {}),
+      ...(fetched.reasoning ? { reasoning: fetched.reasoning } : {}),
     };
     byFetchedModel.set(id, models.length);
     byVisibleModel.set(id, models.length);

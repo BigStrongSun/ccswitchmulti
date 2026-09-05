@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
+import type { CodexModelReasoningCapability } from "@/types";
 
 export interface FetchedModel {
   id: string;
@@ -8,6 +9,7 @@ export interface FetchedModel {
   contextWindow?: number | null;
   inputModalities?: string[] | null;
   supportsImage?: boolean | null;
+  reasoning?: CodexModelReasoningCapability | null;
 }
 
 export interface VolcengineModelListOptions {
