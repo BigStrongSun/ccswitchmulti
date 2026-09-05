@@ -29,6 +29,7 @@ import type {
   CodexProviderProtocolPreflightOutcome,
   CodexReasoningSemantic,
   CodexReasoningSource,
+  CodexToolSchemaEvidence,
 } from "@/lib/api/protocol-compatibility";
 import type {
   CodexProviderProtocolProbeTarget,
@@ -49,6 +50,7 @@ interface BranchProgress {
   readiness: CodexProtocolProbeReadiness | null;
   failures: CodexProtocolProbeFailure[];
   toolSchemaDialect: CodexToolSchemaDialect | null;
+  toolSchemaEvidence: CodexToolSchemaEvidence | null;
   historyReplay: CodexHistoryReplay | null;
 }
 
@@ -111,6 +113,7 @@ function emptyBranch(): BranchProgress {
     readiness: null,
     failures: [],
     toolSchemaDialect: null,
+    toolSchemaEvidence: null,
     historyReplay: null,
   };
 }
@@ -177,6 +180,7 @@ function applyRecord(
     target.reasoningSemantic = branch.reasoning_shape.semantic;
     target.reasoningSource = branch.reasoning_shape.source;
     target.toolSchemaDialect = branch.tool_schema_dialect ?? null;
+    target.toolSchemaEvidence = branch.tool_schema_evidence ?? null;
     target.historyReplay = branch.history_replay ?? null;
     target.readiness = [
       branch.assessment.baseline,
@@ -410,10 +414,18 @@ function transportLabel(transport: CodexProtocolTransport) {
 
 function toolSchemaLabel(
   dialect: CodexToolSchemaDialect | null,
+  evidence: CodexToolSchemaEvidence | null,
   status: VisibleStageStatus,
 ) {
   if (status !== "passed" || dialect === null) return "未确认";
-  return dialect === "moonshot_mfjs" ? "Moonshot MFJS" : "OpenAI";
+  if (dialect === "openai") return "OpenAI";
+  if (evidence === "explicit_rejection") {
+    return "Moonshot MFJS（显式拒绝后协商）";
+  }
+  if (evidence === "negotiated_tool_call") {
+    return "Moonshot MFJS（行为协商后验证）";
+  }
+  return "Moonshot MFJS（无来源，不自动生效）";
 }
 
 function historyReplayLabel(
@@ -817,6 +829,7 @@ export function CodexProtocolProbeProgressDialog({
                               工具 Schema：
                               {toolSchemaLabel(
                                 branch.toolSchemaDialect,
+                                branch.toolSchemaEvidence,
                                 branch.stages.forced_tool,
                               )}
                             </p>

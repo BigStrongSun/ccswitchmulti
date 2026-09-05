@@ -791,6 +791,7 @@ async fn retries_only_explicit_schema_rejections_with_moonshot_dialect_and_recor
     );
     assert!(result.branches.iter().all(|branch| {
         branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
+            && branch.tool_schema_evidence == super::ToolSchemaEvidence::ExplicitRejection
             && branch.assessment.forced_tool == ProbeStageStatus::Passed
     }));
     let requests = fixture.requests.lock().unwrap();
@@ -822,6 +823,7 @@ async fn generic_forced_tool_400_negotiates_the_moonshot_schema_dialect_once() {
     assert_eq!(result.readiness, ProbeReadiness::Verified);
     assert!(result.branches.iter().all(|branch| {
         branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
+            && branch.tool_schema_evidence == super::ToolSchemaEvidence::ExplicitRejection
             && branch.assessment.forced_tool == ProbeStageStatus::Passed
     }));
     assert_eq!(fixture.requests.lock().unwrap().len(), 12);
@@ -1396,6 +1398,7 @@ async fn accepted_complex_schema_without_a_tool_negotiates_moonshot_after_requir
     assert_eq!(result.readiness, ProbeReadiness::Verified, "{result:#?}");
     assert!(result.branches.iter().all(|branch| {
         branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
+            && branch.tool_schema_evidence == super::ToolSchemaEvidence::NegotiatedToolCall
             && branch.assessment.forced_tool == ProbeStageStatus::Passed
             && branch.assessment.continuation == ProbeStageStatus::Passed
     }));
@@ -1422,6 +1425,7 @@ async fn accepted_complex_schema_with_invalid_arguments_negotiates_without_accep
     assert_eq!(result.readiness, ProbeReadiness::Verified, "{result:#?}");
     assert!(result.branches.iter().all(|branch| {
         branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
+            && branch.tool_schema_evidence == super::ToolSchemaEvidence::NegotiatedToolCall
             && branch.assessment.forced_tool == ProbeStageStatus::Passed
             && branch.assessment.continuation == ProbeStageStatus::Passed
     }));

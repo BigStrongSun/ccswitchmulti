@@ -27,6 +27,10 @@ export type CodexCompatibilityRule =
   | "tool_schema"
   | "reasoning_text_replay"
   | "omit_reasoning";
+export type CodexToolSchemaEvidence =
+  | "unspecified"
+  | "explicit_rejection"
+  | "negotiated_tool_call";
 export type CodexReasoningSemantic = "readable" | "summary" | "opaque" | "none";
 export type CodexReasoningSource =
   | "reasoning_content"
@@ -115,6 +119,7 @@ export interface CodexProtocolProbeBranch {
     pre_tool_visible_content: "absent" | "present";
   };
   tool_schema_dialect?: CodexToolSchemaDialect;
+  tool_schema_evidence?: CodexToolSchemaEvidence;
   history_replay?: CodexHistoryReplay;
   evidence?: Array<{
     status_code: number;

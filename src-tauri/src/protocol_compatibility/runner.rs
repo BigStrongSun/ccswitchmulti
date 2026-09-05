@@ -21,8 +21,8 @@ use super::{
     redaction::RedactedProbeEvidence,
     selection::select_transport_outcome_with_reasoning,
     HistoryReplay, PreToolVisibleContent, ProbeCandidate, ProbeCase, ProbeReadiness,
-    ProbeStageStatus, ReasoningSemantic, ReasoningSource, ToolSchemaDialect, TransportKind,
-    TransportProbeAssessment,
+    ProbeStageStatus, ReasoningSemantic, ReasoningSource, ToolSchemaDialect, ToolSchemaEvidence,
+    TransportKind, TransportProbeAssessment,
 };
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -155,6 +155,8 @@ pub struct TransportBranchResult {
     #[serde(default)]
     pub tool_schema_dialect: ToolSchemaDialect,
     #[serde(default)]
+    pub tool_schema_evidence: ToolSchemaEvidence,
+    #[serde(default)]
     pub history_replay: HistoryReplay,
     evidence: Vec<RedactedProbeEvidence>,
     #[serde(default)]
@@ -168,6 +170,7 @@ impl fmt::Debug for TransportBranchResult {
             .field("assessment", &self.assessment)
             .field("reasoning_shape", &self.reasoning_shape)
             .field("tool_schema_dialect", &self.tool_schema_dialect)
+            .field("tool_schema_evidence", &self.tool_schema_evidence)
             .field("history_replay", &self.history_replay)
             .field("evidence_count", &self.evidence.len())
             .field("failures", &self.failures)
@@ -302,6 +305,7 @@ where
     let mut failures = Vec::new();
     let mut reasoning_shape = empty_reasoning_shape();
     let mut tool_schema_dialect = ToolSchemaDialect::OpenAi;
+    let mut tool_schema_evidence = ToolSchemaEvidence::Unspecified;
     let mut history_replay = match transport {
         TransportKind::OpenAiChat => HistoryReplay::ChatReasoningContent,
         TransportKind::OpenAiResponses => HistoryReplay::NativeOnly,
@@ -349,6 +353,7 @@ where
                     assessment,
                     reasoning_shape,
                     tool_schema_dialect,
+                    tool_schema_evidence,
                     history_replay,
                     evidence,
                     failures,
@@ -374,6 +379,7 @@ where
                     assessment,
                     reasoning_shape,
                     tool_schema_dialect,
+                    tool_schema_evidence,
                     history_replay,
                     evidence,
                     failures,
@@ -487,6 +493,7 @@ where
                     assessment,
                     reasoning_shape,
                     tool_schema_dialect,
+                    tool_schema_evidence,
                     history_replay,
                     evidence,
                     failures,
@@ -512,6 +519,7 @@ where
                     assessment,
                     reasoning_shape,
                     tool_schema_dialect,
+                    tool_schema_evidence,
                     history_replay,
                     evidence,
                     failures,
@@ -539,6 +547,7 @@ where
         })
     ) {
         tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
+        tool_schema_evidence = ToolSchemaEvidence::ExplicitRejection;
         reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
             model: candidate.public_model.clone(),
             transport,
@@ -587,7 +596,7 @@ where
                     .as_ref()
                     .is_none_or(|call| !valid_probe_tool_call(call, nonce))
         });
-    if should_retry_with_moonshot && allows_moonshot_behavior_fallback(candidate) {
+    if should_retry_with_moonshot {
         if let Ok(exchange) = &forced {
             update_shape(
                 &mut reasoning_shape,
@@ -596,6 +605,7 @@ where
             evidence.push(exchange.evidence().clone());
         }
         tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
+        tool_schema_evidence = ToolSchemaEvidence::NegotiatedToolCall;
         reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
             model: candidate.public_model.clone(),
             transport,
@@ -642,6 +652,7 @@ where
                         assessment,
                         reasoning_shape,
                         tool_schema_dialect,
+                        tool_schema_evidence,
                         history_replay,
                         evidence,
                         failures,
@@ -678,6 +689,7 @@ where
                             assessment,
                             reasoning_shape,
                             tool_schema_dialect,
+                            tool_schema_evidence,
                             history_replay,
                             evidence,
                             failures,
@@ -705,6 +717,7 @@ where
                     assessment,
                     reasoning_shape,
                     tool_schema_dialect,
+                    tool_schema_evidence,
                     history_replay,
                     evidence,
                     failures,
@@ -816,6 +829,7 @@ where
             assessment,
             reasoning_shape,
             tool_schema_dialect,
+            tool_schema_evidence,
             history_replay,
             evidence,
             failures,
@@ -965,13 +979,6 @@ fn probe_request_options(
         history_replay: Some(history_replay),
         ..CodexRequestOptions::default()
     }
-}
-
-fn allows_moonshot_behavior_fallback(candidate: &ProbeCandidate) -> bool {
-    matches!(
-        candidate.endpoint_host().as_deref(),
-        Some("api.kimi.com" | "api.moonshot.cn")
-    )
 }
 
 fn build_continuation_request(
@@ -1470,37 +1477,5 @@ fn semantic_information_rank(semantic: ReasoningSemantic) -> u8 {
         ReasoningSemantic::Opaque => 1,
         ReasoningSemantic::Readable => 2,
         ReasoningSemantic::Summary => 3,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn moonshot_behavior_fallback_is_limited_to_moonshot_endpoints() {
-        let kimi = ProbeCandidate::new(
-            Some("provider"),
-            None::<String>,
-            "model",
-            "model",
-            TransportKind::OpenAiResponses,
-            "https://api.kimi.com/coding/v1",
-            "bearer",
-        )
-        .expect("valid Kimi candidate");
-        let deepseek = ProbeCandidate::new(
-            Some("provider"),
-            None::<String>,
-            "model",
-            "model",
-            TransportKind::OpenAiResponses,
-            "https://api.deepseek.com",
-            "bearer",
-        )
-        .expect("valid DeepSeek candidate");
-
-        assert!(allows_moonshot_behavior_fallback(&kimi));
-        assert!(!allows_moonshot_behavior_fallback(&deepseek));
     }
 }

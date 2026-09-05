@@ -40,7 +40,7 @@ mod runner;
 pub use runner::{
     run_protocol_compatibility_probe, run_protocol_compatibility_probe_with_reporter,
     ProbeFailureKind, ProbeProgressStage, ProtocolCompatibilityProbeResult,
-    ProtocolProbeProgressEvent,
+    ProtocolProbeProgressEvent, TransportBranchResult,
 };
 
 mod provider;
@@ -54,7 +54,7 @@ pub use profile::ProtocolCompatibilityRecord;
 
 pub(crate) mod endpoint;
 
-pub const PROBE_PROFILE_VERSION: u32 = 6;
+pub const PROBE_PROFILE_VERSION: u32 = 7;
 pub(crate) const PROBE_MAX_OUTPUT_TOKENS: u32 = 1024;
 
 const BASELINE_PROMPT: &str =
@@ -138,6 +138,15 @@ pub enum ToolSchemaDialect {
     #[default]
     OpenAi,
     MoonshotMfjs,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSchemaEvidence {
+    #[default]
+    Unspecified,
+    ExplicitRejection,
+    NegotiatedToolCall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,10 +240,6 @@ impl ProbeCandidate {
     #[cfg(test)]
     pub fn canonical_endpoint(&self) -> String {
         self.endpoint.to_string()
-    }
-
-    pub(crate) fn endpoint_host(&self) -> Option<String> {
-        self.endpoint.host_str().map(str::to_ascii_lowercase)
     }
 
     pub fn with_full_url(mut self, is_full_url: bool) -> Self {

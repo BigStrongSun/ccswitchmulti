@@ -322,7 +322,9 @@ describe("CodexProtocolProbeProgressDialog", () => {
       />,
     );
 
-    expect(screen.getAllByText("工具 Schema：Moonshot MFJS")).toHaveLength(2);
+    expect(
+      screen.getAllByText("工具 Schema：Moonshot MFJS（无来源，不自动生效）"),
+    ).toHaveLength(2);
     expect(
       screen.getByText("历史续轮：reasoning_text content"),
     ).toBeInTheDocument();

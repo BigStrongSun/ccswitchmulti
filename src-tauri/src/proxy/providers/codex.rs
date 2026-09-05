@@ -24,8 +24,8 @@ use crate::{
     protocol_compatibility::{
         compile_provider_probe_candidate_for_model, compile_provider_probe_candidates,
         HistoryReplay, ProbeCandidate, ProbeReadiness, ProbeStageStatus, ProbeTargetKey,
-        ProtocolCompatibilityRecord, ReasoningProjection, ToolSchemaDialect, TransportKind,
-        PROBE_PROFILE_VERSION,
+        ProtocolCompatibilityRecord, ReasoningProjection, ToolSchemaDialect, ToolSchemaEvidence,
+        TransportKind, PROBE_PROFILE_VERSION,
     },
 };
 use regex::Regex;
@@ -1358,7 +1358,7 @@ pub(crate) fn resolve_codex_request_compatibility(
                         .find(|branch| branch.assessment.transport == transport)
                     {
                         if branch.assessment.forced_tool == ProbeStageStatus::Passed
-                            && allows_profile_tool_schema_override(provider)
+                            && should_inherit_probe_tool_schema(branch)
                         {
                             compatibility.tool_schema_dialect = branch.tool_schema_dialect;
                         }
@@ -1393,14 +1393,11 @@ pub(crate) fn resolve_codex_request_compatibility(
     compatibility
 }
 
-fn allows_profile_tool_schema_override(provider: &Provider) -> bool {
-    !matches!(
-        provider_codex_base_url(provider)
-            .and_then(|base_url| url::Url::parse(&base_url).ok())
-            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-            .as_deref(),
-        Some("api.deepseek.com")
-    )
+fn should_inherit_probe_tool_schema(
+    branch: &crate::protocol_compatibility::TransportBranchResult,
+) -> bool {
+    branch.tool_schema_dialect == ToolSchemaDialect::OpenAi
+        || branch.tool_schema_evidence != ToolSchemaEvidence::Unspecified
 }
 
 fn compile_provider_probe_candidate_for_request(
@@ -8197,6 +8194,7 @@ wire_api = "responses"
         upstream_model: &str,
         tool_schema_dialect: &str,
         history_replay: &str,
+        tool_schema_evidence: Option<&str>,
     ) {
         use crate::protocol_compatibility::{
             ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
@@ -8210,26 +8208,30 @@ wire_api = "responses"
         .expect("compile Responses profile Provider policy")
         .target_key(TransportKind::OpenAiResponses)
         .expect("Responses profile target");
+        let mut branch = json!({
+            "assessment": {
+                "transport": "open_ai_responses",
+                "baseline": "passed",
+                "streaming": "passed",
+                "forced_tool": "passed",
+                "continuation": "passed"
+            },
+        });
+        branch["reasoning_shape"] = json!({
+                "semantic": "summary",
+                "source": "native_responses",
+                "pre_tool_visible_content": "absent"
+        });
+        if let Some(tool_schema_evidence) = tool_schema_evidence {
+            branch["tool_schema_evidence"] = json!(tool_schema_evidence);
+        }
+        branch["tool_schema_dialect"] = json!(tool_schema_dialect);
+        branch["history_replay"] = json!(history_replay);
+        branch["evidence"] = json!([]);
         let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
             "selected_transport": "open_ai_responses",
             "readiness": "verified",
-            "branches": [{
-                "assessment": {
-                    "transport": "open_ai_responses",
-                    "baseline": "passed",
-                    "streaming": "passed",
-                    "forced_tool": "passed",
-                    "continuation": "passed"
-                },
-                "reasoning_shape": {
-                    "semantic": "summary",
-                    "source": "native_responses",
-                    "pre_tool_visible_content": "absent"
-                },
-                "tool_schema_dialect": tool_schema_dialect,
-                "history_replay": history_replay,
-                "evidence": []
-            }]
+            "branches": [branch]
         }))
         .expect("verified Responses compatibility result");
         db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
@@ -8254,6 +8256,7 @@ wire_api = "responses"
             "k3",
             "moonshot_mfjs",
             "responses_reasoning_text_content",
+            Some("negotiated_tool_call"),
         );
 
         let compatibility = resolve_codex_request_compatibility(
@@ -8275,27 +8278,28 @@ wire_api = "responses"
     }
 
     #[test]
-    fn deepseek_responses_profile_cannot_inherit_moonshot_schema_dialect() {
+    fn schema_without_recorded_origin_cannot_inherit_moonshot_dialect() {
         let db = Database::memory().expect("memory database");
         let mut provider = create_provider(json!({
             "auth": {"OPENAI_API_KEY": "probe-secret"},
-            "config": "model = \"deepseek-v4-flash-vision-exp\"\nbase_url = \"https://api.deepseek.com\"\nwire_api = \"responses\"\n",
-            "base_url": "https://api.deepseek.com"
+            "config": "model = \"third-party-model\"\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n",
+            "base_url": "https://relay.example/v1"
         }));
-        provider.id = "deepseek-provider".to_string();
+        provider.id = "relay-provider".to_string();
         save_verified_responses_request_compatibility(
             &db,
             &provider,
-            "deepseek-v4-flash-vision-exp",
-            "deepseek-v4-flash-vision-exp",
+            "third-party-model",
+            "third-party-model",
             "moonshot_mfjs",
             "responses_reasoning_text_content",
+            None,
         );
 
         let compatibility = resolve_codex_request_compatibility(
             &provider,
-            "deepseek-v4-flash-vision-exp",
-            "deepseek-v4-flash-vision-exp",
+            "third-party-model",
+            "third-party-model",
             TransportKind::OpenAiResponses,
             &db,
             150,
@@ -8339,6 +8343,7 @@ wire_api = "responses"
             "secondary-upstream",
             "moonshot_mfjs",
             "responses_reasoning_text_content",
+            Some("negotiated_tool_call"),
         );
 
         let compatibility = resolve_codex_request_compatibility(
