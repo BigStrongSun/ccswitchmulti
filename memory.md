@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-06 Partial/Failed 协议分支的手动使用边界
+
+- 自动模式仍只采用后端完整验证为 Verified 的协议分支；逐模型手动覆盖是显式用户意图，可以指定 Chat 或 Responses，并允许没有 Verified 证据的模型进入 Provider Set。手动使用不得被改写成自动推荐或 Verified，也不应被后续探测静默覆盖。
+- 探测弹窗不能只给 Verified 分支选择按钮。已完成评估的 Partial/Unverified 分支同样提供“仍然使用”动作，并逐项列出真实缺口（基础响应、SSE、思考内容、工具调用、工具续轮）；选择后保存为模型级 `codexProtocolOverrides`。Partial 的 selector 候选不能在用户点击前显示成“已选”，只有 Verified 自动选择或真实 manual override 才显示已选。
+- 高级设置继续提供 Provider 级协议、工具 Schema、推理投影和历史续轮手动配置。风险提示应说明具体能力缺口和“仍允许手动使用”，不能用笼统错误阻断；保存后的运行效果由用户接受，探测事实继续原样保留。
+
 ## 2026-09-06 协议探测的可解释适配过程
 
 - 用户点“探测协议”后需要看到的是脱敏的结构检查和适配过程，不是完整响应正文预览。后端 `ProtocolProbeProgressEvent::CompatibilityRetry` 必须携带结构化 `trigger` 与 `change`；持久化分支记录每次 `ProtocolAdaptation` 的 `verified/failed`，前端只能翻译这些后端事实，不能按 Provider 或模型名猜测。

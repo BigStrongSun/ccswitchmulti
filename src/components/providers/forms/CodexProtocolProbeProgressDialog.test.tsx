@@ -132,7 +132,7 @@ describe("CodexProtocolProbeProgressDialog", () => {
   });
 
   it("lets a verified alternate branch become the manual model selection", () => {
-    const onSelectVerifiedTransport = vi.fn();
+    const onSelectTransport = vi.fn();
     const verifiedBranch = {
       assessment: {
         transport: "open_ai_responses",
@@ -205,7 +205,7 @@ describe("CodexProtocolProbeProgressDialog", () => {
         outcome={outcome}
         error=""
         onOpenChange={vi.fn()}
-        onSelectVerifiedTransport={onSelectVerifiedTransport}
+        onSelectTransport={onSelectTransport}
       />,
     );
 
@@ -215,10 +215,96 @@ describe("CodexProtocolProbeProgressDialog", () => {
       }),
     );
 
-    expect(onSelectVerifiedTransport).toHaveBeenCalledWith({
+    expect(onSelectTransport).toHaveBeenCalledWith({
       model: "qwen3.8",
       providerId: null,
       transport: "open_ai_chat",
+      readiness: "verified",
+    });
+  });
+
+  it("allows a partial branch as an explicit manual selection and names its exact gaps", () => {
+    const onSelectTransport = vi.fn();
+    const outcome = {
+      provider: { id: "provider", name: "Relay", settingsConfig: {} },
+      adaptationPreview: {
+        persistence: "single",
+        status: "ready",
+        effectiveTransport: null,
+        models: [],
+      },
+      receiptIds: ["receipt-partial"],
+      protocolApplied: false,
+      observations: [],
+      records: [
+        {
+          probeVersion: 9,
+          target: {
+            provider_id: "provider",
+            route_id: null,
+            public_model: "partial-model",
+            upstream_model: "partial-model",
+            transport: "open_ai_chat",
+            endpoint_fingerprint: "endpoint",
+            authentication_kind: "bearer",
+            credential_fingerprint: "credential",
+            request_policy_fingerprint: "policy",
+          },
+          result: {
+            selected_transport: "open_ai_chat",
+            readiness: "partial",
+            branches: [
+              {
+                assessment: {
+                  transport: "open_ai_chat",
+                  baseline: "passed",
+                  streaming: "passed",
+                  forced_tool: "passed",
+                  continuation: "unsupported",
+                },
+                reasoning_shape: {
+                  semantic: "none",
+                  source: "none",
+                  pre_tool_visible_content: "absent",
+                },
+                tool_schema_dialect: "openai",
+                history_replay: "chat_reasoning_content",
+                failures: [],
+              },
+            ],
+          },
+          testedAt: 1,
+          expiresAt: 2,
+        },
+      ],
+    } as CodexProviderProtocolPreflightOutcome;
+
+    render(
+      <CodexProtocolProbeProgressDialog
+        open
+        running={false}
+        expectedModels={["partial-model"]}
+        events={[]}
+        outcome={outcome}
+        error=""
+        onOpenChange={vi.fn()}
+        onSelectTransport={onSelectTransport}
+      />,
+    );
+
+    expect(screen.getByText(/工具续轮：不支持/)).toBeInTheDocument();
+    expect(screen.getByText(/思考内容：未返回/)).toBeInTheDocument();
+    expect(screen.queryByText("已选 Chat Completions")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "partial-model 仍然使用 Chat Completions",
+      }),
+    );
+    expect(onSelectTransport).toHaveBeenCalledWith({
+      model: "partial-model",
+      providerId: null,
+      transport: "open_ai_chat",
+      readiness: "partial",
     });
   });
 

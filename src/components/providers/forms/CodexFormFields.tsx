@@ -1722,15 +1722,23 @@ export function CodexFormFields({
         )}
         error={protocolProbeError}
         onOpenChange={setIsProtocolProbeProgressOpen}
-        onSelectVerifiedTransport={({ model, transport }) => {
+        onSelectTransport={({ model, transport, readiness }) => {
           const override =
             transport === "open_ai_chat" ? "openai_chat" : "openai_responses";
           onProtocolOverridesChange(
             setCodexProtocolOverride(protocolOverrides, model, override),
           );
-          toast.success(
-            `${model} 已选择 ${transport === "open_ai_chat" ? "Chat Completions" : "Responses"}，保存 Provider 后生效。`,
-          );
+          const transportName =
+            transport === "open_ai_chat" ? "Chat Completions" : "Responses";
+          if (readiness === "verified") {
+            toast.success(
+              `${model} 已选择 ${transportName}，保存 Provider 后生效。`,
+            );
+          } else {
+            toast.warning(
+              `${model} 将手动使用 ${transportName}；已保留探测到的能力缺口，保存 Provider 后生效。`,
+            );
+          }
         }}
         onRetry={() => {
           setIsProtocolProbeProgressOpen(false);

@@ -85,10 +85,11 @@ interface CodexProtocolProbeProgressDialogProps {
   error: string;
   onOpenChange: (open: boolean) => void;
   onRetry?: () => void;
-  onSelectVerifiedTransport?: (input: {
+  onSelectTransport?: (input: {
     model: string;
     providerId: string | null;
     transport: CodexProtocolTransport;
+    readiness: CodexProtocolProbeReadiness;
   }) => void;
 }
 
@@ -135,10 +136,9 @@ function selectedTransportFor(
   model: ModelProgress,
   manualSelections?: Record<string, CodexProtocolTransport>,
 ): CodexProtocolTransport | null {
-  return (
-    manualSelections?.[normalizeCodexPublicModelKey(model.model)] ??
-    model.selectedTransport
-  );
+  const manual = manualSelections?.[normalizeCodexPublicModelKey(model.model)];
+  if (manual) return manual;
+  return model.readiness === "verified" ? model.selectedTransport : null;
 }
 
 function emptyModel(
@@ -512,6 +512,31 @@ function adaptationOutcomeLabel(outcome: CodexAdaptationOutcome | "trying") {
   return "复测未通过，不能自动应用";
 }
 
+function compatibilityIssueLabels(branch: BranchProgress) {
+  const issues: string[] = [];
+  for (const stage of STAGES) {
+    const status = branch.stages[stage.id];
+    if (
+      status === "failed" ||
+      status === "unsupported" ||
+      status === "skipped"
+    ) {
+      issues.push(
+        stage.id === "reasoning" && branch.reasoningSemantic === "none"
+          ? "思考内容：未返回"
+          : `${stage.label}：${statusPresentation(status).label}`,
+      );
+    }
+  }
+  if (
+    branch.reasoningSemantic === "none" &&
+    !issues.some((issue) => issue.startsWith("思考内容："))
+  ) {
+    issues.push("思考内容：未返回");
+  }
+  return issues;
+}
+
 function runtimeMappingRows(
   transport: CodexProtocolTransport,
   reasoningSemantic: CodexReasoningSemantic | null,
@@ -582,7 +607,7 @@ export function CodexProtocolProbeProgressDialog({
   error,
   onOpenChange,
   onRetry,
-  onSelectVerifiedTransport,
+  onSelectTransport,
 }: CodexProtocolProbeProgressDialogProps) {
   const [expandedMappings, setExpandedMappings] = useState<Set<string>>(
     () => new Set(),
@@ -802,8 +827,8 @@ export function CodexProtocolProbeProgressDialog({
                             {readinessLabel(branch.readiness)}
                           </span>
                           {!running &&
-                            branch.readiness === "verified" &&
-                            onSelectVerifiedTransport && (
+                            branch.readiness !== null &&
+                            onSelectTransport && (
                               <Button
                                 type="button"
                                 variant={
@@ -814,18 +839,25 @@ export function CodexProtocolProbeProgressDialog({
                                 size="sm"
                                 className="h-7 px-2 text-xs"
                                 aria-pressed={displaySelected === transport}
-                                aria-label={`${model.model} 选择 ${transportLabel(transport)}`}
+                                aria-label={`${model.model} ${
+                                  branch.readiness === "verified"
+                                    ? "选择"
+                                    : "仍然使用"
+                                } ${transportLabel(transport)}`}
                                 onClick={() =>
-                                  onSelectVerifiedTransport({
+                                  onSelectTransport({
                                     model: model.model,
                                     providerId: model.providerId,
                                     transport,
+                                    readiness: branch.readiness!,
                                   })
                                 }
                               >
                                 {displaySelected === transport
                                   ? "已选"
-                                  : `选择 ${transportLabel(transport)}`}
+                                  : branch.readiness === "verified"
+                                    ? `选择 ${transportLabel(transport)}`
+                                    : `仍然使用 ${transportLabel(transport)}`}
                               </Button>
                             )}
                         </div>
@@ -935,6 +967,25 @@ export function CodexProtocolProbeProgressDialog({
                               Codex；保存并启用 Provider 后生效。
                             </div>
                           )}
+                          {branch.readiness !== null &&
+                            branch.readiness !== "verified" && (
+                              <div className="space-y-1 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-900 dark:text-amber-200">
+                                <p className="font-medium">
+                                  自动适配未完整通过，但允许手动使用
+                                </p>
+                                <ul className="space-y-0.5">
+                                  {compatibilityIssueLabels(branch).map(
+                                    (issue) => (
+                                      <li key={issue}>{issue}</li>
+                                    ),
+                                  )}
+                                </ul>
+                                <p>
+                                  手动选择只表示接受这些能力缺口，不会把本分支标记为
+                                  Verified。
+                                </p>
+                              </div>
+                            )}
                           <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground">
                             <p>
                               工具 Schema：
