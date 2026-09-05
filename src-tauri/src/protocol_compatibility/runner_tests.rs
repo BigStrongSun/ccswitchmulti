@@ -54,6 +54,7 @@ enum ResponsesMode {
     AcceptedComplexSchemaReturnsEmptyArguments,
     MoonshotToolSchemaOnly,
     GenericMoonshotToolSchemaOnly,
+    GenericMoonshotToolSchemaIncompleteContinuation,
     ResponsesCustomToolUnsupported,
     SummaryReplayOnly,
     ReasoningTextReplayOnly,
@@ -210,7 +211,9 @@ async fn upstream(
     if is_forced_tool
         && matches!(
             state.responses_mode,
-            ResponsesMode::MoonshotToolSchemaOnly | ResponsesMode::GenericMoonshotToolSchemaOnly
+            ResponsesMode::MoonshotToolSchemaOnly
+                | ResponsesMode::GenericMoonshotToolSchemaOnly
+                | ResponsesMode::GenericMoonshotToolSchemaIncompleteContinuation
         )
         && tool_parameter_schemas_contain_keyword(
             &body,
@@ -218,7 +221,8 @@ async fn upstream(
         )
     {
         return match state.responses_mode {
-            ResponsesMode::GenericMoonshotToolSchemaOnly => (
+            ResponsesMode::GenericMoonshotToolSchemaOnly
+            | ResponsesMode::GenericMoonshotToolSchemaIncompleteContinuation => (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": {"message": "Invalid request Error"}})),
             )
@@ -314,7 +318,11 @@ async fn upstream(
 
     if is_responses
         && is_continuation
-        && matches!(state.responses_mode, ResponsesMode::IncompleteContinuation)
+        && matches!(
+            state.responses_mode,
+            ResponsesMode::IncompleteContinuation
+                | ResponsesMode::GenericMoonshotToolSchemaIncompleteContinuation
+        )
     {
         return Json(json!({
             "id": "resp_incomplete",
@@ -1158,14 +1166,53 @@ async fn reports_actual_compatibility_retries_without_response_content() {
             expected
         );
         for retry in retries {
-            assert_eq!(
-                retry.as_object().unwrap().len(),
-                5,
-                "only kind/model/transport/stage/rule may leave the runner"
-            );
+            assert!(retry.get("trigger").and_then(Value::as_str).is_some());
+            assert!(retry.get("change").and_then(Value::as_str).is_some());
+            assert_eq!(retry.as_object().unwrap().len(), 7);
         }
         assert!(!serialized.to_string().contains("private tool reasoning"));
     }
+}
+
+#[tokio::test]
+async fn persists_only_backend_verified_adaptation_outcomes() {
+    let verified_fixture = spawn_fixture(ResponsesMode::GenericMoonshotToolSchemaOnly).await;
+    let verified = run_protocol_compatibility_probe(
+        candidate(&verified_fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+    let verified_responses = verified
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .unwrap();
+    assert!(verified_responses.adaptations.iter().any(|adaptation| {
+        adaptation.trigger == super::AdaptationTrigger::AmbiguousRequestRejection
+            && adaptation.change == super::AdaptationChange::ToolSchemaMoonshotMfjs
+            && adaptation.outcome == super::AdaptationOutcome::Verified
+    }));
+
+    let failed_fixture =
+        spawn_fixture(ResponsesMode::GenericMoonshotToolSchemaIncompleteContinuation).await;
+    let failed = run_protocol_compatibility_probe(
+        candidate(&failed_fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+    let failed_responses = failed
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .unwrap();
+    assert!(failed_responses
+        .adaptations
+        .iter()
+        .any(|adaptation| adaptation.outcome == super::AdaptationOutcome::Failed));
+    assert!(failed_responses
+        .adaptations
+        .iter()
+        .all(|adaptation| adaptation.outcome != super::AdaptationOutcome::Verified));
 }
 
 #[tokio::test]

@@ -27,6 +27,22 @@ export type CodexCompatibilityRule =
   | "tool_schema"
   | "reasoning_text_replay"
   | "omit_reasoning";
+export type CodexAdaptationTrigger =
+  | "explicit_tool_schema_rejection"
+  | "ambiguous_request_rejection"
+  | "missing_valid_tool_call"
+  | "reasoning_replay_rejection"
+  | "adapted_replay_rejection";
+export type CodexAdaptationChange =
+  | "tool_schema_moonshot_mfjs"
+  | "replay_reasoning_text_content"
+  | "omit_incompatible_reasoning";
+export type CodexAdaptationOutcome = "failed" | "verified";
+export interface CodexProtocolAdaptation {
+  trigger: CodexAdaptationTrigger;
+  change: CodexAdaptationChange;
+  outcome: CodexAdaptationOutcome;
+}
 export type CodexToolSchemaEvidence =
   | "unspecified"
   | "explicit_rejection"
@@ -63,6 +79,8 @@ export type CodexProtocolProbeProgressEvent =
       transport: CodexProtocolTransport;
       stage: CodexProtocolProbeStage;
       rule: CodexCompatibilityRule;
+      trigger: CodexAdaptationTrigger;
+      change: CodexAdaptationChange;
     }
   | {
       kind: "stage_started";
@@ -121,6 +139,7 @@ export interface CodexProtocolProbeBranch {
   };
   tool_schema_dialect?: CodexToolSchemaDialect;
   tool_schema_evidence?: CodexToolSchemaEvidence;
+  adaptations?: CodexProtocolAdaptation[];
   history_replay?: CodexHistoryReplay;
   evidence?: Array<{
     status_code: number;

@@ -283,6 +283,13 @@ describe("CodexProtocolProbeProgressDialog", () => {
                 },
                 tool_schema_dialect: "moonshot_mfjs",
                 tool_schema_evidence: "ambiguous_rejection",
+                adaptations: [
+                  {
+                    trigger: "ambiguous_request_rejection",
+                    change: "tool_schema_moonshot_mfjs",
+                    outcome: "verified",
+                  },
+                ],
                 history_replay: "responses_reasoning_text_content",
                 failures: [],
               },
@@ -326,6 +333,15 @@ describe("CodexProtocolProbeProgressDialog", () => {
     expect(
       screen.getByText("工具 Schema：Moonshot MFJS（模糊请求拒绝后完整验证）"),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(/上游返回 400\/422，但未明确指出不兼容字段/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /将动态 OpenAI 工具 Schema 编译为 MFJS object 兼容结构后重新请求/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/完整复测通过/)).toBeInTheDocument();
     expect(
       screen.getByText("工具 Schema：Moonshot MFJS（无来源，不自动生效）"),
     ).toBeInTheDocument();
@@ -464,6 +480,8 @@ describe("CodexProtocolProbeProgressDialog", () => {
         transport: "open_ai_responses",
         stage: "continuation",
         rule: "omit_reasoning",
+        trigger: "adapted_replay_rejection",
+        change: "omit_incompatible_reasoning",
       },
     ];
     const props = {

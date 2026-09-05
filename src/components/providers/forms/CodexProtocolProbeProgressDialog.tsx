@@ -20,6 +20,9 @@ import {
 import { cn } from "@/lib/utils";
 import type {
   CodexCompatibilityRule,
+  CodexAdaptationChange,
+  CodexAdaptationOutcome,
+  CodexAdaptationTrigger,
   CodexProtocolCompatibilityRecord,
   CodexProtocolProbeFailure,
   CodexProtocolProbeReadiness,
@@ -52,6 +55,11 @@ interface BranchProgress {
   toolSchemaDialect: CodexToolSchemaDialect | null;
   toolSchemaEvidence: CodexToolSchemaEvidence | null;
   historyReplay: CodexHistoryReplay | null;
+  adaptations: Array<{
+    trigger: CodexAdaptationTrigger;
+    change: CodexAdaptationChange;
+    outcome: CodexAdaptationOutcome | "trying";
+  }>;
 }
 
 interface ModelProgress {
@@ -115,6 +123,7 @@ function emptyBranch(): BranchProgress {
     toolSchemaDialect: null,
     toolSchemaEvidence: null,
     historyReplay: null,
+    adaptations: [],
   };
 }
 
@@ -182,6 +191,7 @@ function applyRecord(
     target.toolSchemaDialect = branch.tool_schema_dialect ?? null;
     target.toolSchemaEvidence = branch.tool_schema_evidence ?? null;
     target.historyReplay = branch.history_replay ?? null;
+    target.adaptations = branch.adaptations ?? [];
     target.readiness = [
       branch.assessment.baseline,
       branch.assessment.streaming,
@@ -241,6 +251,11 @@ function buildProgress(
     branch.touched = true;
     if (event.kind === "compatibility_retry") {
       branch.retries.push(event.rule);
+      branch.adaptations.push({
+        trigger: event.trigger,
+        change: event.change,
+        outcome: "trying",
+      });
       branch.stages[event.stage] = "running";
     } else if (event.kind === "stage_started") {
       branch.stages[event.stage] = "running";
@@ -463,6 +478,38 @@ function runtimeAdaptationLabel(
     return "运行时适配：Responses 请求保持原协议；续轮仅移除不兼容的推理项，工具调用和工具结果仍会保留。";
   }
   return "运行时适配：Responses 请求保持原协议；上游原生推理项按原结构回放。";
+}
+
+function adaptationTriggerLabel(trigger: CodexAdaptationTrigger) {
+  if (trigger === "explicit_tool_schema_rejection") {
+    return "上游明确拒绝了 OpenAI 工具 Schema";
+  }
+  if (trigger === "ambiguous_request_rejection") {
+    return "上游返回 400/422，但未明确指出不兼容字段";
+  }
+  if (trigger === "missing_valid_tool_call") {
+    return "响应已完整结束，但没有返回符合探测约束的工具调用";
+  }
+  if (trigger === "reasoning_replay_rejection") {
+    return "上游拒绝了原生 Responses 推理历史结构";
+  }
+  return "调整后的推理历史结构仍被上游拒绝";
+}
+
+function adaptationChangeLabel(change: CodexAdaptationChange) {
+  if (change === "tool_schema_moonshot_mfjs") {
+    return "将动态 OpenAI 工具 Schema 编译为 MFJS object 兼容结构后重新请求";
+  }
+  if (change === "replay_reasoning_text_content") {
+    return "将推理历史改写为 content[type=reasoning_text] 后重新续轮";
+  }
+  return "仅移除不兼容的推理历史项，保留工具调用与工具结果后重新续轮";
+}
+
+function adaptationOutcomeLabel(outcome: CodexAdaptationOutcome | "trying") {
+  if (outcome === "trying") return "正在协商并重新验证";
+  if (outcome === "verified") return "完整复测通过";
+  return "复测未通过，不能自动应用";
 }
 
 function runtimeMappingRows(
@@ -827,6 +874,67 @@ export function CodexProtocolProbeProgressDialog({
                               </div>
                             );
                           })}
+                          <div className="space-y-1.5 rounded-md border border-border-default bg-muted/20 p-2 text-xs">
+                            <p className="font-medium text-foreground">
+                              上游响应结构检查
+                            </p>
+                            <p className="text-muted-foreground">
+                              {branch.readiness === "verified"
+                                ? "普通响应、SSE 终态、工具调用和工具结果续轮均已由后端解析并实测通过。"
+                                : branch.readiness === "partial"
+                                  ? "响应可达，但仍有结构或续轮阶段未通过，不能作为完整 Codex 兼容结论。"
+                                  : branch.readiness === "unverified"
+                                    ? "基础响应结构未通过验证，不能用于 Codex 自动配置。"
+                                    : "正在检查响应字段、SSE 终态和工具调用结构。"}
+                            </p>
+                            <p className="text-muted-foreground">
+                              推理结构：
+                              {reasoningLabel(
+                                branch.reasoningSemantic,
+                                branch.stages.reasoning,
+                              )}
+                            </p>
+                          </div>
+                          {branch.adaptations.length > 0 && (
+                            <div className="space-y-2 rounded-md border border-sky-500/30 bg-sky-500/5 p-2 text-xs">
+                              <p className="font-medium text-foreground">
+                                CCSM 协议适配过程
+                              </p>
+                              {branch.adaptations.map((adaptation, index) => (
+                                <div
+                                  key={`${adaptation.trigger}:${adaptation.change}:${index}`}
+                                  className="space-y-0.5 border-l-2 border-sky-500/30 pl-2"
+                                >
+                                  <p className="text-muted-foreground">
+                                    检测：
+                                    {adaptationTriggerLabel(adaptation.trigger)}
+                                  </p>
+                                  <p className="text-foreground/80">
+                                    调整：
+                                    {adaptationChangeLabel(adaptation.change)}
+                                  </p>
+                                  <p
+                                    className={cn(
+                                      adaptation.outcome === "verified"
+                                        ? "text-emerald-700 dark:text-emerald-300"
+                                        : adaptation.outcome === "trying"
+                                          ? "text-sky-700 dark:text-sky-300"
+                                          : "text-destructive",
+                                    )}
+                                  >
+                                    结果：
+                                    {adaptationOutcomeLabel(adaptation.outcome)}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {branch.readiness === "verified" && (
+                            <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-2 text-xs text-emerald-800 dark:text-emerald-200">
+                              后端完整验证通过：该协议分支可由 CCSM 应用到
+                              Codex；保存并启用 Provider 后生效。
+                            </div>
+                          )}
                           <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground">
                             <p>
                               工具 Schema：

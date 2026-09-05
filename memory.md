@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-06 协议探测的可解释适配过程
+
+- 用户点“探测协议”后需要看到的是脱敏的结构检查和适配过程，不是完整响应正文预览。后端 `ProtocolProbeProgressEvent::CompatibilityRetry` 必须携带结构化 `trigger` 与 `change`；持久化分支记录每次 `ProtocolAdaptation` 的 `verified/failed`，前端只能翻译这些后端事实，不能按 Provider 或模型名猜测。
+- 工具 Schema 适配的 `verified` 必须同时满足适配后强制工具调用和工具结果续轮通过；推理历史适配必须满足对应续轮通过。HTTP 200、一次重试成功或单独拿到 tool call 都不能点亮完整兼容绿灯。失败尝试也保留为 `failed`，使用户能看见 CCSM 尝试过什么以及为什么没有自动应用。
+- 探测 UI 分为“上游响应结构检查”“CCSM 协议适配过程”和后端完整验证结论：展示实际触发原因、请求/Schema/历史结构调整以及复测结果，但不保存响应正文、API Key、Cookie、响应 ID。`PROBE_PROFILE_VERSION` 升至 9，避免旧档案缺少适配过程却被当成新证据。
+
 ## 2026-09-06 工具 Schema 方言协商证据分层
 
 - 工具 Schema 协商必须把“为何尝试候选方言”和“候选方言是否可用于生产”分开。分类器明确识别的 Schema 400/422 记为 `explicit_rejection`；未能归因到 Schema 的通用 400/422 只记为 `ambiguous_rejection`，不得冒充显式拒绝；OpenAI Schema 请求完整但没有有效工具调用、而替代方言成功时记为 `negotiated_tool_call`。

@@ -94,6 +94,38 @@ pub enum CompatibilityRule {
     OmitReasoning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptationTrigger {
+    ExplicitToolSchemaRejection,
+    AmbiguousRequestRejection,
+    MissingValidToolCall,
+    ReasoningReplayRejection,
+    AdaptedReplayRejection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptationChange {
+    ToolSchemaMoonshotMfjs,
+    ReplayReasoningTextContent,
+    OmitIncompatibleReasoning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptationOutcome {
+    Failed,
+    Verified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolAdaptation {
+    pub trigger: AdaptationTrigger,
+    pub change: AdaptationChange,
+    pub outcome: AdaptationOutcome,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -106,6 +138,8 @@ pub enum ProtocolProbeProgressEvent {
         transport: TransportKind,
         stage: ProbeProgressStage,
         rule: CompatibilityRule,
+        trigger: AdaptationTrigger,
+        change: AdaptationChange,
     },
     CandidateStarted {
         model: String,
@@ -158,6 +192,8 @@ pub struct TransportBranchResult {
     pub tool_schema_evidence: ToolSchemaEvidence,
     #[serde(default)]
     pub history_replay: HistoryReplay,
+    #[serde(default)]
+    pub adaptations: Vec<ProtocolAdaptation>,
     evidence: Vec<RedactedProbeEvidence>,
     #[serde(default)]
     pub failures: Vec<RedactedProbeFailure>,
@@ -172,6 +208,7 @@ impl fmt::Debug for TransportBranchResult {
             .field("tool_schema_dialect", &self.tool_schema_dialect)
             .field("tool_schema_evidence", &self.tool_schema_evidence)
             .field("history_replay", &self.history_replay)
+            .field("adaptations", &self.adaptations)
             .field("evidence_count", &self.evidence.len())
             .field("failures", &self.failures)
             .finish()
@@ -310,6 +347,7 @@ where
         TransportKind::OpenAiChat => HistoryReplay::ChatReasoningContent,
         TransportKind::OpenAiResponses => HistoryReplay::NativeOnly,
     };
+    let mut adaptations = Vec::new();
     report_stage_started(reporter, candidate, transport, ProbeProgressStage::Baseline);
     let baseline = send_case(
         candidate,
@@ -355,6 +393,7 @@ where
                     tool_schema_dialect,
                     tool_schema_evidence,
                     history_replay,
+                    adaptations,
                     evidence,
                     failures,
                 },
@@ -381,6 +420,7 @@ where
                     tool_schema_dialect,
                     tool_schema_evidence,
                     history_replay,
+                    adaptations,
                     evidence,
                     failures,
                 },
@@ -495,6 +535,7 @@ where
                     tool_schema_dialect,
                     tool_schema_evidence,
                     history_replay,
+                    adaptations,
                     evidence,
                     failures,
                 },
@@ -521,6 +562,7 @@ where
                     tool_schema_dialect,
                     tool_schema_evidence,
                     history_replay,
+                    adaptations,
                     evidence,
                     failures,
                 },
@@ -550,11 +592,22 @@ where
     if let Some(evidence_origin) = schema_rejection_evidence {
         tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
         tool_schema_evidence = evidence_origin;
+        let trigger = match evidence_origin {
+            ToolSchemaEvidence::ExplicitRejection => AdaptationTrigger::ExplicitToolSchemaRejection,
+            _ => AdaptationTrigger::AmbiguousRequestRejection,
+        };
+        adaptations.push(ProtocolAdaptation {
+            trigger,
+            change: AdaptationChange::ToolSchemaMoonshotMfjs,
+            outcome: AdaptationOutcome::Failed,
+        });
         reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
             model: candidate.public_model.clone(),
             transport,
             stage: ProbeProgressStage::ForcedTool,
             rule: CompatibilityRule::ToolSchema,
+            trigger,
+            change: AdaptationChange::ToolSchemaMoonshotMfjs,
         });
         forced = send_case(
             candidate,
@@ -608,11 +661,19 @@ where
         }
         tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
         tool_schema_evidence = ToolSchemaEvidence::NegotiatedToolCall;
+        let trigger = AdaptationTrigger::MissingValidToolCall;
+        adaptations.push(ProtocolAdaptation {
+            trigger,
+            change: AdaptationChange::ToolSchemaMoonshotMfjs,
+            outcome: AdaptationOutcome::Failed,
+        });
         reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
             model: candidate.public_model.clone(),
             transport,
             stage: ProbeProgressStage::ForcedTool,
             rule: CompatibilityRule::ToolSchema,
+            trigger,
+            change: AdaptationChange::ToolSchemaMoonshotMfjs,
         });
         forced = send_case(
             candidate,
@@ -656,6 +717,7 @@ where
                         tool_schema_dialect,
                         tool_schema_evidence,
                         history_replay,
+                        adaptations,
                         evidence,
                         failures,
                     },
@@ -693,6 +755,7 @@ where
                             tool_schema_dialect,
                             tool_schema_evidence,
                             history_replay,
+                            adaptations,
                             evidence,
                             failures,
                         },
@@ -721,6 +784,7 @@ where
                     tool_schema_dialect,
                     tool_schema_evidence,
                     history_replay,
+                    adaptations,
                     evidence,
                     failures,
                 },
@@ -748,11 +812,19 @@ where
         && is_bounded_replay_shape_rejection(&continuation)
     {
         history_replay = HistoryReplay::ResponsesReasoningTextContent;
+        let trigger = AdaptationTrigger::ReasoningReplayRejection;
+        adaptations.push(ProtocolAdaptation {
+            trigger,
+            change: AdaptationChange::ReplayReasoningTextContent,
+            outcome: AdaptationOutcome::Failed,
+        });
         reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
             model: candidate.public_model.clone(),
             transport,
             stage: ProbeProgressStage::Continuation,
             rule: CompatibilityRule::ReasoningTextReplay,
+            trigger,
+            change: AdaptationChange::ReplayReasoningTextContent,
         });
         continuation = send_case(
             candidate,
@@ -766,11 +838,19 @@ where
         .await;
         if is_bounded_replay_shape_rejection(&continuation) {
             history_replay = HistoryReplay::Omit;
+            let trigger = AdaptationTrigger::AdaptedReplayRejection;
+            adaptations.push(ProtocolAdaptation {
+                trigger,
+                change: AdaptationChange::OmitIncompatibleReasoning,
+                outcome: AdaptationOutcome::Failed,
+            });
             reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
                 model: candidate.public_model.clone(),
                 transport,
                 stage: ProbeProgressStage::Continuation,
                 rule: CompatibilityRule::OmitReasoning,
+                trigger,
+                change: AdaptationChange::OmitIncompatibleReasoning,
             });
             continuation = send_case(
                 candidate,
@@ -833,6 +913,7 @@ where
             tool_schema_dialect,
             tool_schema_evidence,
             history_replay,
+            adaptations,
             evidence,
             failures,
         },
@@ -887,11 +968,35 @@ fn report_stage_finished<F>(
 fn finish_branch<F>(
     reporter: &F,
     candidate: &ProbeCandidate,
-    result: TransportBranchResult,
+    mut result: TransportBranchResult,
 ) -> TransportBranchResult
 where
     F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
 {
+    for adaptation in &mut result.adaptations {
+        adaptation.outcome = match adaptation.change {
+            AdaptationChange::ToolSchemaMoonshotMfjs
+                if result.tool_schema_dialect == ToolSchemaDialect::MoonshotMfjs
+                    && result.assessment.forced_tool == ProbeStageStatus::Passed
+                    && result.assessment.continuation == ProbeStageStatus::Passed =>
+            {
+                AdaptationOutcome::Verified
+            }
+            AdaptationChange::ReplayReasoningTextContent
+                if result.history_replay == HistoryReplay::ResponsesReasoningTextContent
+                    && result.assessment.continuation == ProbeStageStatus::Passed =>
+            {
+                AdaptationOutcome::Verified
+            }
+            AdaptationChange::OmitIncompatibleReasoning
+                if result.history_replay == HistoryReplay::Omit
+                    && result.assessment.continuation == ProbeStageStatus::Passed =>
+            {
+                AdaptationOutcome::Verified
+            }
+            _ => AdaptationOutcome::Failed,
+        };
+    }
     let reasoning_status = if result.reasoning_shape.semantic == ReasoningSemantic::None {
         if result.assessment.baseline == ProbeStageStatus::Passed {
             ProbeStageStatus::Unsupported
