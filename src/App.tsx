@@ -677,6 +677,48 @@ function App() {
     },
   );
 
+  useEffect(() => {
+    let active = true;
+    void settingsApi
+      .detectCodexPluginRegistration()
+      .then((plugins) => {
+        if (!active || plugins.length === 0) return;
+        const plugin = plugins[0];
+        toast.warning(
+          `检测到 Codex 插件 ${plugin.name}@${plugin.version} 尚未登记到个人 marketplace。`,
+          {
+            duration: Infinity,
+            closeButton: true,
+            action: {
+              label: "修复登记",
+              onClick: () => {
+                void settingsApi
+                  .repairCodexPluginRegistration(plugin.id)
+                  .then(() => {
+                    toast.success(`Codex 插件 ${plugin.name} 登记已修复。`, {
+                      closeButton: true,
+                    });
+                  })
+                  .catch((error) => {
+                    toast.error(
+                      `Codex 插件 ${plugin.name} 登记修复失败：${extractErrorMessage(error)}`,
+                      { closeButton: true },
+                    );
+                  });
+              },
+            },
+          },
+        );
+      })
+      .catch((error) => {
+        console.debug("[App] Failed to inspect Codex plugin registration", error);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   useTauriEvent<{ appType: string; providerName: string }>(
     "proxy-official-warning",
     (payload) => {
