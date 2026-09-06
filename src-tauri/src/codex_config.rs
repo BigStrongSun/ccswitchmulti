@@ -140,15 +140,14 @@ impl CodexCatalogToolProfile {
 }
 
 /// Reserved built-in provider IDs from OpenAI Codex's config/model-provider
-/// catalog. Keep in sync with Codex `RESERVED_MODEL_PROVIDER_IDS` and legacy
-/// removed provider aliases.
+/// catalog. The match is case-sensitive, just like Codex's provider map.
+/// `oss` and `ollama-chat` are legacy aliases, not reserved table IDs.
 const CODEX_RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
     "amazon-bedrock",
+    "amazon-bedrock-runtime",
     "openai",
     "ollama",
     "lmstudio",
-    "oss",
-    "ollama-chat",
 ];
 
 /// 获取 Codex 配置目录路径
@@ -517,7 +516,7 @@ pub(crate) fn is_custom_codex_model_provider_id(id: &str) -> bool {
     !id.is_empty()
         && !CODEX_RESERVED_MODEL_PROVIDER_IDS
             .iter()
-            .any(|reserved| reserved.eq_ignore_ascii_case(id))
+            .any(|reserved| *reserved == id)
 }
 
 /// Write only Codex `config.toml` for provider switching.
@@ -754,9 +753,7 @@ pub fn extract_codex_base_url(config_text: &str) -> Option<String> {
         .map(str::trim)
         .filter(|id| !id.is_empty());
 
-    if active_provider
-        .is_none_or(|provider| provider.eq_ignore_ascii_case(CODEX_OPENAI_MODEL_PROVIDER_ID))
-    {
+    if active_provider.is_none_or(|provider| provider == CODEX_OPENAI_MODEL_PROVIDER_ID) {
         if let Some(base_url) = doc.get("openai_base_url").and_then(|v| v.as_str()) {
             return Some(base_url.to_string());
         }
@@ -7218,6 +7215,124 @@ pub fn extract_codex_experimental_bearer_token(config_text: &str) -> Option<Stri
         .map(str::to_string)
 }
 
+fn codex_provider_table_falls_back_to_official_auth(table: &dyn toml_edit::TableLike) -> bool {
+    table
+        .get("requires_openai_auth")
+        .and_then(|item| item.as_bool())
+        .unwrap_or(false)
+        && table.get("env_key").is_none()
+        && table.get("experimental_bearer_token").is_none()
+        && table.get("auth").is_none()
+        && table.get("aws").is_none()
+}
+
+fn codex_header_table_declares_authorization(item: Option<&toml_edit::Item>) -> bool {
+    item.and_then(|item| item.as_table_like())
+        .is_some_and(|headers| {
+            headers
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case("authorization"))
+        })
+}
+
+fn codex_provider_table_blocks_bearer_injection(table: &dyn toml_edit::TableLike) -> bool {
+    let requires_openai_auth = table
+        .get("requires_openai_auth")
+        .and_then(|item| item.as_bool())
+        .unwrap_or(false);
+    table.get("env_key").is_some()
+        || table.get("auth").is_some()
+        || table.get("aws").is_some()
+        || (!requires_openai_auth
+            && (codex_header_table_declares_authorization(table.get("http_headers"))
+                || codex_header_table_declares_authorization(table.get("env_http_headers"))))
+}
+
+const CODEX_MIGRATED_PROVIDER_ID: &str = "cc-switch";
+const CODEX_STALE_RESERVED_TABLE_IDS: &[&str] = &["openai", "ollama", "lmstudio"];
+
+fn first_free_codex_migrated_provider_id(providers: Option<&dyn toml_edit::TableLike>) -> String {
+    let mut candidate = CODEX_MIGRATED_PROVIDER_ID.to_string();
+    let mut suffix = 2usize;
+    while providers.is_some_and(|table| table.get(&candidate).is_some()) {
+        candidate = format!("{CODEX_MIGRATED_PROVIDER_ID}-{suffix}");
+        suffix += 1;
+    }
+    candidate
+}
+
+/// Rename stale overrides of Codex built-ins without losing their contents.
+/// Codex 0.148+ rejects these tables before starting. Only routes that cannot
+/// fall through to the preserved official `auth.json` follow the new ID.
+fn migrate_stale_reserved_codex_provider_tables(
+    config_text: &str,
+    has_injectable_token: bool,
+) -> Result<Option<String>, AppError> {
+    if !config_text.contains("model_providers") {
+        return Ok(None);
+    }
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let stale_ids: Vec<&str> = CODEX_STALE_RESERVED_TABLE_IDS
+        .iter()
+        .copied()
+        .filter(|id| {
+            doc.get("model_providers")
+                .and_then(|item| item.as_table_like())
+                .and_then(|providers| providers.get(id))
+                .and_then(|item| item.as_table_like())
+                .is_some()
+        })
+        .collect();
+    if stale_ids.is_empty() {
+        return Ok(None);
+    }
+
+    for stale_id in stale_ids {
+        let migrated_id = first_free_codex_migrated_provider_id(
+            doc.get("model_providers")
+                .and_then(|item| item.as_table_like()),
+        );
+        let table_is_active = match active_codex_model_provider_id(&doc) {
+            None => stale_id == CODEX_OPENAI_MODEL_PROVIDER_ID,
+            Some(active) => active == stale_id,
+        };
+        let Some(providers) = doc
+            .get_mut("model_providers")
+            .and_then(|item| item.as_table_like_mut())
+        else {
+            return Ok(None);
+        };
+        let Some(mut stale_item) = providers.remove(stale_id) else {
+            continue;
+        };
+        let mut falls_back_to_official_auth = false;
+        if let Some(table) = stale_item.as_table_like_mut() {
+            if table.get("wire_api").and_then(|item| item.as_str()) != Some("responses") {
+                table.insert("wire_api", toml_edit::value("responses"));
+            }
+            if table
+                .get("name")
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .is_none()
+            {
+                table.insert("name", toml_edit::value("Custom"));
+            }
+            falls_back_to_official_auth = codex_provider_table_falls_back_to_official_auth(&*table);
+        }
+        providers.insert(&migrated_id, stale_item);
+
+        if table_is_active && (has_injectable_token || !falls_back_to_official_auth) {
+            doc["model_provider"] = toml_edit::value(migrated_id);
+        }
+    }
+
+    Ok(Some(doc.to_string()))
+}
+
 fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result<String, AppError> {
     if config_text.trim().is_empty() {
         return Err(AppError::localized(
@@ -7245,13 +7360,16 @@ fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result
 
     if let Some(model_providers) = doc
         .get_mut("model_providers")
-        .and_then(|item| item.as_table_mut())
+        .and_then(|item| item.as_table_like_mut())
     {
         if let Some(provider_table) = model_providers
             .get_mut(provider_id.as_str())
-            .and_then(|item| item.as_table_mut())
+            .and_then(|item| item.as_table_like_mut())
         {
-            provider_table["experimental_bearer_token"] = toml_edit::value(token);
+            if codex_provider_table_blocks_bearer_injection(&*provider_table) {
+                return Ok(doc.to_string());
+            }
+            provider_table.insert("experimental_bearer_token", toml_edit::value(token));
             return Ok(doc.to_string());
         }
     }
@@ -7807,6 +7925,9 @@ pub fn prepare_codex_provider_live_config(
     let token = extract_codex_auth_api_key(auth)
         .or_else(|| extract_codex_experimental_bearer_token(config_text));
 
+    let migrated = migrate_stale_reserved_codex_provider_tables(config_text, token.is_some())?;
+    let config_text = migrated.as_deref().unwrap_or(config_text);
+
     Ok(match token {
         Some(token) => set_codex_experimental_bearer_token(config_text, &token)?,
         None => config_text.to_string(),
@@ -7892,10 +8013,7 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
                 .filter(|id| !id.is_empty())
                 .map(str::to_string);
 
-            if model_provider
-                .as_deref()
-                .is_some_and(|id| id.eq_ignore_ascii_case(CODEX_OPENAI_MODEL_PROVIDER_ID))
-            {
+            if model_provider.as_deref() == Some(CODEX_OPENAI_MODEL_PROVIDER_ID) {
                 if field == "base_url" {
                     if trimmed.is_empty() {
                         doc.as_table_mut().remove("openai_base_url");
@@ -7943,6 +8061,15 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
                         .get_mut(&provider_key)
                         .and_then(toml_edit::Item::as_table_like_mut)
                     {
+                        if provider_table
+                            .get("name")
+                            .and_then(|item| item.as_str())
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                            .is_none()
+                        {
+                            provider_table.insert("name", toml_edit::value(provider_key.as_str()));
+                        }
                         if trimmed.is_empty() {
                             provider_table.remove(field);
                         } else {
@@ -11595,6 +11722,154 @@ model = "gpt-5"
             parsed.get("model_providers").is_none(),
             "reserved provider tables should not be synthesized"
         );
+    }
+
+    #[test]
+    fn upstream_codex_loadable_provider_ids_route_tokens_by_current_reserved_contract() {
+        for reserved in [
+            "amazon-bedrock",
+            "amazon-bedrock-runtime",
+            "openai",
+            "ollama",
+            "lmstudio",
+        ] {
+            assert!(
+                !is_custom_codex_model_provider_id(reserved),
+                "{reserved} is a current Codex built-in"
+            );
+        }
+        for custom in ["oss", "ollama-chat", "OpenAI"] {
+            assert!(
+                is_custom_codex_model_provider_id(custom),
+                "{custom} is an exact custom provider id"
+            );
+            let input = format!(
+                "model_provider = \"{custom}\"\n\n[model_providers.{custom}]\nname = \"Relay\"\nbase_url = \"https://relay.example/v1\"\n"
+            );
+            let output = prepare_codex_provider_live_config(
+                &json!({"OPENAI_API_KEY": "scoped-key"}),
+                &input,
+            )
+            .expect("prepare custom provider");
+            let parsed: toml::Value = toml::from_str(&output).expect("parse prepared config");
+            assert_eq!(
+                parsed["model_providers"][custom]["experimental_bearer_token"].as_str(),
+                Some("scoped-key"),
+                "the token must be provider-scoped for {custom}"
+            );
+            assert!(
+                parsed.get("experimental_bearer_token").is_none(),
+                "{custom} must not strand its token at the top level"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_codex_loadable_provider_migration_is_auth_fallback_aware() {
+        let unauthenticated = r#"model_provider = "openai"
+
+[model_providers.openai]
+name = "Local"
+base_url = "http://127.0.0.1:11434/v1"
+wire_api = "chat"
+"#;
+        let output = prepare_codex_provider_live_config(&json!({}), unauthenticated)
+            .expect("migrate unauthenticated local route");
+        let parsed: toml::Value = toml::from_str(&output).expect("parse migrated local route");
+        assert_eq!(parsed["model_provider"].as_str(), Some("cc-switch"));
+        assert!(parsed["model_providers"].get("openai").is_none());
+        assert_eq!(
+            parsed["model_providers"]["cc-switch"]["wire_api"].as_str(),
+            Some("responses")
+        );
+
+        let official_fallback = r#"model_provider = "openai"
+
+[model_providers.openai]
+base_url = "https://relay.example/v1"
+requires_openai_auth = true
+"#;
+        let output = prepare_codex_provider_live_config(&json!({}), official_fallback)
+            .expect("migrate official-auth fallback route");
+        let parsed: toml::Value = toml::from_str(&output).expect("parse migrated fallback route");
+        assert_eq!(
+            parsed["model_provider"].as_str(),
+            Some("openai"),
+            "a tokenless auth.json fallback must not follow the third-party route"
+        );
+        assert_eq!(
+            parsed["model_providers"]["cc-switch"]["name"].as_str(),
+            Some("Custom"),
+            "a migrated custom table must be loadable"
+        );
+        assert_eq!(
+            parsed["model_providers"]["cc-switch"]["wire_api"].as_str(),
+            Some("responses")
+        );
+
+        let command_auth = r#"model_provider = "openai"
+
+[model_providers.openai]
+name = "Command Auth"
+base_url = "https://relay.example/v1"
+requires_openai_auth = true
+auth = { type = "oauth" }
+"#;
+        let output = prepare_codex_provider_live_config(
+            &json!({"OPENAI_API_KEY": "stored-but-shadowed"}),
+            command_auth,
+        )
+        .expect("migrate command-auth route");
+        let parsed: toml::Value = toml::from_str(&output).expect("parse command-auth route");
+        assert_eq!(parsed["model_provider"].as_str(), Some("cc-switch"));
+        assert!(
+            parsed["model_providers"]["cc-switch"]
+                .get("experimental_bearer_token")
+                .is_none(),
+            "auth and bearer token conflict in Codex 0.149"
+        );
+    }
+
+    #[test]
+    fn upstream_codex_loadable_provider_editor_backfills_non_empty_name() {
+        let created = update_codex_toml_field(
+            "model_provider = \"relay\"\n",
+            "base_url",
+            "https://relay.example/v1",
+        )
+        .expect("create provider table");
+        let parsed: toml::Value = toml::from_str(&created).expect("parse created provider");
+        assert_eq!(
+            parsed["model_providers"]["relay"]["name"].as_str(),
+            Some("relay")
+        );
+
+        let nameless = r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "   "
+base_url = "https://old.example/v1"
+"#;
+        let updated = update_codex_toml_field(nameless, "base_url", "https://new.example/v1")
+            .expect("update provider table");
+        let parsed: toml::Value = toml::from_str(&updated).expect("parse updated provider");
+        assert_eq!(
+            parsed["model_providers"]["relay"]["name"].as_str(),
+            Some("relay")
+        );
+
+        let case_variant = update_codex_toml_field(
+            "model_provider = \"OpenAI\"\n",
+            "base_url",
+            "https://custom.example/v1",
+        )
+        .expect("update exact custom id");
+        let parsed: toml::Value = toml::from_str(&case_variant).expect("parse exact custom id");
+        assert_eq!(
+            parsed["model_providers"]["OpenAI"]["base_url"].as_str(),
+            Some("https://custom.example/v1")
+        );
+        assert!(parsed.get("openai_base_url").is_none());
     }
 
     #[test]
