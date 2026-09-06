@@ -3237,16 +3237,27 @@ fn infer_codex_chat_reasoning_config(
         });
     }
 
-    // StepFun：仅 step-3.5-flash-2603 这一版支持 reasoning effort（low/high 两档），
-    // 其余 step 模型不暴露 effort，故 supports_effort 仅对含 "2603" 的模型置真。
+    // StepFun：step-3.5-flash-2603 支持 low/high 两档；step-3.7-flash
+    // 支持 low/medium/high 三档，其余 step 模型不暴露 effort。2603 沿用
+    // low_high 收敛映射；3.7 必须 passthrough，不能把 medium 塌成 high。
     // 第二个 OR 分支覆盖「经中转/聚合跑该模型、但平台 name/base_url 不含 stepfun」的情况。
-    if haystack.contains("stepfun") || haystack.contains("step-3.5-flash-2603") {
+    if haystack.contains("stepfun")
+        || haystack.contains("step-3.5-flash-2603")
+        || haystack.contains("step-3.7-flash")
+    {
         return Some(CodexChatReasoningConfig {
             supports_thinking: Some(true),
-            supports_effort: Some(model.contains("2603")),
+            supports_effort: Some(model.contains("2603") || model.contains("step-3.7-flash")),
             thinking_param: Some("none".to_string()),
             effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("low_high".to_string()),
+            effort_value_mode: Some(
+                if model.contains("2603") {
+                    "low_high"
+                } else {
+                    "passthrough"
+                }
+                .to_string(),
+            ),
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning".to_string()),
@@ -8560,5 +8571,38 @@ wire_api = "responses"
             compatibility.history_replay,
             crate::protocol_compatibility::HistoryReplay::Omit
         );
+    }
+
+    #[test]
+    fn upstream_stepfun_reasoning_inference_is_model_specific() {
+        let provider = create_provider(json!({
+            "config": r#"
+model_provider = "stepfun"
+model = "step-3.7-flash"
+
+[model_providers.stepfun]
+name = "StepFun"
+base_url = "https://api.stepfun.com/v1"
+wire_api = "chat"
+"#
+        }));
+
+        let step_37 =
+            infer_codex_chat_reasoning_config(&provider, &json!({"model": "step-3.7-flash"}))
+                .expect("StepFun inference");
+        assert_eq!(step_37.supports_effort, Some(true));
+        assert_eq!(step_37.effort_value_mode.as_deref(), Some("passthrough"));
+
+        let step_35_2603 =
+            infer_codex_chat_reasoning_config(&provider, &json!({"model": "step-3.5-flash-2603"}))
+                .expect("StepFun inference");
+        assert_eq!(step_35_2603.supports_effort, Some(true));
+        assert_eq!(step_35_2603.effort_value_mode.as_deref(), Some("low_high"));
+
+        let step_35 =
+            infer_codex_chat_reasoning_config(&provider, &json!({"model": "step-3.5-flash"}))
+                .expect("StepFun inference");
+        assert_eq!(step_35.supports_effort, Some(false));
+        assert_eq!(step_35.thinking_param.as_deref(), Some("none"));
     }
 }

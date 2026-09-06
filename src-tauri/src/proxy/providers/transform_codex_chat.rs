@@ -2790,6 +2790,7 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
     let Some(usage) = usage.filter(|value| value.is_object() && !value.is_null()) else {
         return json!({
             "input_tokens": 0,
+            "input_tokens_details": { "cached_tokens": 0 },
             "output_tokens": 0,
             "total_tokens": 0,
             "output_tokens_details": { "reasoning_tokens": 0 }
@@ -2817,10 +2818,19 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
         "total_tokens": total_tokens
     });
 
-    let cached = usage
-        .pointer("/prompt_tokens_details/cached_tokens")
-        .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
-        .and_then(|v| v.as_u64())
+    let direct_cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
+    let cached = direct_cache_read
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| {
+            usage
+                .pointer("/input_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
         .unwrap_or(0);
     let cache_write = usage
         .pointer("/prompt_tokens_details/cache_write_tokens")
@@ -2837,6 +2847,8 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
             "cached_tokens": cached,
             "cache_write_tokens": cache_write
         });
+    } else {
+        result["input_tokens_details"] = json!({ "cached_tokens": 0 });
     }
 
     if let Some(details) = usage
@@ -2852,8 +2864,8 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
         result["output_tokens_details"] = json!({ "reasoning_tokens": 0 });
     }
 
-    if let Some(cache_read) = usage.get("cache_read_input_tokens") {
-        result["cache_read_input_tokens"] = cache_read.clone();
+    if let Some(cache_read) = direct_cache_read {
+        result["cache_read_input_tokens"] = json!(cache_read);
     }
     if cache_write > 0 {
         result["cache_creation_input_tokens"] = json!(cache_write);
@@ -7745,5 +7757,38 @@ mod tests {
             "tools should be present from tool_search_output"
         );
         assert_eq!(result["tools"][0]["function"]["name"], "search_docs");
+    }
+
+    #[test]
+    fn upstream_usage_contract_projects_required_cache_details_and_deepseek_hits() {
+        let missing = chat_usage_to_responses_usage(None);
+        assert_eq!(missing["input_tokens_details"], json!({"cached_tokens": 0}));
+
+        let direct = chat_usage_to_responses_usage(Some(&json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "cache_read_input_tokens": 4,
+            "prompt_tokens_details": {"cached_tokens": 0}
+        })));
+        assert_eq!(direct["input_tokens_details"]["cached_tokens"], 4);
+        assert_eq!(direct["cache_read_input_tokens"], 4);
+
+        let deepseek = chat_usage_to_responses_usage(Some(&json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+            "prompt_cache_hit_tokens": 600,
+            "prompt_cache_miss_tokens": 400
+        })));
+        assert_eq!(deepseek["input_tokens_details"]["cached_tokens"], 600);
+
+        let standard_precedence = chat_usage_to_responses_usage(Some(&json!({
+            "prompt_tokens_details": {"cached_tokens": 7},
+            "prompt_cache_hit_tokens": 9
+        })));
+        assert_eq!(
+            standard_precedence["input_tokens_details"]["cached_tokens"],
+            7
+        );
     }
 }
