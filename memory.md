@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-09-06 v3.19.2-30 发布前复审
+
+- `git fetch --all --prune --tags` 后再次逐项检查本地/远端分支、开放 PR、所有 linked worktree 的 tracked/untracked 状态及 `main...tip` 独有提交。没有新增“已经完成但尚未进入 main”的 CCSwitchMulti 产品分支；上一轮唯一漏合的 `fix-gpt6-astra-metadata` 已在 `main@9aedbdab`。`codex-power-presets` 已推进到 `aa18d5f7`，但仍有 3 个未提交 probe 脚本且既有 final source no-go 未解除；`codex-multirouter-ssot-v2`、`codex-reasoning-probe-backend`、detached `error-journal-20260904` 和 `ccsm-agent-mesh` 仍按未完成现场保留。没有删除、清理或覆盖任何 worktree。
+- 远端 `fork/main@74af3919` 比本地 main 少 21 个提交，正是 v29 后已验证并完成合流的源码/测试/记忆；本次新 Release 的候选源为本地 `main@9aedbdab`。开放 PR #69/#61/#26/#24/#21/#19 及依赖 PR 均早于本轮审计，其中产品行为已被主线覆盖、存在冲突或没有达到当前架构门禁，不能按“PR 仍开着”直接判定为漏合完成项。
+- 官方 `farion1231/cc-switch` 已发布 `v3.20.1@3217f725`，审计时 `origin/main@db346128` 又比该 tag 前进 30 个提交；本地 main 与上游 merge-base 为 `43eaf073`，两侧分别有 1608/130 个独有提交。`git merge-tree --write-tree main origin/main` 在 Provider、Codex OAuth、协议转换、数据库、前端表单和版本文件等大量核心路径产生冲突，因此上游 3.20.x 必须作为独立迁移逐项验证，不能在 release-only 提交里整枝合并或假称已同步。本版本仍采用 CCSwitchMulti 派生号 `3.19.2-30`，并明确披露这一边界。
+- 隔离 worktree 首次基线把 `pnpm test:unit` 与 Rust 冷编译并行执行：Rust library 3872 passed / 6 ignored、全部 integration suites 通过；前端 1379 项中首个重型 App 用例在 30 秒时限超时，随后两个用例因清理未完成看到重复 DOM。Rust 结束后，SettingsDialog 单 worker 通过，首个 App 用例单独运行 6.1 秒通过，证明该轮失败来自冷编译资源竞争而非产品断言回归。正式发布门禁必须在无 Rust 冷编译并发时重新跑完整前端，不能把定向复跑代替最终全量结果。
+- 发布候选随后在无 Rust 冷编译竞争时通过前端 169 files / 1379 tests、完整 Rust library 3872 passed / 6 ignored 及全部 integration suites；`pnpm typecheck`、Prettier、`cargo check --all-targets`、严格 Clippy `-D warnings`、rustfmt、diff 检查与 Windows Pester 90/90 均通过。正式导出脚本成功生成 16 个 Windows x64 候选文件，`SHA256SUMS` 复算零不匹配，原始 EXE 的 FileVersion/ProductVersion 均为 `3.19.2-30`，安装器签名为 432 bytes，本地 `latest.json` 指向本 tag。裸 `pnpm build` 的默认 `bundle.targets=all` 在应用编译完成后仅卡在 WiX `light.exe` 的 MSI 封装；GitHub Windows 发布 job 与正式本地导出均走 NSIS，后者已成功，因此不能把该 MSI 诊断失败描述成 NSIS 或应用构建失败。本轮仍未安装、停止或重启当前 CCSwitchMulti/Codex。
+
 ## 2026-09-06 本地分叉审计与已完成工作合流
 
 - 审计基线为本地 `main@770968b5`。逐一检查全部本地 branch、linked worktree、`main...tip` 提交计数、`git cherry`、工作树脏状态和既有根因记录后，唯一“产品工作已完成、main 仍缺失”的分支是 `bigstrongsun/fix-gpt6-astra-metadata@1e138230`：官方 OAuth 模型目录的 reasoning 元数据透传、Astra 五档保留及旧 `none/minimal -> low` 迁移已有源码、安装态和真实请求验收，但不在 main 祖先链。本轮以 merge commit `151af1f0` 合入隔离集成分支。
