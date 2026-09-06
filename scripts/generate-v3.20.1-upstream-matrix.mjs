@@ -62,6 +62,48 @@ const explicit = new Map([
     ],
   ],
   [
+    "273c9cc2",
+    [
+      "already-covered",
+      "Current model capability registry already marks exact glm-5.3 variants text-only while leaving glm-5.3v image-capable, with normalization regressions.",
+    ],
+  ],
+  [
+    "7dc0a725",
+    [
+      "adopted",
+      "Task 3 semantically migrated Grok 4.5/4.6 prices and the DeepSeek V4 Flash 0731 alias with guarded price repair tests.",
+    ],
+  ],
+  [
+    "bad9c151",
+    [
+      "adopted",
+      "Task 3 migrated current DeepSeek V4 peak-tier rows and Gemini 3.7 Flash introductory pricing with seed and historical-repair tests.",
+    ],
+  ],
+  [
+    "460aa8c7",
+    [
+      "adopted",
+      "Task 3 migrated Fable/Mythos 5.1 rows and the exact-guard Sonnet 5 standard-price repair without overwriting user prices.",
+    ],
+  ],
+  [
+    "741e802f",
+    [
+      "adopted",
+      "Task 3 added the GLM-5.3 seed without a schema bump or repair overwrite and proved user price preservation.",
+    ],
+  ],
+  [
+    "4549d290",
+    [
+      "rewritten",
+      "Task 4 capability review: verify the current Tauri exit permission and button behavior before changing the fork capability manifest.",
+    ],
+  ],
+  [
     "5a040348",
     [
       "already-covered",

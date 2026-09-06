@@ -5299,3 +5299,11 @@ supported in one streaming turn`。
 - 在隔离分支 `bigstrongsun/upstream-v3.20.1-migration@4e3c83c3` 固定 merge-base `43eaf073`、官方 release `v3.20.1@3217f725` 和审计 tip `741e802f`，生成 `docs/audits/2026-09-06-v3.20.1-upstream-commit-matrix.md`。精确覆盖 131 个非合并提交，其中 100 个属于 v3.20.1、31 个为 tag 后提交；唯一 SHA 131、重复 0、缺失 0。
 - 初始处置为 5 个 `already-covered`、15 个 `not-applicable`、111 个 `rewritten`。`rewritten` 表示拒绝直接 cherry-pick/整枝 merge，并已分配到 Task 3–9 做语义评估，不表示实现已经完成；后续每批必须把对应行更新成带 CCSwitchMulti commit/test 证据的最终结论，证据不足则显式改为 `deferred`。
 - 已确认主线覆盖的五项是：用户自管 `model_catalog_json` 所有权、逐模型 reasoning levels、DeepSeek `supports_search_tool=false`、GPT-6 OAuth client identity、DeepSeek/MultiRouter `supports_parallel_tool_calls`。矩阵由 `scripts/generate-v3.20.1-upstream-matrix.mjs` 可重复生成，并在生成时硬性断言 131 个提交。
+
+## 2026-09-06 v3.20.1-1 Task 3 定价与模型数据
+
+- TDD RED：新增 GLM-5.3 seed/user-price preservation、当前官方价格行和 guarded repair 回归；`model_pricing_` 首次运行 4 passed/3 failed，分别准确失败于新行缺失、Grok 4.5 旧 cache 价未修和 DeepSeek V4 仍停在旧价。GREEN 后同一聚焦组 7/7 通过，没有运行全量 Rust。
+- 语义迁移官方 `7dc0a725`、`bad9c151`、`460aa8c7`、`741e802f`：新增 GLM-5.3、Grok 4.6、DeepSeek V4 Flash 0731、Gemini 3.7 Flash、Claude Fable/Mythos 5.1；修正 Grok 4.5 cache、DeepSeek V4 和 Claude Sonnet 5。所有 repair 都用精确旧值守卫，用户自定义价格不匹配旧 seed 时保持不动；GLM-5.3 和其它全新行只 `INSERT OR IGNORE`，不提升 schema。
+- 官方现行页与 Codex Web、Matrix WebSearch 两条独立链交叉确认：GLM-5.3 为 1.4/4.4/cache 0.26；Grok 4.5/4.6 的短上下文价分别为 2/6/cache 0.30 与 2/6/cache 0.50；DeepSeek V4 Flash/Pro 高峰价分别为 0.44/1.32/cache 0.014 与 1.32/3.96/cache 0.044；Gemini 3.7 Flash 介绍价为 0.75/3.75/cache 0.075；Fable/Mythos 5.1 为 10/50/cache 0.25，Sonnet 5 的 2/10 已转为正式价。
+- 当前单行价格 schema 无法表达 Grok ≥200K 的双倍价和 DeepSeek 工作日峰谷价：Grok 记录短上下文基础档，DeepSeek 沿官方提交决策记录高峰挂牌档，分别会低估长上下文 Grok、并在 DeepSeek 非高峰时高估约一倍。Gemini 3.7 Flash 介绍价在 2026-12-31 后到期，需后续 guarded repair；这些限制显式保留，不在本批扩张成时段/上下文计价重构。
+- `273c9cc2` 不重复迁移：当前 `model_capabilities.rs` 已精确把 `glm-5.3` 标为 text-only，同时保留 `glm-5.3v` 图像能力，并已有 namespace/[1M] normalization 回归。

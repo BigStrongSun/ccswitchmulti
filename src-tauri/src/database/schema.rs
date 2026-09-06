@@ -1734,6 +1734,24 @@ impl Database {
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
     fn seed_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_data = [
+            // Fable/Mythos 5.1 use a 0.025x cache-read multiplier rather than
+            // the usual 0.1x multiplier.
+            (
+                "claude-fable-5-1",
+                "Claude Fable 5.1",
+                "10",
+                "50",
+                "0.25",
+                "12.50",
+            ),
+            (
+                "claude-mythos-5-1",
+                "Claude Mythos 5.1",
+                "10",
+                "50",
+                "0.25",
+                "12.50",
+            ),
             // Claude Fable 5（Opus 之上的新档）
             (
                 "claude-fable-5",
@@ -1762,14 +1780,14 @@ impl Database {
                 "0.50",
                 "6.25",
             ),
-            // Claude Sonnet 5（list 价，与 Sonnet 4.6 一致；促销 $2/$10 至 2026-08-31 不入表）
+            // Claude Sonnet 5 的 $2/$10 介绍价已转为正式价。
             (
                 "claude-sonnet-5",
                 "Claude Sonnet 5",
-                "3",
-                "15",
-                "0.30",
-                "3.75",
+                "2",
+                "10",
+                "0.20",
+                "2.50",
             ),
             // Claude 4.7 系列
             (
@@ -2096,6 +2114,16 @@ impl Database {
             ("gpt-4.1", "GPT-4.1", "2", "8", "0.50", "0"),
             ("gpt-4.1-mini", "GPT-4.1 Mini", "0.40", "1.60", "0.10", "0"),
             ("gpt-4.1-nano", "GPT-4.1 Nano", "0.10", "0.40", "0.025", "0"),
+            // Gemini 3.7 Flash 介绍价有效至 2026-12-31；届时需要新的
+            // guarded repair 更新为 1.50/7.50/0.15。
+            (
+                "gemini-3.7-flash",
+                "Gemini 3.7 Flash",
+                "0.75",
+                "3.75",
+                "0.075",
+                "0",
+            ),
             // Gemini 3.6 系列
             (
                 "gemini-3.6-flash",
@@ -2311,38 +2339,48 @@ impl Database {
                 "0",
             ),
             ("deepseek-v3", "DeepSeek V3", "0.28", "1.11", "0.028", "0"),
-            // deepseek-chat / deepseek-reasoner 自 2026-07 起为 V4 Flash 的 legacy 别名（同价）
+            // DeepSeek V4 has peak/off-peak pricing but the pricing table has
+            // one row per model. Store the vendor's base peak list price; the
+            // off-peak tier is half of these values.
+            // deepseek-chat / deepseek-reasoner are V4 Flash legacy aliases.
             (
                 "deepseek-chat",
                 "DeepSeek Chat",
-                "0.14",
-                "0.28",
-                "0.0028",
+                "0.44",
+                "1.32",
+                "0.014",
                 "0",
             ),
             (
                 "deepseek-reasoner",
                 "DeepSeek Reasoner",
-                "0.14",
-                "0.28",
-                "0.0028",
+                "0.44",
+                "1.32",
+                "0.014",
                 "0",
             ),
-            // DeepSeek V4 系列（官方 CNY 按 1 USD ≈ 7.14 折算）
             (
                 "deepseek-v4-flash",
                 "DeepSeek V4 Flash",
-                "0.14",
-                "0.28",
-                "0.0028",
+                "0.44",
+                "1.32",
+                "0.014",
+                "0",
+            ),
+            (
+                "deepseek-v4-flash-0731",
+                "DeepSeek V4 Flash",
+                "0.44",
+                "1.32",
+                "0.014",
                 "0",
             ),
             (
                 "deepseek-v4-pro",
                 "DeepSeek V4 Pro",
-                "0.435",
-                "0.87",
-                "0.003625",
+                "1.32",
+                "3.96",
+                "0.044",
                 "0",
             ),
             // Kimi (月之暗面)
@@ -2431,6 +2469,7 @@ impl Database {
             ("glm-5", "GLM-5", "1", "3.2", "0.2", "0"),
             ("glm-5.1", "GLM-5.1", "1.4", "4.4", "0.26", "0"),
             ("glm-5.2", "GLM-5.2", "1.4", "4.4", "0.26", "0"),
+            ("glm-5.3", "GLM-5.3", "1.4", "4.4", "0.26", "0"),
             ("glm-5-turbo", "GLM-5-Turbo", "1.2", "4", "0.24", "0"),
             ("glm-5v-turbo", "GLM-5V-Turbo", "1.2", "4", "0.24", "0"),
             // MiMo (小米)
@@ -2531,10 +2570,14 @@ impl Database {
             ("qwq-32b", "QwQ 32B", "0.20", "0.60", "0", "0"),
             ("qwen3-32b", "Qwen3 32B", "0.16", "0.64", "0", "0"),
             // Grok 系列 (xAI)
-            ("grok-4.5", "Grok 4.5", "2", "6", "0.50", "0"),
+            // Both rows use their below-200K base tier. Long-context requests
+            // double all three rates, which the current single-tier table
+            // cannot represent.
+            ("grok-4.6", "Grok 4.6", "2", "6", "0.50", "0"),
+            ("grok-4.5", "Grok 4.5", "2", "6", "0.30", "0"),
             // Grok CLI 官方 OAuth 态 modelUsage 上报的内部别名。定价由
             // costUsdTicks（1 tick = 1e-10 USD）双轮实测反推：input/output 与
-            // grok-4.5 同为 2/6，cache read 实际按 0.30 计（非 API 挂牌的 0.50）
+            // grok-4.5 同为 2/6，cache read 同为 0.30。
             ("grok-4.5-build", "Grok 4.5 Build", "2", "6", "0.30", "0"),
             ("grok-4.3", "Grok 4.3", "1.25", "2.50", "0.20", "0"),
             (
@@ -2704,6 +2747,25 @@ impl Database {
 
     fn repair_current_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_fixes = [
+            // The introductory Sonnet 5 rate became the standard rate. Only
+            // rewrite the exact previously seeded row; user prices remain.
+            (
+                "claude-sonnet-5",
+                "Claude Sonnet 5",
+                "2",
+                "10",
+                "0.20",
+                "2.50",
+                "3",
+                "15",
+                "0.30",
+                "3.75",
+            ),
+            // Correct the exact old Grok 4.5 cache-read seed. Grok 4.6 keeps
+            // the 0.50 rate, so the model IDs must not share a repair.
+            (
+                "grok-4.5", "Grok 4.5", "2", "6", "0.30", "0", "2", "6", "0.50", "0",
+            ),
             // 2026-07-30 OpenAI GPT-5.6 降价：luna -80%、terra -20%（sol 不变）。
             // 每档两条守卫：主守卫匹配 ≥v3.19（已跑过 07-12 cache_write 修正），
             // 0 态守卫匹配 <v3.19 直升用户（cache_write 仍为旧 seed 的 0）
@@ -3091,6 +3153,70 @@ impl Database {
                 "0.20",
                 "1.50",
                 "0.02",
+                "0",
+            ),
+            // DeepSeek's older corrections above intentionally run first so
+            // every historical shape converges on the former V4 price. These
+            // final guards then advance that known value to the current peak
+            // list price without overwriting customized rows.
+            (
+                "deepseek-chat",
+                "DeepSeek Chat",
+                "0.44",
+                "1.32",
+                "0.014",
+                "0",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+            ),
+            (
+                "deepseek-reasoner",
+                "DeepSeek Reasoner",
+                "0.44",
+                "1.32",
+                "0.014",
+                "0",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+            ),
+            (
+                "deepseek-v4-flash",
+                "DeepSeek V4 Flash",
+                "0.44",
+                "1.32",
+                "0.014",
+                "0",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+            ),
+            (
+                "deepseek-v4-flash-0731",
+                "DeepSeek V4 Flash",
+                "0.44",
+                "1.32",
+                "0.014",
+                "0",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+            ),
+            (
+                "deepseek-v4-pro",
+                "DeepSeek V4 Pro",
+                "1.32",
+                "3.96",
+                "0.044",
+                "0",
+                "0.435",
+                "0.87",
+                "0.003625",
                 "0",
             ),
         ];
