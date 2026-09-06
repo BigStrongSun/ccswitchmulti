@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+use std::path::Path;
 
 use crate::app_config::AppType;
 use crate::config::write_text_file;
@@ -16,6 +17,34 @@ fn get_unix_timestamp() -> Result<i64, AppError> {
 }
 
 pub struct PromptService;
+
+fn project_prompt_set_to_path(
+    prompts: &IndexMap<String, Prompt>,
+    target_path: &Path,
+) -> Result<Option<String>, AppError> {
+    let enabled = prompts
+        .iter()
+        .filter(|(_, prompt)| prompt.enabled)
+        .collect::<Vec<_>>();
+
+    if let Some((_, prompt)) = enabled.first() {
+        write_text_file(target_path, &prompt.content)?;
+    } else if target_path.exists() {
+        write_text_file(target_path, "")?;
+    }
+
+    if enabled.len() <= 1 {
+        return Ok(None);
+    }
+    let ids = enabled
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(Some(format!(
+        "多个 Prompt 同时启用，已按稳定顺序投影第一个；enabled IDs: {ids}"
+    )))
+}
 
 impl PromptService {
     pub fn get_prompts(
@@ -182,6 +211,41 @@ impl PromptService {
         Ok(Some(content))
     }
 
+    /// Project restored database state to the managed prompt file without
+    /// reading stale live content back into the newly imported database.
+    pub fn sync_to_live(state: &AppState, app: AppType) -> Result<(), AppError> {
+        if matches!(app, AppType::ClaudeDesktop) {
+            return Ok(());
+        }
+        let prompts = state.db.get_prompts(app.as_str())?;
+        let target_path = prompt_file_path(&app)?;
+        if let Some(warning) = project_prompt_set_to_path(&prompts, &target_path)? {
+            return Err(AppError::Message(warning));
+        }
+        Ok(())
+    }
+
+    pub fn sync_all_to_live(state: &AppState) -> Result<(), AppError> {
+        let mut failures = Vec::new();
+        for app in AppType::all() {
+            if matches!(app, AppType::ClaudeDesktop) {
+                continue;
+            }
+            if let Err(error) = Self::sync_to_live(state, app.clone()) {
+                log::warn!("同步 Prompt 到 {app:?} 失败: {error}");
+                failures.push(format!("{}: {error}", app.as_str()));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Message(format!(
+                "部分应用 Prompt 同步失败: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+
     /// 首次启动时从现有提示词文件自动导入（如果存在）
     /// 返回导入的数量
     pub fn import_from_file_on_first_launch(
@@ -238,5 +302,53 @@ impl PromptService {
 
         log::info!("自动导入完成: {}", app.as_str());
         Ok(1)
+    }
+}
+
+#[cfg(test)]
+mod upstream_sync_reliability_tests {
+    use super::project_prompt_set_to_path;
+    use crate::prompt::Prompt;
+    use indexmap::IndexMap;
+
+    fn prompt(id: &str, content: &str, enabled: bool) -> Prompt {
+        Prompt {
+            id: id.to_string(),
+            name: id.to_string(),
+            content: content.to_string(),
+            description: None,
+            enabled,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn upstream_sync_reliability_prompt_projection_uses_restored_database_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("AGENTS.md");
+        std::fs::write(&path, "stale live content").expect("seed stale live prompt");
+        let mut prompts = IndexMap::new();
+        prompts.insert("off".to_string(), prompt("off", "old", false));
+        prompts.insert("on".to_string(), prompt("on", "restored", true));
+
+        let warning = project_prompt_set_to_path(&prompts, &path).expect("project prompt");
+        assert!(warning.is_none());
+        assert_eq!(std::fs::read_to_string(path).expect("read"), "restored");
+    }
+
+    #[test]
+    fn upstream_sync_reliability_prompt_projection_is_deterministic_on_invalid_duplicates() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("AGENTS.md");
+        let mut prompts = IndexMap::new();
+        prompts.insert("first".to_string(), prompt("first", "first body", true));
+        prompts.insert("second".to_string(), prompt("second", "second body", true));
+
+        let warning = project_prompt_set_to_path(&prompts, &path)
+            .expect("project prompt")
+            .expect("duplicate enabled prompts warn");
+        assert!(warning.contains("first, second"));
+        assert_eq!(std::fs::read_to_string(path).expect("read"), "first body");
     }
 }
