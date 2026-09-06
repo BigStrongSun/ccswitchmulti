@@ -29,9 +29,10 @@ fn project_prompt_set_to_path(
 
     if let Some((_, prompt)) = enabled.first() {
         write_text_file(target_path, &prompt.content)?;
-    } else if target_path.exists() {
-        write_text_file(target_path, "")?;
     }
+    // With nothing enabled, preserve the local file: it is not part of the
+    // database/sync payload, so restore has no authority to erase it. The UI
+    // path for explicitly disabling the final managed prompt still clears it.
 
     if enabled.len() <= 1 {
         return Ok(None);
@@ -350,5 +351,21 @@ mod upstream_sync_reliability_tests {
             .expect("duplicate enabled prompts warn");
         assert!(warning.contains("first, second"));
         assert_eq!(std::fs::read_to_string(path).expect("read"), "first body");
+    }
+
+    #[test]
+    fn upstream_sync_reliability_prompt_projection_preserves_unmanaged_live_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("AGENTS.md");
+        std::fs::write(&path, "local unmanaged content").expect("seed live prompt");
+        let mut prompts = IndexMap::new();
+        prompts.insert("off".to_string(), prompt("off", "managed", false));
+
+        let warning = project_prompt_set_to_path(&prompts, &path).expect("project prompt");
+        assert!(warning.is_none());
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read"),
+            "local unmanaged content"
+        );
     }
 }
