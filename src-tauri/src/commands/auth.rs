@@ -3,7 +3,7 @@ use tauri::State;
 use crate::commands::codex_oauth::CodexOAuthState;
 use crate::commands::copilot::CopilotAuthState;
 use crate::commands::xai_oauth::XaiOAuthState;
-use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+use crate::proxy::providers::codex_oauth_auth::{CodexManagedAccount, CodexOAuthError};
 use crate::proxy::providers::copilot_auth::{
     CopilotAuthError, GitHubAccount, GitHubDeviceCodeResponse,
 };
@@ -87,6 +87,22 @@ fn map_xai_account(
     }
 }
 
+fn map_codex_account(
+    account: CodexManagedAccount,
+    default_account_id: Option<&str>,
+) -> ManagedAuthAccount {
+    ManagedAuthAccount {
+        is_default: default_account_id == Some(account.id.as_str()),
+        id: account.id,
+        provider: AUTH_PROVIDER_CODEX_OAUTH.to_string(),
+        login: account.login,
+        avatar_url: account.avatar_url,
+        authenticated_at: account.authenticated_at,
+        github_domain: account.github_domain,
+        requires_reauth: account.requires_reauth,
+    }
+}
+
 fn map_device_code_response(
     provider: &str,
     response: GitHubDeviceCodeResponse,
@@ -105,6 +121,7 @@ fn map_device_code_response(
 pub async fn auth_start_login(
     auth_provider: String,
     github_domain: Option<String>,
+    target_account_id: Option<String>,
     copilot_state: State<'_, CopilotAuthState>,
     codex_state: State<'_, CodexOAuthState>,
     xai_state: State<'_, XaiOAuthState>,
@@ -112,6 +129,9 @@ pub async fn auth_start_login(
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => {
+            if target_account_id.is_some() {
+                return Err("Targeted re-authentication is only supported for Codex OAuth".into());
+            }
             let auth_manager = copilot_state.0.read().await;
             let response = auth_manager
                 .start_device_flow(github_domain.as_deref())
@@ -122,12 +142,15 @@ pub async fn auth_start_login(
         AUTH_PROVIDER_CODEX_OAUTH => {
             let auth_manager = codex_state.0.read().await;
             let response = auth_manager
-                .start_device_flow()
+                .start_device_flow(target_account_id.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(map_device_code_response(auth_provider, response))
         }
         AUTH_PROVIDER_XAI_OAUTH => {
+            if target_account_id.is_some() {
+                return Err("Targeted re-authentication is only supported for Codex OAuth".into());
+            }
             let auth_manager = xai_state.0.read().await;
             let response = auth_manager
                 .start_device_flow()
@@ -171,9 +194,8 @@ pub async fn auth_poll_for_account(
             match auth_manager.poll_for_token(&device_code).await {
                 Ok(account) => {
                     let default_account_id = auth_manager.get_status().await.default_account_id;
-                    Ok(account.map(|account| {
-                        map_account(auth_provider, account, default_account_id.as_deref())
-                    }))
+                    Ok(account
+                        .map(|account| map_codex_account(account, default_account_id.as_deref())))
                 }
                 Err(CodexOAuthError::AuthorizationPending) => Ok(None),
                 Err(e) => Err(e.to_string()),
@@ -236,7 +258,7 @@ pub async fn auth_list_accounts(
             Ok(status
                 .accounts
                 .into_iter()
-                .map(|account| map_account(auth_provider, account, default_account_id.as_deref()))
+                .map(|account| map_codex_account(account, default_account_id.as_deref()))
                 .collect())
         }
         AUTH_PROVIDER_XAI_OAUTH => {
@@ -294,9 +316,7 @@ pub async fn auth_get_status(
                 accounts: status
                     .accounts
                     .into_iter()
-                    .map(|account| {
-                        map_account(auth_provider, account, default_account_id.as_deref())
-                    })
+                    .map(|account| map_codex_account(account, default_account_id.as_deref()))
                     .collect(),
             })
         }

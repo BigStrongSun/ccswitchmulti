@@ -63,10 +63,12 @@ export interface CodexAccountPoolQuotaStatus {
 export async function authStartLogin(
   authProvider: ManagedAuthProvider,
   githubDomain?: string,
+  targetAccountId?: string,
 ): Promise<ManagedAuthDeviceCodeResponse> {
   return invoke<ManagedAuthDeviceCodeResponse>("auth_start_login", {
     authProvider,
     githubDomain: githubDomain || null,
+    targetAccountId: targetAccountId || null,
   });
 }
 

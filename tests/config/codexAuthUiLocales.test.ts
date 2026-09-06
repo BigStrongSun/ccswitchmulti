@@ -5,6 +5,9 @@ import zhTW from "@/i18n/locales/zh-TW.json";
 import zh from "@/i18n/locales/zh.json";
 
 const requiredKeys = [
+  "codexOauth.duplicateAccount",
+  "codexOauth.reauthRequired",
+  "codexOauth.reauth",
   "codexOauth.poolAutoSwitch",
   "codexOauth.poolDescription",
   "codexOauth.poolRemaining",

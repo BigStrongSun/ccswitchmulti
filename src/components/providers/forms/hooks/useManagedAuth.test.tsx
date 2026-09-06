@@ -72,6 +72,24 @@ const deviceCode: ManagedAuthDeviceCodeResponse = {
   interval: 1,
 };
 
+const legacyReauthStatus: ManagedAuthStatus = {
+  provider: "codex_oauth",
+  authenticated: false,
+  default_account_id: null,
+  accounts: [
+    {
+      id: "legacy-local-id",
+      provider: "codex_oauth",
+      login: "legacy@example.test",
+      avatar_url: null,
+      authenticated_at: 1,
+      is_default: false,
+      github_domain: "github.com",
+      requires_reauth: true,
+    },
+  ],
+};
+
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   mocks.authGetStatus.mockResolvedValue(loggedOutStatus);
@@ -146,6 +164,24 @@ describe("useManagedAuth device flow", () => {
       expect(mocks.authCancelLogin).toHaveBeenCalledWith(
         "codex_oauth",
         "device-secret",
+      ),
+    );
+  });
+
+  it("upstream_codex_identity reauth keeps the existing local binding id", async () => {
+    mocks.authGetStatus.mockResolvedValue(legacyReauthStatus);
+    const { result } = renderManagedAuth();
+    await waitFor(() =>
+      expect(result.current.authStatus).toEqual(legacyReauthStatus),
+    );
+
+    act(() => result.current.reauthAccount("legacy-local-id"));
+
+    await waitFor(() =>
+      expect(mocks.authStartLogin).toHaveBeenCalledWith(
+        "codex_oauth",
+        undefined,
+        "legacy-local-id",
       ),
     );
   });

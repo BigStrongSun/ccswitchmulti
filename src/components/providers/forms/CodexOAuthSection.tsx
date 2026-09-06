@@ -145,11 +145,20 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
     isRemovingAccount,
     isSettingDefaultAccount,
     addAccount,
+    reauthAccount,
+    retryAuth,
     removeAccount,
     setDefaultAccount,
     cancelAuth,
     logout,
   } = useCodexOauth();
+  const visibleError =
+    error === "codex_oauth_duplicate_account"
+      ? t(
+          "codexOauth.duplicateAccount",
+          "该 ChatGPT 账号已经存在，无需重复添加。",
+        )
+      : error;
 
   const { data: poolPolicy } = useQuery({
     queryKey: poolQueryKey,
@@ -593,7 +602,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
       )}
 
       {/* 账号选择器 */}
-      {hasAnyAccount && onAccountSelect && (
+      {accounts.length > 0 && onAccountSelect && (
         <div className="space-y-2">
           <Label className="text-sm text-muted-foreground">
             {t("codexOauth.selectAccount", "选择账号")}
@@ -617,7 +626,11 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                 </span>
               </SelectItem>
               {accounts.map((account) => (
-                <SelectItem key={account.id} value={account.id}>
+                <SelectItem
+                  key={account.id}
+                  value={account.id}
+                  disabled={account.requires_reauth}
+                >
                   <div className="flex items-center gap-2">
                     <User className="h-4 w-4 text-muted-foreground" />
                     <span>{account.login}</span>
@@ -651,7 +664,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
       )}
 
       {/* 已登录账号列表 */}
-      {hasAnyAccount && (
+      {accounts.length > 0 && (
         <div className="space-y-2">
           <Label className="text-sm text-muted-foreground">
             {t("codexOauth.loggedInAccounts", "已登录账号")}
@@ -676,9 +689,28 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                         {t("codexOauth.selected", "已选中")}
                       </Badge>
                     )}
+                    {account.requires_reauth && (
+                      <Badge
+                        variant="outline"
+                        className="border-amber-500 text-xs text-amber-600"
+                      >
+                        {t("codexOauth.reauthRequired", "需要重新认证")}
+                      </Badge>
+                    )}
                   </div>
                   <div className="flex items-center gap-1">
-                    {defaultAccountId !== account.id && (
+                    {account.requires_reauth ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => reauthAccount(account.id)}
+                        disabled={isAddingAccount}
+                      >
+                        {t("codexOauth.reauth", "重新认证")}
+                      </Button>
+                    ) : defaultAccountId !== account.id ? (
                       <Button
                         type="button"
                         variant="ghost"
@@ -689,7 +721,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                       >
                         {t("codexOauth.setAsDefault", "设为默认")}
                       </Button>
-                    )}
+                    ) : null}
                     <Button
                       type="button"
                       variant="ghost"
@@ -799,11 +831,11 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
       {/* 错误状态 */}
       {pollingState === "error" && error && (
         <div className="space-y-2">
-          <p className="text-sm text-red-500">{error}</p>
+          <p className="text-sm text-red-500">{visibleError}</p>
           <div className="flex gap-2">
             <Button
               type="button"
-              onClick={addAccount}
+              onClick={retryAuth}
               variant="outline"
               size="sm"
             >

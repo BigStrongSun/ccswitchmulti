@@ -582,20 +582,20 @@ impl RequestForwarder {
                     if !manager.pool_quota_refresh_due(&entry.account_id).await {
                         return None;
                     }
-                    let token = if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
-                        native_token
+                    let credentials = if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+                        native_token.map(|token| (token, None))
                     } else {
                         manager
-                            .get_valid_token_for_account(&entry.account_id)
+                            .get_valid_token_and_workspace_for_account(&entry.account_id)
                             .await
                             .ok()
+                            .map(|(token, workspace)| (token, Some(workspace)))
                     };
-                    let result = match token {
-                        Some(token) => {
+                    let result = match credentials {
+                        Some((token, workspace)) => {
                             crate::services::subscription::query_codex_remaining_percent(
                                 &token,
-                                (entry.account_id != NATIVE_CODEX_ACCOUNT_ID)
-                                    .then_some(entry.account_id.as_str()),
+                                workspace.as_deref(),
                             )
                             .await
                         }
@@ -3109,26 +3109,24 @@ impl RequestForwarder {
                         .as_ref()
                         .and_then(|m| m.managed_account_id_for("codex_oauth"));
 
-                    let token_result = match &account_id {
+                    let credentials_result = match &account_id {
                         Some(id) => {
                             log::debug!("[CodexOAuth] 使用指定账号 {id} 获取 token");
-                            codex_auth.get_valid_token_for_account(id).await
+                            codex_auth
+                                .get_valid_token_and_workspace_for_account(id)
+                                .await
                         }
                         None => {
                             log::debug!("[CodexOAuth] 使用默认账号获取 token");
-                            codex_auth.get_valid_token().await
+                            codex_auth.get_valid_token_and_workspace().await
                         }
                     };
 
-                    match token_result {
-                        Ok(token) => {
+                    match credentials_result {
+                        Ok((token, workspace_id)) => {
                             auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
                             is_codex_oauth = true;
-                            // 解析使用的 account_id（用于注入 ChatGPT-Account-Id header）
-                            codex_oauth_account_id = match account_id {
-                                Some(id) => Some(id),
-                                None => codex_auth.default_account_id().await,
-                            };
+                            codex_oauth_account_id = Some(workspace_id);
                             log::debug!(
                                 "[CodexOAuth] 成功获取 access_token (account={})",
                                 codex_oauth_account_id.as_deref().unwrap_or("default")
@@ -3198,7 +3196,7 @@ impl RequestForwarder {
             Vec::new()
         };
 
-        // 注入 Codex OAuth 的 ChatGPT-Account-Id header（如果有 account_id）
+        // 注入 Codex OAuth 的上游 workspace header；本地账号绑定 ID 不得出站。
         if let Some(ref account_id) = codex_oauth_account_id {
             if let Ok(hv) = http::HeaderValue::from_str(account_id) {
                 auth_headers.push((http::HeaderName::from_static("chatgpt-account-id"), hv));
@@ -4558,18 +4556,19 @@ impl RequestForwarder {
                         .meta
                         .as_ref()
                         .and_then(|m| m.managed_account_id_for("codex_oauth"));
-                    let token_result = match &account_id {
-                        Some(id) => codex_auth.get_valid_token_for_account(id).await,
-                        None => codex_auth.get_valid_token().await,
+                    let credentials_result = match &account_id {
+                        Some(id) => {
+                            codex_auth
+                                .get_valid_token_and_workspace_for_account(id)
+                                .await
+                        }
+                        None => codex_auth.get_valid_token_and_workspace().await,
                     };
-                    match token_result {
-                        Ok(token) => {
+                    match credentials_result {
+                        Ok((token, workspace_id)) => {
                             auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
                             is_codex_oauth = true;
-                            codex_oauth_account_id = match account_id {
-                                Some(id) => Some(id),
-                                None => codex_auth.default_account_id().await,
-                            };
+                            codex_oauth_account_id = Some(workspace_id);
                         }
                         Err(err) => {
                             return Err(ProxyError::AuthError(format!(
@@ -4908,18 +4907,19 @@ impl RequestForwarder {
                         .meta
                         .as_ref()
                         .and_then(|m| m.managed_account_id_for("codex_oauth"));
-                    let token_result = match &account_id {
-                        Some(id) => codex_auth.get_valid_token_for_account(id).await,
-                        None => codex_auth.get_valid_token().await,
+                    let credentials_result = match &account_id {
+                        Some(id) => {
+                            codex_auth
+                                .get_valid_token_and_workspace_for_account(id)
+                                .await
+                        }
+                        None => codex_auth.get_valid_token_and_workspace().await,
                     };
-                    match token_result {
-                        Ok(token) => {
+                    match credentials_result {
+                        Ok((token, workspace_id)) => {
                             auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
                             is_codex_oauth = true;
-                            codex_oauth_account_id = match account_id {
-                                Some(id) => Some(id),
-                                None => codex_auth.default_account_id().await,
-                            };
+                            codex_oauth_account_id = Some(workspace_id);
                         }
                         Err(err) => {
                             return Err(ProxyError::AuthError(format!(
@@ -6491,21 +6491,19 @@ async fn resolve_hosted_tool_client(
             .meta
             .as_ref()
             .and_then(|meta| meta.managed_account_id_for("codex_oauth"));
-        let token_result = match &account_id {
-            Some(id) => codex_auth.get_valid_token_for_account(id).await,
-            None => codex_auth.get_valid_token().await,
-        };
-        return match token_result {
-            Ok(token) => {
-                let resolved_account_id = match &account_id {
-                    Some(_) => account_id,
-                    None => codex_auth.default_account_id().await,
-                };
-                Ok(OpenAiHostedToolClient::from_codex_oauth(
-                    token,
-                    resolved_account_id,
-                ))
+        let credentials_result = match &account_id {
+            Some(id) => {
+                codex_auth
+                    .get_valid_token_and_workspace_for_account(id)
+                    .await
             }
+            None => codex_auth.get_valid_token_and_workspace().await,
+        };
+        return match credentials_result {
+            Ok((token, workspace_id)) => Ok(OpenAiHostedToolClient::from_codex_oauth(
+                token,
+                Some(workspace_id),
+            )),
             Err(err) => Err(format!(
                 "OpenAI hosted tool bridge failed to obtain Codex OAuth token: {err}"
             )),

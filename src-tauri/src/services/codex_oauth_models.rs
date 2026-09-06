@@ -24,7 +24,7 @@ const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.
 /// 失败则是 DNS、TLS、代理、超时或本机网络层问题，调用方可以再尝试本地缓存兜底。
 pub async fn fetch_models_with_token(
     token: &str,
-    account_id: &str,
+    workspace_id: &str,
 ) -> Result<Vec<FetchedModel>, String> {
     let client = crate::proxy::http_client::get();
     let response = client
@@ -32,7 +32,7 @@ pub async fn fetch_models_with_token(
         .query(&[("client_version", CODEX_OAUTH_CLIENT_VERSION)])
         .header("Authorization", format!("Bearer {token}"))
         .header("originator", CODEX_OAUTH_ORIGINATOR)
-        .header("chatgpt-account-id", account_id)
+        .header("chatgpt-account-id", workspace_id)
         .timeout(Duration::from_secs(CODEX_OAUTH_FETCH_TIMEOUT_SECS))
         .send()
         .await
