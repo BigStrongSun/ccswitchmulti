@@ -5322,3 +5322,11 @@ supported in one streaming turn`。
 - `0e3fe111` 按官方 `c9fe340b` 收口同步一致性：WebDAV、S3、auto-sync 和 manual SQL/DB restore 共享 transport-neutral async mutex；`profiles` 纳入两种传输共同的 auto-sync 表集合。Skill 采用固定 `global sync -> Skill RwLock -> DB mutex` 顺序，快照读者与安装、卸载、更新、备份恢复、导入、切换、存储迁移、ZIP 安装和 app 投影互斥；异步下载不持 std 锁，并在落盘前重新检查身份。恢复后重建 Provider/Prompt live、model-pricing sidecar、settings cache、runtime log level，并失效 Tauri 真实进程的 UsageCache，失败继续聚合到原 warning payload。
 - 后续审计发现官方 `c911c7e3` 修正了 `c9fe340b` 的 Prompt 零启用行为；`f85984ba` 已同步采用：restore snapshot 没有启用 Prompt 时保留本机未托管 live 文件，只有用户在 UI 明确禁用最后一个 managed Prompt 才清空。该回归先观察到 live 内容被清空，再修到 3/3 projection tests 通过。
 - TDD 与批次门禁：`upstream_backup_reliability_` 初始 7/7 按预期失败、随后 7/7 通过；`upstream_backup_atomic_` 从缺失原子发布边界变为 4/4；完整 `database::backup::tests` 为 19 passed / 2 ignored。同步层独立 RED 覆盖分裂 transport mutex、缺失 UsageCache 全失效、缺失 Prompt projection、缺失 Skill state lock、遗漏 profiles auto-sync；最终前缀 7/7。批次一次性门禁通过 usage-cache 4、Prompt 2、Skill 44、sync-protocol 23、manual import/restore 3、WebDAV command 8、S3 command 8、WebDAV/S3 auto-sync 各 6；没有运行全量 Rust、前端或 Tauri/NSIS。
+
+## 2026-09-07 v3.20.1-1 Task 5 数据库游标迁移
+
+- 迁移前 CCSwitchMulti schema 为 v20：`session_log_sync` 只有 `file_path`、纳秒/旧秒级 `last_modified`、`last_line_offset` 和 `last_synced_at`；Codex、Claude、Gemini、OpenCode、Grok Build 共用这张表，但没有 Pi 会话解析器或 Pi 去重账本。官方提交使用的 v17/v18 号不能照搬，实际采用的 Claude 行为被映射为 CCSM v20→v21；fresh DDL 同步增加可空 `last_byte_offset` 与 `last_tail_fingerprint`，存量行保持 NULL，重复启动幂等。
+- `db4c6fe9` 将 Claude 扫描改为一次性预取游标、按字节 seek，只把以换行结尾的完整记录推进到持久游标。旧行号游标首次按前 L 行转换到字节边界而不重放历史；用量插入和游标/指纹推进处于同一 SQLite 事务。未终结但已形成合法 JSON 的尾段仍可依靠 request ID 去重先计费，游标不越过它，补全后会重读并继续；中途 I/O 读取错误不伪装成成功。
+- 游标边界前最多 4096 bytes 使用带 `claude-session-tail-v1` 域标签的 SHA-256 截断指纹。文件短于旧偏移视为截断，边界指纹失配视为重写；两者都把游标钉到当前 EOF，不回放可能已经 rollup/prune 且失去明细去重证据的区间，随后新追加仍可正常导入。永久跳过通过 `SessionSyncResult.errors` 明确报告，读取中断则计入 deferred 并保留旧 mtime 以便续读。
+- TDD RED 4/4 准确失败于 fresh/v20 缺列、半行补全被旧行号吞掉、重写增长区间被误导入；GREEN 后 `upstream_session_cursor_` 8/8。批次门禁一次完成：`database::schema::tests` 9/9、`services::session_usage::tests` 14/14，另有 rustfmt、diff 与三文件严格 UTF-8/no-BOM/no-U+FFFD 检查。
+- 官方 `bcee61be`、`f8d97348`、`f05e2033` 已采用并绑定 `db4c6fe9`。`5ca9459d` 的 Pi lookup index 延至 Task 8，避免当前不存在 Pi 表时制造孤儿 schema；`092ea1f3` 是设置/UI 行为而非数据库迁移，延至 Task 9 使用量界面批次。两项 deferred 都是明确的所有权延后，不是遗漏或已实现声明。

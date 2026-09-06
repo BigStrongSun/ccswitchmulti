@@ -160,6 +160,41 @@ const explicit = new Map([
     ],
   ],
   [
+    "5ca9459d",
+    [
+      "deferred",
+      "Task 5 confirmed CCSwitchMulti has no Pi session parser or dedup ledger yet; defer the Pi-specific lookup index to Task 8 so no orphan schema is created.",
+    ],
+  ],
+  [
+    "092ea1f3",
+    [
+      "deferred",
+      "Task 5 confirmed the auto/manual scan toggle is settings and frontend behavior rather than a database migration; evaluate it with the Task 9 usage UI batch.",
+    ],
+  ],
+  [
+    "bcee61be",
+    [
+      "adopted",
+      "Task 5 commit db4c6fe9 maps Claude incremental byte cursors onto CCSwitchMulti schema v21, preserving legacy line cursors and other parsers.",
+    ],
+  ],
+  [
+    "f8d97348",
+    [
+      "adopted",
+      "Task 5 commit db4c6fe9 fingerprints the committed Claude prefix, pins truncation or rewrites at EOF, keeps incomplete tails resumable, and makes cursor advancement transactional.",
+    ],
+  ],
+  [
+    "f05e2033",
+    [
+      "adopted",
+      "Task 5 commit db4c6fe9 surfaces permanent rewrite skips in session sync errors instead of reporting a silent success.",
+    ],
+  ],
+  [
     "5a040348",
     [
       "already-covered",
