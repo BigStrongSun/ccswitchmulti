@@ -139,6 +139,27 @@ const explicit = new Map([
     ],
   ],
   [
+    "dfb2e523",
+    [
+      "adopted",
+      "Task 4 commits c225a1b0/1b00aeb5 preserve SQL values and sequences, validate staged restores, and atomically publish safety snapshots under a backup-file lock.",
+    ],
+  ],
+  [
+    "c9fe340b",
+    [
+      "adopted",
+      "Task 4 commit 0e3fe111 unifies WebDAV/S3/manual restore locking, coordinates Skill DB/SSOT state, and rebuilds every live projection after import.",
+    ],
+  ],
+  [
+    "c911c7e3",
+    [
+      "adopted",
+      "Task 4 commit f85984ba preserves unmanaged local Prompt content when restore enables no managed Prompt, with a focused projection regression.",
+    ],
+  ],
+  [
     "5a040348",
     [
       "already-covered",
