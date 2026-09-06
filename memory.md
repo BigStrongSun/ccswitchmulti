@@ -5291,3 +5291,4 @@ supported in one streaming turn`。
 - 本地分支复审没有新增已经完成但漏合的产品分支。`codex-power-presets@add559aa` 工作树虽干净但 current renderer 仍明确 NO-GO；`codex-multirouter-ssot-v2`、`codex-reasoning-probe-backend`、detached error journal 和 `ccsm-agent-mesh` 继续按未完成现场保留。
 - 批准方案采用分层语义迁移：低风险数据、基础可靠性、数据库版本映射、Codex OAuth/账号身份、代理协议、Pi、前端/预设、版本发布。每批先 RED、再根修、独立提交并验证；最终优先用本机 9950X 完成 Windows 全门禁，再用 Windows/Ubuntu/macOS CI 证明跨平台条件编译，全部通过后才 tag/release。
 - 设计文档为 `docs/superpowers/specs/2026-09-06-upstream-v3.20.1-migration-design.md`。实现必须使用隔离 `bigstrongsun/upstream-v3.20.1-migration` worktree，不清理用户 `.tmp/`、provider layout preview 或任何未完成 worktree。
+- 用户审阅后要求避免过于频繁的测试。门禁调整为：开发时最小聚焦 RED/GREEN、每批一次受影响模块验证、三个跨批次集成检查点、功能冻结后一次完整 9950X 本地候选门禁，再运行三平台 CI；没有相关源码变化不重复全量测试，失败时先只重跑失败项和依赖范围。
