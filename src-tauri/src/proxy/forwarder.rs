@@ -2554,6 +2554,9 @@ impl RequestForwarder {
         let codex_anthropic_base_is_full_endpoint =
             codex_responses_to_anthropic && base_url_is_full_endpoint(&base_url, "/v1/messages");
 
+        let is_codex_alpha_search = matches!(app_type, AppType::Codex)
+            && split_endpoint_and_query(&effective_endpoint).0 == "/alpha/search";
+
         let url = if let Some(policy) = codex_third_party_request_policy.as_ref() {
             let transport = if codex_responses_to_chat {
                 super::providers::codex_request::CodexRequestTransport::ChatCompletions
@@ -2561,6 +2564,8 @@ impl RequestForwarder {
                 super::providers::codex_request::CodexRequestTransport::Responses
             };
             policy.prepare_url_with_query(transport, passthrough_query.as_deref())?
+        } else if is_full_url && is_codex_alpha_search {
+            rewrite_codex_alpha_search_full_url(&base_url, passthrough_query.as_deref())?
         } else if matches!(resolved_claude_api_format.as_deref(), Some("gemini_native")) {
             super::gemini_url::resolve_gemini_native_url(
                 &base_url,
@@ -2794,24 +2799,20 @@ impl RequestForwarder {
             );
         }
 
-        // Same native-Responses path: scrub the OpenAI-backend-private fields
-        // and tool carriers (`external_web_access`, `prompt_cache_retention`,
-        // `additional_tools`, `tool_search`, …) that xAI's strict serde parser
-        // rejects with 400/422. Deterministic field removals only, gated on the
-        // xAI OAuth path, so the prompt-cache prefix stays stable and no other
-        // provider is affected. Runs after the flatten above so lifted
-        // `namespace` tools survive the tool-type whitelist.
+        // Same native-Responses path: remap an alien subagent model to the live
+        // Grok upstream, then scrub fields xAI rejects. Agent-message payloads
+        // were already projected by the transport-neutral third-party boundary
+        // above, preserving its fail-closed encrypted-content policy.
         if matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && !codex_responses_to_chat
             && !codex_responses_to_anthropic
             && super::providers::provider_needs_responses_namespace_flatten(provider)
-            && super::providers::transform_codex_responses_xai_sanitize::sanitize_xai_responses_request(
-                &mut request_body,
-            )
         {
-            log::debug!(
-                "[Codex] Sanitized xAI-unsupported Responses fields (provider={})",
-                provider.id
+            super::providers::transform_codex_responses_xai_sanitize::apply_xai_native_responses_request_compat(
+                &mut request_body,
+                &provider.id,
+                super::providers::codex_provider_upstream_model(provider).as_deref(),
+                &provider.settings_config,
             );
         }
 
@@ -6219,6 +6220,51 @@ fn append_query_to_full_url(base_url: &str, query: Option<&str>) -> String {
         }
         _ => base_url.to_string(),
     }
+}
+
+/// Derive the sibling Alpha Search endpoint only from an unambiguous complete
+/// Responses URL. Opaque full URLs fail closed instead of receiving the search
+/// payload at an unrelated route.
+fn rewrite_codex_alpha_search_full_url(
+    base_url: &str,
+    request_query: Option<&str>,
+) -> Result<String, ProxyError> {
+    let trimmed = base_url.trim();
+    let parsed = url::Url::parse(trimmed).map_err(|_| {
+        ProxyError::ConfigError("Codex Alpha Search requires a valid full Responses URL".into())
+    })?;
+    let without_fragment = trimmed.split_once('#').map_or(trimmed, |(head, _)| head);
+    let (url_without_query, base_query) = without_fragment
+        .split_once('?')
+        .map_or((without_fragment, None), |(head, query)| {
+            (head, Some(query))
+        });
+    let url_without_query = url_without_query.trim_end_matches('/');
+    let path = parsed.path().trim_end_matches('/');
+    let suffix = if path.ends_with("/responses/compact") {
+        "/responses/compact"
+    } else if path.ends_with("/responses") {
+        "/responses"
+    } else {
+        return Err(ProxyError::ConfigError(
+            "Codex Alpha Search cannot derive /alpha/search from an opaque full URL; use a base URL or a full URL ending in /responses".into(),
+        ));
+    };
+    let prefix_len = url_without_query
+        .len()
+        .checked_sub(suffix.len())
+        .ok_or_else(|| ProxyError::ConfigError("Invalid Codex full URL".into()))?;
+    let mut rewritten = format!("{}/alpha/search", &url_without_query[..prefix_len]);
+    match (
+        base_query.filter(|query| !query.is_empty()),
+        request_query.filter(|query| !query.is_empty()),
+    ) {
+        (Some(base), Some(request)) => rewritten.push_str(&format!("?{base}&{request}")),
+        (Some(base), None) => rewritten.push_str(&format!("?{base}")),
+        (None, Some(request)) => rewritten.push_str(&format!("?{request}")),
+        (None, None) => {}
+    }
+    Ok(rewritten)
 }
 
 fn build_codex_oauth_session_headers(
@@ -11887,6 +11933,36 @@ mod tests {
         let url = append_query_to_full_url("https://relay.example/api?foo=bar", Some("x-id=1"));
 
         assert_eq!(url, "https://relay.example/api?foo=bar&x-id=1");
+    }
+
+    #[test]
+    fn upstream_protocol_alpha_search_rewrites_only_known_full_responses_urls() {
+        assert_eq!(
+            rewrite_codex_alpha_search_full_url(
+                "https://relay.example/v1/responses?api-version=2026-07",
+                Some("client_version=0.144.6"),
+            )
+            .unwrap(),
+            "https://relay.example/v1/alpha/search?api-version=2026-07&client_version=0.144.6"
+        );
+        assert_eq!(
+            rewrite_codex_alpha_search_full_url(
+                "https://relay.example/backend-api/codex/responses/compact/",
+                None,
+            )
+            .unwrap(),
+            "https://relay.example/backend-api/codex/alpha/search"
+        );
+
+        let error = rewrite_codex_alpha_search_full_url(
+            "https://relay.example/custom/rpc-endpoint",
+            Some("client_version=0.144.6"),
+        )
+        .expect_err("an opaque full URL must not receive an Alpha Search payload");
+        assert!(matches!(
+            error,
+            ProxyError::ConfigError(message) if message.contains("cannot derive /alpha/search")
+        ));
     }
 
     #[test]

@@ -122,6 +122,96 @@ pub(crate) fn sanitize_xai_responses_request(body: &mut Value) -> bool {
     changed
 }
 
+/// Apply native xAI request compatibility after namespace flattening.
+///
+/// Multi-agent payload projection is intentionally handled earlier by the
+/// transport-neutral third-party Responses boundary, which also rejects
+/// unreadable encrypted payloads. This xAI-specific step only repairs the
+/// model selected by a subagent and applies xAI's request sanitizer.
+pub(crate) fn apply_xai_native_responses_request_compat(
+    body: &mut Value,
+    provider_id: &str,
+    upstream_model: Option<&str>,
+    settings: &Value,
+) {
+    if let Some(upstream_model) = upstream_model {
+        let allowed = collect_xai_catalog_model_ids(settings);
+        if let Some((from, to)) = rewrite_xai_unknown_request_model(body, upstream_model, &allowed)
+        {
+            log::info!(
+                "[Codex] Rewrote xAI-unknown request model {from} -> {to} (provider={provider_id})"
+            );
+        }
+    }
+    if sanitize_xai_responses_request(body) {
+        log::debug!("[Codex] Sanitized xAI-unsupported Responses fields (provider={provider_id})");
+    }
+}
+
+pub(crate) fn rewrite_xai_unknown_request_model(
+    body: &mut Value,
+    upstream_model: &str,
+    allowed_models: &HashSet<String>,
+) -> Option<(String, String)> {
+    let upstream = upstream_model.trim();
+    if upstream.is_empty() {
+        return None;
+    }
+    let object = body.as_object_mut()?;
+    let requested = object
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if !requested.is_empty()
+        && (requested.eq_ignore_ascii_case(upstream)
+            || request_is_grok_model(&requested)
+            || allowed_models
+                .iter()
+                .any(|model| model.eq_ignore_ascii_case(&requested)))
+    {
+        return None;
+    }
+    object.insert("model".to_string(), Value::String(upstream.to_string()));
+    Some((requested, upstream.to_string()))
+}
+
+pub(crate) fn collect_xai_catalog_model_ids(settings: &Value) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let Some(models) = settings
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+    else {
+        return ids;
+    };
+    for entry in models {
+        for key in ["model", "slug", "id"] {
+            if let Some(id) = entry
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+pub(crate) fn request_is_grok_model(request: &str) -> bool {
+    let bare = request
+        .trim()
+        .rsplit_once('/')
+        .map(|(_, bare)| bare.trim())
+        .unwrap_or_else(|| request.trim());
+    bare.as_bytes()
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"grok"))
+}
+
 /// Whether the request's (possibly provider-prefixed) model resolves to
 /// grok-4.5. Mirrors sub2api's suffix match: `foo/grok-4.5` counts.
 fn request_targets_grok_45(body: &Value) -> bool {
@@ -1763,5 +1853,52 @@ mod tests {
         assert!(sanitize_xai_responses_request(&mut body));
         // second pass finds nothing left to change
         assert!(!sanitize_xai_responses_request(&mut body));
+    }
+
+    #[test]
+    fn upstream_protocol_remaps_unknown_subagent_model_but_preserves_grok_and_catalog_models() {
+        let allowed = collect_xai_catalog_model_ids(&json!({
+            "modelCatalog": {
+                "models": [
+                    {"slug": "grok-4.6"},
+                    {"model": "visible-grok", "upstreamModel": "grok-4.5"}
+                ]
+            }
+        }));
+
+        let mut unknown = json!({"model": "gpt-5.6-sol", "input": []});
+        assert_eq!(
+            rewrite_xai_unknown_request_model(&mut unknown, "grok-4.6", &allowed),
+            Some(("gpt-5.6-sol".to_string(), "grok-4.6".to_string()))
+        );
+        assert_eq!(unknown["model"], "grok-4.6");
+
+        for model in ["grok-4.7-fast", "xai/Grok-4.7-Fast", "visible-grok"] {
+            let mut known = json!({"model": model});
+            assert_eq!(
+                rewrite_xai_unknown_request_model(&mut known, "grok-4.6", &allowed),
+                None,
+                "{model} must remain selectable"
+            );
+            assert_eq!(known["model"], model);
+        }
+    }
+
+    #[test]
+    fn upstream_protocol_missing_model_uses_upstream_and_empty_upstream_never_invents_one() {
+        let allowed = HashSet::new();
+        let mut missing = json!({"input": []});
+        assert_eq!(
+            rewrite_xai_unknown_request_model(&mut missing, "grok-4.6", &allowed),
+            Some((String::new(), "grok-4.6".to_string()))
+        );
+        assert_eq!(missing["model"], "grok-4.6");
+
+        let mut body = json!({"model": "gpt-5.6-sol"});
+        assert_eq!(
+            rewrite_xai_unknown_request_model(&mut body, "  ", &allowed),
+            None
+        );
+        assert_eq!(body["model"], "gpt-5.6-sol");
     }
 }

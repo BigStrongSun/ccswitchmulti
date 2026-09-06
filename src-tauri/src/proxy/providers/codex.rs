@@ -1428,16 +1428,21 @@ fn endpoint_request_compatibility(
     provider: &Provider,
     transport: TransportKind,
 ) -> CodexRequestCompatibility {
-    let host = provider_codex_base_url(provider)
-        .and_then(|base_url| url::Url::parse(&base_url).ok())
+    let base_url = provider_codex_base_url(provider);
+    let host = base_url
+        .as_deref()
+        .and_then(|base_url| url::Url::parse(base_url).ok())
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
-    let tool_schema_dialect = if matches!(host.as_deref(), Some("api.kimi.com" | "api.moonshot.cn"))
-    {
+    let is_moonshot = base_url.as_deref().is_some_and(
+        super::transform_codex_chat_moonshot_schema::upstream_requires_ref_sibling_all_of,
+    );
+    let tool_schema_dialect = if is_moonshot {
         ToolSchemaDialect::MoonshotMfjs
     } else {
         ToolSchemaDialect::OpenAi
     };
     let history_replay = match transport {
+        TransportKind::OpenAiChat if is_moonshot => HistoryReplay::Omit,
         TransportKind::OpenAiChat => HistoryReplay::ChatReasoningContent,
         TransportKind::OpenAiResponses if host.as_deref() == Some("api.deepseek.com") => {
             HistoryReplay::ResponsesReasoningTextContent
@@ -2843,6 +2848,20 @@ pub(crate) fn prepare_codex_native_responses_model(
     body: &mut JsonValue,
 ) -> Result<Option<String>, ProxyError> {
     apply_codex_native_responses_reasoning_effort(provider, body)?;
+    let preserve_future_grok = provider_needs_responses_namespace_flatten(provider)
+        && body
+            .get("model")
+            .and_then(JsonValue::as_str)
+            .is_some_and(super::transform_codex_responses_xai_sanitize::request_is_grok_model);
+    if preserve_future_grok {
+        if let Some(mapped) = apply_codex_request_upstream_model(provider, body) {
+            return Ok(Some(mapped));
+        }
+        return Ok(body
+            .get("model")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string));
+    }
     Ok(apply_codex_upstream_model(provider, body))
 }
 
@@ -7248,6 +7267,50 @@ wire_api = "responses"
             "config": "base_url = \"https://api.deepseek.com/v1\"\nwire_api = \"responses\""
         }));
         assert!(!provider_needs_responses_namespace_flatten(&deepseek));
+    }
+
+    #[test]
+    fn upstream_protocol_xai_native_preparation_preserves_future_grok_models() {
+        let mut provider = create_provider(json!({
+            "auth": {},
+            "config": "model = \"grok-4.6\"",
+            "model": "grok-4.6"
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("xai_oauth".to_string()),
+            ..Default::default()
+        });
+        let mut body = json!({"model": "xai/Grok-4.7-Fast", "input": []});
+
+        prepare_codex_native_responses_model(&provider, &mut body)
+            .expect("prepare native xAI Responses model");
+
+        assert_eq!(body["model"], "xai/Grok-4.7-Fast");
+    }
+
+    #[test]
+    fn upstream_protocol_kimi_chat_default_omits_reasoning_replay() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "secret"},
+            "config": "model = \"kimi-k2.6\"\nbase_url = \"https://api.kimi.com/coding/v1\"\nwire_api = \"chat\"",
+            "base_url": "https://api.kimi.com/coding/v1"
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+
+        let compatibility = resolve_codex_request_compatibility(
+            &provider,
+            "kimi-k2.6",
+            "kimi-k2.6",
+            TransportKind::OpenAiChat,
+            &db,
+            100,
+        );
+
+        assert_eq!(compatibility.history_replay, HistoryReplay::Omit);
     }
 
     fn v2_target_provider(id: &str, api_format: &str, models: serde_json::Value) -> Provider {

@@ -21,7 +21,7 @@ use super::{
     resolve_codex_cache_config, resolve_codex_chat_reasoning_config,
     transform_codex_chat::{
         apply_hosted_tool_switches_to_chat_body, build_codex_tool_context_from_request,
-        responses_to_chat_completions_with_reasoning_text_only_and_cache,
+        responses_to_chat_completions_with_reasoning_text_only_cache_and_history,
     },
     CodexAdapter, ProviderAdapter,
 };
@@ -251,6 +251,13 @@ impl CodexThirdPartyRequestPolicy {
                 .tool_schema_dialect
                 .unwrap_or(ToolSchemaDialect::OpenAi),
         )?;
+        if transport == CodexRequestTransport::ChatCompletions
+            && super::transform_codex_chat_moonshot_schema::upstream_requires_ref_sibling_all_of(
+                &self.base_url,
+            )
+        {
+            super::transform_codex_chat_moonshot_schema::wrap_ref_siblings_in_chat_tools(&mut body);
+        }
         if transport == CodexRequestTransport::Responses
             && provider_needs_responses_namespace_flatten(&self.provider)
         {
@@ -328,11 +335,15 @@ impl CodexThirdPartyRequestPolicy {
             options.hosted_web_search_enabled,
             options.hosted_image_generation_enabled,
         );
-        let mut body = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+        let mut body = responses_to_chat_completions_with_reasoning_text_only_cache_and_history(
             logical_body,
             reasoning_config.as_ref(),
             text_only_override,
             Some(&cache_config),
+            options
+                .history_replay
+                .unwrap_or(HistoryReplay::ChatReasoningContent)
+                == HistoryReplay::ChatReasoningContent,
         )?;
         apply_hosted_tool_switches_to_chat_body(&mut body, &tool_context);
         inject_codex_chat_prompt_cache_key(

@@ -481,6 +481,15 @@ impl ProxyServer {
                 "/grokbuild/v1/responses/compact",
                 post(handlers::handle_grokbuild_responses_compact),
             )
+            // Codex standalone Alpha Search aliases all normalize to the
+            // selected provider's canonical sibling `/alpha/search` route.
+            .route("/alpha/search", post(handlers::handle_alpha_search))
+            .route("/v1/alpha/search", post(handlers::handle_alpha_search))
+            .route("/v1/v1/alpha/search", post(handlers::handle_alpha_search))
+            .route(
+                "/codex/v1/alpha/search",
+                post(handlers::handle_alpha_search),
+            )
             // Gemini API (支持带前缀和不带前缀)
             //
             // 用 `any(..)` 覆盖所有 HTTP 方法：除了 POST `:generateContent` /

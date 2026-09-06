@@ -611,6 +611,25 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
     text_only_override: Option<bool>,
     cache_config: Option<&CodexCacheConfig>,
 ) -> Result<Value, ProxyError> {
+    responses_to_chat_completions_with_reasoning_text_only_cache_and_history(
+        body,
+        reasoning_config,
+        text_only_override,
+        cache_config,
+        true,
+    )
+}
+
+/// Convert a Responses request while honoring the resolved history-replay
+/// contract. `replay_reasoning_content=false` removes both real replayed
+/// reasoning and synthetic tool-call placeholders from the Chat wire body.
+pub(crate) fn responses_to_chat_completions_with_reasoning_text_only_cache_and_history(
+    body: Value,
+    reasoning_config: Option<&CodexChatReasoningConfig>,
+    text_only_override: Option<bool>,
+    cache_config: Option<&CodexCacheConfig>,
+    replay_reasoning_content: bool,
+) -> Result<Value, ProxyError> {
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
     if !tool_context.unsupported_response_tools().is_empty() {
@@ -649,6 +668,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
             &mut messages,
             &tool_context,
             text_only_model,
+            replay_reasoning_content,
         )?;
     }
     let messages = collapse_system_messages_to_head(messages);
@@ -1170,6 +1190,7 @@ fn append_responses_input_as_chat_messages(
     messages: &mut Vec<Value>,
     tool_context: &CodexToolContext,
     text_only_model: bool,
+    replay_reasoning_content: bool,
 ) -> Result<(), ProxyError> {
     let mut pending = PendingChatItems {
         tool_calls: Vec::new(),
@@ -1223,12 +1244,21 @@ fn append_responses_input_as_chat_messages(
     // （其后已没有任何可前向附挂的 message / function_call），回溯附挂到最后一条
     // assistant；目标已有 reasoning_content 时追加，以保留同一 turn 的 embedded
     // reasoning 与 trailing reasoning。
-    attach_pending_reasoning_to_previous_assistant(
-        messages,
-        pending.last_assistant_index,
-        &mut pending.reasoning,
-    );
-    backfill_tool_call_reasoning_placeholders(messages);
+    if replay_reasoning_content {
+        attach_pending_reasoning_to_previous_assistant(
+            messages,
+            pending.last_assistant_index,
+            &mut pending.reasoning,
+        );
+        backfill_tool_call_reasoning_placeholders(messages);
+    } else {
+        pending.reasoning = None;
+        for message in messages.iter_mut() {
+            if let Some(object) = message.as_object_mut() {
+                object.remove("reasoning_content");
+            }
+        }
+    }
     validate_chat_tool_history(messages)?;
     Ok(())
 }
