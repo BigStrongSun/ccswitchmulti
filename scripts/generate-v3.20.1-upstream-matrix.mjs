@@ -195,6 +195,97 @@ const explicit = new Map([
     ],
   ],
   [
+    "a2e22f33",
+    [
+      "adopted",
+      "Existing account-pool selection plus Task 6 commit f17b2f95 adopt the intent without copying upstream's single-slot auth.json design.",
+    ],
+  ],
+  [
+    "f62c854a",
+    [
+      "adopted",
+      "Task 6 commit 837c3afb linearizes device-login cancellation so a cleared or superseded flow cannot publish stale credentials.",
+    ],
+  ],
+  [
+    "897ca892",
+    [
+      "deferred",
+      "Managed OAuth still polls at five minutes and can enter the app-wide tray cache; defer configurable footer/tray behavior to Task 9.",
+    ],
+  ],
+  [
+    "0455a92c",
+    [
+      "already-covered",
+      "One canonical codex-official facade plus stable bindings and the account pool cover multiple accounts; duplicate Provider rows would split router ownership.",
+    ],
+  ],
+  [
+    "c2ec78dd",
+    [
+      "adopted",
+      "Task 6 commit f17b2f95 separates local UUID, workspace header, and JWT subject; it quarantines ambiguous legacy records and preserves reauth identity.",
+    ],
+  ],
+  [
+    "bbe8bb93",
+    [
+      "deferred",
+      "The edit form still needs focused reconciliation when live auth.json and the provider bearer disagree; defer this frontend behavior to Task 9.",
+    ],
+  ],
+  [
+    "cbb79127",
+    [
+      "already-covered",
+      "Third-party switches already project provider-scoped bearers into config.toml while preserving Desktop auth.json, with service/import regressions.",
+    ],
+  ],
+  [
+    "9a1a6b83",
+    [
+      "deferred",
+      "CCSM no longer creates reserved openai tables; lossless migration of stale imports and ID collisions needs focused Task 9 regressions.",
+    ],
+  ],
+  [
+    "bb54e87a",
+    [
+      "deferred",
+      "Exact-case reserved IDs and credential-aware routing of migrated legacy tables are not proven; audit them with the Task 9 config migration.",
+    ],
+  ],
+  [
+    "c5e4f705",
+    [
+      "already-covered",
+      "Config-only switching keeps Desktop OAuth independent; the MultiRouter facade intentionally requires OpenAI auth and never follows upstream's single-slot deletion rule.",
+    ],
+  ],
+  [
+    "6243e20a",
+    [
+      "adopted",
+      "Task 6 commit f17b2f95 keeps JWT subject and workspace distinct and proves organization claims are not workspace fallbacks.",
+    ],
+  ],
+  [
+    "c88b00fa",
+    [
+      "not-applicable",
+      "The MultiRouter facade needs requires_openai_auth=true for Desktop login/quota/logout UI while the proxy resolves route credentials.",
+    ],
+  ],
+  [
+    "92d52916",
+    [
+      "adopted",
+      "Task 6 commit f17b2f95 rejects only matching workspace+subject, allows distinct users in one workspace, and repairs quarantine by targeted reauth.",
+    ],
+  ],
+  [
     "5a040348",
     [
       "already-covered",
