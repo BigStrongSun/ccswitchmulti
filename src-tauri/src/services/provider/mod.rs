@@ -39,8 +39,8 @@ pub(crate) use live::{
     build_codex_live_config_for_provider, build_effective_settings_with_common_config,
     normalize_provider_common_config_for_storage, provider_exists_in_live_config,
     strip_common_config_from_live_settings, sync_codex_router_provider,
-    sync_current_provider_for_app_to_live, write_codex_config_only_with_common_config,
-    write_live_with_common_config,
+    sync_current_provider_for_app_to_live, sync_live_for_provider_respecting_takeover,
+    write_codex_config_only_with_common_config, write_live_with_common_config, LiveSyncOutcome,
 };
 
 // Internal re-exports
@@ -193,28 +193,10 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
         return Ok(false);
     }
 
-    // 代理接管期间 live 归代理所有（开启代理时官方供应商只警告不拦截，
-    // 二者可以共存）。与切换/保存路径一致：以 backup/占位符为所有权信号，
-    // 只更新备份，注入后的配置由接管释放时的恢复路径落盘。
-    let has_live_backup =
-        futures::executor::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
-            .ok()
-            .flatten()
-            .is_some();
-    let live_taken_over = state
-        .proxy_service
-        .detect_takeover_in_live_config_for_app(&AppType::Codex);
-    if has_live_backup || live_taken_over {
-        futures::executor::block_on(
-            state
-                .proxy_service
-                .update_live_backup_from_provider(AppType::Codex.as_str(), provider),
-        )
-        .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+    let outcome = sync_live_for_provider_respecting_takeover(state, &AppType::Codex, provider)?;
+    if outcome == LiveSyncOutcome::BackupOnly {
         return Ok(true);
     }
-
-    live::write_live_with_common_config(&state.db, &AppType::Codex, provider)?;
     // 重写 live 会整体替换 config.toml（有意设计），[mcp_servers] 随之丢失，
     // 写完必须立刻从 DB 重新投影启用的 MCP。只投影 Codex 而非
     // sync_all_enabled：后者按 AppType::all() 顺序逐应用短路，排在 Codex
@@ -3733,6 +3715,242 @@ wire_api = "responses"
 
     #[tokio::test]
     #[serial]
+    async fn upstream_live_sync_stale_backup_does_not_divert_current_provider_edit() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let original = Provider::with_id(
+            "p1".into(),
+            "Claude A".into(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "token-a",
+                    "ANTHROPIC_BASE_URL": "https://api.old.example"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &original)
+            .expect("save provider");
+        db.set_current_provider("claude", "p1")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some("p1"))
+            .expect("set local current provider");
+        write_live_with_common_config(db.as_ref(), &AppType::Claude, &original)
+            .expect("seed live file");
+        db.save_live_backup(
+            "claude",
+            &serde_json::to_string(&original.settings_config).expect("serialize backup"),
+        )
+        .await
+        .expect("seed stale backup");
+        assert!(!state.proxy_service.is_running().await);
+
+        let mut updated = original.clone();
+        updated.settings_config["env"]["ANTHROPIC_BASE_URL"] =
+            Value::String("https://api.new.example".into());
+        ProviderService::update(&state, AppType::Claude, None, updated)
+            .expect("update current provider");
+
+        let live: Value = read_json_file(&get_claude_settings_path()).expect("read live");
+        assert_eq!(
+            live["env"]["ANTHROPIC_BASE_URL"].as_str(),
+            Some("https://api.new.example")
+        );
+        let backup = db
+            .get_live_backup("claude")
+            .await
+            .expect("read backup")
+            .expect("backup remains");
+        assert!(backup.original_config.contains("https://api.new.example"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn upstream_live_sync_enabled_flag_without_takeover_evidence_writes_live() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let original = Provider::with_id(
+            "p1".into(),
+            "Claude A".into(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "token-a",
+                    "ANTHROPIC_BASE_URL": "https://api.old.example"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &original)
+            .expect("save provider");
+        db.set_current_provider("claude", "p1")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some("p1"))
+            .expect("set local current provider");
+        write_live_with_common_config(db.as_ref(), &AppType::Claude, &original)
+            .expect("seed live file");
+
+        let mut proxy_config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read proxy config");
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("leave enabled flag set");
+        assert!(!state.proxy_service.is_running().await);
+
+        let mut updated = original.clone();
+        updated.settings_config["env"]["ANTHROPIC_BASE_URL"] =
+            Value::String("https://api.new.example".into());
+        ProviderService::update(&state, AppType::Claude, None, updated)
+            .expect("update current provider");
+
+        let live: Value = read_json_file(&get_claude_settings_path()).expect("read live");
+        assert_eq!(
+            live["env"]["ANTHROPIC_BASE_URL"].as_str(),
+            Some("https://api.new.example")
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_live_sync_switch_lock_is_per_app_takeover_evidence() {
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        assert!(
+            !state
+                .proxy_service
+                .is_switch_in_progress_for_app("claude")
+                .await
+        );
+
+        let guard = state.proxy_service.lock_switch_for_app("claude").await;
+        assert!(
+            state
+                .proxy_service
+                .is_switch_in_progress_for_app("claude")
+                .await
+        );
+        assert!(
+            !state
+                .proxy_service
+                .is_switch_in_progress_for_app("codex")
+                .await
+        );
+        drop(guard);
+
+        assert!(
+            !state
+                .proxy_service
+                .is_switch_in_progress_for_app("claude")
+                .await
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_live_sync_universal_current_child_reprojects_live() {
+        with_test_home(|state, _home| {
+            let mut universal = UniversalProvider::new(
+                "shared".to_string(),
+                "Shared Relay".to_string(),
+                "custom".to_string(),
+                "https://api.new.example".to_string(),
+                "new-key".to_string(),
+            );
+            universal.apps.claude = true;
+            universal.models.claude = Some(crate::provider::ClaudeModelConfig {
+                model: Some("claude-sonnet-4".to_string()),
+                ..Default::default()
+            });
+            state
+                .db
+                .save_universal_provider(&universal)
+                .expect("save universal provider");
+
+            let child = universal.to_claude_provider().expect("claude child");
+            state
+                .db
+                .save_provider("claude", &child)
+                .expect("seed child provider");
+            state
+                .db
+                .set_current_provider("claude", &child.id)
+                .expect("set current child");
+            crate::settings::set_current_provider(&AppType::Claude, Some(&child.id))
+                .expect("set local current child");
+
+            let mut old_live = child.settings_config.clone();
+            old_live["env"]["ANTHROPIC_BASE_URL"] =
+                Value::String("https://api.old.example".to_string());
+            write_json_file(&get_claude_settings_path(), &old_live).expect("seed old live");
+
+            ProviderService::sync_universal_to_apps(state, "shared")
+                .expect("sync universal provider");
+
+            let live: Value = read_json_file(&get_claude_settings_path()).expect("read live");
+            assert_eq!(
+                live["env"]["ANTHROPIC_BASE_URL"].as_str(),
+                Some("https://api.new.example")
+            );
+            assert_eq!(
+                live["env"]["ANTHROPIC_AUTH_TOKEN"].as_str(),
+                Some("new-key")
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_live_sync_universal_reports_current_child_projection_failure() {
+        with_test_home(|state, _home| {
+            let mut universal = UniversalProvider::new(
+                "shared-failure".to_string(),
+                "Shared Relay".to_string(),
+                "custom".to_string(),
+                "https://api.new.example".to_string(),
+                "new-key".to_string(),
+            );
+            universal.apps.claude = true;
+            universal.models.claude = Some(crate::provider::ClaudeModelConfig {
+                model: Some("claude-sonnet-4".to_string()),
+                ..Default::default()
+            });
+            state
+                .db
+                .save_universal_provider(&universal)
+                .expect("save universal provider");
+            let child = universal.to_claude_provider().expect("claude child");
+            state
+                .db
+                .save_provider("claude", &child)
+                .expect("seed child provider");
+            state
+                .db
+                .set_current_provider("claude", &child.id)
+                .expect("set current child");
+            crate::settings::set_current_provider(&AppType::Claude, Some(&child.id))
+                .expect("set local current child");
+
+            let live_path = get_claude_settings_path();
+            fs::create_dir_all(&live_path).expect("make live target unwritable as a file");
+
+            let error = ProviderService::sync_universal_to_apps(state, "shared-failure")
+                .expect_err("partial live projection must be reported");
+            assert!(
+                error.to_string().contains("Live 投影失败"),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn update_current_codex_provider_refreshes_and_clears_catalog_during_takeover() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
@@ -5757,59 +5975,8 @@ impl ProviderService {
         }
 
         if is_current && !Self::is_codex_schema_v2_router(&app_type, &provider) {
-            // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
-            // - 不直接走普通 Live 写入逻辑
-            // - 改为更新 Live 备份，并在 Claude 下同步代理安全的 Live 配置
-            let has_live_backup =
-                block_on_tauri_runtime(state.db.get_live_backup(app_type.as_str()))
-                    .ok()
-                    .flatten()
-                    .is_some();
-            let live_taken_over = state
-                .proxy_service
-                .detect_takeover_in_live_config_for_app(&app_type);
-            // Backup or live placeholders mean the live file is currently owned
-            // by proxy takeover, including the short activation window before
-            // proxy_config.enabled is committed.
-            let should_sync_via_proxy = has_live_backup || live_taken_over;
-
-            if should_sync_via_proxy {
-                if matches!(app_type, AppType::ClaudeDesktop) {
-                    write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
-                } else {
-                    block_on_tauri_runtime(
-                        state
-                            .proxy_service
-                            .update_live_backup_from_provider(app_type.as_str(), &provider),
-                    )
-                    .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
-                }
-
-                if matches!(app_type, AppType::Claude)
-                    && block_on_tauri_runtime(state.proxy_service.is_running())
-                {
-                    block_on_tauri_runtime(
-                        state
-                            .proxy_service
-                            .sync_claude_live_from_provider_while_proxy_active(&provider),
-                    )
-                    .map_err(|e| AppError::Message(format!("同步 Claude Live 配置失败: {e}")))?;
-                }
-
-                if matches!(app_type, AppType::Codex)
-                    && (live_taken_over || block_on_tauri_runtime(state.proxy_service.is_running()))
-                {
-                    // Codex 模型菜单读取 live catalog/cache；接管期间保存当前 provider 时，
-                    // 只更新 backup 会让 Desktop 继续使用旧的三模型缓存。
-                    block_on_tauri_runtime(
-                        state
-                            .proxy_service
-                            .sync_codex_live_from_provider_while_proxy_active(&provider),
-                    )
-                    .map_err(|e| AppError::Message(format!("同步 Codex Live 配置失败: {e}")))?;
-                }
-            } else {
-                write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            let outcome = sync_live_for_provider_respecting_takeover(state, &app_type, &provider)?;
+            if outcome == LiveSyncOutcome::WroteLive {
                 // 重写 live 后只重投影本应用的 MCP：全量 sync_all_enabled 会把
                 // 无关应用的 live 损坏（如 ~/.claude.json 坏 JSON）牵连进保存
                 // 流程。走到这里 DB 与 live 都已按新配置落盘，保存事实上已
@@ -7038,45 +7205,11 @@ impl ProviderService {
             return Ok(());
         }
 
-        let has_live_backup = block_on_tauri_runtime(state.db.get_live_backup(app_type.as_str()))
-            .ok()
-            .flatten()
-            .is_some();
-
-        let live_taken_over = state
-            .proxy_service
-            .detect_takeover_in_live_config_for_app(&app_type);
-
-        // See the save path above: backup/placeholders are the ownership signal
-        // here, not just proxy_config.enabled.
-        if has_live_backup || live_taken_over {
-            if matches!(app_type, AppType::ClaudeDesktop) {
-                write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
-                return Ok(());
-            }
-
-            block_on_tauri_runtime(
-                state
-                    .proxy_service
-                    .update_live_backup_from_provider(app_type.as_str(), provider),
-            )
-            .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
-
-            if matches!(app_type, AppType::Codex)
-                && (live_taken_over || block_on_tauri_runtime(state.proxy_service.is_running()))
-            {
-                // 显式同步当前 Codex provider 时，接管 live 也必须重新投影最新 catalog/cache。
-                block_on_tauri_runtime(
-                    state
-                        .proxy_service
-                        .sync_codex_live_from_provider_while_proxy_active(provider),
-                )
-                .map_err(|e| AppError::Message(format!("同步 Codex Live 配置失败: {e}")))?;
-            }
+        let outcome = sync_live_for_provider_respecting_takeover(state, &app_type, provider)?;
+        if outcome == LiveSyncOutcome::BackupOnly {
             return Ok(());
         }
-
-        sync_current_provider_for_app_to_live(state, &app_type)
+        McpService::sync_enabled_for_app(state, &app_type)
     }
 
     pub fn migrate_legacy_common_config_usage(
@@ -8632,7 +8765,7 @@ impl ProviderService {
                 .map_err(|error| error.to_string())
             },
         )
-        .map(|outcome| outcome.changed)
+        .and_then(Self::legacy_universal_sync_result)
     }
 
     pub(crate) fn save_and_sync_universal_to_apps_with_codex_profiles(
@@ -8671,7 +8804,7 @@ impl ProviderService {
                 .map_err(|error| error.to_string())
             },
         )
-        .map(|outcome| outcome.changed)
+        .and_then(Self::legacy_universal_sync_result)
     }
 
     pub(crate) fn save_and_sync_universal_to_apps_with_codex_protocol_state_and_publisher<F>(
@@ -9053,12 +9186,90 @@ impl ProviderService {
             }
         }
 
+        let mut live_projection_failures = Vec::new();
+        if provider.apps.claude {
+            Self::project_universal_child_to_live(
+                state,
+                AppType::Claude,
+                &claude_id,
+                &mut live_projection_failures,
+            );
+        }
+        if provider.apps.codex {
+            Self::project_universal_child_to_live(
+                state,
+                AppType::Codex,
+                &codex_id,
+                &mut live_projection_failures,
+            );
+        }
+        if provider.apps.gemini {
+            Self::project_universal_child_to_live(
+                state,
+                AppType::Gemini,
+                &gemini_id,
+                &mut live_projection_failures,
+            );
+        }
+        if !live_projection_failures.is_empty() {
+            log::warn!(
+                "Universal Provider children committed with failed live projections: {}",
+                live_projection_failures.join(",")
+            );
+        }
+
         Ok(UniversalProviderSyncOutcome {
             changed: true,
             projections,
-            projection_error_code: projection_failed
-                .then(|| "codex_provider_set_live_projection_failed".to_string()),
+            projection_error_code: if !live_projection_failures.is_empty() {
+                Some("universal_provider_live_projection_failed".to_string())
+            } else {
+                projection_failed.then(|| "codex_provider_set_live_projection_failed".to_string())
+            },
         })
+    }
+
+    fn project_universal_child_to_live(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+        failures: &mut Vec<String>,
+    ) {
+        let current = match crate::settings::get_effective_current_provider(&state.db, &app_type) {
+            Ok(current) => current,
+            Err(err) => {
+                log::warn!(
+                    "统一供应商同步后读取 {} 当前供应商失败: {err}",
+                    app_type.as_str()
+                );
+                failures.push(app_type.as_str().to_string());
+                return;
+            }
+        };
+        if current.as_deref() != Some(provider_id) {
+            return;
+        }
+
+        if let Err(err) = Self::sync_current_provider_for_app(state, app_type.clone()) {
+            log::warn!(
+                "统一供应商同步后重写 {} live 配置失败: {err}",
+                app_type.as_str()
+            );
+            failures.push(app_type.as_str().to_string());
+        }
+    }
+
+    fn legacy_universal_sync_result(
+        outcome: UniversalProviderSyncOutcome,
+    ) -> Result<bool, AppError> {
+        if outcome.projection_error_code.as_deref()
+            == Some("universal_provider_live_projection_failed")
+        {
+            return Err(AppError::Message(
+                "统一供应商已保存，但当前子供应商 Live 投影失败".to_string(),
+            ));
+        }
+        Ok(outcome.changed)
     }
 
     /// 递归合并 JSON：base 为底，patch 覆盖同名字段

@@ -1466,19 +1466,136 @@ pub(crate) fn sync_current_provider_for_app_to_live(
     Ok(())
 }
 
-pub(crate) fn sync_codex_router_provider(
-    state: &AppState,
-    provider: &Provider,
-) -> Result<(), AppError> {
-    let has_live_backup = block_on_tauri_runtime(state.db.get_live_backup("codex"))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveSyncOutcome {
+    WroteLive,
+    BackupOnly,
+}
+
+fn live_takeover_evidence(state: &AppState, app_type: &AppType) -> (bool, bool) {
+    let has_live_backup = block_on_tauri_runtime(state.db.get_live_backup(app_type.as_str()))
         .ok()
         .flatten()
         .is_some();
     let live_taken_over = state
         .proxy_service
-        .detect_takeover_in_live_config_for_app(&AppType::Codex);
+        .detect_takeover_in_live_config_for_app(app_type);
+    (has_live_backup, live_taken_over)
+}
 
-    if has_live_backup || live_taken_over {
+/// A persisted backup is only recovery material, not proof that takeover still owns live.
+fn proxy_owns_live_config(
+    state: &AppState,
+    app_type: &AppType,
+    has_live_backup: bool,
+    live_taken_over: bool,
+) -> bool {
+    if live_taken_over {
+        return true;
+    }
+
+    let takeover_enabled =
+        block_on_tauri_runtime(state.db.get_proxy_config_for_app(app_type.as_str()))
+            .map(|config| config.enabled)
+            .unwrap_or_else(|err| {
+                log::warn!(
+                    "读取 {} 代理接管标志失败，按未接管处理并继续写入 live 配置: {err}",
+                    app_type.as_str()
+                );
+                false
+            });
+
+    if takeover_enabled
+        && has_live_backup
+        && block_on_tauri_runtime(state.proxy_service.is_running())
+    {
+        return true;
+    }
+
+    has_live_backup
+        && block_on_tauri_runtime(
+            state
+                .proxy_service
+                .is_switch_in_progress_for_app(app_type.as_str()),
+        )
+}
+
+fn refresh_stale_live_backup(state: &AppState, app_type: &AppType, provider: &Provider) {
+    if let Err(err) = block_on_tauri_runtime(
+        state
+            .proxy_service
+            .update_live_backup_from_provider(app_type.as_str(), provider),
+    ) {
+        log::warn!(
+            "刷新 {} 残留 Live 备份失败（不影响本次 live 写入）: {err}",
+            app_type.as_str()
+        );
+    }
+}
+
+pub(crate) fn sync_live_for_provider_respecting_takeover(
+    state: &AppState,
+    app_type: &AppType,
+    provider: &Provider,
+) -> Result<LiveSyncOutcome, AppError> {
+    // Claude Desktop takeover owns its generated 3P profile, not the ordinary
+    // settings file or the legacy backup row. Keep that projection direct.
+    if matches!(app_type, AppType::ClaudeDesktop) {
+        write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
+        return Ok(LiveSyncOutcome::WroteLive);
+    }
+
+    let (has_live_backup, live_taken_over) = live_takeover_evidence(state, app_type);
+    if !proxy_owns_live_config(state, app_type, has_live_backup, live_taken_over) {
+        if has_live_backup {
+            refresh_stale_live_backup(state, app_type, provider);
+        }
+        write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
+        return Ok(LiveSyncOutcome::WroteLive);
+    }
+
+    block_on_tauri_runtime(
+        state
+            .proxy_service
+            .update_live_backup_from_provider(app_type.as_str(), provider),
+    )
+    .map_err(|err| AppError::Message(format!("更新 Live 备份失败: {err}")))?;
+
+    if !block_on_tauri_runtime(state.proxy_service.is_running()) {
+        return Ok(LiveSyncOutcome::BackupOnly);
+    }
+
+    match app_type {
+        AppType::Claude => block_on_tauri_runtime(
+            state
+                .proxy_service
+                .sync_claude_live_from_provider_while_proxy_active(provider),
+        )
+        .map_err(|err| AppError::Message(format!("同步 Claude Live 配置失败: {err}")))?,
+        AppType::Codex if live_taken_over => block_on_tauri_runtime(
+            state
+                .proxy_service
+                .sync_codex_live_from_provider_while_proxy_active(provider),
+        )
+        .map_err(|err| AppError::Message(format!("同步 Codex Live 配置失败: {err}")))?,
+        AppType::GrokBuild if live_taken_over => block_on_tauri_runtime(
+            state
+                .proxy_service
+                .sync_grok_live_from_provider_while_proxy_active(provider),
+        )
+        .map_err(|err| AppError::Message(format!("同步 Grok Build Live 配置失败: {err}")))?,
+        _ => {}
+    }
+
+    Ok(LiveSyncOutcome::BackupOnly)
+}
+
+pub(crate) fn sync_codex_router_provider(
+    state: &AppState,
+    provider: &Provider,
+) -> Result<(), AppError> {
+    let (has_live_backup, live_taken_over) = live_takeover_evidence(state, &AppType::Codex);
+    if proxy_owns_live_config(state, &AppType::Codex, has_live_backup, live_taken_over) {
         block_on_tauri_runtime(
             state
                 .proxy_service
@@ -1486,6 +1603,9 @@ pub(crate) fn sync_codex_router_provider(
         )
         .map_err(|e| AppError::Message(format!("更新 Codex Live 备份失败: {e}")))?;
     } else {
+        if has_live_backup {
+            refresh_stale_live_backup(state, &AppType::Codex, provider);
+        }
         write_codex_config_only_with_common_config(state.db.as_ref(), provider)?;
     }
 
@@ -1531,43 +1651,6 @@ fn sync_current_provider_for_app_respecting_takeover(
         return Ok(());
     }
 
-    let has_live_backup = block_on_tauri_runtime(state.db.get_live_backup(app_type.as_str()))
-        .ok()
-        .flatten()
-        .is_some();
-    let live_taken_over = state
-        .proxy_service
-        .detect_takeover_in_live_config_for_app(app_type);
-
-    // `enabled` is set only after takeover writes complete. During that
-    // activation window, backup/live placeholders are the authoritative signal
-    // that normal provider sync must not rewrite the managed live file.
-    if has_live_backup || live_taken_over {
-        if matches!(app_type, AppType::ClaudeDesktop) {
-            write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
-        } else {
-            block_on_tauri_runtime(
-                state
-                    .proxy_service
-                    .update_live_backup_from_provider(app_type.as_str(), provider),
-            )
-            .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
-
-            if matches!(app_type, AppType::Codex)
-                && (live_taken_over || block_on_tauri_runtime(state.proxy_service.is_running()))
-            {
-                // 全量同步当前 provider 时也要刷新 Codex live catalog/cache，否则模型菜单会停在旧缓存。
-                block_on_tauri_runtime(
-                    state
-                        .proxy_service
-                        .sync_codex_live_from_provider_while_proxy_active(provider),
-                )
-                .map_err(|e| AppError::Message(format!("同步 Codex Live 配置失败: {e}")))?;
-            }
-        }
-        return Ok(());
-    }
-
     // 当 Codex 提供者启用了 MultiRouter 路由（codexRouting enabled + routes 非空），
     // 但 takeover 未激活且没有 live backup 时，主动启用接管而不是走
     // write_live_with_common_config 的普通 common config 路径。
@@ -1588,6 +1671,14 @@ fn sync_current_provider_for_app_respecting_takeover(
                 .and_then(|v| v.as_array())
                 .is_some_and(|routes| !routes.is_empty());
         if has_enabled_routing {
+            let (has_live_backup, live_taken_over) = live_takeover_evidence(state, app_type);
+            if proxy_owns_live_config(state, app_type, has_live_backup, live_taken_over) {
+                sync_live_for_provider_respecting_takeover(state, app_type, provider)?;
+                return Ok(());
+            }
+            if has_live_backup {
+                refresh_stale_live_backup(state, app_type, provider);
+            }
             block_on_tauri_runtime(
                 state
                     .proxy_service
@@ -1598,7 +1689,7 @@ fn sync_current_provider_for_app_respecting_takeover(
         }
     }
 
-    write_live_with_common_config(state.db.as_ref(), app_type, provider)
+    sync_live_for_provider_respecting_takeover(state, app_type, provider).map(|_| ())
 }
 
 /// Sync current provider to live configuration
