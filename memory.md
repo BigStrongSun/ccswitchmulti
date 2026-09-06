@@ -1,5 +1,15 @@
 # CC Switch Repository Memory
 
+## 2026-09-06 本地分叉审计与已完成工作合流
+
+- 审计基线为本地 `main@770968b5`。逐一检查全部本地 branch、linked worktree、`main...tip` 提交计数、`git cherry`、工作树脏状态和既有根因记录后，唯一“产品工作已完成、main 仍缺失”的分支是 `bigstrongsun/fix-gpt6-astra-metadata@1e138230`：官方 OAuth 模型目录的 reasoning 元数据透传、Astra 五档保留及旧 `none/minimal -> low` 迁移已有源码、安装态和真实请求验收，但不在 main 祖先链。本轮以 merge commit `151af1f0` 合入隔离集成分支。
+- 已在 main 中，无需再次合并：`codex-multirouter-ssot-v2`、`codex-reasoning-probe-backend`、`fix-deepseek-reasoning-passthrough`、`fix-reasoning-config-ux-validation`、`fix-universal-provider-probe`、`integrate-pr-6653`、`probe-production-request-equivalence`、`provider-model-reasoning-ui`、`qwen-vllm-default-output`、`reasoning-capability-p0`、`release-v3.19.2-24`、`release-v3.19.2-25`、`ultra-main-integration`。这些 tip 相对 main 的右侧提交数均为 0。
+- 有独有提交但已被主线等价或更完整实现覆盖，不整枝回合：`multirouter-guided-wizard`（13 页流程已按当前 Protocol Lab/Provider Set 架构迁移）、`ultra-orchestration`、`fix-responses-commentary-tool-calls`、`fix-unsupported-responses-tools`、旧 `release/v3.19.2-8`。干净 detached 候选 `763d328b` 与 `0b83f96b` 为 main patch-equivalent；`cd4acd13`、`ee71f47b` 是已被后续协议证据/Provider Set 实现取代的验证快照；`77c8b4b6` 只是旧 v3.19.2-23 发布提交。其余 detached release/build/runtime worktree tip 均已在 main 中。
+- 明确不合并：`backup/main-mixed-before-clean-20260622` 是旧混合备份；`commentary-reasoning-experiment`、`portable-reasoning-experiment-nogo` 是 no-go/实验线；`subagent-v2-capability-injection` 是论文课件资料；旧 release 分支只是历史发布证据。`codex-power-presets@ce708d3b` 已记录 final source no-go，不能因提交完整或存在构建产物而冒充可发布功能。
+- 仍在分叉中工作的现场必须保留：`codex-multirouter-ssot-v2` 有 4 个未提交源码修改；`codex-reasoning-probe-backend` 有 5 个未提交源码修改和构建目录；`codex-power-presets` 有 2 个未提交源码修改；detached `error-journal-20260904` 有 6 个已修改和 2 个未跟踪产品/记忆文件。`ccsm-agent-mesh@a68b803a` 虽工作树未脏，但仍是未接入现有代理生命周期、Provider/凭据边界和 E2E canary 的独立原型，也按未完成产品分叉保留。只有 `.tmp` 或 `target-protocol-probe` 的 worktree 不据此误判为仍在写产品代码。
+- 前端全集首次在未改测试的 main 与集成树共同复现同一基线失败：Verified 自动推荐已经显示“已选 Responses/Chat”，旧断言仍期待“选择”。测试提交 `f1ecbb6e` 只同步这一既有产品契约，聚焦 40/40 通过；没有修改生产行为或放宽 Partial/Failed 断言。
+- 集成树最终新鲜门禁：前端 169 files / 1379 tests；Rust library 3872 passed / 0 failed / 6 ignored 且全部 integration suites 通过；系统 Windows PowerShell 5.1 安装事务 Pester 52/52；`pnpm typecheck`、Prettier、rustfmt、`git diff --check` 和全部变更文本严格 UTF-8/no-BOM/no-U+FFFD 均通过。本轮只合流源码和本地提交，未构建、安装、push、tag 或发布新版本。
+
 ## 2026-09-06 Partial/Failed 协议分支的手动使用边界
 
 - 自动模式仍只采用后端完整验证为 Verified 的协议分支；逐模型手动覆盖是显式用户意图，可以指定 Chat 或 Responses，并允许没有 Verified 证据的模型进入 Provider Set。手动使用不得被改写成自动推荐或 Verified，也不应被后续探测静默覆盖。

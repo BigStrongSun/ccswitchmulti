@@ -30,11 +30,11 @@
 - Consumes: local refs, `git worktree list`, branch tips, existing branch-audit memory.
 - Produces: an auditable classification of each divergent branch.
 
-- [ ] Record branches already contained in `main` as no-op.
-- [ ] Record superseded and patch-equivalent branches without merging them.
-- [ ] Record explicit no-go, historical, backup, and documentation-only branches without merging them.
-- [ ] Record incomplete product prototypes as active work, not completed work.
-- [ ] Identify completed product branches whose behavior is absent from `main`.
+- [x] Record branches already contained in `main` as no-op.
+- [x] Record superseded and patch-equivalent branches without merging them.
+- [x] Record explicit no-go, historical, backup, and documentation-only branches without merging them.
+- [x] Record incomplete product prototypes as active work, not completed work.
+- [x] Identify completed product branches whose behavior is absent from `main`.
 
 ### Task 2: Integrate completed product work
 
@@ -46,9 +46,9 @@
 - Consumes: clean integration branch based on `main@770968b5` and Astra branch `1e138230`.
 - Produces: a merge commit preserving both branch commits and current main history.
 
-- [ ] Merge with `--no-ff` and a traceable message.
-- [ ] Resolve conflicts by retaining current main architecture plus the branch's official reasoning metadata propagation and legacy effort migration.
-- [ ] Inspect the resulting diff and ensure no unrelated branch content entered.
+- [x] Merge with `--no-ff` and a traceable message.
+- [x] Resolve conflicts by retaining current main architecture plus the branch's official reasoning metadata propagation and legacy effort migration.
+- [x] Inspect the resulting diff and ensure no unrelated branch content entered.
 
 ### Task 3: Verify and advance local main
 
@@ -60,10 +60,10 @@
 - Consumes: the exact merged integration tree.
 - Produces: a tested local `main` and a durable audit record.
 
-- [ ] Run TypeScript typecheck and the full frontend unit suite.
-- [ ] Run Rust full tests, rustfmt check, and `git diff --check`.
-- [ ] Run installation transaction Pester tests.
-- [ ] Strictly decode changed text as UTF-8 and reject BOM/U+FFFD.
-- [ ] Commit the final branch audit to the integration branch.
-- [ ] Fast-forward local `main` to the verified integration tip.
-- [ ] Recheck main ancestry, main checkout preservation, and repository status.
+- [x] Run TypeScript typecheck and the full frontend unit suite.
+- [x] Run Rust full tests, rustfmt check, and `git diff --check`.
+- [x] Run installation transaction Pester tests.
+- [x] Strictly decode changed text as UTF-8 and reject BOM/U+FFFD.
+- [x] Commit the final branch audit to the integration branch.
+- [x] Fast-forward local `main` to the verified integration tip.
+- [x] Recheck main ancestry, main checkout preservation, and repository status.
