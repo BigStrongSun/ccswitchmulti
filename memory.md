@@ -5307,3 +5307,10 @@ supported in one streaming turn`。
 - 官方现行页与 Codex Web、Matrix WebSearch 两条独立链交叉确认：GLM-5.3 为 1.4/4.4/cache 0.26；Grok 4.5/4.6 的短上下文价分别为 2/6/cache 0.30 与 2/6/cache 0.50；DeepSeek V4 Flash/Pro 高峰价分别为 0.44/1.32/cache 0.014 与 1.32/3.96/cache 0.044；Gemini 3.7 Flash 介绍价为 0.75/3.75/cache 0.075；Fable/Mythos 5.1 为 10/50/cache 0.25，Sonnet 5 的 2/10 已转为正式价。
 - 当前单行价格 schema 无法表达 Grok ≥200K 的双倍价和 DeepSeek 工作日峰谷价：Grok 记录短上下文基础档，DeepSeek 沿官方提交决策记录高峰挂牌档，分别会低估长上下文 Grok、并在 DeepSeek 非高峰时高估约一倍。Gemini 3.7 Flash 介绍价在 2026-12-31 后到期，需后续 guarded repair；这些限制显式保留，不在本批扩张成时段/上下文计价重构。
 - `273c9cc2` 不重复迁移：当前 `model_capabilities.rs` 已精确把 `glm-5.3` 标为 text-only，同时保留 `glm-5.3v` 图像能力，并已有 namespace/[1M] normalization 回归。
+
+## 2026-09-06 v3.20.1-1 Task 4 基础可靠性第一批
+
+- 双链核对官方提交与 issue 后确认四个真实根因：WSL UNC 会以 Windows error 50 拒绝 `ReplaceFileW`；数据库备份恢复可能保留 Skill `content_hash` 却没有 SSOT 目录；WiX 自动更新重启可能丢失 HKCU PATH；`DatabaseUpgrade` 前端直接调用 `@tauri-apps/plugin-process.exit` 但 capability 缺少 `process:allow-exit`。WiX Handlebars 邻接反斜杠修复已在当前模板覆盖，不重复修改。
+- Windows 原子写保留 CCSwitchMulti 已有的 1175/1176 重试、1177 部分移动恢复和旧文件保护，只把明确的 `ERROR_NOT_SUPPORTED(50)` 纳入 rename fallback；未把所有未知错误降级为非原子覆盖。Skill 更新检查先验证安全的 SSOT 子目录存在，再使用缓存哈希；非法 directory 继续沿用原安全边界，不诱导用户点击一个必然失败且可能越界的更新。
+- Windows CLI 检测现在按进程 PATH、HKCU、HKLM 顺序合并并大小写去重，展开注册表 `%VAR%` 后同时供候选扫描、默认入口解析和版本执行使用；默认入口通过系统 `where.exe $PATH:<tool>` 只查有效 PATH、跳过 WindowsApps alias，并优先于硬编码候选，避免旧 npm shim 抢占显示版本。Codex/Claude 独立安装目录只加入对应工具，测试使用纯目录生成函数，避免被开发机真实 PATH 污染。
+- Windows 首窗继续保持 `visible:false`；同步读取 `cc-switch-theme` 应用 dark class，并在非 about 页面完成加载后首次显示，静默启动仍不显示。CSP 只加入该固定脚本的 SHA-256。新 `upstream_reliability_` 聚焦组首次因缺少函数得到 10 个编译错误；实现后第一次 8/9，其中唯一失败来自测试把开发机真实 PATH 当作空环境；下沉纯函数后最终 9/9 通过。未运行全量 Rust、前端或 Tauri 构建。

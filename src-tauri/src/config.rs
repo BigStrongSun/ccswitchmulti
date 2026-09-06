@@ -348,6 +348,11 @@ fn is_partial_replace_move(error: &std::io::Error) -> bool {
 }
 
 #[cfg(windows)]
+fn is_windows_rename_fallback_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(50)
+}
+
+#[cfg(windows)]
 enum PartialReplaceRecovery {
     Completed,
     Restored(std::io::Error),
@@ -522,7 +527,9 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
                 continue;
             }
 
-            if replace_error.kind() != std::io::ErrorKind::NotFound {
+            // WSL UNC filesystems reject ReplaceFileW with ERROR_NOT_SUPPORTED
+            // even though std::fs::rename can still replace the destination.
+            if !is_windows_rename_fallback_error(&replace_error) {
                 last_error = Some(replace_error);
                 break;
             }
@@ -661,6 +668,14 @@ mod tests {
         assert!(!is_retryable_replace_error(
             &std::io::Error::from_raw_os_error(87)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn upstream_reliability_windows_atomic_replace_falls_back_for_wsl_not_supported_error() {
+        let error = std::io::Error::from_raw_os_error(50);
+
+        assert!(is_windows_rename_fallback_error(&error));
     }
 
     #[cfg(windows)]

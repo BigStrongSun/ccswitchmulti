@@ -97,10 +97,45 @@ const explicit = new Map([
     ],
   ],
   [
+    "c39c9032",
+    [
+      "adopted",
+      "Task 4 adds the WSL ERROR_NOT_SUPPORTED rename fallback to CCSwitchMulti's stronger Windows atomic-write recovery path, with a focused classifier regression.",
+    ],
+  ],
+  [
+    "3c592d93",
+    [
+      "already-covered",
+      "The current CCSwitchMulti WiX template already escapes Handlebars-adjacent registry-key separators as double backslashes.",
+    ],
+  ],
+  [
+    "967daa1a",
+    [
+      "adopted",
+      "Task 4 checks the Skill SSOT directory before trusting a cached hash, so database-only restores expose missing files as an available repair.",
+    ],
+  ],
+  [
+    "de9af49a",
+    [
+      "adopted",
+      "Task 4 reconstructs Windows CLI detection PATH from process, HKCU, and HKLM state; prioritizes the effective PATH target; and adds Codex and Claude standalone installer locations.",
+    ],
+  ],
+  [
+    "d4fefefc",
+    [
+      "adopted",
+      "Task 4 applies the saved theme before first paint and delays the first Windows show until the non-about page load completes, while preserving silent startup.",
+    ],
+  ],
+  [
     "4549d290",
     [
-      "rewritten",
-      "Task 4 capability review: verify the current Tauri exit permission and button behavior before changing the fork capability manifest.",
+      "adopted",
+      "Task 4 grants process:allow-exit because the database recovery UI invokes the Tauri process exit API directly.",
     ],
   ],
   [

@@ -914,6 +914,35 @@ impl SkillService {
         Ok(())
     }
 
+    /// Resolve the local side of an update comparison without letting a stale
+    /// database hash hide a missing SSOT directory after a database-only restore.
+    fn local_hash_for_update_check(
+        ssot_dir: &Path,
+        raw_directory: &str,
+        cached_hash: Option<&str>,
+    ) -> Option<(String, bool)> {
+        let directory = match Self::require_valid_directory(raw_directory) {
+            Ok(directory) => directory,
+            Err(err) => {
+                log::warn!("Skill directory 非法，跳过本地目录检查: {err}");
+                return cached_hash.map(|hash| (hash.to_string(), false));
+            }
+        };
+
+        let local_dir = ssot_dir.join(&directory);
+        if !local_dir.exists() {
+            return None;
+        }
+
+        if let Some(hash) = cached_hash {
+            return Some((hash.to_string(), false));
+        }
+
+        Self::compute_dir_hash(&local_dir)
+            .ok()
+            .map(|hash| (hash, true))
+    }
+
     /// 检查所有已安装 Skill 的更新
     ///
     /// 仅检查有 repo_owner 的 Skill（本地 Skill 跳过），
@@ -997,31 +1026,18 @@ impl SkillService {
                     }
                 };
 
-                // 本地哈希：优先数据库，否则实时计算
-                let local_hash = match &skill.content_hash {
-                    Some(h) => Some(h.clone()),
-                    // 脏 directory 会让 compute_dir_hash 递归遍历任意目录，
-                    // 且哈希结果经「有无更新」的界面状态泄露少量信息。
-                    None => match Self::require_valid_directory(&skill.directory) {
-                        Err(err) => {
-                            log::warn!("跳过非法 directory 的哈希计算: {err}");
-                            None
+                let local_hash = match Self::local_hash_for_update_check(
+                    &ssot_dir,
+                    &skill.directory,
+                    skill.content_hash.as_deref(),
+                ) {
+                    Some((hash, freshly_computed)) => {
+                        if freshly_computed {
+                            let _ = db.update_skill_hash(&skill.id, &hash, 0);
                         }
-                        Ok(directory) => {
-                            let local_dir = ssot_dir.join(&directory);
-                            if local_dir.exists() {
-                                match Self::compute_dir_hash(&local_dir) {
-                                    Ok(h) => {
-                                        let _ = db.update_skill_hash(&skill.id, &h, 0);
-                                        Some(h)
-                                    }
-                                    Err(_) => None,
-                                }
-                            } else {
-                                None
-                            }
-                        }
-                    },
+                        Some(hash)
+                    }
+                    None => None,
                 };
 
                 if local_hash.as_deref() != Some(&remote_hash) {
@@ -4293,6 +4309,55 @@ mod tests {
             .get_installed_skill(&installed.id)
             .expect("query skill")
             .is_none());
+    }
+
+    #[test]
+    fn upstream_reliability_local_hash_ignores_cache_when_ssot_dir_is_missing() {
+        let ssot = tempdir().expect("tempdir");
+
+        assert_eq!(
+            SkillService::local_hash_for_update_check(ssot.path(), "my-skill", Some("cached")),
+            None
+        );
+    }
+
+    #[test]
+    fn upstream_reliability_local_hash_uses_cache_when_ssot_dir_exists() {
+        let ssot = tempdir().expect("tempdir");
+        fs::create_dir(ssot.path().join("my-skill")).expect("create skill dir");
+
+        assert_eq!(
+            SkillService::local_hash_for_update_check(ssot.path(), "my-skill", Some("cached")),
+            Some(("cached".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn upstream_reliability_local_hash_computes_when_cache_is_empty() {
+        let ssot = tempdir().expect("tempdir");
+        let dir = ssot.path().join("my-skill");
+        fs::create_dir(&dir).expect("create skill dir");
+        fs::write(dir.join("SKILL.md"), "---\nname: x\n---\n").expect("write skill");
+        let expected = SkillService::compute_dir_hash(&dir).expect("hash");
+
+        assert_eq!(
+            SkillService::local_hash_for_update_check(ssot.path(), "my-skill", None),
+            Some((expected, true))
+        );
+    }
+
+    #[test]
+    fn upstream_reliability_local_hash_keeps_cache_for_invalid_directory() {
+        let ssot = tempdir().expect("tempdir");
+
+        assert_eq!(
+            SkillService::local_hash_for_update_check(ssot.path(), "../evil", Some("cached")),
+            Some(("cached".to_string(), false))
+        );
+        assert_eq!(
+            SkillService::local_hash_for_update_check(ssot.path(), "../evil", None),
+            None
+        );
     }
 
     #[test]
