@@ -18,6 +18,11 @@
 - 非默认方言只有在证据来源非 `unspecified`，并且同一协议分支的强制工具调用与工具结果续轮都通过时，才允许运行时继承。通用 400/422 仍可触发安全候选探测，以兼容本地化或厂商异形错误，但仅有错误码或仅能发起工具调用都不构成生产兼容结论。
 - `PROBE_PROFILE_VERSION` 从 7 升至 8，旧档案不会套用新继承语义。UI 对模糊拒绝显示“模糊请求拒绝后完整验证”，使触发来源与最终验证强度都可见；规则不包含 Provider、模型名或主机特例。
 
+## 2026-09-05 新官方模型 reasoning 元数据动态同步根修
+
+- Codex OAuth 官方目录解析现在跨 Rust/Tauri/TypeScript 完整保留模型的 reasoning 能力，前端目录刷新会写入现有或新增 OAuth 模型，不再用丢失 `max` 的通用模板替代服务端元数据；不维护 Astra 型号白名单。
+- 对不支持 `none/minimal` 的官方模型，旧任务档位会按规范顺序迁移到最低受支持档。`gpt-6-astra` 的五档为 `low/medium/high/xhigh/max`，旧 `none` 因而映射到 `low`。详见 `memory-2026-09-05-official-model-reasoning-metadata.md`。
+
 ## 2026-09-04 v3.19.2-29 发布完成
 
 - 本地Windows x64 r10已安装验收，产品源码097f2ce2；发布tag v3.19.2-29的远端peeled commit保持c7a6709af617960f7db7988cc2feb52fb56c1404，未删除或移动。main测试修正74af3919ba5c8cd133c31d0f8a3bba23b6cf9e58与tag仅相差App测试和memory，产品源码/构建配置没有变化，未重复安装或重启Codex。

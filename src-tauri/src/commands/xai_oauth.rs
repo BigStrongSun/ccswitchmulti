@@ -131,6 +131,7 @@ pub async fn get_xai_oauth_models(
             context_window: None,
             input_modalities: None,
             supports_image: None,
+            reasoning: None,
         })
         .collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));

@@ -3893,6 +3893,44 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
   });
 
+  it("applies official reasoning metadata when refreshing an OAuth model", () => {
+    const source: Provider = {
+      id: "official-source",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-6-astra" }] },
+      },
+    };
+    const reasoning = {
+      schemaVersion: 2,
+      supportStatus: "confirmed_supported",
+      controlKind: "graded",
+      supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "low",
+      disableAllowed: false,
+      upstream: {
+        format: "string",
+        parameter: "reasoning_effort",
+        effortMap: { none: "low", minimal: "low" },
+      },
+      source: "official",
+      confidence: "authoritative",
+    };
+
+    const refreshed = providerWithFetchedModelCatalog(source, [
+      {
+        id: "gpt-6-astra",
+        ownedBy: "Codex",
+        reasoning,
+      } as unknown as FetchedModel,
+    ]);
+
+    expect(
+      refreshed.settingsConfig?.modelCatalog?.models?.[0]?.reasoning,
+    ).toEqual(reasoning);
+  });
+
   it("restores the only hidden model even when the projected catalog is empty", async () => {
     const source: Provider = {
       id: "hidden-only-source",
