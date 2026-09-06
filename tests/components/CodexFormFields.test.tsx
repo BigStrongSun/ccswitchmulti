@@ -1552,10 +1552,10 @@ describe("CodexFormFields local model routing", () => {
     expect(onApiFormatChange).not.toHaveBeenCalled();
     expect(
       screen.getByRole("article", { name: "gpt-5.5 探测进度" }),
-    ).toHaveTextContent("选择 Responses");
+    ).toHaveTextContent("已选 Responses");
     expect(
       screen.getByRole("article", { name: "qwen3.6 探测进度" }),
-    ).toHaveTextContent("选择 Chat Completions");
+    ).toHaveTextContent("已选 Chat Completions");
     expect(
       screen.getByRole("article", { name: "glm-4.5 探测进度" }),
     ).toHaveTextContent("Failed");
