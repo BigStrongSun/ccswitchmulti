@@ -23,7 +23,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tokio::sync::{Mutex, RwLock};
 
 use super::codex_oauth_pool::{CodexPoolAttemptOutcome, CodexPoolRuntimeState};
@@ -409,6 +412,10 @@ pub struct CodexOAuthManager {
     /// 进行中的 Device Code 流程：device_auth_id -> {user_code, expires_at_ms}
     /// 过期条目会在 start_device_flow 时被清理，防止放弃的登录流程导致无界增长
     pending_device_codes: Arc<RwLock<HashMap<String, PendingDeviceCode>>>,
+    /// 登录提交、取消和清空必须线性化，避免已经换到 token 的旧 flow 在取消后落盘。
+    login_commit_lock: Arc<Mutex<()>>,
+    /// 清空认证时递增，使仍在 Device Code 网络请求中的旧登录无法重新登记。
+    login_epoch: AtomicU64,
     /// OAuth token 端点；生产环境固定为 OpenAI，测试中可替换为本地假服务。
     oauth_token_url: String,
     storage_path: PathBuf,
@@ -436,6 +443,8 @@ impl CodexOAuthManager {
             refresh_locks: Arc::new(RwLock::new(HashMap::new())),
             persistence_lock: Arc::new(Mutex::new(())),
             pending_device_codes: Arc::new(RwLock::new(HashMap::new())),
+            login_commit_lock: Arc::new(Mutex::new(())),
+            login_epoch: AtomicU64::new(0),
             oauth_token_url,
             storage_path,
         };
@@ -457,6 +466,7 @@ impl CodexOAuthManager {
     /// - verification_uri = https://auth.openai.com/codex/device
     pub async fn start_device_flow(&self) -> Result<GitHubDeviceCodeResponse, CodexOAuthError> {
         log::info!("[CodexOAuth] 启动 Device Code 流程");
+        let login_epoch = self.login_epoch.load(Ordering::Acquire);
 
         let response = crate::proxy::http_client::get()
             .post(DEVICE_AUTH_USERCODE_URL)
@@ -483,20 +493,13 @@ impl CodexOAuthManager {
         let expires_in = device.expires_in.unwrap_or(DEVICE_CODE_DEFAULT_EXPIRES_IN);
         let expires_at_ms = chrono::Utc::now().timestamp_millis() + (expires_in as i64) * 1000;
 
-        // 记录 device_auth_id -> 用户码映射；同时清理所有已过期的条目，
-        // 避免用户放弃登录流程导致 HashMap 无界增长
-        {
-            let mut pending = self.pending_device_codes.write().await;
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            pending.retain(|_, entry| entry.expires_at_ms > now_ms);
-            pending.insert(
-                device.device_auth_id.clone(),
-                PendingDeviceCode {
-                    user_code: device.user_code.clone(),
-                    expires_at_ms,
-                },
-            );
-        }
+        self.register_pending_device_code(
+            device.device_auth_id.clone(),
+            device.user_code.clone(),
+            expires_at_ms,
+            login_epoch,
+        )
+        .await?;
 
         log::info!(
             "[CodexOAuth] 获取 Device Code 成功，user_code: {}",
@@ -510,6 +513,40 @@ impl CodexOAuthManager {
             expires_in,
             interval,
         })
+    }
+
+    async fn register_pending_device_code(
+        &self,
+        device_auth_id: String,
+        user_code: String,
+        expires_at_ms: i64,
+        login_epoch: u64,
+    ) -> Result<(), CodexOAuthError> {
+        let _commit_guard = self.login_commit_lock.lock().await;
+        if self.login_epoch.load(Ordering::Acquire) != login_epoch {
+            return Err(CodexOAuthError::ExpiredToken);
+        }
+
+        let mut pending = self.pending_device_codes.write().await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        pending.retain(|_, entry| entry.expires_at_ms > now_ms);
+        pending.insert(
+            device_auth_id,
+            PendingDeviceCode {
+                user_code,
+                expires_at_ms,
+            },
+        );
+        Ok(())
+    }
+
+    pub async fn cancel_device_flow(&self, device_code: &str) -> bool {
+        let _commit_guard = self.login_commit_lock.lock().await;
+        self.pending_device_codes
+            .write()
+            .await
+            .remove(device_code)
+            .is_some()
     }
 
     /// 轮询 Device Code 状态
@@ -581,10 +618,25 @@ impl CodexOAuthManager {
             .exchange_code_for_tokens(&success.authorization_code, &success.code_verifier)
             .await?;
 
-        // 清理 pending device code
-        {
-            let mut pending = self.pending_device_codes.write().await;
-            pending.remove(device_code);
+        let account = self.commit_device_login(device_code, tokens).await?;
+
+        Ok(Some(account))
+    }
+
+    async fn commit_device_login(
+        &self,
+        device_code: &str,
+        tokens: OAuthTokenResponse,
+    ) -> Result<GitHubAccount, CodexOAuthError> {
+        let _commit_guard = self.login_commit_lock.lock().await;
+        let entry = self
+            .pending_device_codes
+            .write()
+            .await
+            .remove(device_code)
+            .ok_or(CodexOAuthError::ExpiredToken)?;
+        if entry.expires_at_ms <= chrono::Utc::now().timestamp_millis() {
+            return Err(CodexOAuthError::ExpiredToken);
         }
 
         let refresh_token = tokens.refresh_token.clone().ok_or_else(|| {
@@ -596,30 +648,26 @@ impl CodexOAuthManager {
             CodexOAuthError::ParseError("无法从 token 中提取 account_id".to_string())
         })?;
 
-        // access_token 是短期 Bearer 凭据，只放内存；长期恢复依赖磁盘里的 refresh_token。
-        {
-            let mut tokens_cache = self.access_tokens.write().await;
-            tokens_cache.insert(
-                account_id.clone(),
-                CachedAccessToken {
-                    token: tokens.access_token.clone(),
-                    expires_at_ms: compute_expires_at_ms(tokens.expires_in),
-                },
-            );
-        }
-
         let expires_at_ms = compute_expires_at_ms(tokens.expires_in);
         let account = self
             .add_account_internal(
-                account_id,
+                account_id.clone(),
                 refresh_token,
                 email,
-                Some(tokens.access_token),
+                Some(tokens.access_token.clone()),
                 Some(expires_at_ms),
             )
             .await?;
 
-        Ok(Some(account))
+        self.access_tokens.write().await.insert(
+            account_id,
+            CachedAccessToken {
+                token: tokens.access_token,
+                expires_at_ms,
+            },
+        );
+
+        Ok(account)
     }
 
     /// 用 authorization_code + code_verifier 换取 tokens
@@ -1247,6 +1295,10 @@ impl CodexOAuthManager {
     pub async fn clear_auth(&self) -> Result<(), CodexOAuthError> {
         log::info!("[CodexOAuth] 清除所有认证");
 
+        let _commit_guard = self.login_commit_lock.lock().await;
+        let _persist_guard = self.persistence_lock.lock().await;
+        self.login_epoch.fetch_add(1, Ordering::AcqRel);
+
         {
             let mut accounts = self.accounts.write().await;
             accounts.clear();
@@ -1263,10 +1315,7 @@ impl CodexOAuthManager {
             let mut locks = self.refresh_locks.write().await;
             locks.clear();
         }
-        {
-            let mut pending = self.pending_device_codes.write().await;
-            pending.clear();
-        }
+        self.pending_device_codes.write().await.clear();
         self.pool_runtime.lock().await.purge_all();
 
         if self.storage_path.exists() {
@@ -1723,7 +1772,66 @@ fn extract_identity_from_tokens(tokens: &OAuthTokenResponse) -> (Option<String>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn upstream_codex_login_start_rejects_flow_cleared_during_network_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let login_epoch = manager.login_epoch.load(Ordering::Acquire);
+
+        manager.clear_auth().await.unwrap();
+        let result = manager
+            .register_pending_device_code(
+                "stale-device-auth-id".to_string(),
+                "ABCD-EFGH".to_string(),
+                chrono::Utc::now().timestamp_millis() + 60_000,
+                login_epoch,
+            )
+            .await;
+
+        assert!(matches!(result, Err(CodexOAuthError::ExpiredToken)));
+        assert!(manager.pending_device_codes.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upstream_codex_login_cancelled_flow_cannot_commit_tokens() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let login_epoch = manager.login_epoch.load(Ordering::Acquire);
+        manager
+            .register_pending_device_code(
+                "cancelled-device-auth-id".to_string(),
+                "ABCD-EFGH".to_string(),
+                chrono::Utc::now().timestamp_millis() + 60_000,
+                login_epoch,
+            )
+            .await
+            .unwrap();
+
+        assert!(manager.cancel_device_flow("cancelled-device-auth-id").await);
+        let result = manager
+            .commit_device_login(
+                "cancelled-device-auth-id",
+                OAuthTokenResponse {
+                    access_token: "access-after-cancel".to_string(),
+                    refresh_token: Some("refresh-after-cancel".to_string()),
+                    id_token: Some(format!(
+                        "e30.{}.sig",
+                        URL_SAFE_NO_PAD.encode(
+                            br#"{"chatgpt_account_id":"workspace-after-cancel","email":"cancelled@example.test"}"#
+                        )
+                    )),
+                    expires_in: Some(3600),
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(CodexOAuthError::ExpiredToken)));
+        assert!(manager.list_accounts().await.is_empty());
+        assert!(!manager.storage_path.exists());
+    }
 
     #[test]
     fn oauth_error_classification_requires_explicit_invalid_grant_semantics() {

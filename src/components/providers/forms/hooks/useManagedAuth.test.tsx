@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   authGetStatus: vi.fn(),
   authStartLogin: vi.fn(),
   authPollForAccount: vi.fn(),
+  authCancelLogin: vi.fn(),
   openExternal: vi.fn(),
   copyText: vi.fn(),
 }));
@@ -21,6 +22,7 @@ vi.mock("@/lib/api", () => ({
     authGetStatus: mocks.authGetStatus,
     authStartLogin: mocks.authStartLogin,
     authPollForAccount: mocks.authPollForAccount,
+    authCancelLogin: mocks.authCancelLogin,
   },
   settingsApi: { openExternal: mocks.openExternal },
 }));
@@ -75,6 +77,7 @@ beforeEach(() => {
   mocks.authGetStatus.mockResolvedValue(loggedOutStatus);
   mocks.authStartLogin.mockResolvedValue(deviceCode);
   mocks.authPollForAccount.mockResolvedValue(null);
+  mocks.authCancelLogin.mockResolvedValue(true);
   mocks.openExternal.mockResolvedValue(undefined);
   mocks.copyText.mockResolvedValue(undefined);
 });
@@ -127,5 +130,23 @@ describe("useManagedAuth device flow", () => {
     await waitFor(() => expect(result.current.pollingState).toBe("idle"));
     expect(result.current.error).toBeNull();
     expect(result.current.hasAnyAccount).toBe(true);
+  });
+
+  it("upstream_codex_login_cancel notifies the backend for an active Codex flow", async () => {
+    const { result } = renderManagedAuth();
+    await waitFor(() =>
+      expect(result.current.authStatus).toEqual(loggedOutStatus),
+    );
+
+    act(() => result.current.startAuth());
+    await waitFor(() => expect(result.current.pollingState).toBe("polling"));
+    act(() => result.current.cancelAuth());
+
+    await waitFor(() =>
+      expect(mocks.authCancelLogin).toHaveBeenCalledWith(
+        "codex_oauth",
+        "device-secret",
+      ),
+    );
   });
 });

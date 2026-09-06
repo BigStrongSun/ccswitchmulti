@@ -29,6 +29,7 @@ export function useManagedAuth(
   const flowGenerationRef = useRef(0);
   const flowActiveRef = useRef(false);
   const expirationCheckRef = useRef(false);
+  const activeDeviceCodeRef = useRef<string | null>(null);
 
   const {
     data: authStatus,
@@ -55,19 +56,38 @@ export function useManagedAuth(
     }
   }, []);
 
+  const cancelBackendFlow = useCallback(
+    async (activeDeviceCode: string | null) => {
+      if (authProvider !== "codex_oauth" || !activeDeviceCode) return;
+      try {
+        await authApi.authCancelLogin(authProvider, activeDeviceCode);
+      } catch (cancelError) {
+        console.debug(
+          "[ManagedAuth] Failed to cancel backend device flow:",
+          cancelError,
+        );
+      }
+    },
+    [authProvider],
+  );
+
   useEffect(() => {
     return () => {
       flowGenerationRef.current += 1;
       flowActiveRef.current = false;
+      const activeDeviceCode = activeDeviceCodeRef.current;
+      activeDeviceCodeRef.current = null;
       stopPolling();
+      void cancelBackendFlow(activeDeviceCode);
     };
-  }, [stopPolling]);
+  }, [cancelBackendFlow, stopPolling]);
 
   const finishFlow = useCallback(
     (flowGeneration: number) => {
       if (flowGeneration !== flowGenerationRef.current) return false;
       stopPolling();
       flowActiveRef.current = false;
+      activeDeviceCodeRef.current = null;
       expirationCheckRef.current = false;
       flowGenerationRef.current += 1;
       return true;
@@ -120,7 +140,11 @@ export function useManagedAuth(
       response: await authApi.authStartLogin(authProvider, githubDomain),
     }),
     onSuccess: async ({ flowGeneration, response }) => {
-      if (flowGeneration !== flowGenerationRef.current) return;
+      if (flowGeneration !== flowGenerationRef.current) {
+        void cancelBackendFlow(response.device_code);
+        return;
+      }
+      activeDeviceCodeRef.current = response.device_code;
       setDeviceCode(response);
       setPollingState("polling");
       setError(null);
@@ -257,11 +281,14 @@ export function useManagedAuth(
     flowGenerationRef.current += 1;
     flowActiveRef.current = false;
     expirationCheckRef.current = false;
+    const activeDeviceCode = activeDeviceCodeRef.current;
+    activeDeviceCodeRef.current = null;
     stopPolling();
     setPollingState("idle");
     setDeviceCode(null);
     setError(null);
-  }, [stopPolling]);
+    void cancelBackendFlow(activeDeviceCode);
+  }, [cancelBackendFlow, stopPolling]);
 
   const logout = useCallback(() => {
     logoutMutation.mutate();

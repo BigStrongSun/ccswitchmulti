@@ -167,7 +167,7 @@ pub async fn auth_poll_for_account(
             }
         }
         AUTH_PROVIDER_CODEX_OAUTH => {
-            let auth_manager = codex_state.0.write().await;
+            let auth_manager = codex_state.0.read().await;
             match auth_manager.poll_for_token(&device_code).await {
                 Ok(account) => {
                     let default_account_id = auth_manager.get_status().await.default_account_id;
@@ -193,6 +193,21 @@ pub async fn auth_poll_for_account(
         }
         _ => unreachable!(),
     }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn auth_cancel_login(
+    auth_provider: String,
+    device_code: String,
+    codex_state: State<'_, CodexOAuthState>,
+) -> Result<bool, String> {
+    let auth_provider = ensure_auth_provider(&auth_provider)?;
+    if auth_provider != AUTH_PROVIDER_CODEX_OAUTH {
+        return Err("Login cancellation is only supported for Codex OAuth".to_string());
+    }
+
+    let auth_manager = codex_state.0.read().await;
+    Ok(auth_manager.cancel_device_flow(&device_code).await)
 }
 
 #[tauri::command(rename_all = "camelCase")]
