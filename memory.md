@@ -5284,3 +5284,10 @@ supported in one streaming turn`。
 - 对安装版 `OpenAI.Codex_26.901.2854.0` 的 `app.asar` 做只读取证确认：新版 renderer 在启用 canonical history 时优先渲染 `conversation.turnHistory.history`，`turns` 只是兼容/overlay；resume 会先把旧 `wS(conversation)` 与最新五轮合并，再按 `turnsPagination` 继续加载。因此旧 V8 修复只清空 `turns`、保留 `turnHistory`，会把新尾页继续合入旧的多-island缓存，正好造成“当前消息存在，但中间一段仍不显示”。
 - V9 renderer 修复同时识别 rollout path 漂移与同路径下未完成的多 canonical island。仅空闲任务进入恢复；streaming、legacy overlay 或 canonical entity 中存在 `inProgress` 的任务延迟。恢复前同时清空 `turns` 与 `turnHistory`，重置分页状态并调用 Codex 自己的 `resumeConversationForUnavailableOwner`；随后调用 `getCompleteConversationTurns` 闭合全部分页边界。任一步失败都恢复原 conversation，且兼容层证据不再把 hydration 失败误报为 history ready。
 - QuickJS 行为测试覆盖同路径 fragmented history、正常单-island tail 不误修、canonical active turn 延迟、恢复前清除 canonical cache、完整分页加载以及失败回滚；Codex Desktop 聚焦测试 43/43 通过。该修复只改源码与模拟 renderer 状态，不重启当前 Codex、不修改正在写入的真实 rollout；安装版视觉验收仍需后续安全构建替换后执行。
+
+# 2026-09-06 CCSwitchMulti v3.20.1-1 上游迁移设计
+
+- 用户批准以 `3.20.1-1` 为目标做官方 3.20.1 迁移。设计基线为 CCSwitchMulti `main@3670daab`、官方 tag `v3.20.1@3217f725`、审计 tip `origin/main@741e802f`、merge-base `43eaf073`；两侧独有 1611/131 个提交，整枝 merge-tree 有 83 个内容冲突，因此禁止粗糙整枝合并。
+- 本地分支复审没有新增已经完成但漏合的产品分支。`codex-power-presets@add559aa` 工作树虽干净但 current renderer 仍明确 NO-GO；`codex-multirouter-ssot-v2`、`codex-reasoning-probe-backend`、detached error journal 和 `ccsm-agent-mesh` 继续按未完成现场保留。
+- 批准方案采用分层语义迁移：低风险数据、基础可靠性、数据库版本映射、Codex OAuth/账号身份、代理协议、Pi、前端/预设、版本发布。每批先 RED、再根修、独立提交并验证；最终优先用本机 9950X 完成 Windows 全门禁，再用 Windows/Ubuntu/macOS CI 证明跨平台条件编译，全部通过后才 tag/release。
+- 设计文档为 `docs/superpowers/specs/2026-09-06-upstream-v3.20.1-migration-design.md`。实现必须使用隔离 `bigstrongsun/upstream-v3.20.1-migration` worktree，不清理用户 `.tmp/`、provider layout preview 或任何未完成 worktree。
