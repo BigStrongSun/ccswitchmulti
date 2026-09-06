@@ -906,6 +906,8 @@ fn build_repair_plan_for_paths(
                     continue;
                 }
             };
+            #[cfg(not(any(target_os = "windows", test)))]
+            let _ = &repair;
             let scan = match scan_rollout_ordinals(&path) {
                 Ok(scan) => scan,
                 Err(error) => {
