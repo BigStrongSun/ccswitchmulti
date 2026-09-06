@@ -29,8 +29,8 @@ use super::codex_terminal::{
     classify_native_responses_terminal, NativeResponsesEvidence, NativeResponsesTerminalDisposition,
 };
 use super::streaming_responses::{
-    anthropic_error_sse, anthropic_sse, create_anthropic_sse_stream_from_responses,
-    RETRYABLE_STREAM_MARKER,
+    anthropic_error_sse, anthropic_sse,
+    create_anthropic_sse_stream_from_responses_with_web_search_options, RETRYABLE_STREAM_MARKER,
 };
 use crate::proxy::error::ProxyError;
 use crate::proxy::hyper_client::ProxyResponse;
@@ -681,10 +681,28 @@ pub fn create_resilient_anthropic_sse_stream_from_responses(
     initial: ByteStream,
     reconnector: Option<StreamReconnector>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    create_resilient_anthropic_sse_stream_from_responses_with_web_search_options(
+        initial,
+        reconnector,
+        None,
+        None,
+    )
+}
+
+pub(crate) fn create_resilient_anthropic_sse_stream_from_responses_with_web_search_options(
+    initial: ByteStream,
+    reconnector: Option<StreamReconnector>,
+    hosted_web_search_name: Option<String>,
+    max_web_search_uses: Option<u64>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let Some(reconnector) = reconnector else {
             // 无重连工厂：不做重试，但思考期心跳与主循环保持同款语义。
-            let translated = create_anthropic_sse_stream_from_responses(initial);
+            let translated = create_anthropic_sse_stream_from_responses_with_web_search_options(
+                initial,
+                hosted_web_search_name.clone(),
+                max_web_search_uses,
+            );
             futures::pin_mut!(translated);
             let mut message_start_forwarded = false;
             loop {
@@ -727,7 +745,11 @@ pub fn create_resilient_anthropic_sse_stream_from_responses(
                 Some(stream) => stream,
                 None => break,
             };
-            let translated = create_anthropic_sse_stream_from_responses(byte_stream);
+            let translated = create_anthropic_sse_stream_from_responses_with_web_search_options(
+                byte_stream,
+                hosted_web_search_name.clone(),
+                max_web_search_uses,
+            );
             futures::pin_mut!(translated);
 
             // 本次尝试因可重试原因终止时的描述；None 表示尝试正常走完。
