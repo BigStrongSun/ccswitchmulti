@@ -206,8 +206,10 @@ vi.mock("@/components/settings/DirectorySettings", () => ({
     onBrowseAppConfig,
     onResetAppConfig,
     onAppConfigChange,
+    piDir,
   }: any) => (
     <div>
+      <span>pi-directory:{piDir ?? "none"}</span>
       <button onClick={() => onBrowseDirectory("claude")}>
         browse-directory
       </button>
@@ -469,5 +471,20 @@ describe("SettingsPage Component", () => {
 
     fireEvent.click(screen.getByText("change-app-config"));
     expect(settingsMock.updateAppConfigDir).toHaveBeenCalledWith("/app/new");
+  });
+
+  it("passes the configured Pi directory to directory settings", () => {
+    settingsMock = createSettingsMock({
+      settings: {
+        ...createSettingsMock().settings,
+        piConfigDir: "/pi/custom",
+      },
+    });
+
+    renderSettingsPage();
+    fireEvent.click(screen.getByText("settings.tabAdvanced"));
+    fireEvent.click(screen.getByText("settings.advanced.configDir.title"));
+
+    expect(screen.getByText("pi-directory:/pi/custom")).toBeInTheDocument();
   });
 });

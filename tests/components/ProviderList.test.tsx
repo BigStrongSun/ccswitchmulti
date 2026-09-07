@@ -2,8 +2,12 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactElement } from "react";
+import { http, HttpResponse } from "msw";
 import type { Provider } from "@/types";
 import { ProviderList } from "@/components/providers/ProviderList";
+import { server } from "../msw/server";
+
+const TAURI_ENDPOINT = "http://tauri.local";
 
 const useDragSortMock = vi.fn();
 const useSortableMock = vi.fn();
@@ -424,5 +428,130 @@ describe("ProviderList Component", () => {
     expect(
       screen.getByText("No providers match your search."),
     ).toBeInTheDocument();
+  });
+
+  it("derives Pi membership only from the native provider ID list", async () => {
+    const provider = createProvider({
+      id: "drifted-pi",
+      name: "Saved Pi",
+    });
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [provider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/get_pi_current_state`, () =>
+        HttpResponse.json({ enabledProviderIds: ["drifted-pi"] }),
+      ),
+    );
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ [provider.id]: provider }}
+        currentProviderId=""
+        appId="pi"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      const latest = providerCardRenderSpy.mock.calls
+        .map(([props]) => props)
+        .filter((props) => props.provider.id === provider.id)
+        .at(-1);
+      expect(latest).toMatchObject({
+        isCurrent: false,
+        isInConfig: true,
+        isRemovalProtected: false,
+      });
+    });
+  });
+
+  it("fails closed when Pi's authoritative state cannot be read", async () => {
+    const provider = createProvider({
+      id: "legacy-pi",
+      name: "Legacy Pi",
+      meta: { liveConfigManaged: true } as Provider["meta"],
+    });
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [provider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/get_pi_current_state`, () =>
+        HttpResponse.json("current state unavailable", { status: 500 }),
+      ),
+    );
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ [provider.id]: provider }}
+        currentProviderId="legacy-pi"
+        appId="pi"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await waitFor(() => {
+      const latest = providerCardRenderSpy.mock.calls.at(-1)?.[0];
+      expect(latest).toMatchObject({
+        isCurrent: false,
+        isInConfig: false,
+        isStateChangeProtected: true,
+      });
+    });
+  });
+
+  it("does not expose proxy or failover state on Pi provider cards", async () => {
+    const provider = createProvider({ id: "pi-provider", name: "Pi" });
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [provider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/get_pi_current_state`, () =>
+        HttpResponse.json({ enabledProviderIds: [provider.id] }),
+      ),
+    );
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ [provider.id]: provider }}
+        currentProviderId={provider.id}
+        appId="pi"
+        isProxyRunning
+        isProxyTakeover
+        activeProviderId={provider.id}
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      const latest = providerCardRenderSpy.mock.calls.at(-1)?.[0];
+      expect(latest).toMatchObject({
+        isCurrent: false,
+        isProxyRunning: false,
+        isProxyTakeover: false,
+        isAutoFailoverEnabled: false,
+      });
+      expect(latest.onToggleFailover).toBeUndefined();
+      expect(latest.activeProviderId).toBeUndefined();
+    });
   });
 });

@@ -5416,3 +5416,12 @@ supported in one streaming turn`。
 - Pi session browser 只读原生 JSONL，复用 Pi 的绝对 `sessionDir`、`~` 路径或默认目录；相对目录明确返回 `requires_project_context`，不猜启动 cwd。树解析按 parent/leaf 选择活动分支，限制 128 MiB、50 万条和 ID 长度；删除前重新验证 active root、目录布局与 header session ID。
 - Pi usage importer 与 session browser 共用文件发现规则，按捕获的文件大小扫描完整 JSONL 行，接受合法未终结尾行但不越过不完整 JSON。稳定 entry ID、canonical JSON semantic ID 与持久账本共同处理重写、fork 和 rollup 后重扫；reported cost 优先，否则按 fresh input 语义调用现有定价计算器。Provider/model 等不可信标签在 UTF-8 边界限制为 512 bytes，时间戳必须落在 SQLite 可表示范围。
 - TDD schema RED 精确失败为 `no such table: session_usage_dedup`，parser 注册 RED 精确失败为缺少 `session_usage_pi` 模块；GREEN 后集中 `cargo test --lib pi -- --nocapture` 为 602/602，其中 Pi usage 16 条、Pi session browser 12 条，并覆盖既有 Pi Provider/Prompt/Skill 边界。这里只证明源码与聚焦回归；前端类型、Session filter/提示和 Usage dashboard 仍属于下一批，尚未运行全量 Rust/frontend、Tauri/NSIS 或安装态验收。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi 前端、目录、工具生命周期与应用边界
+
+- Pi 已接入 App switcher/visibility、独立 Provider 表单、Prompt 原生资源、Skill、Session、Usage、目录设置和 About 工具卡。Provider duplicate 必须读取 `get_pi_current_state` 的原生 Provider IDs；remove 无论原生命令成功与否都失效 Pi current-state 与 Provider 缓存，不能让 UI 继续信任过期事实。
+- Pi Provider 表单从完整节点派生写回，保留未知字段；请求头和结构化 options 使用显式编辑器。共享 `ModelDropdown` 迁移官方 `7e152d75`/`076c2744` 的可搜索分组选择语义，按 model ID 与 vendor 匹配，选择后关闭；它不是 Pi 私有分叉。
+- Pi 明确不进入 MCP、Codex MultiRouter、Provider Set、本地代理、failover 或 tray takeover。`appConfig`、App 集成缓存/duplicate 回归与 MCP 支持矩阵都锁定此边界；Pi 的 auth、默认 Provider、默认 Model 和默认 Thinking 仍归 Pi 所有，CCSM 前端不冒充可编辑。
+- 工具生命周期把 Pi 固定为 npm 包 `@earendil-works/pi-coding-agent`，安装/升级沿用 npm，latest 查询也走 npm registry；Windows/POSIX 命令和 WSL 配置目录均已接入，不臆造 `pi update`。四个 locale 精确迁移官方 `84e75ad2` 的 15 个变更路径，当前源码引用的 103 个 Pi 文案键无缺失，JSON 严格 UTF-8 无 BOM。
+- 本批 TDD 的 RED 分别证明目录 hook 错误回退 Hermes、设置 UI/SettingsPage 未传 Pi、后端工具 normalization 丢弃 Pi、About 少一张 Pi 卡。最终集中 GREEN 证据为前端 20 文件 186/186、App Pi 边界 2/2、`upstream_pi_` 37/37、Pi session 12/12、Pi usage 16/16、model-fetch headers 3/3、credential redaction 1/1、Pi lifecycle 1/1、typecheck 与 rustfmt。该批只执行一次格式化后的聚焦复验，没有在开发中反复启动完整 9950X 全量套件。
+- Task 9 目前只可把共享模型下拉 `7e152d75`/`076c2744` 与本批有证据的 Pi/结构化编辑器范围标记完成。IME helper 只用于 Pi 请求头，并未覆盖官方 `d9d4a660`/`a98829ba` 的全部目标表单和测试；其他 preset、endpoint、reasoning dialect、表单布局与 usage UI 行继续保持待迁移，不能批量改成 adopted。

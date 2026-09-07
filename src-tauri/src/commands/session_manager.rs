@@ -2,6 +2,27 @@
 
 use crate::session_manager;
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiCurrentState {
+    enabled_provider_ids: Vec<String>,
+    default_provider_id: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_pi_current_state() -> Result<PiCurrentState, String> {
+    let store = crate::pi_config::PiModelsStore::new(
+        crate::pi_config::get_pi_models_path().map_err(|error| error.to_string())?,
+    );
+    let snapshot = store.read_snapshot().map_err(|error| error.to_string())?;
+    let defaults =
+        crate::pi_config::read_pi_native_defaults().map_err(|error| error.to_string())?;
+    Ok(PiCurrentState {
+        enabled_provider_ids: snapshot.providers.keys().cloned().collect(),
+        default_provider_id: defaults.default_provider,
+    })
+}
+
 #[tauri::command]
 pub fn get_pi_session_discovery() -> session_manager::providers::pi::PiSessionDiscovery {
     session_manager::providers::pi::session_discovery()

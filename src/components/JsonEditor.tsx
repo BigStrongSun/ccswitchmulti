@@ -13,6 +13,7 @@ import { formatJSON } from "@/utils/formatters";
 
 interface JsonEditorProps {
   id?: string;
+  ariaLabel?: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
@@ -25,6 +26,8 @@ interface JsonEditorProps {
 }
 
 const JsonEditor: React.FC<JsonEditorProps> = ({
+  id,
+  ariaLabel,
   value,
   onChange,
   placeholder: placeholderText = "",
@@ -142,6 +145,9 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
       baseTheme,
       sizingTheme,
       jsonLinter,
+      EditorView.contentAttributes.of(
+        ariaLabel ? { "aria-label": ariaLabel } : {},
+      ),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
           const newValue = update.state.doc.toString();
@@ -257,6 +263,7 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
       className={isFullHeight ? "flex flex-col" : ""}
     >
       <div
+        id={id}
         ref={editorRef}
         style={{ width: "100%", height: isFullHeight ? undefined : "auto" }}
         className={isFullHeight ? "flex-1 min-h-0" : ""}

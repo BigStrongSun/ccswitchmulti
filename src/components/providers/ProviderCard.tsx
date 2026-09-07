@@ -30,6 +30,7 @@ import {
 import { useProviderHealth } from "@/lib/query/failover";
 import { useUsageQuery } from "@/lib/query/queries";
 import { resolveProviderIcon } from "@/utils/providerIcon";
+import { isProxyAppId } from "@/config/appConfig";
 import type { CodexProviderAdaptationSummary } from "@/lib/api/protocol-compatibility";
 
 interface DragHandleProps {
@@ -68,6 +69,8 @@ interface ProviderCardProps {
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
   // OpenClaw: default model
   isDefaultModel?: boolean;
+  isRemovalProtected?: boolean;
+  isStateChangeProtected?: boolean;
   onSetAsDefault?: () => void;
 }
 
@@ -234,6 +237,8 @@ export function ProviderCard({
   activeProviderId,
   // OpenClaw: default model
   isDefaultModel,
+  isRemovalProtected,
+  isStateChangeProtected,
   onSetAsDefault,
 }: ProviderCardProps) {
   const { t } = useTranslation();
@@ -243,7 +248,11 @@ export function ProviderCard({
   const handleDisableAnyOmo = isOmoSlim ? onDisableOmoSlim : onDisableOmo;
   const isAdditiveMode = appId === "opencode" && !isAnyOmo;
 
-  const { data: health } = useProviderHealth(provider.id, appId);
+  const { data: health } = useProviderHealth(
+    provider.id,
+    appId,
+    isProxyAppId(appId),
+  );
 
   const fallbackUrlText = t("provider.notConfigured", {
     defaultValue: "未配置接口地址",
@@ -719,6 +728,8 @@ export function ProviderCard({
               onToggleFailover={onToggleFailover}
               // OpenClaw: default model
               isDefaultModel={isDefaultModel}
+              isRemovalProtected={isRemovalProtected}
+              isStateChangeProtected={isStateChangeProtected}
               onSetAsDefault={onSetAsDefault}
             />
           </div>

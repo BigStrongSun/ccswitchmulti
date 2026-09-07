@@ -9,6 +9,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import PromptListItem from "./PromptListItem";
 import PromptFormPanel from "./PromptFormPanel";
 import { ConfirmDialog } from "../ConfirmDialog";
+import PiPromptPanel, { type PromptPrimaryAction } from "./PiPromptPanel";
+
+export type { PromptPrimaryAction } from "./PiPromptPanel";
 
 interface PromptPanelProps {
   open: boolean;
@@ -16,15 +19,25 @@ interface PromptPanelProps {
   appId: AppId;
   onInteractionBlockedChange?: (blocked: boolean) => void;
   onNavigationBlockedChange?: (blocked: boolean) => void;
+  onPrimaryActionChange?: (action: PromptPrimaryAction) => void;
 }
 
 export interface PromptPanelHandle {
   openAdd: () => void;
 }
 
-const PromptPanel = React.forwardRef<PromptPanelHandle, PromptPanelProps>(
+const GenericPromptPanel = React.forwardRef<
+  PromptPanelHandle,
+  PromptPanelProps
+>(
   (
-    { open, appId, onInteractionBlockedChange, onNavigationBlockedChange },
+    {
+      open,
+      appId,
+      onInteractionBlockedChange,
+      onNavigationBlockedChange,
+      onPrimaryActionChange,
+    },
     ref,
   ) => {
     const { t } = useTranslation();
@@ -69,6 +82,10 @@ const PromptPanel = React.forwardRef<PromptPanelHandle, PromptPanelProps>(
     useEffect(() => {
       onNavigationBlockedChange?.(navigationBlocked);
     }, [navigationBlocked, onNavigationBlockedChange]);
+
+    useEffect(() => {
+      onPrimaryActionChange?.("prompt");
+    }, [onPrimaryActionChange]);
 
     useEffect(
       () => () => {
@@ -353,6 +370,23 @@ const PromptPanel = React.forwardRef<PromptPanelHandle, PromptPanelProps>(
       </div>
     );
   },
+);
+
+GenericPromptPanel.displayName = "GenericPromptPanel";
+
+const PromptPanel = React.forwardRef<PromptPanelHandle, PromptPanelProps>(
+  (props, ref) =>
+    props.appId === "pi" ? (
+      <PiPromptPanel
+        ref={ref}
+        open={props.open}
+        onInteractionBlockedChange={props.onInteractionBlockedChange}
+        onNavigationBlockedChange={props.onNavigationBlockedChange}
+        onPrimaryActionChange={props.onPrimaryActionChange}
+      />
+    ) : (
+      <GenericPromptPanel ref={ref} {...props} />
+    ),
 );
 
 PromptPanel.displayName = "PromptPanel";
