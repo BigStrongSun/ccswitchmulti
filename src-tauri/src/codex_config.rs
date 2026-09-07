@@ -82,6 +82,8 @@ pub(crate) const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
 /// 已确认原生 `/responses` 网关不接受 OpenAI hosted web_search 的主机片段。
 pub const CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID: &str = "cc-switch-official";
 const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &[
+    "bigmodel.cn",
+    "z.ai",
     "xiaomimimo.com",
     "longcat.chat",
     "minimax.io",
@@ -183,14 +185,37 @@ fn codex_top_level_model(config_text: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// Parse the host from either an absolute URL or a bare host and normalize it
+/// for vendor-boundary checks. Invalid or hostless values are not classified.
+pub(crate) fn codex_url_host(url_or_host: &str) -> Option<String> {
+    let trimmed = url_or_host.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = url::Url::parse(trimmed)
+        .or_else(|_| url::Url::parse(&format!("https://{trimmed}")))
+        .ok()?;
+    parsed
+        .host_str()
+        .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+}
+
+/// Match a host exactly or below a vendor domain. Paths and lookalike suffixes
+/// such as `z.ai.example.com` or `xyz.ai` never satisfy the boundary.
+pub(crate) fn codex_url_host_matches_any(url_or_host: &str, hosts: &[&str]) -> bool {
+    let Some(host) = codex_url_host(url_or_host) else {
+        return false;
+    };
+    hosts.iter().any(|candidate| {
+        let candidate = candidate.trim_start_matches('.').to_ascii_lowercase();
+        host == candidate || host.ends_with(&format!(".{candidate}"))
+    })
+}
+
 /// 判断原生 `/responses` 网关是否应禁用 Codex hosted web_search。
 fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
     if let Some(base_url) = extract_codex_base_url(config_text) {
-        let base_url = base_url.to_ascii_lowercase();
-        if CODEX_WEB_SEARCH_REJECT_HOSTS
-            .iter()
-            .any(|host| base_url.contains(host))
-        {
+        if codex_url_host_matches_any(&base_url, CODEX_WEB_SEARCH_REJECT_HOSTS) {
             return true;
         }
     }
@@ -11287,6 +11312,35 @@ trust_level = "trusted"
             CodexCatalogToolProfile::from_api_format(None),
             CodexCatalogToolProfile::ProxyChat
         );
+    }
+
+    #[test]
+    fn native_web_search_vendor_hosts_are_label_bounded() {
+        assert_eq!(codex_url_host("api.z.ai").as_deref(), Some("api.z.ai"));
+
+        let config = |base_url: &str| {
+            format!(
+                "model = \"gpt-5.5\"\nmodel_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Custom\"\nbase_url = \"{base_url}\"\nwire_api = \"responses\"\n"
+            )
+        };
+
+        for base_url in ["https://open.bigmodel.cn/api/v1", "https://api.z.ai/api/v1"] {
+            assert!(
+                codex_native_gateway_rejects_web_search(&config(base_url)),
+                "{base_url}"
+            );
+        }
+        for base_url in [
+            "https://api.xyz.ai/api/v1",
+            "https://viz.ai/api/v1",
+            "https://z.ai.example.com/api/v1",
+            "https://notbigmodel.cn/api/v1",
+        ] {
+            assert!(
+                !codex_native_gateway_rejects_web_search(&config(base_url)),
+                "{base_url}"
+            );
+        }
     }
 
     #[test]

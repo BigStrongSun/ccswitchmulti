@@ -245,6 +245,20 @@ pub fn explain_codex_responses_upstream_protocol(
         );
     }
 
+    if let Some(base_url) = provider_codex_base_url(provider) {
+        if let Some(protocol) = zhipu_codex_endpoint_protocol(&base_url) {
+            return CodexResponsesUpstreamDecision::new(
+                protocol,
+                match protocol {
+                    CodexResponsesUpstreamProtocol::Responses => "native_responses_url",
+                    CodexResponsesUpstreamProtocol::Chat => "known_chat_completions_only_url",
+                    _ => unreachable!("Zhipu exposes only Responses or Chat endpoints"),
+                },
+                format!("base_url={base_url} 命中智谱协议专用端点"),
+            );
+        }
+    }
+
     if let Some(api_format) = provider
         .meta
         .as_ref()
@@ -2628,6 +2642,17 @@ pub fn resolve_codex_catalog_tool_profile(
     if provider.is_xai_oauth() {
         return CodexCatalogToolProfile::NativeResponses;
     }
+    if let Some(base_url) = provider_codex_base_url(provider) {
+        match zhipu_codex_endpoint_protocol(&base_url) {
+            Some(CodexResponsesUpstreamProtocol::Responses) => {
+                return CodexCatalogToolProfile::NativeResponses;
+            }
+            Some(CodexResponsesUpstreamProtocol::Chat) => {
+                return CodexCatalogToolProfile::ProxyChat;
+            }
+            _ => {}
+        }
+    }
     if codex_provider_uses_anthropic(provider) {
         return CodexCatalogToolProfile::Anthropic;
     }
@@ -3457,6 +3482,23 @@ fn is_chat_completions_url(value: &str) -> bool {
         .ends_with("/chat/completions")
 }
 
+/// Zhipu publishes protocol-specific Coding Plan endpoints. Their path is
+/// authoritative when persisted metadata predates a preset update.
+fn zhipu_codex_endpoint_protocol(value: &str) -> Option<CodexResponsesUpstreamProtocol> {
+    if !crate::codex_config::codex_url_host_matches_any(value, &["bigmodel.cn", "z.ai"]) {
+        return None;
+    }
+    let parsed = url::Url::parse(value.trim()).ok()?;
+    let path = parsed.path().trim_end_matches('/').to_ascii_lowercase();
+    if path == "/api/v1" {
+        return Some(CodexResponsesUpstreamProtocol::Responses);
+    }
+    if path.contains("/paas/v4") || is_chat_completions_url(&path) {
+        return Some(CodexResponsesUpstreamProtocol::Chat);
+    }
+    None
+}
+
 /// 统一判断当前入口是否是 Codex Responses 路径。
 ///
 /// 参数:
@@ -3487,13 +3529,15 @@ pub(crate) fn is_codex_remote_compact_endpoint(endpoint: &str) -> bool {
 /// 用于兼容旧数据：一些 provider 曾经把 `wire_api` 误写成 `responses`，
 /// 但真实服务端只提供 `/chat/completions`。
 fn is_known_chat_completions_only_url(value: &str) -> bool {
+    if let Some(protocol) = zhipu_codex_endpoint_protocol(value) {
+        return protocol == CodexResponsesUpstreamProtocol::Chat;
+    }
     let lower = value.trim().to_ascii_lowercase();
     is_chat_completions_url(&lower)
         || [
             "api.deepseek.com",
             "api.moonshot.cn",
             "dashscope.aliyuncs.com",
-            "open.bigmodel.cn",
             "api.siliconflow.cn",
             "sensenova.cn",
             "openrouter.ai",
@@ -5837,6 +5881,59 @@ wire_api = "anthropic"
             resolve_codex_catalog_tool_profile(&chat),
             CodexCatalogToolProfile::ProxyChat
         );
+    }
+
+    #[test]
+    fn zhipu_native_responses_endpoint_overrides_stale_chat_metadata() {
+        use crate::codex_config::CodexCatalogToolProfile;
+
+        let provider = |base_url: &str| {
+            let mut provider = create_provider(json!({
+                "config": format!(
+                    "model_provider = \"zhipu\"\nmodel = \"glm-5.3\"\n\n[model_providers.zhipu]\nname = \"Zhipu GLM\"\nbase_url = \"{base_url}\"\nwire_api = \"responses\"\n"
+                )
+            }));
+            provider.meta = Some(crate::provider::ProviderMeta {
+                api_format: Some("openai_chat".to_string()),
+                ..Default::default()
+            });
+            provider
+        };
+
+        for base_url in ["https://open.bigmodel.cn/api/v1", "https://api.z.ai/api/v1"] {
+            let native = provider(base_url);
+            let decision = explain_codex_responses_upstream_protocol(&native);
+            assert_eq!(
+                decision.protocol,
+                CodexResponsesUpstreamProtocol::Responses,
+                "{base_url}"
+            );
+            assert_eq!(decision.source, "native_responses_url", "{base_url}");
+            assert_eq!(
+                resolve_codex_catalog_tool_profile(&native),
+                CodexCatalogToolProfile::NativeResponses,
+                "{base_url}"
+            );
+        }
+
+        for base_url in [
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://api.z.ai/api/coding/paas/v4",
+            "https://api.xyz.ai/api/v1",
+        ] {
+            let chat = provider(base_url);
+            assert_eq!(
+                explain_codex_responses_upstream_protocol(&chat).protocol,
+                CodexResponsesUpstreamProtocol::Chat,
+                "{base_url}"
+            );
+            assert_eq!(
+                resolve_codex_catalog_tool_profile(&chat),
+                CodexCatalogToolProfile::ProxyChat,
+                "{base_url}"
+            );
+        }
     }
 
     #[test]

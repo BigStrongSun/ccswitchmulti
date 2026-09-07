@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 Zhipu Codex Responses 端点与持久化协议根修
+
+- Codex 内置 Web 与固定 Matrix WebSearch 桥分别直读智谱国内/国际官方 Codex 页面，均确认 Codex 必须使用专属 OpenAI Responses 端点：国内 `https://open.bigmodel.cn/api/v1`、国际 `https://api.z.ai/api/v1`，`wire_api=responses`，默认 `glm-5.3`。国内官方目录另列 `glm-5-turbo`；国内 `glm-5.3`/`glm-5-turbo` 上下文为 `1048576`/`204800`，国际目录只列 `glm-5.3`。
+- 根因不只是内置预设过时。CCSM 的 `is_known_chat_completions_only_url` 过去把整个 `open.bigmodel.cn` 主机无条件当成 Chat-only，`resolve_codex_catalog_tool_profile` 又优先信任持久化的旧 `meta.apiFormat`；因此仅把已保存 Provider 的地址更新到 `/api/v1`，仍可能继续做 Responses→Chat 转换并生成 ProxyChat 工具画像。
+- 修复把智谱协议专用 path 提升为该厂商的路由事实源：`/api/v1` 固定原生 Responses，`/api/coding/paas/v4` 与 `/api/paas/v4` 保持 Chat；新预设切到 `glm-5.3`，国内附带 `glm-5-turbo`。模型 reasoning 用 schema-v2 Responses 对象表达：GLM-5.3 仅 `low/high/max`、默认 `max`、不可关闭；Turbo 仅暴露官方默认 `max`，不伪造 `none`。
+- host 判断改用 URL 解析与 DNS 标签边界，新增 `bigmodel.cn`/`z.ai` 原生 hosted-web-search 拒绝项而不误伤 `xyz.ai`、`viz.ai`、`z.ai.example.com` 或 `notbigmodel.cn`。RED 分别命中旧 Chat 预设、缺失 GLM-5.3、陈旧 metadata 仍路由 Chat 和未禁用 hosted search；GREEN 后预设/能力 16/16、Rust 路由与 host 2/2、Provider 表单 15/15。重开旧 override 时用户自己的 `glm-5.2` catalog 保持原样，维护预设基线独立更新。
+- 本批没有可用的真实智谱套餐 Key，因此 endpoint/模型目录由两条官方文档链交叉验证，未做真实计费请求 canary；也没有安装、重启、合并 main、push、tag 或发布。
+
 ## 2026-09-07 QwenCloud 国际站三产品预设迁移
 
 - 上游 `6d25f34e` 的 QwenCloud 意图已按 CCSwitchMulti 当前预设边界重写，而非整提交照搬：七个受支持 App 都分别提供按量付费、Coding Plan、Token Plan，Codex 使用稳定 `presetKey`；三种 API Key 与 base URL 明确隔离，避免套餐 Key 误打到按量域名产生 401/403 或意外计费。

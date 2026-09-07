@@ -24,20 +24,6 @@ const expectedChatPresets = new Map<
     },
   ],
   [
-    "Zhipu GLM",
-    {
-      baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
-      contextWindows: { "glm-5.2": 200000 },
-    },
-  ],
-  [
-    "Zhipu GLM en",
-    {
-      baseUrl: "https://api.z.ai/api/coding/paas/v4",
-      contextWindows: { "glm-5.2": 200000 },
-    },
-  ],
-  [
     "Baidu Qianfan Coding Plan",
     {
       baseUrl: "https://qianfan.baidubce.com/v2/coding",
@@ -184,35 +170,10 @@ describe("Codex Chat provider presets", () => {
     );
   });
 
-  it("declares GLM 5.2 thinking and reasoning effort support", () => {
-    for (const name of ["Zhipu GLM", "Zhipu GLM en"]) {
-      const preset = codexProviderPresets.find((item) => item.name === name);
-
-      expect(preset?.modelCatalog).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            model: "glm-5.2",
-            inputModalities: ["text"],
-            textOnly: true,
-            supportsImage: false,
-          }),
-        ]),
-      );
-      expect(preset?.codexChatReasoning).toMatchObject({
-        supportsThinking: true,
-        supportsEffort: true,
-        thinkingParam: "thinking",
-        effortParam: "reasoning_effort",
-        effortValueMode: "deepseek",
-        outputFormat: "reasoning_content",
-      });
-    }
-  });
-
   it("uses native Responses API for migrated CN providers without local route mapping", () => {
     const nativeResponsesPresets = new Map<
       string,
-      { contextWindows: Record<string, number> }
+      { baseUrl?: string; contextWindows: Record<string, number> }
     >([
       // 官方 Codex 文档确认 Coding Plan /api/coding/v3 支持 Responses API
       ["火山Agentplan", { contextWindows: { "ark-code-latest": 256000 } }],
@@ -259,6 +220,20 @@ describe("Codex Chat provider presets", () => {
           },
         },
       ],
+      [
+        "Zhipu GLM",
+        {
+          baseUrl: "https://open.bigmodel.cn/api/v1",
+          contextWindows: { "glm-5.3": 1048576, "glm-5-turbo": 204800 },
+        },
+      ],
+      [
+        "Zhipu GLM en",
+        {
+          baseUrl: "https://api.z.ai/api/v1",
+          contextWindows: { "glm-5.3": 1048576 },
+        },
+      ],
     ]);
 
     for (const [name, expected] of nativeResponsesPresets) {
@@ -266,6 +241,13 @@ describe("Codex Chat provider presets", () => {
 
       expect(preset, `${name} preset`).toBeDefined();
       expect(preset?.apiFormat).toBe("openai_responses");
+      if (expected.baseUrl) {
+        expect(extractCodexBaseUrl(preset?.config)).toBe(expected.baseUrl);
+        expect(preset?.endpointCandidates).toContain(expected.baseUrl);
+        expect(extractCodexModelName(preset?.config)).toBe(
+          preset?.modelCatalog?.[0]?.model,
+        );
+      }
       // 原生 Responses 预设现在带 modelCatalog，供直连路径生成
       // ~/.codex 的 model-catalogs.json；前端已按 apiFormat 解耦，带 catalog
       // 不再等同于强制开启本地路由映射。

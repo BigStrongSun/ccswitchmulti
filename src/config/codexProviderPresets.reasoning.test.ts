@@ -109,32 +109,31 @@ describe("Codex preset reasoning capabilities", () => {
     );
   });
 
-  it("declares GLM-5.2 compatibility aliases and max default", () => {
-    expect(presetModel("Zhipu GLM", "glm-5.2").reasoning).toEqual(
-      expect.objectContaining({
-        supportedEfforts: [
-          "none",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max",
-        ],
-        defaultEffort: "max",
-        disableAllowed: true,
-        upstream: expect.objectContaining({
-          parameter: "reasoning_effort",
-          effortMap: {
-            none: "none",
-            minimal: "none",
-            low: "high",
-            medium: "high",
-            high: "high",
-            xhigh: "max",
-            max: "max",
+  it("declares GLM-5.3 native Responses efforts and max default", () => {
+    for (const provider of ["Zhipu GLM", "Zhipu GLM en"]) {
+      expect(presetModel(provider, "glm-5.3").reasoning).toEqual(
+        expect.objectContaining({
+          supportedEfforts: ["low", "high", "max"],
+          defaultEffort: "max",
+          disableAllowed: false,
+          upstream: {
+            format: "reasoning_object",
+            parameter: "reasoning.effort",
           },
+          outputFormat: "reasoning",
         }),
+      );
+    }
+    expect(presetModel("Zhipu GLM", "glm-5-turbo").reasoning).toEqual(
+      expect.objectContaining({
+        supportedEfforts: ["max"],
+        defaultEffort: "max",
+        disableAllowed: false,
+        upstream: {
+          format: "reasoning_object",
+          parameter: "reasoning.effort",
+        },
+        outputFormat: "reasoning",
       }),
     );
   });
