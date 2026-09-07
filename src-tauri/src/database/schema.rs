@@ -317,6 +317,26 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // Session detail rows are pruned after rollup, so request identities
+        // needed for Pi fork/rewrite deduplication live in a compact ledger.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_usage_dedup (
+                data_source TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                semantic_id TEXT NOT NULL,
+                has_entry_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (data_source, request_id)
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_usage_dedup_semantic
+             ON session_usage_dedup(data_source, semantic_id, has_entry_id)",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         // 19. 多设备额度协作只缓存每设备最新的脱敏聚合报告。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS quota_collaboration_reports (
@@ -558,6 +578,11 @@ impl Database {
                         log::info!("迁移数据库从 v20 到 v21（Claude 会话日志字节游标）");
                         Self::migrate_v20_to_v21(conn)?;
                         Self::set_user_version(conn, 21)?;
+                    }
+                    21 => {
+                        log::info!("迁移数据库从 v21 到 v22（添加 Pi 会话用量持久去重账本）");
+                        Self::migrate_v21_to_v22(conn)?;
+                        Self::set_user_version(conn, 22)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1316,6 +1341,23 @@ impl Database {
                 "INTEGER",
             )?;
         }
+        Ok(())
+    }
+
+    /// v21 -> v22: preserve Pi request identities after detail rollup.
+    fn migrate_v21_to_v22(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_usage_dedup (
+                data_source TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                semantic_id TEXT NOT NULL,
+                has_entry_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (data_source, request_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_session_usage_dedup_semantic
+             ON session_usage_dedup(data_source, semantic_id, has_entry_id);",
+        )
+        .map_err(|error| AppError::Database(format!("创建 Pi 会话用量去重账本失败: {error}")))?;
         Ok(())
     }
 
@@ -4030,6 +4072,53 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         assert_eq!(cursor, (3, None, None));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_pi_session_usage_v21_migration_creates_indexed_dedup_ledger() -> Result<(), AppError>
+    {
+        let conn = Connection::open_in_memory()?;
+        Database::set_user_version(&conn, 21)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        conn.execute(
+            "INSERT INTO session_usage_dedup
+             (data_source, request_id, semantic_id, has_entry_id)
+             VALUES ('pi_session', 'request', 'semantic', 1)",
+            [],
+        )?;
+
+        for (sql, expected) in [
+            (
+                "SELECT EXISTS(SELECT 1 FROM session_usage_dedup
+                 WHERE data_source = ?1 AND request_id = ?2)",
+                "(data_source=? AND request_id=?)",
+            ),
+            (
+                "SELECT EXISTS(SELECT 1 FROM session_usage_dedup
+                 WHERE data_source = ?1 AND semantic_id = ?2)",
+                "(data_source=? AND semantic_id=?)",
+            ),
+            (
+                "SELECT EXISTS(SELECT 1 FROM session_usage_dedup
+                 WHERE data_source = ?1 AND semantic_id = ?2 AND has_entry_id = 0)",
+                "(data_source=? AND semantic_id=? AND has_entry_id=?)",
+            ),
+        ] {
+            let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+            let plan = statement
+                .query_map(params!["pi_session", "identity"], |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert!(
+                plan.iter().any(|step| step.contains(expected)),
+                "lookup does not constrain the complete identity {expected}: {plan:?}"
+            );
+        }
         Ok(())
     }
 

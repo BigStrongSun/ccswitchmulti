@@ -5408,3 +5408,11 @@ supported in one streaming turn`。
 - 普通安装、本地 ZIP、重复安装、启用、禁用、更新、卸载和存储迁移都接入该所有权边界。新安装在 DB 持久化前检查 Pi 冲突，后续同步失败回滚 DB；更新先记录旧部署证据，替换 SSOT 后再次校验再刷新；卸载对修改后的 Pi 副本返回 `preservedPiPath` 与 `piCleanupIncomplete`，备份源排除被保留目录，防止把用户原生内容复制进 CCSM 备份。
 - SSOT 与任何应用 Skills 根目录相同会在同步/删除前拒绝；迁移目标在移动任何文件前完成别名检查。迁移已受管 Pi copy/symlink 时记录旧部署证据，迁移后只刷新仍与旧证据匹配的目标；外部同名目录保持不动。Pi 原生目录与其他应用路径别名时，卸载也不会经另一应用清理路径误删已保留内容。
 - TDD 首条 RED 证明 Pi 原生目录存在后 API 仍错误返回 disabled；随后同名外部目录、隐藏文件修改、安装持久化顺序、卸载告警、迁移目标别名、迁移刷新和操作间变化均纳入回归。最终 Pi Skill 聚焦 10/10、完整 `services::skill::tests` 54/54、DAO metadata 3/3、`skill_sync` 集成 7/7；Windows 无 symlink 特权的两条既有集成断言按原测试设计跳过 symlink-only 分支。未运行全量 Rust/frontend、Tauri/NSIS 或安装态验收。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi Session 与用量索引
+
+- 官方 `40d747c0` 的 v16→v17 不能照搬到当前 CCSM schema；Pi 去重账本映射为 v21→v22，并同步进入 fresh DDL。`session_usage_dedup` 以 `(data_source, request_id)` 为主键，另建 `(data_source, semantic_id, has_entry_id)` 完整覆盖索引；request、semantic 与 legacy semantic 三类查询采用独立 SQL，避免 `OR` 让 SQLite 放弃完整身份索引。
+- 账本和 `session_log_sync` 都是本机文件扫描状态：WebDAV/SQL 同步继续 skip remote 并 preserve local，不能把另一台设备的 Pi request identity 或绝对路径覆盖进来。明细 rollup/prune 后，账本仍保留 fork/rewrite 去重身份。
+- Pi session browser 只读原生 JSONL，复用 Pi 的绝对 `sessionDir`、`~` 路径或默认目录；相对目录明确返回 `requires_project_context`，不猜启动 cwd。树解析按 parent/leaf 选择活动分支，限制 128 MiB、50 万条和 ID 长度；删除前重新验证 active root、目录布局与 header session ID。
+- Pi usage importer 与 session browser 共用文件发现规则，按捕获的文件大小扫描完整 JSONL 行，接受合法未终结尾行但不越过不完整 JSON。稳定 entry ID、canonical JSON semantic ID 与持久账本共同处理重写、fork 和 rollup 后重扫；reported cost 优先，否则按 fresh input 语义调用现有定价计算器。Provider/model 等不可信标签在 UTF-8 边界限制为 512 bytes，时间戳必须落在 SQLite 可表示范围。
+- TDD schema RED 精确失败为 `no such table: session_usage_dedup`，parser 注册 RED 精确失败为缺少 `session_usage_pi` 模块；GREEN 后集中 `cargo test --lib pi -- --nocapture` 为 602/602，其中 Pi usage 16 条、Pi session browser 12 条，并覆盖既有 Pi Provider/Prompt/Skill 边界。这里只证明源码与聚焦回归；前端类型、Session filter/提示和 Usage dashboard 仍属于下一批，尚未运行全量 Rust/frontend、Tauri/NSIS 或安装态验收。

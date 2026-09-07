@@ -7,6 +7,7 @@
 use crate::config::atomic_write_private;
 use crate::error::AppError;
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -28,6 +29,17 @@ pub(crate) struct PiModelsSnapshot {
 pub(crate) struct PiModelsWriteOutcome {
     pub changed: bool,
     pub content_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PiNativeDefaults {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_dir: Option<String>,
 }
 
 pub(crate) struct PiModelsStore {
@@ -154,6 +166,30 @@ pub(crate) fn get_pi_agent_dir() -> Result<PathBuf, AppError> {
 
 pub(crate) fn get_pi_models_path() -> Result<PathBuf, AppError> {
     Ok(get_pi_agent_dir()?.join("models.json"))
+}
+
+pub(crate) fn get_pi_settings_path() -> Result<PathBuf, AppError> {
+    Ok(get_pi_agent_dir()?.join("settings.json"))
+}
+
+pub(crate) fn read_pi_native_defaults() -> Result<PiNativeDefaults, AppError> {
+    let path = get_pi_settings_path()?;
+    if !path.exists() {
+        return Ok(PiNativeDefaults::default());
+    }
+    let bytes = read_file_limited(&path)?;
+    let source = String::from_utf8(bytes).map_err(|error| {
+        AppError::Config(format!(
+            "Pi settings.json must be UTF-8 ({}): {error}",
+            path.display()
+        ))
+    })?;
+    json5::from_str(&source).map_err(|error| {
+        AppError::Config(format!(
+            "Pi settings.json is not valid JSON/JSONC ({}): {error}",
+            path.display()
+        ))
+    })
 }
 
 pub(crate) fn provider_base_url(provider: &Value) -> Option<String> {

@@ -3,6 +3,11 @@
 use crate::session_manager;
 
 #[tauri::command]
+pub fn get_pi_session_discovery() -> session_manager::providers::pi::PiSessionDiscovery {
+    session_manager::providers::pi::session_discovery()
+}
+
+#[tauri::command]
 pub async fn list_sessions() -> Result<Vec<session_manager::SessionMeta>, String> {
     let sessions = tauri::async_runtime::spawn_blocking(session_manager::scan_sessions)
         .await
