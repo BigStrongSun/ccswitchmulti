@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 官方 v3.20.2 late-arrival 审计
+
+- `git fetch --all --prune --tags` 将官方 `origin/main` 从上一冻结点 `1b34d322` 推进 14 个非 merge 提交到 `f3b18df1`，该 tip 同时是新 tag `v3.20.2`。固定 Matrix WebSearch bridge 直读 GitHub release 页面得到同一版本、发布日期和 52-commit release 摘要；Codex 内置 Web 搜索索引仍停在 v3.20.1/旧 releases，因此最新状态以实时 Git 对象和 Matrix 直读为准。
+- 审计矩阵已从 140 行扩到 154 行（merge-base 后 v3.20.1 内 100 行、post-tag 54 行），无缺失或重复。新增 14 行中，Pi 缺失翻译键与 `/images/edits` 路由在当前 CCSM 已有等价或更强实现；上游 release/version/docs 三项不适用；其余九项明确 deferred，不得静默进入 3.20.1-1。
+- deferred 中应优先处理两项安全性：上游测试隔离 `LOCALAPPDATA`，以及 `mask_url` 在非法 URL 的第 20 字节落入多字节字符时 panic。Claude workflow journal、Updater 错误详情、Codex takeover auth stamp、九月时效价格、JieKou/Novita 模型 URL、SoleAPI 与价格下拉布局各自需要独立 RED/GREEN 或视觉/官方证据，不能粗糙 cherry-pick。
+
 ## 2026-09-08 OpenCode Go 用量与稳定请求身份第二批
 
 - 上游 `270a4ff3` 的用量意图已按 CCSwitchMulti 当前五 App Provider 结构重写：Claude 延续所有 Coding Plan 的自动识别；Claude Desktop、Codex、OpenCode、Pi 只对 OpenCode Go 自动注入 `token_plan`，且不覆盖用户已有 `usage_script`。各端分别从 `env.ANTHROPIC_BASE_URL`、Codex TOML `base_url`、`options.baseURL` 和 Pi `baseUrl` 读取真实持久化配置。
