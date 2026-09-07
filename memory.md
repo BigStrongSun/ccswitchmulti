@@ -5433,3 +5433,9 @@ supported in one streaming turn`。
 - 新价格双链核验：GPT-6 Astra 官方为 input/cache-read/output/cache-write `10/1/50/12.5`；Gemini 3.8 Flash 介绍价为 input/output `0.75/3.75`，持续到 2026-12-31。GLM-5.3 Flash 与上游 seed 存在时效差异：Z.AI 当前 50% 活动价为 input/output/cache-read `0.075/0.25/0.015`，2026-09-09 24:00 UTC+8 后恢复 list `0.15/0.50/0.03`。在到期策略和 guarded repair 明确前，不得直接照抄上游 list price 造成当前费用高估。
 - Codex OAuth 的 Anthropic→Responses 转换根因有两层：`map_tool_choice_to_responses` 只投影选择模式而丢弃 `disable_parallel_tool_use`，随后必填字段补全把 `parallel_tool_calls` 固定为 `false`。Anthropic 官方语义是 disable=true 时一轮至多一个工具，Responses 字段是正向 allow，因此显式值必须取反；未显式提供时沿用 Anthropic/Codex 默认并行能力。
 - TDD 先修改缺省断言并新增显式 true/false 双向映射测试；两条 RED 都稳定得到 actual=false。最小 GREEN 仅在同一转换边界取反映射显式值，并把 Codex OAuth 缺省改为 true；非 OAuth 路径继续不注入该字段。最终该转换模块 89/89、rustfmt、diff check 和 140 行矩阵状态计数均通过。
+
+## 2026-09-07 v3.20.1-1 late-arrival 模型价格种子
+
+- GPT-6 Astra 与 Gemini 3.8 Flash 只作为 `INSERT OR IGNORE` 基础价格种子迁移，不做 schema bump，也不加入 `repair_current_model_pricing`。因此新数据库和缺行数据库可以计费，再次执行 `ensure_model_pricing_seeded()` 不会覆盖用户自定义价格。
+- GPT-6 Astra 采用 OpenAI 官方标准短上下文 input/output/cache-read/cache-write `10/50/1/12.5`；超长上下文与 Fast/Batch/Flex 倍率不折进基础种子。Gemini 3.8 Flash 采用 Google 官方截至 2026-12-31 的介绍价 `0.75/3.75/0.075/0`；2027-01-01 的 `1.50/7.50/0.15` 切换必须以后续 guarded repair 显式处理，不能预先高估当前费用。
+- TDD 一次性加入“首次 seed 存在且值正确”和“重复 seed 保留用户四项自定义价格”两条回归；RED 均为 `QueryReturnedNoRows`，最小 GREEN 后 2/2。GLM-5.3 Flash 仍保持未落库，等待 2026-09-09 活动价到期策略，不能把上游 list price 与本批混合采用。

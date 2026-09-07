@@ -1781,6 +1781,83 @@ fn schema_model_pricing_seeds_current_upstream_price_rows() {
 }
 
 #[test]
+fn late_arrival_pricing_seeds_astra_and_gemini_3_8_flash() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let expected = [
+        ("gpt-6-astra", "10", "50", "1", "12.5"),
+        ("gemini-3.8-flash", "0.75", "3.75", "0.075", "0"),
+    ];
+    for (model_id, input, output, cache_read, cache_creation) in expected {
+        let actual: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("late-arrival model pricing should be seeded");
+        assert_eq!(
+            actual,
+            (
+                input.to_string(),
+                output.to_string(),
+                cache_read.to_string(),
+                cache_creation.to_string()
+            ),
+            "{model_id} pricing mismatch"
+        );
+    }
+}
+
+#[test]
+fn late_arrival_pricing_seed_does_not_overwrite_user_prices() {
+    let db = Database::memory().expect("create memory db");
+
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        for model_id in ["gpt-6-astra", "gemini-3.8-flash"] {
+            conn.execute(
+                "UPDATE model_pricing
+                 SET input_cost_per_million = '9', output_cost_per_million = '8',
+                     cache_read_cost_per_million = '7', cache_creation_cost_per_million = '6'
+                 WHERE model_id = ?1",
+                [model_id],
+            )
+            .expect("set custom late-arrival price");
+        }
+    }
+
+    db.ensure_model_pricing_seeded()
+        .expect("ensure pricing seeded");
+
+    let conn = db.conn.lock().expect("lock conn");
+    for model_id in ["gpt-6-astra", "gemini-3.8-flash"] {
+        let actual: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("query custom late-arrival price");
+        assert_eq!(
+            actual,
+            (
+                "9".to_string(),
+                "8".to_string(),
+                "7".to_string(),
+                "6".to_string()
+            ),
+            "{model_id} custom pricing was overwritten"
+        );
+    }
+}
+
+#[test]
 fn model_pricing_repairs_known_upstream_prices_without_overwriting_custom_rows() {
     let db = Database::memory().expect("create memory db");
 

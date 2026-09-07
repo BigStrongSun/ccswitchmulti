@@ -1968,6 +1968,9 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
+            // GPT-6 Astra 标准短上下文价（2026-09-07）；超长上下文与
+            // Fast/Batch/Flex 倍率由计费模式决定，不折进基础种子。
+            ("gpt-6-astra", "GPT-6 Astra", "10", "50", "1", "12.5"),
             // GPT-5.6 系列：OpenAI API 标准短上下文价（2026-07-13）。
             // cache creation 是官方 pricing 页面单列的 cache writes，不与普通
             // input 混算，避免带 prompt cache 的请求少算费用。
@@ -2184,8 +2187,16 @@ impl Database {
             ("gpt-4.1", "GPT-4.1", "2", "8", "0.50", "0"),
             ("gpt-4.1-mini", "GPT-4.1 Mini", "0.40", "1.60", "0.10", "0"),
             ("gpt-4.1-nano", "GPT-4.1 Nano", "0.10", "0.40", "0.025", "0"),
-            // Gemini 3.7 Flash 介绍价有效至 2026-12-31；届时需要新的
+            // Gemini 3.8/3.7 Flash 介绍价有效至 2026-12-31；届时需要新的
             // guarded repair 更新为 1.50/7.50/0.15。
+            (
+                "gemini-3.8-flash",
+                "Gemini 3.8 Flash",
+                "0.75",
+                "3.75",
+                "0.075",
+                "0",
+            ),
             (
                 "gemini-3.7-flash",
                 "Gemini 3.7 Flash",
