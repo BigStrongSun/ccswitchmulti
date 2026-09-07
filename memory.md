@@ -16,6 +16,7 @@
 - `git fetch --all --prune --tags` 后，官方 `origin/main` 仍精确等于 `v3.20.2@f3b18df1`，tag 后提交数为 0。分叉复审发现新完成但未进入迁移候选/main 的唯一产品提交是 `c3537bc9`：其父提交 `74547518` 已在本地 main，只把 stream 修复语义移植为 `e28f6c7a`，没有整枝带回旧基线。memory 冲突仅为双方顶部追加记录，解决时保留 stream 完整记录和迁移候选原有记录；`streaming_retry` 37/37、重试预算 1/1、`cargo check --all-targets`、CI 原样严格 Clippy、rustfmt、diff 与 UTF-8 均通过。
 - 其他未合分支继续沿用已验证处置：power/commentary/portable 为实验或 NO-GO，AgentMesh 未接现有代理生命周期，Sub-Agent V2 为课件资料，其余旧分支已被当前 main/migration 的更完整架构覆盖；不能仅凭 `--no-merged` 整枝合并。main 只有未跟踪 `.tmp/` 和 provider settings preview，其他多个 dirty worktree 原样保留。stream-fix worktree 因旧沙箱 SID 触发 Git dubious ownership，本轮不写全局 `safe.directory`。
 - `2f6dbb87` 的本地 NSIS/portable/raw 产物是在 stream 修复进入候选前生成，现只作为被替代构建证据，禁止上传为 v3.20.1-1。最终候选必须从包含 `e28f6c7a` 的 clean commit 重新执行一次 release 构建并生成新哈希。
+- 最终 clean rebuild 从 `9c5731516c1f6e69069e715966796f0ec16bc576` 成功完成。Sidecar 2,277,888 bytes / `9C9463DF8D7FCF70F84B8A80BDC3E8FC11A32B9AD9C26AD76EF6CBB1A4D63909`；NSIS 13,623,498 bytes / `42BA45D04560CD3D413054FF7CC70ED92EFB60FF656C75636907C8813110EBB8`；portable ZIP 16,095,176 bytes / `9896412CE4A6AD4EDC15BF30C53DE62A110F964C631355A1B798A723DC7DE2E0`；raw EXE 43,656,192 bytes / `4EC61CEFD0CF9972024CFEA281DC5BE5FF1535DE34046CC3B5F6F937E014E00A`。16/16 清单重算一致，PE/ZIP 版本、metadata commit、428-byte updater 签名与 URL 均正确；NSIS installed-exe 派生哈希为 `CB45DE5539D472455629D6C122E76C3E18FEAA014799EF7052E80ACDCED654AC`。独立公钥验签仍由 GitHub workflow 完成。
 
 ## 2026-09-08 v3.20.1-1 Rust 候选门禁两项失败分类
 
