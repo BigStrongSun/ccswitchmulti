@@ -378,27 +378,35 @@ fn native_responses_transport_error_message(error: &std::io::Error) -> &'static 
     }
 }
 
-fn native_responses_transport_error_sse(message: &str) -> Bytes {
-    let payload = json!({
-        "type": "error",
+/// 中途截断 / 协议拒绝的终态事件：发 `event: response.failed`。
+///
+/// Codex 客户端按 JSON `type` 字段分派（而非 SSE 事件名）：裸 `event: error`
+/// （kind="error"）在客户端无分支、被静默丢弃，客户端只能回退到通用的
+/// "stream closed before response.completed"，这里记录的具体原因随之丢失。
+/// `response.failed` 分支会读取 `response.error`；只要 `code` 不命中客户端的
+/// 确定性分类（context_length_exceeded、insufficient_quota、cyber_policy 等），
+/// 就会被映射为可重试的 stream error，并把具体 `message` 保留到
+/// `stream_max_retries` 耗尽后呈现。因此本函数不得复用客户端分类的 code 值。
+fn native_responses_failed_terminal_sse(
+    response_id: Option<&str>,
+    code: &str,
+    message: &str,
+) -> Bytes {
+    let mut response = json!({
+        "status": "failed",
         "error": {
-            "type": "stream_error",
-            "message": message,
-        }
-    });
-    Bytes::from(format!("event: error\ndata: {payload}\n\n"))
-}
-
-fn native_responses_protocol_error_sse(code: &str, message: &str) -> Bytes {
-    let payload = json!({
-        "type": "error",
-        "error": {
-            "type": "upstream_protocol_error",
             "code": code,
             "message": message,
-        }
+        },
     });
-    Bytes::from(format!("event: error\ndata: {payload}\n\n"))
+    if let Some(id) = response_id {
+        response["id"] = json!(id);
+    }
+    let payload = json!({
+        "type": "response.failed",
+        "response": response,
+    });
+    Bytes::from(format!("event: response.failed\ndata: {payload}\n\n"))
 }
 
 /// 原生 Codex Responses 的安全 SSE 重连。
@@ -459,7 +467,8 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                     if semantic_output_forwarded {
                         let message = "Upstream Responses SSE ended without a terminal event after semantic output";
                         log::error!("[Codex/Responses] {message}");
-                        yield Ok(native_responses_protocol_error_sse(
+                        yield Ok(native_responses_failed_terminal_sse(
+                            response_id.as_deref(),
                             "upstream_terminal_event_missing",
                             message,
                         ));
@@ -477,7 +486,11 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                                 "[Codex/Responses] upstream stream failed after semantic output: {}; client_message={message}",
                                 crate::proxy::error::error_chain_message(&error)
                             );
-                            yield Ok(native_responses_transport_error_sse(message));
+                            yield Ok(native_responses_failed_terminal_sse(
+                                response_id.as_deref(),
+                                "stream_error",
+                                message,
+                            ));
                             break 'attempts;
                         }
                         break 'stream format!("upstream Responses SSE transport error: {error}");
@@ -528,7 +541,11 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                                     log::error!(
                                         "[Codex/Responses] rejected invalid terminal event: code={code}; {message}"
                                     );
-                                    yield Ok(native_responses_protocol_error_sse(code, &message));
+                                    yield Ok(native_responses_failed_terminal_sse(
+                                        response_id.as_deref(),
+                                        code,
+                                        &message,
+                                    ));
                                 }
                             }
                             break 'attempts;
@@ -549,7 +566,8 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                         "Upstream Responses SSE ended without a terminal event"
                     };
                     log::error!("[Codex/Responses] {message}: {reason}");
-                    yield Ok(native_responses_protocol_error_sse(
+                    yield Ok(native_responses_failed_terminal_sse(
+                        response_id.as_deref(),
                         "upstream_terminal_event_missing",
                         message,
                     ));
@@ -560,7 +578,11 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                     log::error!(
                         "[Codex/Responses] stream failed after {attempt} reconnect attempt(s): {reason}; client_message={message}"
                     );
-                    yield Ok(native_responses_transport_error_sse(message));
+                    yield Ok(native_responses_failed_terminal_sse(
+                        response_id.as_deref(),
+                        "stream_error",
+                        message,
+                    ));
                     break 'attempts;
                 }
                 attempt += 1;
@@ -1222,7 +1244,7 @@ mod tests {
                 output.push_str(&String::from_utf8_lossy(&bytes));
                 output
             });
-        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("event: response.failed"), "got: {out}");
         assert!(out.contains("上游响应流连接提前关闭"), "got: {out}");
         assert!(out.contains("HTTP 分块响应未完整结束"), "got: {out}");
         assert!(!out.contains("error decoding response body"), "got: {out}");
@@ -1240,7 +1262,7 @@ mod tests {
         .await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 0, "must not replay output");
-        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("event: response.failed"), "got: {out}");
         assert!(out.contains("terminal event"), "got: {out}");
         assert!(!out.contains("event: response.completed"), "got: {out}");
     }
@@ -1251,7 +1273,7 @@ mod tests {
 
         let out = collect(create_resilient_responses_sse_stream(first, None)).await;
 
-        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("event: response.failed"), "got: {out}");
         assert!(out.contains("terminal event"), "got: {out}");
         assert!(!out.contains("event: response.completed"), "got: {out}");
     }
@@ -1282,7 +1304,7 @@ mod tests {
         .await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("event: response.failed"), "got: {out}");
         assert!(out.contains("status=failed"), "got: {out}");
         assert!(!out.contains("event: response.completed"), "got: {out}");
     }
@@ -1313,7 +1335,7 @@ mod tests {
         .await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("event: response.failed"), "got: {out}");
         assert!(out.contains("status=incomplete"), "got: {out}");
         assert!(!out.contains("event: response.completed"), "got: {out}");
     }
@@ -1353,7 +1375,7 @@ mod tests {
         .await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("event: response.failed"), "got: {out}");
         assert!(out.contains("final output"), "got: {out}");
         assert!(!out.contains("event: response.completed"), "got: {out}");
     }
@@ -1433,7 +1455,7 @@ mod tests {
 
         let out = collect(create_resilient_responses_sse_stream(first, None)).await;
 
-        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("event: response.failed"), "got: {out}");
         assert!(out.contains("structurally incomplete"), "got: {out}");
         assert!(!out.contains("event: response.completed"), "got: {out}");
     }

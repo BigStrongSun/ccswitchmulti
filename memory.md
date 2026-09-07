@@ -1,5 +1,16 @@
 # CC Switch Repository Memory
 
+## 2026-09-07 Codex 流断应用层双修（retries=10 + response.failed，v3.19.2-31 streamfix 已装）
+
+- 线程 01a079eb "stream disconnected before completion" 应用层根因两层：中途断流时 CCSM yield 裸 `event: error`（kind="error"），Codex 客户端 SSE 解析器对该 kind 无分派分支、静默丢弃，具体原因丢失只显示通用文案；`stream_max_retries=5` 吸收不了约 13 分钟劣化窗口。客户端源码证据（codex-source-rust-v0.137.0 `codex-rs/codex-api/src/sse/responses.rs`）：L146-148 按 JSON `type`→`kind` 分派，L266 match，`response.failed` 分支 L312-344 反序列化 `response.error`（全 Option、message 保留），确定性分类器 L513-536（context_length_exceeded/insufficient_quota/usage_not_included/invalid_prompt/cyber_policy/server_is_overloaded/slow_down）不命中我们的 code ⇒ `ApiError::Retryable{message}` → `CodexErr::Stream`，客户端带具体 message 重试、预算耗尽后呈现具体原因，不会比旧行为更早中断 agent loop。
+- 修复1（streaming_retry.rs）：裸错误构造器合并为 `native_responses_failed_terminal_sse(response_id, code, message)`，发 `event: response.failed` + `{"type":"response.failed","response":{"id"?,"status":"failed","error":{"code","message"}}}`；5 个裸错误调用点全替换（有输出后 EOF、有输出后传输错误[事故路径]、终态被拒、无重连器、重连耗尽），code 取 stream_error / upstream_terminal_event_missing / codex_terminal.rs 分类码（upstream_terminal_status_mismatch / upstream_tool_call_dropped / upstream_final_output_missing），7 个测试断言同步改，安全不变量保持（语义输出后不重放、失败后不发 completed）。其余 `event: error` 点不在范围：streaming.rs L640 在 OpenAI→Anthropic 转换内、streaming_responses.rs 是 Responses→Anthropic、其余为测试 fixture。
+- 修复2（codex_config.rs）：`CODEX_MANAGED_STREAM_MAX_RETRIES` 5→10（L60，注释注明有意高于官方默认 5），`request_max_retries=2` 不变，全部写入/校验位点用常量，测试 `managed_codex_retry_budget_preserves_codex_stream_recovery` 同步。
+- 验证：`cargo test --lib streaming_retry` 37/37、codex_config 重试预算测试 1/1（本会话复跑）。worktree 无前端工具链（沙箱封外网/AppData），从 main checkout 拷 dist、共享 warm CARGO_TARGET_DIR 纯 cargo build --release 11m28s，打包 v3.19.2-31（codex-history-repairer 在 feature 后未构建，已装 V9 repairer 保持）。
+- 安装：15:44:30 事务安装（stop→backup→swap→hash 验证→start→wait listener，自动回滚），备份 `ccsm-install-backups\streamfix-20260907-154430\` + 本地 `.pre-streamfix-*.bak`；新二进制 SHA256 cc-switch.exe `33AC5789…`（40,755,712 B）、ccsm.exe `9C90A64B…`（3,239,936 B）。重投影机制：router 启动 idempotent Codex takeover 从常量重写整个 `model_providers` 表（proxy.rs L3973），普通重启即重投影、无需手动开关；takeover 激活时 consistency inspect 返回 NotApplicable 不做 drift repair。
+- 生效时机：Codex 客户端在线程启动时加载重试预算（仅 MCP/catalog 刷新重读）⇒ 新任务立即 10，既有线程（含事故线程）保留 5 直到 Codex app 重启；建议重启一次 Codex app。
+- 未解决异常：16:25:59 运行中 Codex app 用其过期内存态全文件重写 config.toml，把 10 回写成 5（它启动时加载的是 5）；16:35:21 重启重投影后 16:50 复核仍为 10。复现时 CCSM 侧加固（takeover 激活时 consistency repair / retry 预算指纹）需用户决策，不擅自加码；一次 Codex app 重启可中和该风险并让既有线程拿到 10。
+- 日志在 `C:\Users\sunda\.cc-switch\logs\`（cc-switch.log、codex-router.log、proxy-errors.jsonl+.1/.2、recovery-outcomes.json、app-exit-events.jsonl）。本会话自身在 15:44→16:25 中断约 41 分钟（auto-reviewer 也命中同一 stream disconnection bug），是此类问题发生频率的活证据。
+
 ## 2026-09-08 v3.20.1-1 Rust 候选门禁两项失败分类
 
 - 修复 PPIO 后的前端最终全量在 `110da36f` 得到 185/185 files、1537/1537 tests。随后 Rust 并行全量完成编译，4053 个 library tests 中 4045 通过、6 ignored、2 失败；集成测试尚未执行，因为 library test binary 已非零退出。
