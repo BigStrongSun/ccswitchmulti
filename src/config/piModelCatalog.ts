@@ -207,6 +207,24 @@ export const piModelCatalog = {
       maxTokens: 131_072,
     },
   },
+  "meta/muse-spark-1.2-contributor": {
+    capabilities: {
+      name: "Muse Spark 1.2 Contributor",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 1_048_576,
+      maxTokens: 131_072,
+    },
+  },
+  "meta/muse-spark-1.3-contributor": {
+    capabilities: {
+      name: "Muse Spark 1.3 Contributor",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 1_048_576,
+      maxTokens: 131_072,
+    },
+  },
   "meta/llama-4-maverick": {
     capabilities: {
       name: "Meta Llama 4 Maverick",
@@ -414,6 +432,15 @@ export const piModelCatalog = {
       maxTokens: 100_000,
     },
   },
+  "omen/omen-alpha": {
+    capabilities: {
+      name: "Omen Alpha",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 500_000,
+      maxTokens: 128_000,
+    },
+  },
   "qwen/qwen3-coder-plus": {
     capabilities: {
       name: "Qwen3 Coder Plus",
@@ -570,6 +597,15 @@ export const piModelCatalog = {
   "xai/grok-4.5": {
     capabilities: {
       name: "Grok 4.5",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 500_000,
+      maxTokens: 500_000,
+    },
+  },
+  "xai/grok-4.6": {
+    capabilities: {
+      name: "Grok 4.6",
       reasoning: true,
       input: ["text", "image"],
       contextWindow: 500_000,

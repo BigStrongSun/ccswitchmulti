@@ -11,6 +11,11 @@ import type {
   PromptCacheRoutingMode,
 } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
+import {
+  openCodeGoModelsFor,
+  type OpenCodeGoModel,
+  type OpenCodeGoProtocol,
+} from "./openCodeGoCatalog";
 
 export interface CodexProviderPreset {
   name: string;
@@ -257,6 +262,50 @@ function builtinReasoningFromLevels(
     outputFormat: "reasoning_content",
     source: "builtin",
   };
+}
+
+function openCodeGoCodexReasoning(
+  model: OpenCodeGoModel,
+): CodexModelReasoningCapability {
+  if (model.reasoning.kind === "unknown" || model.protocol === "messages") {
+    return unknownBuiltinReasoning;
+  }
+  if (model.reasoning.kind === "toggle") {
+    return booleanBuiltinReasoning("thinking", "reasoning_content");
+  }
+
+  const supportedEfforts = [...model.reasoning.efforts];
+  return {
+    schemaVersion: 2,
+    supportStatus: "confirmed_supported",
+    controlKind: "graded",
+    supportedEfforts,
+    defaultEffort: supportedEfforts.includes("high")
+      ? "high"
+      : supportedEfforts[0],
+    disableAllowed: model.reasoning.disableAllowed ?? false,
+    upstream:
+      model.protocol === "responses"
+        ? { format: "reasoning_object", parameter: "reasoning.effort" }
+        : { format: "string", parameter: "reasoning_effort" },
+    outputFormat:
+      model.protocol === "responses" ? "reasoning" : "reasoning_content",
+    source: "builtin",
+  };
+}
+
+function openCodeGoCodexCatalog(protocol: OpenCodeGoProtocol) {
+  return modelCatalog(
+    openCodeGoModelsFor(protocol).map((model) => ({
+      model: model.id,
+      displayName: model.name,
+      contextWindow: model.context,
+      inputModalities: model.input.some((modality) => modality === "image")
+        ? (["text", "image"] as const)
+        : (["text"] as const),
+      reasoning: openCodeGoCodexReasoning(model),
+    })),
+  );
 }
 
 const deepSeekV4Reasoning: CodexModelReasoningCapability = {
@@ -1977,7 +2026,8 @@ wire_api = "responses"`,
     iconColor: "#000000",
   },
   {
-    name: "OpenCode Go",
+    name: "OpenCode Go (Responses)",
+    presetKey: "opencode-go-responses",
     websiteUrl: "https://opencode.ai/go",
     apiKeyUrl: "https://opencode.ai/go?ref=2YTRG2NGTX",
     partnerPromotionKey: "opencode_go",
@@ -1985,26 +2035,49 @@ wire_api = "responses"`,
     config: generateThirdPartyConfig(
       "opencode_go",
       "https://opencode.ai/zen/go/v1",
-      "glm-5.2",
+      "gpt-5.6-luna",
+    ),
+    endpointCandidates: ["https://opencode.ai/zen/go/v1"],
+    apiFormat: "openai_responses",
+    modelCatalog: openCodeGoCodexCatalog("responses"),
+    category: "third_party",
+    icon: "opencode",
+    iconColor: "#211E1E",
+  },
+  {
+    name: "OpenCode Go (Messages)",
+    presetKey: "opencode-go-messages",
+    websiteUrl: "https://opencode.ai/go",
+    apiKeyUrl: "https://opencode.ai/go?ref=2YTRG2NGTX",
+    partnerPromotionKey: "opencode_go",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "opencode_go_messages",
+      "https://opencode.ai/zen/go",
+      "minimax-m3",
+    ),
+    endpointCandidates: ["https://opencode.ai/zen/go"],
+    apiFormat: "anthropic",
+    modelCatalog: openCodeGoCodexCatalog("messages"),
+    category: "third_party",
+    icon: "opencode",
+    iconColor: "#211E1E",
+  },
+  {
+    name: "OpenCode Go",
+    presetKey: "opencode-go-chat",
+    websiteUrl: "https://opencode.ai/go",
+    apiKeyUrl: "https://opencode.ai/go?ref=2YTRG2NGTX",
+    partnerPromotionKey: "opencode_go",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "opencode_go_chat",
+      "https://opencode.ai/zen/go/v1",
+      "glm-5.3",
     ),
     endpointCandidates: ["https://opencode.ai/zen/go/v1"],
     apiFormat: "openai_chat",
-    modelCatalog: modelCatalog([
-      { model: "glm-5.2", displayName: "GLM 5.2", contextWindow: 204800 },
-      { model: "glm-5.1", displayName: "GLM 5.1", contextWindow: 204800 },
-      {
-        model: "kimi-k2.7-code",
-        displayName: "Kimi K2.7 Code",
-        contextWindow: 262144,
-      },
-      { model: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro" },
-      { model: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash" },
-      {
-        model: "mimo-v2.5-pro",
-        displayName: "MiMo V2.5 Pro",
-        contextWindow: 1048576,
-      },
-    ]),
+    modelCatalog: openCodeGoCodexCatalog("chat"),
     category: "third_party",
     icon: "opencode",
     iconColor: "#211E1E",

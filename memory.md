@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 OpenCode Go 多协议目录第一批
+
+- OpenCode Go 当前不是单一 OpenAI Chat 兼容服务。第一方 Go 文档和当前服务端源码共同确认模型会按请求协议过滤：Responses 端点承载 Grok 4.6、GPT-5.6 Luna 与 Muse Spark Contributor；Anthropic Messages 承载 MiniMax M3/M2.7 与 Qwen3.8/3.7/3.6；其余 GLM、Kimi、LongCat、DeepSeek、MiMo、Hy、Omen 走 Chat Completions。错误协议会得到 `modelFormatNotSupported`，因此旧的全量 Chat 预设即使补齐模型名也会产生“可见但不可用”的目录。
+- 新的 `openCodeGoCatalog.ts` 是五个客户端预设共享的 27 模型维护基线，协议以第一方端点表为权威，context/output/modalities/reasoning 采用 2026-09-08 的 provider-scoped models.dev 数据。实时 `/zen/go/v1/models` 当时返回 35 个 ID；静态基线排除 `minimax-m2.5`、`kimi-k2.5`、`glm-5`、`qwen3.5-plus`、`mimo-v2-pro`、`mimo-v2-omni`、`hy3-preview`、`grok-4.5` 和新出现但已标 deprecated 的 `ox-alpha-free`，动态发现仍可显示服务端保留的兼容型号。
+- Claude Code/Desktop 只选择 Messages-compatible 模型，使用 `/zen/go` 根和 `ANTHROPIC_API_KEY`，默认 MiniMax M3、轻量角色 MiniMax M2.7。OpenCode 通过模型级 `provider.npm` 在同一 Provider 中分别路由 `@ai-sdk/openai`、`@ai-sdk/anthropic`、`@ai-sdk/openai-compatible`。Codex 与 Pi 的 API 格式是 Provider 级，因此保留原 `OpenCode Go` 作为 Chat 预设，并新增独立 Responses/Messages 预设；三者目录互斥，旧 Pi providerKey 保持不变。
+- 现有保存 Provider 与用户自定义 catalog/options 没有迁移或覆盖；本批只修改新建预设和共享维护数据。TDD 首次 5/5 RED 精确命中旧五模型目录、Claude 错误 Chat/auth、缺失 SDK 路由与未拆协议；GREEN 后 OpenCode Go 5/5、Pi Provider/Thinking 13/13、TypeScript 通过。没有真实 Go Key，因此没有计费 canary，也没有安装、重启、合并 main、push、tag 或发布。
+
 ## 2026-09-08 Zhipu Codex Responses 端点与持久化协议根修
 
 - Codex 内置 Web 与固定 Matrix WebSearch 桥分别直读智谱国内/国际官方 Codex 页面，均确认 Codex 必须使用专属 OpenAI Responses 端点：国内 `https://open.bigmodel.cn/api/v1`、国际 `https://api.z.ai/api/v1`，`wire_api=responses`，默认 `glm-5.3`。国内官方目录另列 `glm-5-turbo`；国内 `glm-5.3`/`glm-5-turbo` 上下文为 `1048576`/`204800`，国际目录只列 `glm-5.3`。

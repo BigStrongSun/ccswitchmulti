@@ -1,5 +1,6 @@
 import type { ProviderCategory, OpenCodeProviderConfig } from "../types";
 import type { PresetTheme, TemplateValueConfig } from "./claudeProviderPresets";
+import { OPEN_CODE_GO_MODELS } from "./openCodeGoCatalog";
 
 export interface OpenCodeProviderPreset {
   name: string;
@@ -26,6 +27,48 @@ export const opencodeNpmPackages = [
   { value: "@ai-sdk/amazon-bedrock", label: "Amazon Bedrock" },
   { value: "@ai-sdk/google", label: "Google (Gemini)" },
 ] as const;
+
+const openCodeGoModels = Object.fromEntries(
+  OPEN_CODE_GO_MODELS.map((model) => {
+    const npm =
+      model.protocol === "responses"
+        ? "@ai-sdk/openai"
+        : model.protocol === "messages"
+          ? "@ai-sdk/anthropic"
+          : "@ai-sdk/openai-compatible";
+    const input = [...model.input];
+    const variants =
+      model.reasoning.kind === "effort" && npm !== "@ai-sdk/openai-compatible"
+        ? Object.fromEntries(
+            (npm === "@ai-sdk/openai" &&
+            "disableAllowed" in model.reasoning &&
+            model.reasoning.disableAllowed
+              ? (["none", ...model.reasoning.efforts] as const)
+              : model.reasoning.efforts
+            ).map((effort) => [
+              effort,
+              npm === "@ai-sdk/openai"
+                ? { reasoningEffort: effort }
+                : npm === "@ai-sdk/anthropic"
+                  ? { effort }
+                  : {},
+            ]),
+          )
+        : undefined;
+
+    return [
+      model.id,
+      {
+        name: model.name,
+        limit: { context: model.context, output: model.output },
+        modalities: { input, output: ["text"] },
+        reasoning: true,
+        ...(npm === "@ai-sdk/openai-compatible" ? {} : { provider: { npm } }),
+        ...(variants && Object.keys(variants).length > 0 ? { variants } : {}),
+      },
+    ];
+  }),
+);
 
 export interface PresetModelVariant {
   id: string;
@@ -1883,13 +1926,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
         apiKey: "",
         setCacheKey: true,
       },
-      models: {
-        "glm-5.2": { name: "GLM 5.2" },
-        "kimi-k2.7-code": { name: "Kimi K2.7 Code" },
-        "deepseek-v4-pro": { name: "DeepSeek V4 Pro" },
-        "deepseek-v4-flash": { name: "DeepSeek V4 Flash" },
-        "mimo-v2.5-pro": { name: "MiMo V2.5 Pro" },
-      },
+      models: openCodeGoModels,
     },
     category: "third_party",
     icon: "opencode",

@@ -4,12 +4,18 @@ import {
   getPiModelCatalogReference,
   piModel,
   type PiCatalogModel,
+  type PiModelCatalogKey,
 } from "./piModelCatalog";
 import {
   getPiThinkingProfile,
   resolvePiThinkingProfile,
   type PiThinkingLevelMap,
 } from "./piThinkingProfiles";
+import {
+  openCodeGoModelsFor,
+  type OpenCodeGoModelId,
+  type OpenCodeGoProtocol,
+} from "./openCodeGoCatalog";
 
 export type PiApiFormat =
   | "openai-completions"
@@ -58,6 +64,66 @@ const DEEPSEEK_THINKING_COMPAT = {
   requiresReasoningContentOnAssistantMessages: true,
   thinkingFormat: "deepseek",
 } as const;
+
+const OPEN_CODE_GO_PI_CATALOG_KEYS = {
+  "grok-4.6": "xai/grok-4.6",
+  "gpt-5.6-luna": "openai/gpt-5.6-luna",
+  "muse-spark-1.3-contributor": "meta/muse-spark-1.3-contributor",
+  "muse-spark-1.2-contributor": "meta/muse-spark-1.2-contributor",
+  "minimax-m3": "minimax/minimax-m3",
+  "minimax-m2.7": "minimax/minimax-m2.7",
+  "qwen3.8-max": "qwen/qwen3.8-max",
+  "qwen3.8-flash": "qwen/qwen3.8-flash",
+  "qwen3.7-max": "qwen/qwen3.7-max",
+  "qwen3.7-plus": "qwen/qwen3.7-plus",
+  "qwen3.6-plus": "qwen/qwen3.6-plus",
+  "glm-5.3-flash": "zai/glm-5.3-flash",
+  "glm-5.3": "zai/glm-5.3",
+  "glm-5.2": "zai/glm-5.2",
+  "glm-5.1": "zai/glm-5.1",
+  "kimi-k3": "moonshotai/kimi-k3",
+  "kimi-k2.7-code": "moonshotai/kimi-k2.7-code",
+  "kimi-k2.6": "moonshotai/kimi-k2.6",
+  "longcat-2.0": "longcat/longcat-2.0",
+  "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+  "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
+  "deepseek-v4-flash-vision-exp": "deepseek/deepseek-v4-flash-vision-exp",
+  "mimo-v2.5": "xiaomi/mimo-v2.5",
+  "mimo-v2.5-pro": "xiaomi/mimo-v2.5-pro",
+  "hy4-preview": "tencent/hy4-preview",
+  hy3: "tencent/hy3",
+  "omen-alpha": "omen/omen-alpha",
+} as const satisfies Record<OpenCodeGoModelId, PiModelCatalogKey>;
+
+function openCodeGoPiModels(protocol: OpenCodeGoProtocol): PiPresetModel[] {
+  return openCodeGoModelsFor(protocol).map((model) => {
+    const catalogKey = OPEN_CODE_GO_PI_CATALOG_KEYS[model.id];
+    const thinkingProfile =
+      protocol === "chat" && model.id === "glm-5.2"
+        ? "openCodeGoGlm52"
+        : protocol === "chat" && model.id.startsWith("deepseek-")
+          ? "deepseekV4"
+          : undefined;
+    const preset = piModel(catalogKey, {
+      id: model.id,
+      name: model.name,
+      reasoning: true,
+      input: model.input.some((modality) => modality === "image")
+        ? ["text", "image"]
+        : ["text"],
+      contextWindow: model.context,
+      maxTokens: model.output,
+      ...(thinkingProfile ? { thinkingProfile } : {}),
+    });
+    if (protocol !== "chat") return preset;
+    return {
+      ...preset,
+      compat: model.id.startsWith("deepseek-")
+        ? { ...DEEPSEEK_THINKING_COMPAT }
+        : { ...OPENAI_COMPLETIONS_COMPAT },
+    };
+  });
+}
 
 // Tencent's thinking switch is explicit, but its multi-turn contract does not
 // require clients to echo reasoning_content back to the next request.
@@ -1302,6 +1368,40 @@ const piProviderPresetDefinitions: PiProviderPreset[] = [
     iconColor: "#000000",
   },
   {
+    name: "OpenCode Go (Responses)",
+    providerKey: "cc-switch-open-code-go-responses",
+    websiteUrl: "https://opencode.ai/go",
+    apiKeyUrl: "https://opencode.ai/go?ref=2YTRG2NGTX",
+    settingsConfig: {
+      name: "OpenCode Go (Responses)",
+      baseUrl: "https://opencode.ai/zen/go/v1",
+      api: "openai-responses",
+      apiKey: "",
+      models: openCodeGoPiModels("responses"),
+    },
+    category: "third_party",
+    partnerPromotionKey: "opencode_go",
+    icon: "opencode",
+    iconColor: "#211E1E",
+  },
+  {
+    name: "OpenCode Go (Messages)",
+    providerKey: "cc-switch-open-code-go-messages",
+    websiteUrl: "https://opencode.ai/go",
+    apiKeyUrl: "https://opencode.ai/go?ref=2YTRG2NGTX",
+    settingsConfig: {
+      name: "OpenCode Go (Messages)",
+      baseUrl: "https://opencode.ai/zen/go",
+      api: "anthropic-messages",
+      apiKey: "",
+      models: openCodeGoPiModels("messages"),
+    },
+    category: "third_party",
+    partnerPromotionKey: "opencode_go",
+    icon: "opencode",
+    iconColor: "#211E1E",
+  },
+  {
     name: "OpenCode Go",
     providerKey: "cc-switch-open-code-go",
     websiteUrl: "https://opencode.ai/go",
@@ -1311,42 +1411,7 @@ const piProviderPresetDefinitions: PiProviderPreset[] = [
       baseUrl: "https://opencode.ai/zen/go/v1",
       api: "openai-completions",
       apiKey: "",
-      models: [
-        {
-          ...piModel("zai/glm-5.2", {
-            id: "glm-5.2",
-            name: "GLM 5.2",
-            thinkingProfile: "openCodeGoGlm52",
-          }),
-          compat: { ...OPENAI_COMPLETIONS_COMPAT },
-        },
-        {
-          ...piModel("moonshotai/kimi-k2.7-code", {
-            id: "kimi-k2.7-code",
-          }),
-          compat: { ...OPENAI_COMPLETIONS_COMPAT },
-        },
-        {
-          ...piModel("deepseek/deepseek-v4-pro", {
-            id: "deepseek-v4-pro",
-            thinkingProfile: "deepseekV4",
-          }),
-          compat: { ...DEEPSEEK_THINKING_COMPAT },
-        },
-        {
-          ...piModel("deepseek/deepseek-v4-flash", {
-            id: "deepseek-v4-flash",
-            thinkingProfile: "deepseekV4",
-          }),
-          compat: { ...DEEPSEEK_THINKING_COMPAT },
-        },
-        {
-          ...piModel("xiaomi/mimo-v2.5-pro", {
-            id: "mimo-v2.5-pro",
-          }),
-          compat: { ...OPENAI_COMPLETIONS_COMPAT },
-        },
-      ],
+      models: openCodeGoPiModels("chat"),
     },
     category: "third_party",
     partnerPromotionKey: "opencode_go",
