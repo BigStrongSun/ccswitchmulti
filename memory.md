@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 v3.20.1-1 候选门禁暴露 PPIO 目录污染
+
+- Task 12 首次前端全量在 `a908c389` 得到 185 个文件中 184 通过、1 失败（1536/1537 tests）：OpenCode 的 PPIO 预设实际暴露了 `tc-code-latest`、GLM、Kimi 等 Tencent 个人 Token Plan 目录，而非 PPIO 的 `deepseek/deepseek-v4-flash-0731`。
+- 根因定位到 `1a905f16`：加入 Tencent OpenCode 产品对象时，迁移编辑误把紧邻的既有 PPIO `settingsConfig.models` 也替换成与 Tencent 个人套餐完全相同的目录。这是源码对象被误改，不是模块加载后的共享引用污染。修复只恢复 PPIO 自己的单模型对象，保留后续 Tencent 对象不变。
+- 现有 PPIO 断言已经提供精确 RED；修复后 PPIO 13/13 与 Tencent 18/18 合计 31/31 GREEN。因为候选源码已变化，前端全量仍必须在新 commit 上最终重跑，不能沿用失败批次中的 1536 项通过结果冒充完整门禁。
+
 ## 2026-09-08 v3.20.1-1 版本准备
 
 - Task 11 将 package、Tauri、Cargo manifest 与 lockfile 四个版本源统一为 `3.20.1-1`，并新增累计中文 Release Notes 与持续更新的 release execution record。版本说明明确区分 adopted、CCSM rewrite、already-covered、deferred/not-applicable，以及 source/build/CI/Release/installed runtime 各证据层。
