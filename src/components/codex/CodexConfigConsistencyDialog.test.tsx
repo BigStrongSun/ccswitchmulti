@@ -591,4 +591,48 @@ describe("CodexConfigConsistencyDialog", () => {
     expect(screen.getByText(/文件轮转任务.*1/)).toBeInTheDocument();
     expect(screen.getByText(/续写分段.*3/)).toBeInTheDocument();
   });
+
+  it("explains blocked-only history instead of claiming no anomaly was found", () => {
+    render(
+      <CodexConfigConsistencyDialog
+        report={null}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "status",
+          progress: null,
+          preflight: {
+            supported: true,
+            canRefresh: true,
+            snapshotToken: "blocked-history",
+            desktopProcessCount: 1,
+            appServerProcessCount: 1,
+            processCount: 2,
+            launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+            warning: null,
+            paginatedHistory: {
+              affectedRolloutCount: 0,
+              duplicateOrdinalCount: 0,
+              affectedBytes: 0,
+              blockedRolloutCount: 1,
+              blockedReason: "unsafe_rollout_ordinal_sequence",
+            },
+          },
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={vi.fn()}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("需要处理")).toBeInTheDocument();
+    expect(screen.getByText(/其他异常历史保持原样：.*1/)).toBeInTheDocument();
+    expect(
+      screen.queryByText("未发现可安全修复的重复序号。"),
+    ).not.toBeInTheDocument();
+  });
 });

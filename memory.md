@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-09-07 Codex 历史状态矛盾与深探测结果丢失根修
+
+- “分页历史：需要处理”同时显示“未发现可安全修复”的根因是同一卡片用了两套条件：徽标把 `affectedRolloutCount > 0 || blockedRolloutCount > 0` 都视为异常，说明文字却只检查 `affectedRolloutCount`。当仅有无法安全自动修复的 blocked 历史时，UI 因而自相矛盾。状态页现在明确显示“其他异常历史保持原样：N”；只有 affected 与 blocked 都为 0 时才显示未发现异常。
+- 截图中的 `codex_provider_set_manual_intent_required` 不是 8 月 31 日编辑器初始化竞态修复未合入。提交 `72773b78` 已进入 `v3.19.2-22` 至 `v3.19.2-31`，本机运行的 `3.19.2-29` 也包含该提交。新根因位于显式深探测的后处理：双协议请求及 receipt 已完成后，`run_provider_preflight` 还会构建零写入 adaptation preview；草稿若标记 manual 但没有完整 Provider 级 transport，preview 抛出保存意图错误，整个命令失败，前端遂显示两个分支“未返回探测结果”。
+- 根修只解耦探测结果与保存预览：零写入 preview 在不完整手动草稿上改用本轮真实 records 生成自动适配视图，保留 Responses/Chat 结果；Provider Set prepare/commit、普通保存和手动确认仍沿用原有 fail-closed 校验，不会把不完整手动意图写入数据库。
+- TDD 在旧代码上分别稳定复现矛盾文案与 `InvalidInput("codex_provider_set_manual_intent_required")`，修复后状态对话框 12/12、相关前端 28/28、Rust `codex_protocol_preflight_save_tests` 16/16、`pnpm typecheck`、Prettier 与 `cargo fmt --check` 通过。源码修复尚未构建或安装；当前安装进程仍为 `3.19.2-29`，不能把源码验证描述为安装态完成。
+- 外部检索按规则使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链。Matrix 对精确错误码没有找到相关一手资料，内置 Web 只确认公开仓库和旧版 Provider 文档；两条链均不足以解释内部错误，根因以本地源码、git ancestry、已安装版本和 RED→GREEN 回归为准。
+
 ## 2026-09-06 v3.19.2-30 候选与 v3.19.2-31 正式发布
 
 - 正式发布 commit 为 `a169bf585b4ffe9d086d2e4777621b8fca0b98e4`，annotated tag `v3.19.2-31` 的远端 peeled commit 与之完全一致。tag 前 CI run `34022610762` 的 Frontend、Ubuntu、macOS、Windows 全部 success；Release run `34023466929` 的 Linux x64/ARM64、Windows x64/ARM64、macOS、`Publish GitHub Release` 与 `Assemble latest.json` 七个 job 全部 success。

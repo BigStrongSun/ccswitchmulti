@@ -218,7 +218,10 @@ export function CodexConfigConsistencyDialog({
                   <p className="mt-1 text-xs text-muted-foreground">
                     {refresh.preflight.paginatedHistory.affectedRolloutCount > 0
                       ? `${t("codexConfigConsistency.paginatedHistoryFiles")} ${refresh.preflight.paginatedHistory.affectedRolloutCount} · ${t("codexConfigConsistency.duplicateOrdinals")} ${refresh.preflight.paginatedHistory.duplicateOrdinalCount}`
-                      : t("codexConfigConsistency.noPaginatedHistoryIssue")}
+                      : refresh.preflight.paginatedHistory.blockedRolloutCount >
+                          0
+                        ? `${t("codexConfigConsistency.paginatedHistorySkipped")} ${refresh.preflight.paginatedHistory.blockedRolloutCount}`
+                        : t("codexConfigConsistency.noPaginatedHistoryIssue")}
                   </p>
                   {rotatedThreadCount > 0 ? (
                     <p className="mt-1 text-xs text-muted-foreground">

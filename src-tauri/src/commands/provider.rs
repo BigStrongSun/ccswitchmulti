@@ -470,16 +470,22 @@ pub(crate) fn build_codex_provider_adaptation_preview(
                 }
                 "openai_chat" => Some(crate::protocol_compatibility::TransportKind::OpenAiChat),
                 _ => None,
-            })
-            .ok_or_else(|| {
-                AppError::InvalidInput("codex_provider_set_manual_intent_required".to_string())
-            })?;
-        crate::codex_multirouter::provider_set::plan_manual_codex_provider_set(
-            &logical_provider,
-            transport,
-            existing_providers,
-            now,
-        )
+            });
+        if let Some(transport) = transport {
+            crate::codex_multirouter::provider_set::plan_manual_codex_provider_set(
+                &logical_provider,
+                transport,
+                existing_providers,
+                now,
+            )
+        } else {
+            crate::codex_multirouter::provider_set::plan_codex_provider_set(
+                &logical_provider,
+                records,
+                existing_providers,
+                now,
+            )
+        }
     } else {
         crate::codex_multirouter::provider_set::plan_codex_provider_set(
             &logical_provider,
@@ -3780,6 +3786,61 @@ mod codex_protocol_preflight_save_tests {
             .expect("catalog models")
             .iter()
             .all(|model| model.get("apiFormat").is_none()));
+    }
+
+    #[test]
+    fn preflight_preview_uses_probe_evidence_when_manual_mode_has_no_transport() {
+        let mut source = codex_provider();
+        let meta = source.meta.get_or_insert_with(ProviderMeta::default);
+        meta.codex_protocol_mode = Some(CodexProtocolMode::Manual);
+        meta.api_format = None;
+        source
+            .settings_config
+            .as_object_mut()
+            .expect("settings object")
+            .remove("apiFormat");
+        let now = chrono::Utc::now().timestamp();
+        let target = crate::protocol_compatibility::compile_provider_probe_candidate_for_model(
+            &source,
+            "qwen-visible".to_string(),
+            "Qwen/Qwen3.8".to_string(),
+        )
+        .expect("compile candidate")
+        .target_key(TransportKind::OpenAiChat)
+        .expect("target");
+        let record = ProtocolCompatibilityRecord::new(
+            target,
+            ProtocolCompatibilityProbeResult {
+                selected_transport: Some(TransportKind::OpenAiChat),
+                readiness: ProbeReadiness::Verified,
+                branches: Vec::new(),
+            },
+            now,
+            now + 600,
+        );
+        let observations = [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
+            .into_iter()
+            .map(|transport| {
+                let mut observation = record.clone();
+                observation.target.transport = transport;
+                observation
+            })
+            .collect::<Vec<_>>();
+
+        let preview = build_codex_provider_adaptation_preview(
+            &source,
+            &[record],
+            &observations,
+            &HashMap::new(),
+            now,
+        )
+        .expect("explicit probe results must survive an incomplete manual draft");
+
+        assert_eq!(preview.status, CodexAdaptationStatus::Ready);
+        assert_eq!(
+            preview.effective_transport,
+            Some(CodexEffectiveTransport::OpenAiChat)
+        );
     }
 
     #[test]
