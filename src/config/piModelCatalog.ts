@@ -423,6 +423,15 @@ export const piModelCatalog = {
       maxTokens: 65_536,
     },
   },
+  "qwen/qwen3-coder-next": {
+    capabilities: {
+      name: "Qwen3 Coder Next",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 262_144,
+      maxTokens: 65_536,
+    },
+  },
   "qwen/qwen3-coder-480b": {
     capabilities: {
       name: "Qwen3 Coder 480B",
@@ -441,12 +450,66 @@ export const piModelCatalog = {
       maxTokens: 65_536,
     },
   },
+  "qwen/qwen3.6-flash": {
+    capabilities: {
+      name: "Qwen3.6 Flash",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 1_000_000,
+      maxTokens: 32_768,
+    },
+  },
+  "qwen/qwen3.5-plus": {
+    capabilities: {
+      name: "Qwen3.5 Plus",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 1_000_000,
+      maxTokens: 65_536,
+    },
+  },
+  "qwen/qwen3-max-2026-01-23": {
+    capabilities: {
+      name: "Qwen3 Max 2026-01-23",
+      reasoning: true,
+      input: ["text"],
+      contextWindow: 262_144,
+      maxTokens: 32_768,
+    },
+  },
   "qwen/qwen3.7-max": {
     capabilities: {
       name: "Qwen3.7 Max",
       reasoning: true,
       input: ["text"],
       contextWindow: 1_000_000,
+      maxTokens: 131_072,
+    },
+  },
+  "qwen/qwen3.7-plus": {
+    capabilities: {
+      name: "Qwen3.7 Plus",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 1_000_000,
+      maxTokens: 65_536,
+    },
+  },
+  "qwen/qwen3.8-max": {
+    capabilities: {
+      name: "Qwen3.8 Max",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 983_616,
+      maxTokens: 131_072,
+    },
+  },
+  "qwen/qwen3.8-flash": {
+    capabilities: {
+      name: "Qwen3.8 Flash",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 983_616,
       maxTokens: 131_072,
     },
   },

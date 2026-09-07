@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-09-07 QwenCloud 国际站三产品预设迁移
+
+- 上游 `6d25f34e` 的 QwenCloud 意图已按 CCSwitchMulti 当前预设边界重写，而非整提交照搬：七个受支持 App 都分别提供按量付费、Coding Plan、Token Plan，Codex 使用稳定 `presetKey`；三种 API Key 与 base URL 明确隔离，避免套餐 Key 误打到按量域名产生 401/403 或意外计费。
+- 2026-09-07 复核的阿里云官方文档确认：国际按量 OpenAI/Anthropic 地址为 `dashscope-intl.aliyuncs.com/compatible-mode/v1` 与 `/apps/anthropic`；Coding Plan 为 `coding-intl.dashscope.aliyuncs.com/v1` 与 `/apps/anthropic`；Token Plan 为 `token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` 与 `/apps/anthropic`。OpenCode/OpenClaw 的 Anthropic SDK 配置按客户端约定追加 `/v1`，Claude Code/Desktop、Hermes、Pi 不追加。
+- 上游 2026-09-01 模型表在当前官方资料面前已部分过时：按量默认更新为 `qwen3.8-max`；Coding Plan 采用当前官方支持的 Qwen 子集；单一 Token Plan 预设只内置个人版与团队版共同支持的编码模型，避免对某个套餐暴露不可用条目。Qwen3.8 在 Codex 中使用 CCSM schema-v2 reasoning：`none/low/medium/xhigh`、默认 `xhigh`、可关闭；思考模式输入上限 `983616`、输出上限 `131072`，并保留图片输入。
+- TDD 证据：`src/config/qwenCloudProviderPresets.test.ts` 在实现前 10/10 失败（七 App 均无预设），实现后 10/10 通过；测试锁定每 App endpoint/API mode、结构化 App 的有序模型目录、Codex 稳定身份和 Qwen3.8 reasoning/窗口。批次尚未安装、重启、合并 main、push、tag 或发布。
+- 独立复审又定位到 Codex `modelCatalog()` 的证据陷阱：省略 reasoning 会被物化为 `confirmed_unsupported`，不能用于“官方支持思考、但当前协议档位尚未完全证明”的模型。修复后 Qwen3.8 Responses 明确使用 `reasoning.effort` 对象；Qwen3.7/3.6/3.5 与 Qwen3 Max 按官方混合思考契约使用 `enable_thinking`，并区分 Responses 的 `reasoning` 与 Chat 的 `reasoning_content` 输出；Qwen3 Coder Next/Plus 在缺少当前 Coding Plan 协议级开关证据时保留 `unknown`，不再伪造不支持。复审回归先因 Qwen3.8 的错误顶层 `reasoning_effort` 精确 RED，修复后 10/10 GREEN。
+
 ## 2026-09-06 v3.19.2-30 候选与 v3.19.2-31 正式发布
 
 - 正式发布 commit 为 `a169bf585b4ffe9d086d2e4777621b8fca0b98e4`，annotated tag `v3.19.2-31` 的远端 peeled commit 与之完全一致。tag 前 CI run `34022610762` 的 Frontend、Ubuntu、macOS、Windows 全部 success；Release run `34023466929` 的 Linux x64/ARM64、Windows x64/ARM64、macOS、`Publish GitHub Release` 与 `Assemble latest.json` 七个 job 全部 success。
