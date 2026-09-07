@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 v3.20.1-1 版本准备
+
+- Task 11 将 package、Tauri、Cargo manifest 与 lockfile 四个版本源统一为 `3.20.1-1`，并新增累计中文 Release Notes 与持续更新的 release execution record。版本说明明确区分 adopted、CCSM rewrite、already-covered、deferred/not-applicable，以及 source/build/CI/Release/installed runtime 各证据层。
+- 当前数据库 schema 从主线 v20 升到 v22：v21 为 Claude 会话 byte cursor/tail fingerprint，v22 为 managed Codex OAuth identity。升级前会自动创建迁移备份；旧应用会拒绝读取 v22。降级必须退出新版并恢复与旧版兼容的完整备份，不能手改 `PRAGMA user_version`。
+- Task 11 只执行版本、Markdown、diff 和 UTF-8 轻量门禁。Task 12 才在 Ryzen 9 9950X 上集中运行一次完整本地候选门禁；Rust 测试启动时必须把 `LOCALAPPDATA` 指向专用临时目录，避免触碰真实 Claude Desktop 配置。完整门禁前不安装、不重启、不合并 main、不 push、不 tag、不发布，也不触碰 `127.0.0.1:15721`。
+
 ## 2026-09-08 官方 v3.20.2 late-arrival 审计
 
 - `git fetch --all --prune --tags` 将官方 `origin/main` 从上一冻结点 `1b34d322` 推进 14 个非 merge 提交到 `f3b18df1`，该 tip 同时是新 tag `v3.20.2`。固定 Matrix WebSearch bridge 直读 GitHub release 页面得到同一版本、发布日期和 52-commit release 摘要；Codex 内置 Web 搜索索引仍停在 v3.20.1/旧 releases，因此最新状态以实时 Git 对象和 Matrix 直读为准。
