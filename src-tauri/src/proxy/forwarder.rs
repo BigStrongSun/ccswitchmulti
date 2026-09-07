@@ -582,20 +582,20 @@ impl RequestForwarder {
                     if !manager.pool_quota_refresh_due(&entry.account_id).await {
                         return None;
                     }
-                    let token = if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
-                        native_token
+                    let credentials = if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+                        native_token.map(|token| (token, None))
                     } else {
                         manager
-                            .get_valid_token_for_account(&entry.account_id)
+                            .get_valid_token_and_workspace_for_account(&entry.account_id)
                             .await
                             .ok()
+                            .map(|(token, workspace)| (token, Some(workspace)))
                     };
-                    let result = match token {
-                        Some(token) => {
+                    let result = match credentials {
+                        Some((token, workspace)) => {
                             crate::services::subscription::query_codex_remaining_percent(
                                 &token,
-                                (entry.account_id != NATIVE_CODEX_ACCOUNT_ID)
-                                    .then_some(entry.account_id.as_str()),
+                                workspace.as_deref(),
                             )
                             .await
                         }
@@ -1424,7 +1424,7 @@ impl RequestForwarder {
                     let provider_type = ProviderType::from_app_type_and_config(app_type, provider);
                     let is_anthropic_provider = matches!(
                         provider_type,
-                        ProviderType::Claude | ProviderType::ClaudeAuth
+                        Some(ProviderType::Claude | ProviderType::ClaudeAuth)
                     );
                     let mut signature_rectifier_non_retryable_client_error = false;
 
@@ -2554,6 +2554,9 @@ impl RequestForwarder {
         let codex_anthropic_base_is_full_endpoint =
             codex_responses_to_anthropic && base_url_is_full_endpoint(&base_url, "/v1/messages");
 
+        let is_codex_alpha_search = matches!(app_type, AppType::Codex)
+            && split_endpoint_and_query(&effective_endpoint).0 == "/alpha/search";
+
         let url = if let Some(policy) = codex_third_party_request_policy.as_ref() {
             let transport = if codex_responses_to_chat {
                 super::providers::codex_request::CodexRequestTransport::ChatCompletions
@@ -2561,6 +2564,8 @@ impl RequestForwarder {
                 super::providers::codex_request::CodexRequestTransport::Responses
             };
             policy.prepare_url_with_query(transport, passthrough_query.as_deref())?
+        } else if is_full_url && is_codex_alpha_search {
+            rewrite_codex_alpha_search_full_url(&base_url, passthrough_query.as_deref())?
         } else if matches!(resolved_claude_api_format.as_deref(), Some("gemini_native")) {
             super::gemini_url::resolve_gemini_native_url(
                 &base_url,
@@ -2794,24 +2799,20 @@ impl RequestForwarder {
             );
         }
 
-        // Same native-Responses path: scrub the OpenAI-backend-private fields
-        // and tool carriers (`external_web_access`, `prompt_cache_retention`,
-        // `additional_tools`, `tool_search`, …) that xAI's strict serde parser
-        // rejects with 400/422. Deterministic field removals only, gated on the
-        // xAI OAuth path, so the prompt-cache prefix stays stable and no other
-        // provider is affected. Runs after the flatten above so lifted
-        // `namespace` tools survive the tool-type whitelist.
+        // Same native-Responses path: remap an alien subagent model to the live
+        // Grok upstream, then scrub fields xAI rejects. Agent-message payloads
+        // were already projected by the transport-neutral third-party boundary
+        // above, preserving its fail-closed encrypted-content policy.
         if matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && !codex_responses_to_chat
             && !codex_responses_to_anthropic
             && super::providers::provider_needs_responses_namespace_flatten(provider)
-            && super::providers::transform_codex_responses_xai_sanitize::sanitize_xai_responses_request(
-                &mut request_body,
-            )
         {
-            log::debug!(
-                "[Codex] Sanitized xAI-unsupported Responses fields (provider={})",
-                provider.id
+            super::providers::transform_codex_responses_xai_sanitize::apply_xai_native_responses_request_compat(
+                &mut request_body,
+                &provider.id,
+                super::providers::codex_provider_upstream_model(provider).as_deref(),
+                &provider.settings_config,
             );
         }
 
@@ -3109,26 +3110,24 @@ impl RequestForwarder {
                         .as_ref()
                         .and_then(|m| m.managed_account_id_for("codex_oauth"));
 
-                    let token_result = match &account_id {
+                    let credentials_result = match &account_id {
                         Some(id) => {
                             log::debug!("[CodexOAuth] 使用指定账号 {id} 获取 token");
-                            codex_auth.get_valid_token_for_account(id).await
+                            codex_auth
+                                .get_valid_token_and_workspace_for_account(id)
+                                .await
                         }
                         None => {
                             log::debug!("[CodexOAuth] 使用默认账号获取 token");
-                            codex_auth.get_valid_token().await
+                            codex_auth.get_valid_token_and_workspace().await
                         }
                     };
 
-                    match token_result {
-                        Ok(token) => {
+                    match credentials_result {
+                        Ok((token, workspace_id)) => {
                             auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
                             is_codex_oauth = true;
-                            // 解析使用的 account_id（用于注入 ChatGPT-Account-Id header）
-                            codex_oauth_account_id = match account_id {
-                                Some(id) => Some(id),
-                                None => codex_auth.default_account_id().await,
-                            };
+                            codex_oauth_account_id = Some(workspace_id);
                             log::debug!(
                                 "[CodexOAuth] 成功获取 access_token (account={})",
                                 codex_oauth_account_id.as_deref().unwrap_or("default")
@@ -3198,7 +3197,7 @@ impl RequestForwarder {
             Vec::new()
         };
 
-        // 注入 Codex OAuth 的 ChatGPT-Account-Id header（如果有 account_id）
+        // 注入 Codex OAuth 的上游 workspace header；本地账号绑定 ID 不得出站。
         if let Some(ref account_id) = codex_oauth_account_id {
             if let Ok(hv) = http::HeaderValue::from_str(account_id) {
                 auth_headers.push((http::HeaderName::from_static("chatgpt-account-id"), hv));
@@ -3635,6 +3634,12 @@ impl RequestForwarder {
                 is_copilot,
             );
         }
+        apply_opencode_go_identity(
+            &mut ordered_headers,
+            &url,
+            &self.session_id,
+            self.session_client_provided,
+        );
         enforce_codex_oauth_originator(
             &mut ordered_headers,
             is_codex_oauth || codex_official_auth_passthrough,
@@ -4558,18 +4563,19 @@ impl RequestForwarder {
                         .meta
                         .as_ref()
                         .and_then(|m| m.managed_account_id_for("codex_oauth"));
-                    let token_result = match &account_id {
-                        Some(id) => codex_auth.get_valid_token_for_account(id).await,
-                        None => codex_auth.get_valid_token().await,
+                    let credentials_result = match &account_id {
+                        Some(id) => {
+                            codex_auth
+                                .get_valid_token_and_workspace_for_account(id)
+                                .await
+                        }
+                        None => codex_auth.get_valid_token_and_workspace().await,
                     };
-                    match token_result {
-                        Ok(token) => {
+                    match credentials_result {
+                        Ok((token, workspace_id)) => {
                             auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
                             is_codex_oauth = true;
-                            codex_oauth_account_id = match account_id {
-                                Some(id) => Some(id),
-                                None => codex_auth.default_account_id().await,
-                            };
+                            codex_oauth_account_id = Some(workspace_id);
                         }
                         Err(err) => {
                             return Err(ProxyError::AuthError(format!(
@@ -4663,6 +4669,12 @@ impl RequestForwarder {
                 .as_ref()
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             false,
+        );
+        apply_opencode_go_identity(
+            &mut ordered_headers,
+            &url,
+            &self.session_id,
+            self.session_client_provided,
         );
         enforce_codex_oauth_originator(
             &mut ordered_headers,
@@ -4908,18 +4920,19 @@ impl RequestForwarder {
                         .meta
                         .as_ref()
                         .and_then(|m| m.managed_account_id_for("codex_oauth"));
-                    let token_result = match &account_id {
-                        Some(id) => codex_auth.get_valid_token_for_account(id).await,
-                        None => codex_auth.get_valid_token().await,
+                    let credentials_result = match &account_id {
+                        Some(id) => {
+                            codex_auth
+                                .get_valid_token_and_workspace_for_account(id)
+                                .await
+                        }
+                        None => codex_auth.get_valid_token_and_workspace().await,
                     };
-                    match token_result {
-                        Ok(token) => {
+                    match credentials_result {
+                        Ok((token, workspace_id)) => {
                             auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
                             is_codex_oauth = true;
-                            codex_oauth_account_id = match account_id {
-                                Some(id) => Some(id),
-                                None => codex_auth.default_account_id().await,
-                            };
+                            codex_oauth_account_id = Some(workspace_id);
                         }
                         Err(err) => {
                             return Err(ProxyError::AuthError(format!(
@@ -4991,6 +5004,12 @@ impl RequestForwarder {
                 .as_ref()
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             false,
+        );
+        apply_opencode_go_identity(
+            &mut ordered_headers,
+            &upstream_url,
+            &self.session_id,
+            self.session_client_provided,
         );
         enforce_codex_oauth_originator(
             &mut ordered_headers,
@@ -6221,6 +6240,51 @@ fn append_query_to_full_url(base_url: &str, query: Option<&str>) -> String {
     }
 }
 
+/// Derive the sibling Alpha Search endpoint only from an unambiguous complete
+/// Responses URL. Opaque full URLs fail closed instead of receiving the search
+/// payload at an unrelated route.
+fn rewrite_codex_alpha_search_full_url(
+    base_url: &str,
+    request_query: Option<&str>,
+) -> Result<String, ProxyError> {
+    let trimmed = base_url.trim();
+    let parsed = url::Url::parse(trimmed).map_err(|_| {
+        ProxyError::ConfigError("Codex Alpha Search requires a valid full Responses URL".into())
+    })?;
+    let without_fragment = trimmed.split_once('#').map_or(trimmed, |(head, _)| head);
+    let (url_without_query, base_query) = without_fragment
+        .split_once('?')
+        .map_or((without_fragment, None), |(head, query)| {
+            (head, Some(query))
+        });
+    let url_without_query = url_without_query.trim_end_matches('/');
+    let path = parsed.path().trim_end_matches('/');
+    let suffix = if path.ends_with("/responses/compact") {
+        "/responses/compact"
+    } else if path.ends_with("/responses") {
+        "/responses"
+    } else {
+        return Err(ProxyError::ConfigError(
+            "Codex Alpha Search cannot derive /alpha/search from an opaque full URL; use a base URL or a full URL ending in /responses".into(),
+        ));
+    };
+    let prefix_len = url_without_query
+        .len()
+        .checked_sub(suffix.len())
+        .ok_or_else(|| ProxyError::ConfigError("Invalid Codex full URL".into()))?;
+    let mut rewritten = format!("{}/alpha/search", &url_without_query[..prefix_len]);
+    match (
+        base_query.filter(|query| !query.is_empty()),
+        request_query.filter(|query| !query.is_empty()),
+    ) {
+        (Some(base), Some(request)) => rewritten.push_str(&format!("?{base}&{request}")),
+        (Some(base), None) => rewritten.push_str(&format!("?{base}")),
+        (None, Some(request)) => rewritten.push_str(&format!("?{request}")),
+        (None, None) => {}
+    }
+    Ok(rewritten)
+}
+
 fn build_codex_oauth_session_headers(
     session_id: &str,
 ) -> Vec<(http::HeaderName, http::HeaderValue)> {
@@ -6242,6 +6306,48 @@ fn build_codex_oauth_session_headers(
     }
 
     headers
+}
+
+fn is_opencode_go_upstream_url(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    url.host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("opencode.ai"))
+        && (url.path() == "/zen/go" || url.path().starts_with("/zen/go/"))
+}
+
+/// Normalize the identity required by OpenCode Go at the final outbound boundary.
+/// Preserve an explicit Go session header. If a protocol conversion removed it, derive it only
+/// from a stable client-provided session; the per-request fallback UUID is never sent upstream.
+fn apply_opencode_go_identity(
+    headers: &mut http::HeaderMap,
+    url: &str,
+    session_id: &str,
+    session_client_provided: bool,
+) {
+    if !is_opencode_go_upstream_url(url) {
+        return;
+    }
+
+    headers.insert(
+        http::header::USER_AGENT,
+        http::HeaderValue::from_static(concat!("CCSwitchMulti/", env!("CARGO_PKG_VERSION"))),
+    );
+
+    let session_header = http::HeaderName::from_static("x-opencode-session");
+    let has_explicit_session = headers
+        .get(&session_header)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_explicit_session || !session_client_provided {
+        return;
+    }
+    if let Ok(value) = http::HeaderValue::from_str(session_id.trim()) {
+        if !value.is_empty() {
+            headers.insert(session_header, value);
+        }
+    }
 }
 
 /// 判断 originator 是否属于官方 Codex 已声明的 first-party 客户端集合。
@@ -6491,21 +6597,19 @@ async fn resolve_hosted_tool_client(
             .meta
             .as_ref()
             .and_then(|meta| meta.managed_account_id_for("codex_oauth"));
-        let token_result = match &account_id {
-            Some(id) => codex_auth.get_valid_token_for_account(id).await,
-            None => codex_auth.get_valid_token().await,
-        };
-        return match token_result {
-            Ok(token) => {
-                let resolved_account_id = match &account_id {
-                    Some(_) => account_id,
-                    None => codex_auth.default_account_id().await,
-                };
-                Ok(OpenAiHostedToolClient::from_codex_oauth(
-                    token,
-                    resolved_account_id,
-                ))
+        let credentials_result = match &account_id {
+            Some(id) => {
+                codex_auth
+                    .get_valid_token_and_workspace_for_account(id)
+                    .await
             }
+            None => codex_auth.get_valid_token_and_workspace().await,
+        };
+        return match credentials_result {
+            Ok((token, workspace_id)) => Ok(OpenAiHostedToolClient::from_codex_oauth(
+                token,
+                Some(workspace_id),
+            )),
             Err(err) => Err(format!(
                 "OpenAI hosted tool bridge failed to obtain Codex OAuth token: {err}"
             )),
@@ -10477,6 +10581,62 @@ mod tests {
     }
 
     #[test]
+    fn opencode_go_identity_preserves_client_session_and_sets_own_user_agent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-opencode-session",
+            HeaderValue::from_static("client-session"),
+        );
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("upstream-client/1.0"),
+        );
+
+        apply_opencode_go_identity(
+            &mut headers,
+            "https://opencode.ai/zen/go/v1/responses",
+            "derived-session",
+            true,
+        );
+
+        assert_eq!(
+            headers.get("x-opencode-session"),
+            Some(&HeaderValue::from_static("client-session"))
+        );
+        assert_eq!(
+            headers.get(http::header::USER_AGENT),
+            Some(&HeaderValue::from_static(concat!(
+                "CCSwitchMulti/",
+                env!("CARGO_PKG_VERSION")
+            )))
+        );
+    }
+
+    #[test]
+    fn opencode_go_identity_derives_session_only_from_stable_client_identity() {
+        let mut stable = HeaderMap::new();
+        apply_opencode_go_identity(
+            &mut stable,
+            "https://opencode.ai/zen/go/v1/chat/completions",
+            "stable-session",
+            true,
+        );
+        assert_eq!(
+            stable.get("x-opencode-session"),
+            Some(&HeaderValue::from_static("stable-session"))
+        );
+
+        let mut generated = HeaderMap::new();
+        apply_opencode_go_identity(
+            &mut generated,
+            "https://opencode.ai/zen/go/v1/messages",
+            "random-per-request-uuid",
+            false,
+        );
+        assert!(!generated.contains_key("x-opencode-session"));
+    }
+
+    #[test]
     /// 可信本地 Codex OAuth 请求应保留唯一的官方 first-party 来源。
     fn codex_oauth_originator_preserves_trusted_first_party_identity() {
         let mut headers = HeaderMap::new();
@@ -11889,6 +12049,36 @@ mod tests {
         let url = append_query_to_full_url("https://relay.example/api?foo=bar", Some("x-id=1"));
 
         assert_eq!(url, "https://relay.example/api?foo=bar&x-id=1");
+    }
+
+    #[test]
+    fn upstream_protocol_alpha_search_rewrites_only_known_full_responses_urls() {
+        assert_eq!(
+            rewrite_codex_alpha_search_full_url(
+                "https://relay.example/v1/responses?api-version=2026-07",
+                Some("client_version=0.144.6"),
+            )
+            .unwrap(),
+            "https://relay.example/v1/alpha/search?api-version=2026-07&client_version=0.144.6"
+        );
+        assert_eq!(
+            rewrite_codex_alpha_search_full_url(
+                "https://relay.example/backend-api/codex/responses/compact/",
+                None,
+            )
+            .unwrap(),
+            "https://relay.example/backend-api/codex/alpha/search"
+        );
+
+        let error = rewrite_codex_alpha_search_full_url(
+            "https://relay.example/custom/rpc-endpoint",
+            Some("client_version=0.144.6"),
+        )
+        .expect_err("an opaque full URL must not receive an Alpha Search payload");
+        assert!(matches!(
+            error,
+            ProxyError::ConfigError(message) if message.contains("cannot derive /alpha/search")
+        ));
     }
 
     #[test]

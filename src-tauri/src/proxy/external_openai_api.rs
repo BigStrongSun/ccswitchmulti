@@ -361,6 +361,9 @@ pub fn list_backend_options(
 ) -> Result<Vec<ExternalOpenAiApiBackendOptionView>, AppError> {
     let mut options = Vec::new();
     for app_type in AppType::all() {
+        if app_type == AppType::Pi {
+            continue;
+        }
         let providers = db.get_all_providers(app_type.as_str())?;
         for provider in providers.values() {
             options.push(provider_backend_option(
@@ -741,7 +744,7 @@ fn provider_can_be_openai_compatible(app_type: &AppType, provider: &Provider) ->
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes => true,
-        AppType::Claude | AppType::ClaudeDesktop | AppType::Gemini => false,
+        AppType::Claude | AppType::ClaudeDesktop | AppType::Gemini | AppType::Pi => false,
     }
 }
 
@@ -1349,6 +1352,27 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("native protocol")));
+    }
+
+    #[test]
+    fn upstream_pi_providers_are_absent_from_external_openai_api_backends() {
+        let db = Database::memory().expect("memory db");
+        let provider = Provider::with_id(
+            "pi-native".to_string(),
+            "Pi Native".to_string(),
+            json!({
+                "baseUrl": "https://api.example.com/v1",
+                "apiKey": "secret",
+                "api": "openai-completions",
+                "models": [{"id": "model-a"}]
+            }),
+            None,
+        );
+        db.save_provider("pi", &provider).expect("save Pi provider");
+
+        let options = list_backend_options(&db).expect("backend options");
+
+        assert!(options.iter().all(|option| option.app_type != "pi"));
     }
 
     #[test]

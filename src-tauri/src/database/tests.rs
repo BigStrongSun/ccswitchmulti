@@ -1640,11 +1640,7 @@ fn model_pricing_seed_repairs_known_outdated_builtin_prices() {
         .expect("query DeepSeek price");
     assert_eq!(
         deepseek,
-        (
-            "0.435".to_string(),
-            "0.87".to_string(),
-            "0.003625".to_string()
-        )
+        ("1.32".to_string(), "3.96".to_string(), "0.044".to_string())
     );
 
     let glm: (String, String, String) = conn
@@ -1691,6 +1687,236 @@ fn schema_model_pricing_includes_new_codex_and_qwen_models() {
                 cache_creation.to_string()
             ),
             "{model_id} pricing mismatch"
+        );
+    }
+}
+
+#[test]
+fn schema_model_pricing_seeds_glm_5_3_without_overwriting_user_prices() {
+    let db = Database::memory().expect("create memory db");
+
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        let actual: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = 'glm-5.3'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("GLM-5.3 pricing should be seeded");
+        assert_eq!(
+            actual,
+            (
+                "1.4".to_string(),
+                "4.4".to_string(),
+                "0.26".to_string(),
+                "0".to_string()
+            )
+        );
+
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '9', output_cost_per_million = '8'
+             WHERE model_id = 'glm-5.3'",
+            [],
+        )
+        .expect("set user GLM-5.3 price");
+    }
+
+    db.ensure_model_pricing_seeded()
+        .expect("ensure pricing seeded");
+
+    let conn = db.conn.lock().expect("lock conn");
+    let user_price: (String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million
+             FROM model_pricing WHERE model_id = 'glm-5.3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query user GLM-5.3 price");
+    assert_eq!(user_price, ("9".to_string(), "8".to_string()));
+}
+
+#[test]
+fn schema_model_pricing_seeds_current_upstream_price_rows() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let expected = [
+        ("grok-4.6", "2", "6", "0.50", "0"),
+        ("grok-4.5", "2", "6", "0.30", "0"),
+        ("deepseek-v4-flash-0731", "0.44", "1.32", "0.014", "0"),
+        ("deepseek-v4-flash", "0.44", "1.32", "0.014", "0"),
+        ("deepseek-v4-pro", "1.32", "3.96", "0.044", "0"),
+        ("gemini-3.7-flash", "0.75", "3.75", "0.075", "0"),
+        ("claude-fable-5-1", "10", "50", "0.25", "12.50"),
+        ("claude-mythos-5-1", "10", "50", "0.25", "12.50"),
+        ("claude-sonnet-5", "2", "10", "0.20", "2.50"),
+    ];
+
+    for (model_id, input, output, cache_read, cache_creation) in expected {
+        let actual: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("current upstream price should be seeded");
+        assert_eq!(
+            actual,
+            (
+                input.to_string(),
+                output.to_string(),
+                cache_read.to_string(),
+                cache_creation.to_string()
+            ),
+            "{model_id} pricing mismatch"
+        );
+    }
+}
+
+#[test]
+fn late_arrival_pricing_seeds_astra_and_gemini_3_8_flash() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let expected = [
+        ("gpt-6-astra", "10", "50", "1", "12.5"),
+        ("gemini-3.8-flash", "0.75", "3.75", "0.075", "0"),
+    ];
+    for (model_id, input, output, cache_read, cache_creation) in expected {
+        let actual: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("late-arrival model pricing should be seeded");
+        assert_eq!(
+            actual,
+            (
+                input.to_string(),
+                output.to_string(),
+                cache_read.to_string(),
+                cache_creation.to_string()
+            ),
+            "{model_id} pricing mismatch"
+        );
+    }
+}
+
+#[test]
+fn late_arrival_pricing_seed_does_not_overwrite_user_prices() {
+    let db = Database::memory().expect("create memory db");
+
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        for model_id in ["gpt-6-astra", "gemini-3.8-flash"] {
+            conn.execute(
+                "UPDATE model_pricing
+                 SET input_cost_per_million = '9', output_cost_per_million = '8',
+                     cache_read_cost_per_million = '7', cache_creation_cost_per_million = '6'
+                 WHERE model_id = ?1",
+                [model_id],
+            )
+            .expect("set custom late-arrival price");
+        }
+    }
+
+    db.ensure_model_pricing_seeded()
+        .expect("ensure pricing seeded");
+
+    let conn = db.conn.lock().expect("lock conn");
+    for model_id in ["gpt-6-astra", "gemini-3.8-flash"] {
+        let actual: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("query custom late-arrival price");
+        assert_eq!(
+            actual,
+            (
+                "9".to_string(),
+                "8".to_string(),
+                "7".to_string(),
+                "6".to_string()
+            ),
+            "{model_id} custom pricing was overwritten"
+        );
+    }
+}
+
+#[test]
+fn model_pricing_repairs_known_upstream_prices_without_overwriting_custom_rows() {
+    let db = Database::memory().expect("create memory db");
+
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '2', output_cost_per_million = '6',
+                 cache_read_cost_per_million = '0.50', cache_creation_cost_per_million = '0'
+             WHERE model_id = 'grok-4.5'",
+            [],
+        )
+        .expect("restore old Grok price");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '3', output_cost_per_million = '15',
+                 cache_read_cost_per_million = '0.30', cache_creation_cost_per_million = '3.75'
+             WHERE model_id = 'claude-sonnet-5'",
+            [],
+        )
+        .expect("restore old Sonnet price");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '9', output_cost_per_million = '8',
+                 cache_read_cost_per_million = '7', cache_creation_cost_per_million = '6'
+             WHERE model_id = 'grok-4.3'",
+            [],
+        )
+        .expect("set custom Grok price");
+    }
+
+    db.ensure_model_pricing_seeded()
+        .expect("ensure pricing seeded");
+
+    let conn = db.conn.lock().expect("lock conn");
+    let expected = [
+        ("grok-4.5", "2", "6", "0.30", "0"),
+        ("claude-sonnet-5", "2", "10", "0.20", "2.50"),
+        ("grok-4.3", "9", "8", "7", "6"),
+    ];
+    for (model_id, input, output, cache_read, cache_creation) in expected {
+        let actual: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("query repaired price");
+        assert_eq!(
+            actual,
+            (
+                input.to_string(),
+                output.to_string(),
+                cache_read.to_string(),
+                cache_creation.to_string()
+            ),
+            "{model_id} repaired price mismatch"
         );
     }
 }

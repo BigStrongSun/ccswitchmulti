@@ -611,6 +611,25 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
     text_only_override: Option<bool>,
     cache_config: Option<&CodexCacheConfig>,
 ) -> Result<Value, ProxyError> {
+    responses_to_chat_completions_with_reasoning_text_only_cache_and_history(
+        body,
+        reasoning_config,
+        text_only_override,
+        cache_config,
+        true,
+    )
+}
+
+/// Convert a Responses request while honoring the resolved history-replay
+/// contract. `replay_reasoning_content=false` removes both real replayed
+/// reasoning and synthetic tool-call placeholders from the Chat wire body.
+pub(crate) fn responses_to_chat_completions_with_reasoning_text_only_cache_and_history(
+    body: Value,
+    reasoning_config: Option<&CodexChatReasoningConfig>,
+    text_only_override: Option<bool>,
+    cache_config: Option<&CodexCacheConfig>,
+    replay_reasoning_content: bool,
+) -> Result<Value, ProxyError> {
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
     if !tool_context.unsupported_response_tools().is_empty() {
@@ -649,6 +668,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
             &mut messages,
             &tool_context,
             text_only_model,
+            replay_reasoning_content,
         )?;
     }
     let messages = collapse_system_messages_to_head(messages);
@@ -1170,6 +1190,7 @@ fn append_responses_input_as_chat_messages(
     messages: &mut Vec<Value>,
     tool_context: &CodexToolContext,
     text_only_model: bool,
+    replay_reasoning_content: bool,
 ) -> Result<(), ProxyError> {
     let mut pending = PendingChatItems {
         tool_calls: Vec::new(),
@@ -1223,12 +1244,21 @@ fn append_responses_input_as_chat_messages(
     // （其后已没有任何可前向附挂的 message / function_call），回溯附挂到最后一条
     // assistant；目标已有 reasoning_content 时追加，以保留同一 turn 的 embedded
     // reasoning 与 trailing reasoning。
-    attach_pending_reasoning_to_previous_assistant(
-        messages,
-        pending.last_assistant_index,
-        &mut pending.reasoning,
-    );
-    backfill_tool_call_reasoning_placeholders(messages);
+    if replay_reasoning_content {
+        attach_pending_reasoning_to_previous_assistant(
+            messages,
+            pending.last_assistant_index,
+            &mut pending.reasoning,
+        );
+        backfill_tool_call_reasoning_placeholders(messages);
+    } else {
+        pending.reasoning = None;
+        for message in messages.iter_mut() {
+            if let Some(object) = message.as_object_mut() {
+                object.remove("reasoning_content");
+            }
+        }
+    }
     validate_chat_tool_history(messages)?;
     Ok(())
 }
@@ -2760,6 +2790,7 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
     let Some(usage) = usage.filter(|value| value.is_object() && !value.is_null()) else {
         return json!({
             "input_tokens": 0,
+            "input_tokens_details": { "cached_tokens": 0 },
             "output_tokens": 0,
             "total_tokens": 0,
             "output_tokens_details": { "reasoning_tokens": 0 }
@@ -2787,10 +2818,19 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
         "total_tokens": total_tokens
     });
 
-    let cached = usage
-        .pointer("/prompt_tokens_details/cached_tokens")
-        .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
-        .and_then(|v| v.as_u64())
+    let direct_cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
+    let cached = direct_cache_read
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| {
+            usage
+                .pointer("/input_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
         .unwrap_or(0);
     let cache_write = usage
         .pointer("/prompt_tokens_details/cache_write_tokens")
@@ -2807,6 +2847,8 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
             "cached_tokens": cached,
             "cache_write_tokens": cache_write
         });
+    } else {
+        result["input_tokens_details"] = json!({ "cached_tokens": 0 });
     }
 
     if let Some(details) = usage
@@ -2822,8 +2864,8 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
         result["output_tokens_details"] = json!({ "reasoning_tokens": 0 });
     }
 
-    if let Some(cache_read) = usage.get("cache_read_input_tokens") {
-        result["cache_read_input_tokens"] = cache_read.clone();
+    if let Some(cache_read) = direct_cache_read {
+        result["cache_read_input_tokens"] = json!(cache_read);
     }
     if cache_write > 0 {
         result["cache_creation_input_tokens"] = json!(cache_write);
@@ -7715,5 +7757,38 @@ mod tests {
             "tools should be present from tool_search_output"
         );
         assert_eq!(result["tools"][0]["function"]["name"], "search_docs");
+    }
+
+    #[test]
+    fn upstream_usage_contract_projects_required_cache_details_and_deepseek_hits() {
+        let missing = chat_usage_to_responses_usage(None);
+        assert_eq!(missing["input_tokens_details"], json!({"cached_tokens": 0}));
+
+        let direct = chat_usage_to_responses_usage(Some(&json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "cache_read_input_tokens": 4,
+            "prompt_tokens_details": {"cached_tokens": 0}
+        })));
+        assert_eq!(direct["input_tokens_details"]["cached_tokens"], 4);
+        assert_eq!(direct["cache_read_input_tokens"], 4);
+
+        let deepseek = chat_usage_to_responses_usage(Some(&json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+            "prompt_cache_hit_tokens": 600,
+            "prompt_cache_miss_tokens": 400
+        })));
+        assert_eq!(deepseek["input_tokens_details"]["cached_tokens"], 600);
+
+        let standard_precedence = chat_usage_to_responses_usage(Some(&json!({
+            "prompt_tokens_details": {"cached_tokens": 7},
+            "prompt_cache_hit_tokens": 9
+        })));
+        assert_eq!(
+            standard_precedence["input_tokens_details"]["cached_tokens"],
+            7
+        );
     }
 }

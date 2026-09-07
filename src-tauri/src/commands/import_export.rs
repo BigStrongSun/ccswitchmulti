@@ -13,7 +13,17 @@ use crate::database::backup::BackupEntry;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::services::provider::ProviderService;
+use crate::services::sync_protocol::sync_mutex;
 use crate::store::AppState;
+
+async fn run_with_database_restore_lock<T, Start, Fut>(start_operation: Start) -> T
+where
+    Start: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let _sync_guard = sync_mutex().lock().await;
+    start_operation().await
+}
 
 // ─── File import/export ──────────────────────────────────────
 
@@ -45,15 +55,18 @@ pub async fn import_config_from_file(
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
     let db = state.db.clone();
-    let db_for_sync = db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let path_buf = PathBuf::from(&filePath);
-        let backup_id = db.import_sql(&path_buf)?;
-        let warning = post_sync_warning_from_result(Ok(run_post_import_sync(db_for_sync)));
-        if let Some(msg) = warning.as_ref() {
-            log::warn!("[Import] post-import sync warning: {msg}");
-        }
-        Ok::<_, AppError>(success_payload_with_warning(backup_id, warning))
+    let live_usage_cache = state.usage_cache.clone();
+    run_with_database_restore_lock(move || {
+        tauri::async_runtime::spawn_blocking(move || {
+            let path_buf = PathBuf::from(&filePath);
+            let backup_id = db.import_sql(&path_buf)?;
+            let warning =
+                post_sync_warning_from_result(Ok(run_post_import_sync(db, live_usage_cache)));
+            if let Some(msg) = warning.as_ref() {
+                log::warn!("[Import] post-import sync warning: {msg}");
+            }
+            Ok::<_, AppError>(success_payload_with_warning(backup_id, warning))
+        })
     })
     .await
     .map_err(|e| format!("导入配置失败: {e}"))?
@@ -174,12 +187,15 @@ pub async fn restore_db_backup(
     filename: String,
 ) -> Result<Value, String> {
     let db = state.db.clone();
-    let db_for_sync = db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        restore_db_backup_with_sync(
-            || db.restore_from_backup(&filename),
-            || run_post_import_sync(db_for_sync),
-        )
+    let live_usage_cache = state.usage_cache.clone();
+    run_with_database_restore_lock(move || {
+        tauri::async_runtime::spawn_blocking(move || {
+            let db_for_restore = db.clone();
+            restore_db_backup_with_sync(
+                || db_for_restore.restore_from_backup(&filename),
+                || run_post_import_sync(db, live_usage_cache),
+            )
+        })
     })
     .await
     .map_err(|e| format!("Restore failed: {e}"))?
@@ -203,9 +219,40 @@ pub fn delete_db_backup(filename: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::restore_db_backup_with_sync;
+    use super::{restore_db_backup_with_sync, run_with_database_restore_lock};
     use crate::error::AppError;
+    use crate::services::sync_protocol::sync_mutex;
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn upstream_sync_reliability_manual_restore_waits_for_global_lock() {
+        let guard = sync_mutex().lock().await;
+        let entered = Arc::new(AtomicBool::new(false));
+        let entered_in_task = Arc::clone(&entered);
+        let restore = run_with_database_restore_lock(move || {
+            tokio::task::spawn_blocking(move || {
+                entered_in_task.store(true, Ordering::SeqCst);
+            })
+        });
+        tokio::pin!(restore);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), restore.as_mut())
+                .await
+                .is_err()
+        );
+        assert!(!entered.load(Ordering::SeqCst));
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), restore.as_mut())
+            .await
+            .expect("restore starts after lock release")
+            .expect("blocking task completes");
+        assert!(entered.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn database_restore_runs_derived_state_sync_after_replacement() {

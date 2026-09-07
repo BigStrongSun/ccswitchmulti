@@ -105,4 +105,20 @@ describe("PromptFormPanel", () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByLabelText("prompts.name")).toBeEnabled();
   });
+
+  it("preserves Pi instruction bytes instead of trimming the content", async () => {
+    const onSave = vi.fn().mockResolvedValue(true);
+    render(<PromptFormPanel appId="pi" onSave={onSave} onClose={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText("prompts.name"), {
+      target: { value: "Pi Prompt" },
+    });
+    fireEvent.change(screen.getByLabelText("markdown-editor"), {
+      target: { value: "\n  exact Pi content  \n" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[1].content).toBe("\n  exact Pi content  \n");
+  });
 });

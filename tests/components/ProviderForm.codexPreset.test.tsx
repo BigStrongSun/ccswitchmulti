@@ -446,10 +446,12 @@ describe("ProviderForm Codex preset selection", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("codex-base-url")).toHaveTextContent(
-        "https://open.bigmodel.cn/api/coding/paas/v4",
+        "https://open.bigmodel.cn/api/v1",
       );
     });
-    expect(screen.getByTestId("codex-catalog")).toHaveTextContent("glm-5.2");
+    expect(screen.getByTestId("codex-catalog")).toHaveTextContent(
+      "glm-5.3,glm-5-turbo",
+    );
     expect(screen.getByTestId("codex-takeover")).toHaveTextContent("enabled");
     await waitFor(() => {
       expect(scrollIntoView).toHaveBeenCalledWith({
@@ -616,7 +618,9 @@ describe("ProviderForm Codex preset selection", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Zhipu GLM$/ }));
     await waitFor(() => {
-      expect(screen.getByTestId("codex-catalog")).toHaveTextContent("glm-5.2");
+      expect(screen.getByTestId("codex-catalog")).toHaveTextContent(
+        "glm-5.3,glm-5-turbo",
+      );
     });
     fireEvent.click(screen.getByRole("button", { name: "mock-set-api-key" }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -625,23 +629,26 @@ describe("ProviderForm Codex preset selection", () => {
     expect(onSubmit.mock.calls[0][0].meta.codexPresetId).toBe("zhipu-glm-cn");
     expect(
       screen.getByTestId("codex-preset-reasoning-models"),
-    ).toHaveTextContent("glm-5.2");
-    expect(savedSettings.modelCatalog.models).toHaveLength(1);
-    for (const model of savedSettings.modelCatalog.models) {
-      expect(model.reasoning).toMatchObject({
-        supportedEfforts: [
-          "none",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max",
-        ],
-        defaultEffort: "max",
-        source: "builtin",
-      });
-    }
+    ).toHaveTextContent("glm-5.3,glm-5-turbo");
+    expect(savedSettings.modelCatalog.models).toHaveLength(2);
+    expect(savedSettings.modelCatalog.models[0].reasoning).toMatchObject({
+      supportedEfforts: ["low", "high", "max"],
+      defaultEffort: "max",
+      disableAllowed: false,
+      upstream: {
+        format: "reasoning_object",
+        parameter: "reasoning.effort",
+      },
+      outputFormat: "reasoning",
+      source: "builtin",
+    });
+    expect(savedSettings.modelCatalog.models[1].reasoning).toMatchObject({
+      supportedEfforts: ["max"],
+      defaultEffort: "max",
+      disableAllowed: false,
+      outputFormat: "reasoning",
+      source: "builtin",
+    });
   });
 
   it("restores the maintained preset baseline when reopening a saved override", async () => {
@@ -683,7 +690,58 @@ describe("ProviderForm Codex preset selection", () => {
     await waitFor(() => {
       expect(
         screen.getByTestId("codex-preset-reasoning-models"),
-      ).toHaveTextContent("glm-5.2");
+      ).toHaveTextContent("glm-5.3,glm-5-turbo");
+    });
+    expect(screen.getByTestId("codex-catalog")).toHaveTextContent("glm-5.2");
+  });
+
+  it("persists and restores the Tencent maintained preset identity", async () => {
+    const onSubmit = vi.fn();
+    const first = renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /Tencent Token Plan Enterprise Pro$/,
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-catalog")).toHaveTextContent(
+        "deepseek-v4-pro-202606",
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "mock-set-api-key" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    const saved = onSubmit.mock.calls[0][0];
+    expect(saved.meta.codexPresetId).toBe("tencent-token-plan-enterprise-pro");
+    expect(JSON.parse(saved.settingsConfig).modelCatalog.models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          model: "deepseek-v4-pro-202606",
+          reasoning: expect.objectContaining({ source: "builtin" }),
+        }),
+      ]),
+    );
+
+    first.unmount();
+    renderProviderForm({
+      initialData: {
+        ...saved,
+        settingsConfig: JSON.parse(saved.settingsConfig),
+      },
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("codex-preset-reasoning-models"),
+      ).toHaveTextContent("deepseek-v4-pro-202606");
+      expect(
+        screen.getByTestId("codex-menu-projection-editability"),
+      ).toHaveTextContent("managed");
     });
   });
 
@@ -693,7 +751,9 @@ describe("ProviderForm Codex preset selection", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Zhipu GLM$/ }));
     await waitFor(() => {
-      expect(screen.getByTestId("codex-catalog")).toHaveTextContent("glm-5.2");
+      expect(screen.getByTestId("codex-catalog")).toHaveTextContent(
+        "glm-5.3,glm-5-turbo",
+      );
     });
     fireEvent.click(screen.getByRole("button", { name: "自定义模型源" }));
     expect(screen.getByTestId("codex-takeover")).toHaveTextContent("enabled");

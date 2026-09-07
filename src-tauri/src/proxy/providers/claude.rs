@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 const ANTHROPIC_THINKING_PLACEHOLDER: &str = "tool call";
 const ANTHROPIC_REDACTED_THINKING_PLACEHOLDER: &str = "[redacted thinking]";
 // Keep hints lowercase; matching lowercases only the input value.
-const REASONING_VENDOR_HINTS: &[&str] = &["moonshot", "kimi", "deepseek", "mimo", "xiaomimimo"];
+const REASONING_VENDOR_HINTS: &[&str] = &["deepseek", "mimo", "xiaomimimo"];
 
 /// 获取 Claude 供应商的 API 格式
 ///
@@ -2117,7 +2117,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_openai_chat_preserves_reasoning_content_for_kimi_provider() {
+    fn upstream_protocol_kimi_chat_does_not_inject_reasoning_content() {
         let provider = create_provider_with_meta(
             json!({
                 "env": {
@@ -2147,7 +2147,10 @@ mod tests {
                 .unwrap();
 
         let msg = &transformed["messages"][0];
-        assert_eq!(msg["reasoning_content"], "I should call the tool.");
+        assert!(
+            msg.get("reasoning_content").is_none(),
+            "Kimi asked to exit the reasoning-vendor replay workaround"
+        );
         assert!(msg.get("tool_calls").is_some());
     }
 
@@ -2314,7 +2317,7 @@ mod tests {
     }
 
     #[test]
-    fn test_kimi_anthropic_tool_history_injects_missing_thinking() {
+    fn upstream_protocol_kimi_anthropic_history_stays_unmodified() {
         let provider = create_provider(json!({
             "env": {
                 "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding",
@@ -2337,11 +2340,10 @@ mod tests {
             "anthropic",
         );
 
-        assert!(changed);
+        assert!(!changed);
         let content = body["messages"][0]["content"].as_array().unwrap();
-        assert_eq!(content[0]["type"], "thinking");
-        assert_eq!(content[0]["thinking"], ANTHROPIC_THINKING_PLACEHOLDER);
-        assert_eq!(content[1]["type"], "tool_use");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "tool_use");
     }
 
     #[test]

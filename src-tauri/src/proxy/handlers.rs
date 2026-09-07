@@ -39,6 +39,7 @@ use super::{
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_retry::{
             create_resilient_anthropic_sse_stream_from_responses,
+            create_resilient_anthropic_sse_stream_from_responses_with_web_search_options,
             create_resilient_responses_sse_stream_with_context, StreamLogContext,
             StreamReconnector,
         },
@@ -957,6 +958,10 @@ async fn handle_claude_transform(
     };
     let tool_schema_hints = transform_gemini::extract_anthropic_tool_schema_hints(original_body);
     let tool_schema_hints = (!tool_schema_hints.is_empty()).then_some(tool_schema_hints);
+    let hosted_web_search_name =
+        transform_responses::anthropic_web_search_tool_name(original_body).map(str::to_string);
+    let hosted_web_search_max_uses =
+        transform_responses::anthropic_web_search_max_uses(original_body);
 
     if use_streaming {
         // 根据 api_format 选择流式转换器
@@ -966,12 +971,23 @@ async fn handle_claude_transform(
         > = if api_format == "openai_responses" {
             // Responses 上游会在提交后中途掐断 SSE；带重连工厂的包装器在下游
             // 尚未收到实质内容时自动重试（上限 5 次），其余场景行为不变。
-            Box::new(Box::pin(
-                create_resilient_anthropic_sse_stream_from_responses(
-                    Box::pin(stream),
-                    stream_reconnect,
-                ),
-            ))
+            if hosted_web_search_name.is_none() && hosted_web_search_max_uses.is_none() {
+                Box::new(Box::pin(
+                    create_resilient_anthropic_sse_stream_from_responses(
+                        Box::pin(stream),
+                        stream_reconnect,
+                    ),
+                ))
+            } else {
+                Box::new(Box::pin(
+                    create_resilient_anthropic_sse_stream_from_responses_with_web_search_options(
+                        Box::pin(stream),
+                        stream_reconnect,
+                        hosted_web_search_name.clone(),
+                        hosted_web_search_max_uses,
+                    ),
+                ))
+            }
         } else if api_format == "gemini_native" {
             Box::new(Box::pin(create_anthropic_sse_stream_from_gemini(
                 stream,
@@ -1077,80 +1093,110 @@ async fn handle_claude_transform(
         } else {
             std::time::Duration::ZERO
         };
-    let (mut response_headers, _status, body_bytes) =
-        read_decoded_body(response, ctx.tag, body_timeout).await?;
-
-    let body_str = String::from_utf8_lossy(&body_bytes);
-
-    let upstream_response: Value = if aggregate_codex_oauth_responses_sse {
-        responses_sse_to_response_value(&body_str)?
-    } else {
-        match serde_json::from_slice(&body_bytes) {
-            Ok(value) => value,
-            // 兜底嗅探（#2234）：部分网关对 stream:false 强制返回 SSE 体，却把
-            // Content-Type 标成 application/json 等，is_sse() 的 header 检查失效。
-            // 此时按 SSE 聚合成单个 JSON 再走既有非流转换器，客户端仍收到
-            // Anthropic JSON，非流语义不变。gemini_native 暂无聚合器，落诊断错误。
-            Err(_) if body_looks_like_sse(&body_str) && api_format != "gemini_native" => {
-                log::warn!(
+    let enforce_web_search_limit_while_aggregating =
+        aggregate_codex_oauth_responses_sse && hosted_web_search_max_uses.is_some();
+    let (mut response_headers, direct_anthropic_response, upstream_response) =
+        if enforce_web_search_limit_while_aggregating {
+            if let Some(encoding) = get_content_encoding(response.headers()) {
+                return Err(ProxyError::TransformError(format!(
+                    "Cannot enforce Anthropic WebSearch max_uses on a compressed Codex SSE response ({encoding})"
+                )));
+            }
+            let headers = response.headers().clone();
+            let message = responses_sse_stream_to_anthropic_message(
+                response.bytes_stream(),
+                hosted_web_search_name.clone(),
+                hosted_web_search_max_uses,
+                body_timeout,
+            )
+            .await?;
+            (headers, Some(message), None)
+        } else {
+            let (headers, _status, body_bytes) =
+                read_decoded_body(response, ctx.tag, body_timeout).await?;
+            let body_str = String::from_utf8_lossy(&body_bytes);
+            let value = if aggregate_codex_oauth_responses_sse {
+                responses_sse_to_response_value(&body_str)?
+            } else {
+                match serde_json::from_slice(&body_bytes) {
+                    Ok(value) => value,
+                    // 兜底嗅探（#2234）：部分网关对 stream:false 强制返回 SSE 体，却把
+                    // Content-Type 标成 application/json 等，is_sse() 的 header 检查失效。
+                    // 此时按 SSE 聚合成单个 JSON 再走既有非流转换器，客户端仍收到
+                    // Anthropic JSON，非流语义不变。gemini_native 暂无聚合器，落诊断错误。
+                    Err(_) if body_looks_like_sse(&body_str) && api_format != "gemini_native" => {
+                        log::warn!(
                     "[Claude] 上游对非流请求返回未标记的 SSE 体（api_format={api_format}），按 SSE 聚合兜底"
                 );
-                let aggregated = if api_format == "openai_responses" {
-                    responses_sse_to_response_value(&body_str)
-                } else {
-                    chat_sse_to_response_value(&body_str)
-                };
-                // 聚合也失败时：服务端日志只记录长度，并给客户端错误附带同款
-                // 现场诊断（content-type/body 分类），否则命中嗅探臂的用户只拿到
-                // 裸聚合错误、丢失非嗅探臂已有的诊断增强（C7）
-                aggregated.map_err(|e| {
-                    log::error!(
-                        "[Claude] SSE 聚合兜底失败: {e}, body_bytes={}",
-                        body_bytes.len()
-                    );
-                    aggregate_fallback_error(e, &response_headers, &body_str)
-                })?
-            }
-            Err(e) => {
-                log::error!(
-                    "[Claude] 解析上游响应失败: {e}, body_bytes={}",
-                    body_bytes.len()
-                );
-                return Err(upstream_body_parse_error(
-                    "Failed to parse upstream response",
-                    &e,
-                    &response_headers,
-                    &body_str,
-                ));
-            }
-        }
-    };
+                        let aggregated = if api_format == "openai_responses" {
+                            responses_sse_to_response_value(&body_str)
+                        } else {
+                            chat_sse_to_response_value(&body_str)
+                        };
+                        // 聚合也失败时：服务端日志只记录长度，并给客户端错误附带同款
+                        // 现场诊断（content-type/body 分类），否则命中嗅探臂的用户只拿到
+                        // 裸聚合错误、丢失非嗅探臂已有的诊断增强（C7）
+                        aggregated.map_err(|e| {
+                            log::error!(
+                                "[Claude] SSE 聚合兜底失败: {e}, body_bytes={}",
+                                body_bytes.len()
+                            );
+                            aggregate_fallback_error(e, &headers, &body_str)
+                        })?
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "[Claude] 解析上游响应失败: {e}, body_bytes={}",
+                            body_bytes.len()
+                        );
+                        return Err(upstream_body_parse_error(
+                            "Failed to parse upstream response",
+                            &e,
+                            &headers,
+                            &body_str,
+                        ));
+                    }
+                }
+            };
+            (headers, None, Some(value))
+        };
 
     // Preserve raw Responses usage so a post-upstream conversion failure still
     // records the tokens already consumed by the successful upstream request.
-    let raw_usage_response = (api_format == "openai_responses").then(|| {
-        json!({
-            "id": upstream_response.get("id").cloned().unwrap_or(Value::Null),
-            "model": upstream_response.get("model").cloned().unwrap_or(Value::Null),
-            "usage": transform_responses::build_anthropic_usage_from_responses(
-                upstream_response.get("usage")
-            )
-        })
-    });
+    let raw_usage_response = (api_format == "openai_responses")
+        .then_some(upstream_response.as_ref())
+        .flatten()
+        .map(|upstream_response| {
+            json!({
+                "id": upstream_response.get("id").cloned().unwrap_or(Value::Null),
+                "model": upstream_response.get("model").cloned().unwrap_or(Value::Null),
+                "usage": transform_responses::build_anthropic_usage_from_responses(
+                    upstream_response.get("usage")
+                )
+            })
+        });
 
     // 根据 api_format 选择非流式转换器
-    let transform_result = if api_format == "openai_responses" {
-        transform_responses::responses_to_anthropic(upstream_response)
+    let transform_result = if let Some(response) = direct_anthropic_response {
+        Ok(response)
+    } else if api_format == "openai_responses" {
+        transform_responses::responses_to_anthropic_with_web_search_options(
+            upstream_response.expect("upstream response is present without direct transform"),
+            hosted_web_search_name.as_deref(),
+            hosted_web_search_max_uses,
+        )
     } else if api_format == "gemini_native" {
         transform_gemini::gemini_to_anthropic_with_shadow_and_hints(
-            upstream_response,
+            upstream_response.expect("upstream response is present without direct transform"),
             Some(state.gemini_shadow.as_ref()),
             Some(&ctx.provider.id),
             Some(&ctx.session_id),
             tool_schema_hints.as_ref(),
         )
     } else {
-        transform::openai_to_anthropic(upstream_response)
+        transform::openai_to_anthropic(
+            upstream_response.expect("upstream response is present without direct transform"),
+        )
     };
     let anthropic_response = match transform_result {
         Ok(response) => response,
@@ -3110,6 +3156,63 @@ pub async fn handle_responses_compact(
     handle_responses_compact_for_app(state, request, AppType::Codex, "Codex", "codex").await
 }
 
+/// Pass Codex's standalone Alpha Search protocol through without converting it
+/// into Chat or Anthropic request shapes.
+pub async fn handle_alpha_search(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    let (parts, req_body) = request.into_parts();
+    let method = parts.method.clone();
+    let uri = parts.uri;
+    let mut headers = parts.headers;
+    let extensions = parts.extensions;
+    let body_bytes = req_body
+        .collect()
+        .await
+        .map_err(|e| ProxyError::Internal(format!("Failed to read request body: {e}")))?
+        .to_bytes();
+    let body_bytes = decode_codex_request_body(&mut headers, body_bytes)?;
+    let body: Value = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ProxyError::InvalidRequest(format!("Failed to parse request body: {e}")))?;
+
+    let mut ctx =
+        RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
+    let endpoint = endpoint_with_query(&uri, "/alpha/search");
+    let forwarder = ctx.create_forwarder(&state);
+    let mut result = match forwarder
+        .forward_with_retry(
+            &AppType::Codex,
+            method,
+            &endpoint,
+            body,
+            headers,
+            extensions,
+            ctx.get_providers(),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(mut err) => {
+            update_context_provider_for_forward_error(&state, &mut ctx, err.provider.take());
+            log_forward_error(&state, &ctx, false, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+        }
+    };
+
+    let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
+    ctx.provider = result.provider;
+    process_response(
+        result.response,
+        &ctx,
+        &state,
+        &CODEX_PARSER_CONFIG,
+        connection_guard,
+    )
+    .await
+}
+
 pub async fn handle_grokbuild_responses_compact(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
@@ -4968,6 +5071,48 @@ fn should_use_claude_transform_streaming(
     is_codex_oauth: bool,
 ) -> bool {
     requested_streaming || upstream_is_sse || (is_codex_oauth && api_format == "openai_responses")
+}
+
+async fn responses_sse_stream_to_anthropic_message(
+    stream: impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+    hosted_web_search_name: Option<String>,
+    max_web_search_uses: Option<u64>,
+    body_timeout: std::time::Duration,
+) -> Result<Value, ProxyError> {
+    let collect = async move {
+        let converted = super::providers::streaming_responses::create_anthropic_sse_stream_from_responses_with_web_search_options(
+            stream,
+            hosted_web_search_name,
+            max_web_search_uses,
+        );
+        tokio::pin!(converted);
+        let mut body = Vec::new();
+        while let Some(chunk) = converted.next().await {
+            body.extend_from_slice(&chunk.map_err(|error| {
+                ProxyError::ForwardFailed(format!(
+                    "Failed to transform upstream Responses SSE: {error}"
+                ))
+            })?);
+        }
+        String::from_utf8(body).map_err(|error| {
+            ProxyError::TransformError(format!(
+                "Transformed Anthropic SSE was not valid UTF-8: {error}"
+            ))
+        })
+    };
+    let body = if body_timeout.is_zero() {
+        collect.await?
+    } else {
+        tokio::time::timeout(body_timeout, collect)
+            .await
+            .map_err(|_| {
+                ProxyError::Timeout(format!(
+                    "响应体读取超时: {}s（上游发完响应头后 body 未到达）",
+                    body_timeout.as_secs()
+                ))
+            })??
+    };
+    transform_codex_anthropic::anthropic_sse_to_message_value(&body)
 }
 
 /// 把 OpenAI Responses SSE 流聚合成一个完整的 Responses JSON 对象，供下游转成 Anthropic

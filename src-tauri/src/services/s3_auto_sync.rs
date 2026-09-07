@@ -10,6 +10,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::error::AppError;
 use crate::services::s3_sync;
+use crate::services::sync_protocol::should_trigger_auto_sync_for_table;
 use crate::settings::{self, S3SyncSettings};
 
 const AUTO_SYNC_DEBOUNCE_MS: u64 = 1000;
@@ -41,18 +42,7 @@ pub(crate) fn is_auto_sync_suppressed() -> bool {
 }
 
 pub fn should_trigger_for_table(table: &str) -> bool {
-    let normalized = table.trim().to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "providers"
-            | "provider_endpoints"
-            | "mcp_servers"
-            | "prompts"
-            | "skills"
-            | "skill_repos"
-            | "settings"
-            | "proxy_config"
-    )
+    should_trigger_auto_sync_for_table(table)
 }
 
 pub(crate) fn enqueue_change_signal(tx: &Sender<String>, table: &str) -> bool {

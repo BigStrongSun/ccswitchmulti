@@ -11,7 +11,14 @@ import { TEMPLATE_TYPES } from "@/config/constants";
 
 export interface CodingPlanProviderEntry {
   /** 与后端 QuotaTier 的 `codingPlanProvider` 取值对齐 */
-  id: "kimi" | "zhipu" | "zhipu_team" | "minimax" | "zenmux" | "volcengine";
+  id:
+    | "kimi"
+    | "zhipu"
+    | "zhipu_team"
+    | "minimax"
+    | "zenmux"
+    | "volcengine"
+    | "opencode_go";
   /** UsageScriptModal 下拉显示用 */
   label: string;
   /** base_url 匹配规则 */
@@ -19,6 +26,11 @@ export interface CodingPlanProviderEntry {
 }
 
 export const CODING_PLAN_PROVIDERS: readonly CodingPlanProviderEntry[] = [
+  {
+    id: "opencode_go",
+    label: "OpenCode Go",
+    pattern: /opencode\.ai\/zen\/go(?:\/v1)?(?:\/|$)/i,
+  },
   { id: "kimi", label: "Kimi For Coding", pattern: /api\.kimi\.com\/coding/i },
   {
     id: "zhipu",
@@ -67,12 +79,11 @@ export function detectCodingPlanProvider(
 }
 
 /**
- * 新建 Claude 供应商时，若 `ANTHROPIC_BASE_URL` 命中 Coding Plan 路由表，
- * 自动把 `meta.usage_script` 标记为 token_plan 并启用。
+ * 新建供应商时解析各 App 的真实持久化配置；Claude 延续全部 Coding Plan 的
+ * 自动识别，其他 App 只为经过验证的 OpenCode Go 自动启用 token_plan。
  *
  * - 仅在 `meta.usage_script` 完全缺失时注入，不覆盖用户/UsageScriptModal 已有配置
- * - 仅对 Claude app 生效：后端 `commands/provider.rs` 的 token_plan 分支只处理 Claude
- *   supplier 的 `settings_config.env.ANTHROPIC_BASE_URL`
+ * - Claude Desktop/Codex/OpenCode/Pi 不因本功能扩大到其他套餐
  * - code 置空：Rust 端走专用 `coding_plan::get_coding_plan_quota`，不执行 JS 脚本
  */
 export function injectCodingPlanUsageScript<
@@ -81,14 +92,34 @@ export function injectCodingPlanUsageScript<
     meta?: Record<string, any>;
   },
 >(appId: string, provider: T): T {
-  if (appId !== "claude") return provider;
   if (provider.meta?.usage_script) return provider;
 
-  const baseUrl = provider.settingsConfig?.env?.ANTHROPIC_BASE_URL;
+  const settingsConfig = provider.settingsConfig;
+  const baseUrl = (() => {
+    switch (appId) {
+      case "claude":
+      case "claude-desktop":
+        return settingsConfig?.env?.ANTHROPIC_BASE_URL;
+      case "pi":
+        return settingsConfig?.baseUrl;
+      case "opencode":
+        return settingsConfig?.options?.baseURL;
+      case "codex": {
+        const config = settingsConfig?.config;
+        if (typeof config !== "string") return undefined;
+        return config.match(/^\s*base_url\s*=\s*["']([^"']+)["']/im)?.[1];
+      }
+      default:
+        return undefined;
+    }
+  })();
   const codingPlanProvider = detectCodingPlanProvider(
     typeof baseUrl === "string" ? baseUrl : null,
   );
   if (!codingPlanProvider) return provider;
+  if (appId !== "claude" && codingPlanProvider !== "opencode_go") {
+    return provider;
+  }
 
   return {
     ...provider,

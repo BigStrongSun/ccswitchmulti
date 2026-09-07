@@ -80,6 +80,7 @@ pub(crate) fn uses_adaptive_thinking(model: &str) -> bool {
         "mythos-5",
         "mythos-preview",
         "sonnet-5",
+        "opus-5",
         "opus-4-8",
         "opus-4-7",
         "opus-4-6",
@@ -92,9 +93,15 @@ pub(crate) fn uses_adaptive_thinking(model: &str) -> bool {
 /// Models where omitting `thinking` still leaves adaptive thinking enabled.
 pub(crate) fn adaptive_thinking_is_default(model: &str) -> bool {
     let normalized = normalize_model_name(model);
-    ["fable-5", "mythos-5", "mythos-preview", "sonnet-5"]
-        .iter()
-        .any(|needle| normalized.contains(needle))
+    [
+        "fable-5",
+        "mythos-5",
+        "mythos-preview",
+        "sonnet-5",
+        "opus-5",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
 }
 
 /// Models that reject `thinking: {"type":"disabled"}`.
@@ -167,9 +174,10 @@ mod tests {
     }
 
     #[test]
-    fn current_generation_models_use_adaptive_thinking() {
+    fn claude_5_current_generation_models_use_adaptive_thinking() {
         for model in [
             "claude-sonnet-5",
+            "claude-opus-5",
             "anthropic/claude-fable-5",
             "claude-mythos-5",
             "claude-opus-4.8",
@@ -177,6 +185,7 @@ mod tests {
             assert!(uses_adaptive_thinking(model), "model={model}");
         }
         assert!(adaptive_thinking_is_default("claude-sonnet-5"));
+        assert!(adaptive_thinking_is_default("claude-opus-5"));
         assert!(thinking_cannot_be_disabled("claude-fable-5"));
         assert!(!thinking_cannot_be_disabled("claude-sonnet-5"));
     }

@@ -63,8 +63,8 @@ pub async fn get_codex_oauth_quota(
     };
 
     // 获取（必要时自动刷新）access_token
-    let token = match manager.get_valid_token_for_account(&id).await {
-        Ok(t) => t,
+    let (token, workspace_id) = match manager.get_valid_token_and_workspace_for_account(&id).await {
+        Ok(credentials) => credentials,
         Err(e) => {
             return Ok(SubscriptionQuota::error(
                 "codex_oauth",
@@ -77,7 +77,7 @@ pub async fn get_codex_oauth_quota(
     // 瞬时传输失败以 Err 传播（前端 reject → retry + 保留上次成功值）。
     query_codex_quota(
         &token,
-        Some(&id),
+        Some(&workspace_id),
         "codex_oauth",
         "Codex OAuth access token expired or rejected. Please re-login via cc-switch.",
     )
@@ -124,11 +124,14 @@ pub async fn refresh_codex_account_pool_quota(
         let quota = if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
             crate::services::subscription::get_subscription_quota("codex").await
         } else {
-            match manager.get_valid_token_for_account(&entry.account_id).await {
-                Ok(token) => {
+            match manager
+                .get_valid_token_and_workspace_for_account(&entry.account_id)
+                .await
+            {
+                Ok((token, workspace_id)) => {
                     query_codex_quota(
                         &token,
-                        Some(&entry.account_id),
+                        Some(&workspace_id),
                         "codex_oauth",
                         "Codex OAuth access token expired or rejected.",
                     )
@@ -194,12 +197,12 @@ pub async fn get_codex_oauth_models(
         return Err("No ChatGPT account available".to_string());
     };
 
-    let token = manager
-        .get_valid_token_for_account(&id)
+    let (token, workspace_id) = manager
+        .get_valid_token_and_workspace_for_account(&id)
         .await
         .map_err(|e| format!("Codex OAuth token unavailable: {e}"))?;
 
-    crate::services::codex_oauth_models::fetch_models_with_token(&token, &id).await
+    crate::services::codex_oauth_models::fetch_models_with_token(&token, &workspace_id).await
 }
 
 /// 读取本地 Codex 官方模型缓存。

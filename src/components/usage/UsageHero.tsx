@@ -69,6 +69,10 @@ const TITLE_THEMES: Record<AppType | "all", TitleTheme> = {
     accent: "text-purple-600 dark:text-purple-400",
     iconBg: "bg-purple-500/10",
   },
+  pi: {
+    accent: "text-fuchsia-600 dark:text-fuchsia-400",
+    iconBg: "bg-fuchsia-500/10",
+  },
 };
 
 /**
@@ -125,6 +129,8 @@ function pickSummary(
 
 type CacheWriteState = "ok" | "partial" | "na";
 
+const PARTIAL_CACHE_WRITE_APP_TYPES: ReadonlySet<string> = new Set(["pi"]);
+
 /**
  * Anthropic-style protocols report cache creation; OpenAI-style protocols
  * (Codex/Gemini) do not — so a mix shows the number with a caveat, all-OpenAI
@@ -137,8 +143,10 @@ function deriveCacheWriteState(appTypes: string[]): CacheWriteState {
     CACHE_INCLUSIVE_APP_TYPES.has(t),
   ).length;
   if (inclusive === appTypes.length) return "na";
-  if (inclusive === 0) return "ok";
-  return "partial";
+  const partial = appTypes.some((appType) =>
+    PARTIAL_CACHE_WRITE_APP_TYPES.has(appType),
+  );
+  return inclusive === 0 && !partial ? "ok" : "partial";
 }
 
 /**

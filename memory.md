@@ -7,6 +7,77 @@
 - 根修只解耦探测结果与保存预览：零写入 preview 在不完整手动草稿上改用本轮真实 records 生成自动适配视图，保留 Responses/Chat 结果；Provider Set prepare/commit、普通保存和手动确认仍沿用原有 fail-closed 校验，不会把不完整手动意图写入数据库。
 - TDD 在旧代码上分别稳定复现矛盾文案与 `InvalidInput("codex_provider_set_manual_intent_required")`，修复后状态对话框 12/12、相关前端 28/28、Rust `codex_protocol_preflight_save_tests` 16/16、`pnpm typecheck`、Prettier 与 `cargo fmt --check` 通过。源码修复尚未构建或安装；当前安装进程仍为 `3.19.2-29`，不能把源码验证描述为安装态完成。
 - 外部检索按规则使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链。Matrix 对精确错误码没有找到相关一手资料，内置 Web 只确认公开仓库和旧版 Provider 文档；两条链均不足以解释内部错误，根因以本地源码、git ancestry、已安装版本和 RED→GREEN 回归为准。
+## 2026-09-07 Codex 流断应用层双修（retries=10 + response.failed，v3.19.2-31 streamfix 已装）
+
+- 线程 01a079eb "stream disconnected before completion" 应用层根因两层：中途断流时 CCSM yield 裸 `event: error`（kind="error"），Codex 客户端 SSE 解析器对该 kind 无分派分支、静默丢弃，具体原因丢失只显示通用文案；`stream_max_retries=5` 吸收不了约 13 分钟劣化窗口。客户端源码证据（codex-source-rust-v0.137.0 `codex-rs/codex-api/src/sse/responses.rs`）：L146-148 按 JSON `type`→`kind` 分派，L266 match，`response.failed` 分支 L312-344 反序列化 `response.error`（全 Option、message 保留），确定性分类器 L513-536（context_length_exceeded/insufficient_quota/usage_not_included/invalid_prompt/cyber_policy/server_is_overloaded/slow_down）不命中我们的 code ⇒ `ApiError::Retryable{message}` → `CodexErr::Stream`，客户端带具体 message 重试、预算耗尽后呈现具体原因，不会比旧行为更早中断 agent loop。
+- 修复1（streaming_retry.rs）：裸错误构造器合并为 `native_responses_failed_terminal_sse(response_id, code, message)`，发 `event: response.failed` + `{"type":"response.failed","response":{"id"?,"status":"failed","error":{"code","message"}}}`；5 个裸错误调用点全替换（有输出后 EOF、有输出后传输错误[事故路径]、终态被拒、无重连器、重连耗尽），code 取 stream_error / upstream_terminal_event_missing / codex_terminal.rs 分类码（upstream_terminal_status_mismatch / upstream_tool_call_dropped / upstream_final_output_missing），7 个测试断言同步改，安全不变量保持（语义输出后不重放、失败后不发 completed）。其余 `event: error` 点不在范围：streaming.rs L640 在 OpenAI→Anthropic 转换内、streaming_responses.rs 是 Responses→Anthropic、其余为测试 fixture。
+- 修复2（codex_config.rs）：`CODEX_MANAGED_STREAM_MAX_RETRIES` 5→10（L60，注释注明有意高于官方默认 5），`request_max_retries=2` 不变，全部写入/校验位点用常量，测试 `managed_codex_retry_budget_preserves_codex_stream_recovery` 同步。
+- 验证：`cargo test --lib streaming_retry` 37/37、codex_config 重试预算测试 1/1（本会话复跑）。worktree 无前端工具链（沙箱封外网/AppData），从 main checkout 拷 dist、共享 warm CARGO_TARGET_DIR 纯 cargo build --release 11m28s，打包 v3.19.2-31（codex-history-repairer 在 feature 后未构建，已装 V9 repairer 保持）。
+- 安装：15:44:30 事务安装（stop→backup→swap→hash 验证→start→wait listener，自动回滚），备份 `ccsm-install-backups\streamfix-20260907-154430\` + 本地 `.pre-streamfix-*.bak`；新二进制 SHA256 cc-switch.exe `33AC5789…`（40,755,712 B）、ccsm.exe `9C90A64B…`（3,239,936 B）。重投影机制：router 启动 idempotent Codex takeover 从常量重写整个 `model_providers` 表（proxy.rs L3973），普通重启即重投影、无需手动开关；takeover 激活时 consistency inspect 返回 NotApplicable 不做 drift repair。
+- 生效时机：Codex 客户端在线程启动时加载重试预算（仅 MCP/catalog 刷新重读）⇒ 新任务立即 10，既有线程（含事故线程）保留 5 直到 Codex app 重启；建议重启一次 Codex app。
+- 未解决异常：16:25:59 运行中 Codex app 用其过期内存态全文件重写 config.toml，把 10 回写成 5（它启动时加载的是 5）；16:35:21 重启重投影后 16:50 复核仍为 10。复现时 CCSM 侧加固（takeover 激活时 consistency repair / retry 预算指纹）需用户决策，不擅自加码；一次 Codex app 重启可中和该风险并让既有线程拿到 10。
+- 日志在 `C:\Users\sunda\.cc-switch\logs\`（cc-switch.log、codex-router.log、proxy-errors.jsonl+.1/.2、recovery-outcomes.json、app-exit-events.jsonl）。本会话自身在 15:44→16:25 中断约 41 分钟（auto-reviewer 也命中同一 stream disconnection bug），是此类问题发生频率的活证据。
+
+## 2026-09-08 v3.20.1-1 发布前分叉复审与 stream 修复整合
+
+- `git fetch --all --prune --tags` 后，官方 `origin/main` 仍精确等于 `v3.20.2@f3b18df1`，tag 后提交数为 0。分叉复审发现新完成但未进入迁移候选/main 的唯一产品提交是 `c3537bc9`：其父提交 `74547518` 已在本地 main，只把 stream 修复语义移植为 `e28f6c7a`，没有整枝带回旧基线。memory 冲突仅为双方顶部追加记录，解决时保留 stream 完整记录和迁移候选原有记录；`streaming_retry` 37/37、重试预算 1/1、`cargo check --all-targets`、CI 原样严格 Clippy、rustfmt、diff 与 UTF-8 均通过。
+- 其他未合分支继续沿用已验证处置：power/commentary/portable 为实验或 NO-GO，AgentMesh 未接现有代理生命周期，Sub-Agent V2 为课件资料，其余旧分支已被当前 main/migration 的更完整架构覆盖；不能仅凭 `--no-merged` 整枝合并。main 只有未跟踪 `.tmp/` 和 provider settings preview，其他多个 dirty worktree 原样保留。stream-fix worktree 因旧沙箱 SID 触发 Git dubious ownership，本轮不写全局 `safe.directory`。
+- `2f6dbb87` 的本地 NSIS/portable/raw 产物是在 stream 修复进入候选前生成，现只作为被替代构建证据，禁止上传为 v3.20.1-1。最终候选必须从包含 `e28f6c7a` 的 clean commit 重新执行一次 release 构建并生成新哈希。
+- 最终 clean rebuild 从 `9c5731516c1f6e69069e715966796f0ec16bc576` 成功完成。Sidecar 2,277,888 bytes / `9C9463DF8D7FCF70F84B8A80BDC3E8FC11A32B9AD9C26AD76EF6CBB1A4D63909`；NSIS 13,623,498 bytes / `42BA45D04560CD3D413054FF7CC70ED92EFB60FF656C75636907C8813110EBB8`；portable ZIP 16,095,176 bytes / `9896412CE4A6AD4EDC15BF30C53DE62A110F964C631355A1B798A723DC7DE2E0`；raw EXE 43,656,192 bytes / `4EC61CEFD0CF9972024CFEA281DC5BE5FF1535DE34046CC3B5F6F937E014E00A`。16/16 清单重算一致，PE/ZIP 版本、metadata commit、428-byte updater 签名与 URL 均正确；NSIS installed-exe 派生哈希为 `CB45DE5539D472455629D6C122E76C3E18FEAA014799EF7052E80ACDCED654AC`。独立公钥验签仍由 GitHub workflow 完成。
+
+## 2026-09-08 v3.20.1-1 Rust 候选门禁两项失败分类
+
+- 修复 PPIO 后的前端最终全量在 `110da36f` 得到 185/185 files、1537/1537 tests。随后 Rust 并行全量完成编译，4053 个 library tests 中 4045 通过、6 ignored、2 失败；集成测试尚未执行，因为 library test binary 已非零退出。
+- `apply_ccsm_uses_compare_and_swap_and_creates_a_drift_backup` 单独运行通过。该组虽标 `#[serial]`，仓库其他模块仍用各自局部 mutex 或无统一锁修改进程级 `CC_SWITCH_TEST_HOME`、HOME/USERPROFILE 和 settings，因此并行全量可在 inspect 与 resolve 之间切换路径/状态，制造 stale fingerprint。最终 Rust 门禁用 `--test-threads=1` 隔离这类进程全局测试状态；Cargo 编译仍并行，不把测试调度竞态误判成产品 CAS 失败。
+- `test_backfill_deducts_cache_read_for_grokbuild_total_rows` 单独稳定 RED。根因是 `b30b470d` 已把 Grok 4.5 cache-read seed 从 0.50 修正为 0.30，旧测试注释和金额未同步；生产返回的 `0.000075` 正确。测试期望更新为 input `0.000900`、cache `0.000075`、total `0.001575` 后聚焦 GREEN。后续只需在新 commit 上重跑 Rust 全量，不重复与本次 Rust-only 变更无关的前端全量。
+
+## 2026-09-08 v3.20.1-1 候选门禁暴露 PPIO 目录污染
+
+- Task 12 首次前端全量在 `a908c389` 得到 185 个文件中 184 通过、1 失败（1536/1537 tests）：OpenCode 的 PPIO 预设实际暴露了 `tc-code-latest`、GLM、Kimi 等 Tencent 个人 Token Plan 目录，而非 PPIO 的 `deepseek/deepseek-v4-flash-0731`。
+- 根因定位到 `1a905f16`：加入 Tencent OpenCode 产品对象时，迁移编辑误把紧邻的既有 PPIO `settingsConfig.models` 也替换成与 Tencent 个人套餐完全相同的目录。这是源码对象被误改，不是模块加载后的共享引用污染。修复只恢复 PPIO 自己的单模型对象，保留后续 Tencent 对象不变。
+- 现有 PPIO 断言已经提供精确 RED；修复后 PPIO 13/13 与 Tencent 18/18 合计 31/31 GREEN。因为候选源码已变化，前端全量仍必须在新 commit 上最终重跑，不能沿用失败批次中的 1536 项通过结果冒充完整门禁。
+
+## 2026-09-08 v3.20.1-1 版本准备
+
+- Task 11 将 package、Tauri、Cargo manifest 与 lockfile 四个版本源统一为 `3.20.1-1`，并新增累计中文 Release Notes 与持续更新的 release execution record。版本说明明确区分 adopted、CCSM rewrite、already-covered、deferred/not-applicable，以及 source/build/CI/Release/installed runtime 各证据层。
+- 当前数据库 schema 从主线 v20 升到 v22：v21 为 Claude 会话 byte cursor/tail fingerprint，v22 为 managed Codex OAuth identity。升级前会自动创建迁移备份；旧应用会拒绝读取 v22。降级必须退出新版并恢复与旧版兼容的完整备份，不能手改 `PRAGMA user_version`。
+- Task 11 只执行版本、Markdown、diff 和 UTF-8 轻量门禁。Task 12 才在 Ryzen 9 9950X 上集中运行一次完整本地候选门禁；Rust 测试启动时必须把 `LOCALAPPDATA` 指向专用临时目录，避免触碰真实 Claude Desktop 配置。完整门禁前不安装、不重启、不合并 main、不 push、不 tag、不发布，也不触碰 `127.0.0.1:15721`。
+
+## 2026-09-08 官方 v3.20.2 late-arrival 审计
+
+- `git fetch --all --prune --tags` 将官方 `origin/main` 从上一冻结点 `1b34d322` 推进 14 个非 merge 提交到 `f3b18df1`，该 tip 同时是新 tag `v3.20.2`。固定 Matrix WebSearch bridge 直读 GitHub release 页面得到同一版本、发布日期和 52-commit release 摘要；Codex 内置 Web 搜索索引仍停在 v3.20.1/旧 releases，因此最新状态以实时 Git 对象和 Matrix 直读为准。
+- 审计矩阵已从 140 行扩到 154 行（merge-base 后 v3.20.1 内 100 行、post-tag 54 行），无缺失或重复。新增 14 行中，Pi 缺失翻译键与 `/images/edits` 路由在当前 CCSM 已有等价或更强实现；上游 release/version/docs 三项不适用；其余九项明确 deferred，不得静默进入 3.20.1-1。
+- deferred 中应优先处理两项安全性：上游测试隔离 `LOCALAPPDATA`，以及 `mask_url` 在非法 URL 的第 20 字节落入多字节字符时 panic。Claude workflow journal、Updater 错误详情、Codex takeover auth stamp、九月时效价格、JieKou/Novita 模型 URL、SoleAPI 与价格下拉布局各自需要独立 RED/GREEN 或视觉/官方证据，不能粗糙 cherry-pick。
+
+## 2026-09-08 OpenCode Go 用量与稳定请求身份第二批
+
+- 上游 `270a4ff3` 的用量意图已按 CCSwitchMulti 当前五 App Provider 结构重写：Claude 延续所有 Coding Plan 的自动识别；Claude Desktop、Codex、OpenCode、Pi 只对 OpenCode Go 自动注入 `token_plan`，且不覆盖用户已有 `usage_script`。各端分别从 `env.ANTHROPIC_BASE_URL`、Codex TOML `base_url`、`options.baseURL` 和 Pi `baseUrl` 读取真实持久化配置。
+- `/zen/go` 与 `/zen/go/v1` 都归一到第一方公开源码支持的 `GET /zen/go/v1/usage`，使用 Bearer。响应的 rolling/weekly/monthly 映射到 five_hour/weekly_limit/monthly；坏窗口单独跳过，全部无法解析时显式失败。0% 窗口即使带合法 ISO `resetsAt` 也是占位，不展示倒计时。401 表示 Key 无效；403 保持凭据 Valid，并在最终 UI 可见错误中明确说明账号没有 OpenCode Go 订阅。
+- 推理请求的根因边界也一并修正：`x-opencode-session` 现在是跨 Messages/Responses/Chat 的最高优先级稳定 session 真值。三条真实出站路径都会保留客户端明确值；缺失时只从 `session_client_provided=true` 的稳定身份派生，绝不发送每请求随机 UUID；OpenCode Go 上游统一使用 `CCSwitchMulti/<version>` 自有 User-Agent，不伪造 Claude、Codex 或 OpenCode 身份。
+- TDD 证据：前端首次 6/7 RED，纠正 Claude Desktop fixture 后再次精确 RED，最终 7/7 GREEN；Rust 用量和身份测试先因缺少路由/解析/出站处理 RED，修复后 `cargo test opencode --lib` 52/52 GREEN。未使用真实 Go Key，因此没有计费 canary；本批没有安装、重启、合并 main、push、tag 或发布。
+
+## 2026-09-08 OpenCode Go 多协议目录第一批
+
+- OpenCode Go 当前不是单一 OpenAI Chat 兼容服务。第一方 Go 文档和当前服务端源码共同确认模型会按请求协议过滤：Responses 端点承载 Grok 4.6、GPT-5.6 Luna 与 Muse Spark Contributor；Anthropic Messages 承载 MiniMax M3/M2.7 与 Qwen3.8/3.7/3.6；其余 GLM、Kimi、LongCat、DeepSeek、MiMo、Hy、Omen 走 Chat Completions。错误协议会得到 `modelFormatNotSupported`，因此旧的全量 Chat 预设即使补齐模型名也会产生“可见但不可用”的目录。
+- 新的 `openCodeGoCatalog.ts` 是五个客户端预设共享的 27 模型维护基线，协议以第一方端点表为权威，context/output/modalities/reasoning 采用 2026-09-08 的 provider-scoped models.dev 数据。实时 `/zen/go/v1/models` 当时返回 35 个 ID；静态基线排除 `minimax-m2.5`、`kimi-k2.5`、`glm-5`、`qwen3.5-plus`、`mimo-v2-pro`、`mimo-v2-omni`、`hy3-preview`、`grok-4.5` 和新出现但已标 deprecated 的 `ox-alpha-free`，动态发现仍可显示服务端保留的兼容型号。
+- Claude Code/Desktop 只选择 Messages-compatible 模型，使用 `/zen/go` 根和 `ANTHROPIC_API_KEY`，默认 MiniMax M3、轻量角色 MiniMax M2.7。OpenCode 通过模型级 `provider.npm` 在同一 Provider 中分别路由 `@ai-sdk/openai`、`@ai-sdk/anthropic`、`@ai-sdk/openai-compatible`。Codex 与 Pi 的 API 格式是 Provider 级，因此保留原 `OpenCode Go` 作为 Chat 预设，并新增独立 Responses/Messages 预设；三者目录互斥，旧 Pi providerKey 保持不变。
+- 现有保存 Provider 与用户自定义 catalog/options 没有迁移或覆盖；本批只修改新建预设和共享维护数据。TDD 首次 5/5 RED 精确命中旧五模型目录、Claude 错误 Chat/auth、缺失 SDK 路由与未拆协议；GREEN 后 OpenCode Go 5/5、Pi Provider/Thinking 13/13、TypeScript 通过。没有真实 Go Key，因此没有计费 canary，也没有安装、重启、合并 main、push、tag 或发布。
+
+## 2026-09-08 Zhipu Codex Responses 端点与持久化协议根修
+
+- Codex 内置 Web 与固定 Matrix WebSearch 桥分别直读智谱国内/国际官方 Codex 页面，均确认 Codex 必须使用专属 OpenAI Responses 端点：国内 `https://open.bigmodel.cn/api/v1`、国际 `https://api.z.ai/api/v1`，`wire_api=responses`，默认 `glm-5.3`。国内官方目录另列 `glm-5-turbo`；国内 `glm-5.3`/`glm-5-turbo` 上下文为 `1048576`/`204800`，国际目录只列 `glm-5.3`。
+- 根因不只是内置预设过时。CCSM 的 `is_known_chat_completions_only_url` 过去把整个 `open.bigmodel.cn` 主机无条件当成 Chat-only，`resolve_codex_catalog_tool_profile` 又优先信任持久化的旧 `meta.apiFormat`；因此仅把已保存 Provider 的地址更新到 `/api/v1`，仍可能继续做 Responses→Chat 转换并生成 ProxyChat 工具画像。
+- 修复把智谱协议专用 path 提升为该厂商的路由事实源：`/api/v1` 固定原生 Responses，`/api/coding/paas/v4` 与 `/api/paas/v4` 保持 Chat；新预设切到 `glm-5.3`，国内附带 `glm-5-turbo`。模型 reasoning 用 schema-v2 Responses 对象表达：GLM-5.3 仅 `low/high/max`、默认 `max`、不可关闭；Turbo 仅暴露官方默认 `max`，不伪造 `none`。
+- host 判断改用 URL 解析与 DNS 标签边界，新增 `bigmodel.cn`/`z.ai` 原生 hosted-web-search 拒绝项而不误伤 `xyz.ai`、`viz.ai`、`z.ai.example.com` 或 `notbigmodel.cn`。RED 分别命中旧 Chat 预设、缺失 GLM-5.3、陈旧 metadata 仍路由 Chat 和未禁用 hosted search；GREEN 后预设/能力 16/16、Rust 路由与 host 2/2、Provider 表单 15/15。重开旧 override 时用户自己的 `glm-5.2` catalog 保持原样，维护预设基线独立更新。
+- 本批没有可用的真实智谱套餐 Key，因此 endpoint/模型目录由两条官方文档链交叉验证，未做真实计费请求 canary；也没有安装、重启、合并 main、push、tag 或发布。
+
+## 2026-09-07 QwenCloud 国际站三产品预设迁移
+
+- 上游 `6d25f34e` 的 QwenCloud 意图已按 CCSwitchMulti 当前预设边界重写，而非整提交照搬：七个受支持 App 都分别提供按量付费、Coding Plan、Token Plan，Codex 使用稳定 `presetKey`；三种 API Key 与 base URL 明确隔离，避免套餐 Key 误打到按量域名产生 401/403 或意外计费。
+- 2026-09-07 复核的阿里云官方文档确认：国际按量 OpenAI/Anthropic 地址为 `dashscope-intl.aliyuncs.com/compatible-mode/v1` 与 `/apps/anthropic`；Coding Plan 为 `coding-intl.dashscope.aliyuncs.com/v1` 与 `/apps/anthropic`；Token Plan 为 `token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` 与 `/apps/anthropic`。OpenCode/OpenClaw 的 Anthropic SDK 配置按客户端约定追加 `/v1`，Claude Code/Desktop、Hermes、Pi 不追加。
+- 上游 2026-09-01 模型表在当前官方资料面前已部分过时：按量默认更新为 `qwen3.8-max`；Coding Plan 采用当前官方支持的 Qwen 子集；单一 Token Plan 预设只内置个人版与团队版共同支持的编码模型，避免对某个套餐暴露不可用条目。Qwen3.8 在 Codex 中使用 CCSM schema-v2 reasoning：`none/low/medium/xhigh`、默认 `xhigh`、可关闭；思考模式输入上限 `983616`、输出上限 `131072`，并保留图片输入。
+- TDD 证据：`src/config/qwenCloudProviderPresets.test.ts` 在实现前 10/10 失败（七 App 均无预设），实现后 10/10 通过；测试锁定每 App endpoint/API mode、结构化 App 的有序模型目录、Codex 稳定身份和 Qwen3.8 reasoning/窗口。批次尚未安装、重启、合并 main、push、tag 或发布。
+- 独立复审又定位到 Codex `modelCatalog()` 的证据陷阱：省略 reasoning 会被物化为 `confirmed_unsupported`，不能用于“官方支持思考、但当前协议档位尚未完全证明”的模型。修复后 Qwen3.8 Responses 明确使用 `reasoning.effort` 对象；Qwen3.7/3.6/3.5 与 Qwen3 Max 按官方混合思考契约使用 `enable_thinking`，并区分 Responses 的 `reasoning` 与 Chat 的 `reasoning_content` 输出；Qwen3 Coder Next/Plus 在缺少当前 Coding Plan 协议级开关证据时保留 `unknown`，不再伪造不支持。复审回归先因 Qwen3.8 的错误顶层 `reasoning_effort` 精确 RED，修复后 10/10 GREEN。
 
 ## 2026-09-06 v3.19.2-30 候选与 v3.19.2-31 正式发布
 
@@ -5301,3 +5372,184 @@ supported in one streaming turn`。
 - 设计文档为 `docs/superpowers/specs/2026-09-06-upstream-v3.20.1-migration-design.md`。实现必须使用隔离 `bigstrongsun/upstream-v3.20.1-migration` worktree，不清理用户 `.tmp/`、provider layout preview 或任何未完成 worktree。
 - 用户审阅后要求避免过于频繁的测试。门禁调整为：开发时最小聚焦 RED/GREEN、每批一次受影响模块验证、三个跨批次集成检查点、功能冻结后一次完整 9950X 本地候选门禁，再运行三平台 CI；没有相关源码变化不重复全量测试，失败时先只重跑失败项和依赖范围。
 - 定稿后的执行计划为 `docs/superpowers/plans/2026-09-06-upstream-v3.20.1-migration.md`，共 13 个任务。迁移矩阵先覆盖固定 131 个官方独有提交，依次执行低风险数据、基础可靠性、数据库映射、OAuth 身份、协议/历史、Pi、前端/预设和版本发布；中间提交命令级禁用自动 release hook，只有最终冻结候选集中跑完整本地门禁。
+
+## 2026-09-06 v3.20.1-1 官方提交处置矩阵
+
+- 在隔离分支 `bigstrongsun/upstream-v3.20.1-migration@4e3c83c3` 固定 merge-base `43eaf073`、官方 release `v3.20.1@3217f725` 和审计 tip `741e802f`，生成 `docs/audits/2026-09-06-v3.20.1-upstream-commit-matrix.md`。精确覆盖 131 个非合并提交，其中 100 个属于 v3.20.1、31 个为 tag 后提交；唯一 SHA 131、重复 0、缺失 0。
+- 初始处置为 5 个 `already-covered`、15 个 `not-applicable`、111 个 `rewritten`。`rewritten` 表示拒绝直接 cherry-pick/整枝 merge，并已分配到 Task 3–9 做语义评估，不表示实现已经完成；后续每批必须把对应行更新成带 CCSwitchMulti commit/test 证据的最终结论，证据不足则显式改为 `deferred`。
+- 已确认主线覆盖的五项是：用户自管 `model_catalog_json` 所有权、逐模型 reasoning levels、DeepSeek `supports_search_tool=false`、GPT-6 OAuth client identity、DeepSeek/MultiRouter `supports_parallel_tool_calls`。矩阵由 `scripts/generate-v3.20.1-upstream-matrix.mjs` 可重复生成，并在生成时硬性断言 131 个提交。
+
+## 2026-09-06 v3.20.1-1 Task 3 定价与模型数据
+
+- TDD RED：新增 GLM-5.3 seed/user-price preservation、当前官方价格行和 guarded repair 回归；`model_pricing_` 首次运行 4 passed/3 failed，分别准确失败于新行缺失、Grok 4.5 旧 cache 价未修和 DeepSeek V4 仍停在旧价。GREEN 后同一聚焦组 7/7 通过，没有运行全量 Rust。
+- 语义迁移官方 `7dc0a725`、`bad9c151`、`460aa8c7`、`741e802f`：新增 GLM-5.3、Grok 4.6、DeepSeek V4 Flash 0731、Gemini 3.7 Flash、Claude Fable/Mythos 5.1；修正 Grok 4.5 cache、DeepSeek V4 和 Claude Sonnet 5。所有 repair 都用精确旧值守卫，用户自定义价格不匹配旧 seed 时保持不动；GLM-5.3 和其它全新行只 `INSERT OR IGNORE`，不提升 schema。
+- 官方现行页与 Codex Web、Matrix WebSearch 两条独立链交叉确认：GLM-5.3 为 1.4/4.4/cache 0.26；Grok 4.5/4.6 的短上下文价分别为 2/6/cache 0.30 与 2/6/cache 0.50；DeepSeek V4 Flash/Pro 高峰价分别为 0.44/1.32/cache 0.014 与 1.32/3.96/cache 0.044；Gemini 3.7 Flash 介绍价为 0.75/3.75/cache 0.075；Fable/Mythos 5.1 为 10/50/cache 0.25，Sonnet 5 的 2/10 已转为正式价。
+- 当前单行价格 schema 无法表达 Grok ≥200K 的双倍价和 DeepSeek 工作日峰谷价：Grok 记录短上下文基础档，DeepSeek 沿官方提交决策记录高峰挂牌档，分别会低估长上下文 Grok、并在 DeepSeek 非高峰时高估约一倍。Gemini 3.7 Flash 介绍价在 2026-12-31 后到期，需后续 guarded repair；这些限制显式保留，不在本批扩张成时段/上下文计价重构。
+- `273c9cc2` 不重复迁移：当前 `model_capabilities.rs` 已精确把 `glm-5.3` 标为 text-only，同时保留 `glm-5.3v` 图像能力，并已有 namespace/[1M] normalization 回归。
+
+## 2026-09-06 v3.20.1-1 Task 4 基础可靠性第一批
+
+- 双链核对官方提交与 issue 后确认四个真实根因：WSL UNC 会以 Windows error 50 拒绝 `ReplaceFileW`；数据库备份恢复可能保留 Skill `content_hash` 却没有 SSOT 目录；WiX 自动更新重启可能丢失 HKCU PATH；`DatabaseUpgrade` 前端直接调用 `@tauri-apps/plugin-process.exit` 但 capability 缺少 `process:allow-exit`。WiX Handlebars 邻接反斜杠修复已在当前模板覆盖，不重复修改。
+- Windows 原子写保留 CCSwitchMulti 已有的 1175/1176 重试、1177 部分移动恢复和旧文件保护，只把明确的 `ERROR_NOT_SUPPORTED(50)` 纳入 rename fallback；未把所有未知错误降级为非原子覆盖。Skill 更新检查先验证安全的 SSOT 子目录存在，再使用缓存哈希；非法 directory 继续沿用原安全边界，不诱导用户点击一个必然失败且可能越界的更新。
+- Windows CLI 检测现在按进程 PATH、HKCU、HKLM 顺序合并并大小写去重，展开注册表 `%VAR%` 后同时供候选扫描、默认入口解析和版本执行使用；默认入口通过系统 `where.exe $PATH:<tool>` 只查有效 PATH、跳过 WindowsApps alias，并优先于硬编码候选，避免旧 npm shim 抢占显示版本。Codex/Claude 独立安装目录只加入对应工具，测试使用纯目录生成函数，避免被开发机真实 PATH 污染。
+- Windows 首窗继续保持 `visible:false`；同步读取 `cc-switch-theme` 应用 dark class，并在非 about 页面完成加载后首次显示，静默启动仍不显示。CSP 只加入该固定脚本的 SHA-256。新 `upstream_reliability_` 聚焦组首次因缺少函数得到 10 个编译错误；实现后第一次 8/9，其中唯一失败来自测试把开发机真实 PATH 当作空环境；下沉纯函数后最终 9/9 通过。未运行全量 Rust、前端或 Tauri 构建。
+
+## 2026-09-06 v3.20.1-1 Task 4 备份与同步可靠性
+
+- `c225a1b0` 按当前 CCSM 数据库边界迁移官方 `dfb2e523` 的 SQL 保真层：外部 SQL 在 migration 前验证 v3.8 已有核心表并拒绝未提交事务；空 provider/MCP 仍是合法配置；staging 保持 incremental auto-vacuum。TEXT 的 NUL/非法 UTF-8 使用 `CAST(X'..' AS TEXT)`，REAL 保留 storage class、负零和无穷值，完整导出及 sync 本地表恢复都保留 `sqlite_sequence` 高水位；所有 SQLite Backup 都要求 `StepResult::Done`。保留了 CCSM 原有 authorizer、密钥脱敏、路径 portableize/localize、多行 INSERT、generated column 和 trigger 顺序处理。
+- `1b00aeb5` 将备份目录的 list/create/rename/delete/restore/retention 串行化。新备份先写隐藏 `.tmp`，完成 Backup、quick_check 和关闭连接后才用 no-clobber 原子发布；碰到同名竞争会换后缀，失败不留下可见半成品。二进制 restore 先以只读方式复制到 staging，完成 integrity、原始 schema、future-version、auto-vacuum、migration 和 pricing seed 校验后，才在同一个 live DB guard 下创建精确 safety snapshot 并替换主库；损坏或未来版本不触碰 live。
+- `0e3fe111` 按官方 `c9fe340b` 收口同步一致性：WebDAV、S3、auto-sync 和 manual SQL/DB restore 共享 transport-neutral async mutex；`profiles` 纳入两种传输共同的 auto-sync 表集合。Skill 采用固定 `global sync -> Skill RwLock -> DB mutex` 顺序，快照读者与安装、卸载、更新、备份恢复、导入、切换、存储迁移、ZIP 安装和 app 投影互斥；异步下载不持 std 锁，并在落盘前重新检查身份。恢复后重建 Provider/Prompt live、model-pricing sidecar、settings cache、runtime log level，并失效 Tauri 真实进程的 UsageCache，失败继续聚合到原 warning payload。
+- 后续审计发现官方 `c911c7e3` 修正了 `c9fe340b` 的 Prompt 零启用行为；`f85984ba` 已同步采用：restore snapshot 没有启用 Prompt 时保留本机未托管 live 文件，只有用户在 UI 明确禁用最后一个 managed Prompt 才清空。该回归先观察到 live 内容被清空，再修到 3/3 projection tests 通过。
+- TDD 与批次门禁：`upstream_backup_reliability_` 初始 7/7 按预期失败、随后 7/7 通过；`upstream_backup_atomic_` 从缺失原子发布边界变为 4/4；完整 `database::backup::tests` 为 19 passed / 2 ignored。同步层独立 RED 覆盖分裂 transport mutex、缺失 UsageCache 全失效、缺失 Prompt projection、缺失 Skill state lock、遗漏 profiles auto-sync；最终前缀 7/7。批次一次性门禁通过 usage-cache 4、Prompt 2、Skill 44、sync-protocol 23、manual import/restore 3、WebDAV command 8、S3 command 8、WebDAV/S3 auto-sync 各 6；没有运行全量 Rust、前端或 Tauri/NSIS。
+
+## 2026-09-07 v3.20.1-1 Task 5 数据库游标迁移
+
+- 迁移前 CCSwitchMulti schema 为 v20：`session_log_sync` 只有 `file_path`、纳秒/旧秒级 `last_modified`、`last_line_offset` 和 `last_synced_at`；Codex、Claude、Gemini、OpenCode、Grok Build 共用这张表，但没有 Pi 会话解析器或 Pi 去重账本。官方提交使用的 v17/v18 号不能照搬，实际采用的 Claude 行为被映射为 CCSM v20→v21；fresh DDL 同步增加可空 `last_byte_offset` 与 `last_tail_fingerprint`，存量行保持 NULL，重复启动幂等。
+- `db4c6fe9` 将 Claude 扫描改为一次性预取游标、按字节 seek，只把以换行结尾的完整记录推进到持久游标。旧行号游标首次按前 L 行转换到字节边界而不重放历史；用量插入和游标/指纹推进处于同一 SQLite 事务。未终结但已形成合法 JSON 的尾段仍可依靠 request ID 去重先计费，游标不越过它，补全后会重读并继续；中途 I/O 读取错误不伪装成成功。
+- 游标边界前最多 4096 bytes 使用带 `claude-session-tail-v1` 域标签的 SHA-256 截断指纹。文件短于旧偏移视为截断，边界指纹失配视为重写；两者都把游标钉到当前 EOF，不回放可能已经 rollup/prune 且失去明细去重证据的区间，随后新追加仍可正常导入。永久跳过通过 `SessionSyncResult.errors` 明确报告，读取中断则计入 deferred 并保留旧 mtime 以便续读。
+- TDD RED 4/4 准确失败于 fresh/v20 缺列、半行补全被旧行号吞掉、重写增长区间被误导入；GREEN 后 `upstream_session_cursor_` 8/8。批次门禁一次完成：`database::schema::tests` 9/9、`services::session_usage::tests` 14/14，另有 rustfmt、diff 与三文件严格 UTF-8/no-BOM/no-U+FFFD 检查。
+- 官方 `bcee61be`、`f8d97348`、`f05e2033` 已采用并绑定 `db4c6fe9`。`5ca9459d` 的 Pi lookup index 延至 Task 8，避免当前不存在 Pi 表时制造孤儿 schema；`092ea1f3` 是设置/UI 行为而非数据库迁移，延至 Task 9 使用量界面批次。两项 deferred 都是明确的所有权延后，不是遗漏或已实现声明。
+
+## 2026-09-07 v3.20.1-1 Task 6 Codex OAuth 身份分离
+
+- `f17b2f95` 把 managed Codex 身份拆成三层：CCSM 本地稳定 `account_id`（新账号为 UUID，旧绑定在 targeted reauth 时原位保留）、只用于上游 `chatgpt-account-id` 的 `chatgpt_account_id`、用于同 workspace 去重的 JWT `sub`。同 workspace 不同 `sub` 是不同本地账号；普通登录仅在 workspace 与 subject 同时匹配时返回 `DuplicateAccount`。organization claim 不再作为 workspace fallback。
+- managed store 升到 v2 并持久化 `chatgpt_account_id` 与 `id_token`。缺少足够身份依据的 v1/legacy 记录不删除，而是标记 `requires_reauth=true`：不能设默认、不能提供 token/workspace、不能进入账号池，但仍在 UI 可见并可 targeted reauth。quota、models、forwarder 三条请求、hosted-tool continuation 与 pool quota 都解析同一 `(token, workspace)`，不得把 local UUID 发成上游 workspace header。
+- 三个并发 RED 锁定真实根因：旧 refresh 响应可覆盖 targeted reauth 新凭据；remove 与 reauth commit 交错可复活账号；reauth 等待 refresh 时 cancel 会被全局 commit 锁阻塞。根修后 targeted reauth 先取得 per-account refresh lock，等待后再做 pending-flow/generation 最终校验；最终校验、pending 删除、原子持久化与内存发布统一受 commit lock 保护，remove 在同一边界清理 generation/pending flow。
+- Desktop native、managed local、account-pool candidate 与 third-party provider_config 的权威矩阵记录在 `docs/audits/2026-09-07-codex-oauth-identity-matrix.md`。Desktop 去重采用 evidence-bound fail-open：新 local UUID 不能仅凭 workspace 与 native 条目判为同一用户；证据含糊时宁可保留两个候选，也不能误删共享 workspace 的另一用户，quarantine 记录仍不进池。
+- 官方 `a2e22f33` 的多账号选择意图由 CCSM 既有账号池与 `f17b2f95` 采用，但不照搬把 managed token 写入 live `auth.json` 的单槽设计；`f62c854a` 绑定 `837c3afb`，`c2ec78dd`、`6243e20a`、`92d52916` 绑定 `f17b2f95`。`0455a92c` 的多 follow-login Provider 行由 canonical `codex-official` facade + 多 binding/pool 更强边界覆盖，不能复制 seed 拆散 MultiRouter ownership。
+- 0.149 config-only 系列不能粗糙合入：普通第三方 provider 已由 provider-scoped `experimental_bearer_token` 持有凭据并保留 Desktop `auth.json`；MultiRouter FullyManaged facade 则必须保留 `requires_openai_auth=true` 与非秘密 `PROXY_MANAGED`，Native/Mixed 不写 placeholder，以维持 Desktop 登录/额度/退出 UI。故 `c88b00fa` 的强制 false 对该 facade 不适用，`c5e4f705` 的单 Provider auth 删除/flag 联动由 CCSM 独立所有权取代。`bbe8bb93` 的 live 编辑 reconcile、`9a1a6b83`/`bb54e87a` 的 stale reserved table/精确大小写迁移，以及 `897ca892` 的 OAuth quota 间隔/tray cache 明确延到 Task 9 聚焦审计，未冒充已实现。
+- 批次门禁：OAuth manager 48/48、forwarder 163/163、Codex OAuth models 9/9、前端 managed-auth/UI/locale 13/13、`pnpm typecheck`、`cargo check --all-targets --no-default-features`、rustfmt、diff 和 15 个改动文本 strict UTF-8/no-BOM/no-U+FFFD 均通过。此批没有运行 Tauri/NSIS、没有构建安装包、没有安装或替换当前运行 CCSM/Codex；完整 9950X 构建仍保留到最终候选一次集中执行。
+- 官方事实核对使用两条独立搜索链：Codex 内置 Web 找到 farion1231 官方 Release、源码页和多账号 Issue，但索引没有精确返回本批 SHA；固定入口 `matrix-websearch` MCP 经 stdio 初始化成功，限定官方仓库查询返回 0 条。13 个提交的标题、文件范围和语义最终以本地已 fetch 的官方 Git commit 对象逐项 `git show` 为一手依据；两条网页索引均未提供相冲突的事实，也不能替代源码证据。
+
+## 2026-09-07 v3.20.1-1 Task 7 协议与会话正确性第一阶段
+
+- Kimi/Moonshot 已从 `reasoning_content` replay 和 Anthropic 缺失 thinking 占位两条 vendor gate 移除；DeepSeek/MiMo 的既有兼容路径保留。Anthropic 顶层 system 数组仍合并成稳定首消息，但 conversation `messages` 内的中途 system 不再被抽走，避免改变 prefix-cache 分段。两组回归先分别得到旧行为失败，再修复通过。
+- xAI 原生 Responses 保留 CCSM 现有 namespace/custom-tool 往返和通用第三方 `agent_message` 投影；后者对不可解密 payload fail closed，不能被官方较宽松的 xAI 递归转换覆盖。新增的 xAI 专属边界只把缺失或非 Grok 子代理模型回落到当前上游模型，同时保留 catalog 中的可见模型及未来 `grok*` SKU，并在 namespace flatten 后统一调用 sanitizer。
+- Moonshot/Kimi Chat 仅在 `moonshot.cn`、`moonshot.ai`、`kimi.com` DNS 标签边界命中时，把 function parameters 中带 sibling 的 `$ref` 移入 `allOf`。遍历只进入 JSON Schema 的 schema-valued keywords，不进入 default/examples/enum/const 或未知扩展，重复执行幂等，其他 Provider 的 prompt-cache schema 不变。
+- Codex resumed/revert 双 UUID 文件名按两层身份处理：尾部 UUID 是物理 rollout ID，继续用于 request_id/event_index 去重；root `session_meta.id` 与文件名前置 UUID 一致时是逻辑 thread ID，用于 usage session 归属。单 UUID 文件名与 meta 不一致仍 deferred；该修改不触碰 `codex_paginated_history_repair` 的 active `history_base` lineage。
+- Codex Alpha Search 四个本地别名统一语义透传到 `/alpha/search`。普通 base URL 正常拼接；full URL 只从明确以 `/responses` 或 `/responses/compact` 结尾的路径推导 sibling endpoint 并合并 query，opaque full URL fail closed，避免搜索 payload 发到错误 RPC。官方 `bdeaac75` 的另一半 Claude hosted WebSearch 尚未迁移，仍保留 `rewritten`，必须独立覆盖请求约束、非流式、SSE、引用、max_uses 与 usage 后才可关闭。
+- 聚焦 TDD：初版协议/会话组和 Alpha Search 为 12/12 GREEN，但独立审查发现三个 helper-only 假绿：Moonshot `allOf` 重写早于 MFJS 编译、Kimi 的 Codex→Chat 路径仍注入 replay 占位、future Grok 在 xAI guard 前已被通用 fallback 覆盖。新增四条真实组合回归先稳定得到 12 passed/4 failed；把 schema wire rewrite 移到 dialect 编译后、让 Chat converter 消费 `HistoryReplay`、并把 future-Grok 判定移到 native Responses 模型准备边界后，最终 `cargo test --lib upstream_protocol -- --nocapture` 为 16/16 GREEN。冻结本阶段差异后，`cargo check --all-targets --no-default-features`、rustfmt、diff 与改动文本 strict UTF-8/no-BOM/no-U+FFFD 均通过。未运行全量 Rust/前端、Tauri/NSIS、安装或重启；完整 9950X 候选门禁仍留到功能冻结后集中执行一次。
+
+## 2026-09-07 v3.20.1-1 Task 7 Claude hosted WebSearch
+
+- 官方 `bdeaac75` 的 WebSearch 部分按 CCSM 当前转换和 resilient reconnect 架构独立迁移，没有带入上游的大块 Markdown/历史重构。请求侧识别 `web_search_20250305`、`20260209`、`20260318`；新版本必须显式 `allowed_callers=["direct"]`，unknown version、`response_inclusion`、非 direct caller 与不可表达的 `blocked_domains` 全部 fail closed。API-key 后端用 `max_tool_calls`，Codex OAuth 只允许被强制且隔离的 hosted tool，以 instruction + 本地状态机双重限制 `max_uses`。
+- Anthropic 多轮中的 `server_tool_use`/`web_search_tool_result` 会恢复成一个原生 Responses `web_search_call`，不会退化成普通 function。非流和 SSE 都输出严格配对的 server call/result，保留 action sources、失败码、HTTP(S) citation 和 `usage.server_tool_use.web_search_requests`；不安全 citation URL 不生成 Markdown 链接。兼容网关若只在最终 annotation 返回来源，SSE 会延迟空 result、收集安全 citation 后再按 call→result→text 顺序输出，保证下一轮 replay 不丢结构化来源。
+- CCSM 既有 Responses resilient reconnect 仍是唯一重连边界：无 WebSearch 请求继续走原入口；带 WebSearch 时选项随每次重连重建状态。一旦 server tool block 已下发就属于实质输出，不允许重连重放。`max_uses` 在第二个超限 call 的 added 或 done 事件上立即生成 `max_uses_exceeded` 并结束转换流，测试用分块 poll 证明不会继续读取上游；并行未完成 search 会先关闭并配对 `unavailable` result，已完成普通 function 保留 `tool_use` stop reason，其他仍未完成内容则显式 `stream_truncated`，不伪造正常 message_stop。Codex OAuth 非流聚合复用同一流状态机并合并完整 delta usage；压缩 SSE 因无法安全提前限流而 fail closed。
+- TDD 第一组因缺少 response-side WebSearch API 在编译期失败，GREEN 后 request/replay/non-stream 为 6/6；流式组同样先因选项入口缺失失败，后续又分别用“仅有 output_item.done”和“超限后不得继续 poll”得到行为 RED。独立审查再发现并行 search 未闭合、普通 function stop reason 错误、非流 delta usage 丢失、错误 shape 域约束被静默忽略和 terminal citation 无法回填五项 Important；新增回归先稳定得到 WebSearch 7 passed/4 failed 与 usage 聚合 0/1，根修后聚焦组为 11/11 和 1/1。复审又证明只有独立 annotation 事件能回填来源，`output_item.done`/`response.completed` 终态快照仍为空，且延迟文本期间无下游字节；三条新回归先得到 3/3 RED，统一补齐已知终态 annotation carrier 的安全去重聚合，并在每个被缓冲的文本增量前发送非语义 Anthropic ping 后转为 3/3 GREEN。修正冻结后的受影响模块门禁为 `streaming_responses` 29/29、`transform_responses` 88/88、`transform_codex_anthropic` 72/72；不运行全量 Rust/frontend、Tauri/NSIS、安装或重启，完整 9950X 候选门禁仍保留到功能冻结后一次集中执行。
+
+## 2026-09-07 v3.20.1-1 Task 7 Chat 用量与 StepFun 推理档位
+
+- 官方 `6a7da87c` 与 `46f19a15` 不能直接照搬到 CCSM：Chat→Responses 的 usage 同时服务非流转换和流式生命周期事件。统一根修使 usage 缺失时也固定输出 `input_tokens_details.cached_tokens=0`；缓存命中优先级为 `cache_read_input_tokens`、标准 `prompt_tokens_details.cached_tokens`、`input_tokens_details.cached_tokens`、最后才是 DeepSeek `prompt_cache_hit_tokens`，因此不会让厂商 fallback 覆盖更权威的标准字段。流式 `base_response()` 复用同一个转换函数，避免 created/completed 默认结构漂移。
+- 官方 `3f75bbdf` 的意图按模型精确迁移：`step-3.7-flash` 支持 low/medium/high，使用 `passthrough`；`step-3.5-flash-2603` 继续只支持 low/high，使用 `low_high`；不带 2603 的 `step-3.5-flash` 不宣称 effort 支持。不能用平台级布尔开关把所有 StepFun 型号一并放开。
+- TDD 中用量两条回归先因缺少必需的 `input_tokens_details` 得到 RED，StepFun 回归先因 3.7 被判为不支持 effort 得到 RED；实现后聚焦 2/2 与 1/1 转绿，受影响 `codex_chat` 模块门禁为 228/228。Codex 内置 Web 与 Matrix WebSearch 两条独立链一致确认 DeepSeek 官方 cache hit/miss 字段；StepFun 搜索索引存在旧摘要漂移，当前官方正文、Matrix 直读页面和本地官方提交均支持 3.7 的 medium，因此以当前正文为准。本批不重复全量 Rust/frontend，提交前只运行一次静态与编译门禁。
+
+## 2026-09-07 v3.20.1-1 Task 7 Provider Live 所有权根修
+
+- 官方 `926af949` 暴露的根因在 CCSM 仍然存在且分散在普通 Provider 保存、显式 current 同步、全量同步和 Codex Router 特殊投影中：旧逻辑把 `has_live_backup || live_taken_over` 直接当作接管所有权。backup 是恢复材料，会在崩溃或失败恢复后残留；它单独存在时继续只写 backup 会让正常 live 永久停在旧 Provider。
+- 统一所有权判定现在只接受三类证据：live 中仍有明确接管 placeholder；该应用 `proxy_config.enabled`、backup 与实际运行中的代理同时成立；或该应用正持有 switch lock 且 backup 已建立，表示接管激活窗口。switch lock 的观测严格按应用，不能用“全局代理在运行”把另一应用的残留 backup 误判为接管。无所有权的 stale backup 会 best-effort 跟随新 Provider 刷新，但无论刷新是否成功都不再截走真实 live 写入。
+- 普通 Claude/Codex/Grok 路径共用 `LiveSyncOutcome`；Claude Desktop 的接管对象是独立 3P profile，继续直接投影且不改 legacy backup。Codex schema-v2 MultiRouter 保留专用 facade/catalog publisher，不能调用普通 Codex live helper：Provider 模块首次批次门禁因此捕获 `name=OpenAI`/`openai_base_url` 回归，79/80 通过；移除错误的通用重投影后精确失败项转绿，保持 `CCSwitch MultiRouter` facade。
+- Universal Provider 的 Claude/Codex/Gemini 子项提交后会逐应用检查当前所有权，仅当前子项重投影 live；单个应用失败会被记录并通过 legacy API 错误或结构化 `projection_error_code=universal_provider_live_projection_failed` 报告，不再 DB 已变更却返回无条件成功。新回归依次得到 stale backup 与 Universal live 2/2 RED、switch-lock API 编译 RED、partial failure 返回 true 的行为 RED；最终 `upstream_live_sync` 5/5 GREEN，active takeover 与 Claude Desktop 既有回归也在 Provider 批次中通过。本批未运行全量 Rust/frontend、Tauri/NSIS、安装或重启。
+
+## 2026-09-07 v3.20.1-1 Task 7 Codex Provider 表可加载性与认证边界
+
+- 官方 `93bb91aa` 的真实缺口位于 CCSM 的 live 配置准备入口：TOML 语法合法不代表 Codex 0.149 能加载。当前 reserved ID 必须精确匹配 `amazon-bedrock`、`amazon-bedrock-runtime`、`openai`、`ollama`、`lmstudio`；`oss`、`ollama-chat` 与大小写变体是 custom ID，token 必须写入对应 Provider 表。旧 `[model_providers.openai|ollama|lmstudio]` 会被无损改名到首个空闲 `cc-switch[-N]`，任意非 Responses `wire_api` 归一化为 `responses`，空/缺失 `name` 补成 `Custom`。
+- 重命名后的 route-follow 以认证解析事实为边界：有可注入 token，或表不会回退到官方 `auth.json` 时才跟随；只有 `requires_openai_auth=true` 且同时缺少 `env_key`、`experimental_bearer_token`、`auth`、`aws` 的表在无 token 时留在 built-in route，避免把保留的 Desktop OAuth 发到第三方地址。`auth`/`aws`/`env_key` 与不走官方认证的显式 Authorization 表阻止额外 bearer 注入，避免 Codex 0.149 的互斥字段拒载。
+- `update_codex_toml_field` 创建或触碰 custom Provider 表时补齐稳定非空 `name`，并按 Codex 的大小写精确语义处理 `OpenAI`。三条同前缀 TDD 回归先稳定得到 0/3 RED，再转为 3/3 GREEN；受影响 `codex_config` 模块门禁 219/219，`cargo check --all-targets --no-default-features` 通过。`1435223b`、`e12fc623`、`d01eab97`、`e47b5fca` 明确延至 Task 9，与各自 preset、endpoint、reasoning dialect 和 Provider 表单一起核验；不得把 Task 7 的后端配置修复冒充为这些预设已验证。
+- 官方事实由本轮既有双链审计确认：Codex 内置 Web 的 Discussion #7782 证明 Chat wire API 已移除；Matrix WebSearch 实时直读官方 `config_toml.rs` 与本地 `codex-source-latest@c6058cca` 一致给出五项 reserved ID。Codex 搜索缓存曾返回缺少 `amazon-bedrock-runtime` 的四项旧片段，属于索引漂移；实时 raw、本地同版本源码和 `model-provider-info` 仍定义 runtime Provider，因此采用五项当前契约。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi 核心配置所有权
+
+- Pi 必须作为独立 managed app 接入。Pi 当前官方契约把显式供应商放在 `~/.pi/agent/models.json`，把原生 API Key/OAuth 放在 `auth.json`，把默认 Provider/Model/Thinking 放在 `settings.json`；CCSM 只管理 `models.json.providers` 的目标显式节点，绝不接管认证或默认选择。Codex 内置 Web 与固定入口 Matrix WebSearch 均直接读取 Pi 官方 `models.md`、`settings.md`、`providers.md`，结论与本地官方 `84e75ad2` 一致。
+- `PiModelsStore` 把完整文件字节的 SHA-256 作为调用方可见 content-version。写入/删除必须携带读取版本；进程内写入统一串行化，锁内复核版本，写前把原始字节原子备份到 `models.json.cc-switch.bak`，备份后再复核一次才替换原文件。过期快照返回 `AppError::Conflict`，相同内容或重复删除不写文件也不滚动备份。
+- JSON/JSONC 读取限制为 1 MiB、严格 UTF-8，根节点及 `providers` 必须为对象。写回会规范化为 JSON，因此注释只在逐字节备份中保留；所有未知顶层字段、非目标 Provider 和调用方从完整节点带回的未知 Provider 字段继续保留。结构化编辑器后续必须从完整节点派生替换值，不能提交已知字段子集。
+- 第一层 TDD 为 5 条 `upstream_pi_config_` 回归：stale CAS、native auth/settings 不触碰、未知字段保留、逐字节写前备份、幂等写入及目标删除。首次 RED 是 API/Conflict 缺失；GREEN 后 5/5。此处尚未把 Pi 加入 AppType、Provider service、Prompt/Skill/session usage 或前端，也没有让 Pi 进入 MultiRouter、Provider Set、代理、failover、tray takeover 或 MCP sync。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi Provider 事务与代理隔离
+
+- Pi 已作为 additive managed app 注册，但 Provider CRUD 不复用通用 additive live writer。`ProviderService` 在 list/add/update/remove/delete/switch 六个入口先分派到 Pi 专用服务；每次完整操作持有 Pi app 写锁，并由 `PiModelsStore` 在文件层继续执行 content-version CAS。
+- add-to-live、enable、update、remove、delete 都拒绝 stale 数据库卡片。DB-only add/update 只保存当前版本而不创建原生节点；这修复了最初 `update_with_store` 无条件 `put_provider` 会把已移除卡片偷偷重新启用的所有权漏洞。Provider key 不允许通过 update 改名。
+- 原生文件写成功而数据库 INSERT/UPDATE/DELETE 失败时，会以写入后的新 content-version 恢复删除或原值；若期间发生外部编辑，CAS 回滚失败会与原数据库错误一起返回，不能覆盖外部内容。故障注入回归分别验证 add、update、delete 的原生回滚。
+- Pi 在代理边界 fail closed：`supports_local_proxy=false`；通用 live writer、Provider adapter、外部 OpenAI API 候选、proxy takeover/hot-switch/live 写入/强制恢复、failover 命令均拒绝或忽略 Pi。MCP flag 与全量 provider live sync 同样排除 Pi；Prompt/Skill 和 session usage 仍留给 Task 8 后续独立所有权批次。
+- 本批按低频门禁约定只集中运行 `cargo test --lib upstream_pi_ -- --nocapture`，结果 19/19；覆盖 App 注册、配置 CAS/备份、Provider 完整入口生命周期、DB-only 编辑不误启用、数据库失败回滚以及 proxy/failover/external API 排除。这里只证明源码与聚焦回归，尚未运行全量 Rust/frontend、Tauri/NSIS、安装或运行态验收。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi Prompt 原生所有权
+
+- Pi Prompt 库与原生文件采用分离所有权：数据库中的 `enabled` 不作为事实源；每次读取按 `AGENTS.md` 内容与稳定顺序中的首个精确匹配条目派生活动态。通用恢复和全量 Prompt 投影明确跳过 Pi，避免数据库 restore 覆盖用户或 Pi 自己维护的原生指令。
+- `AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md` 与 `prompts/*.md` 共用进程锁、1 MiB 限长、严格 UTF-8、原子写和调用方可见的 `sha256:<hex>` revision CAS。固定系统指令拒绝空白内容并要求用删除停用；slash-command 模板允许空内容，但 slug 必须拒绝路径分隔符、控制/空白字符、Windows 保留名和其他不可移植字符。
+- 编辑 active Prompt 时，先从原生内容确认条目仍 active，数据库统一存 `enabled=false`，随后以同一 snapshot revision 更新或删除 `AGENTS.md`；原生写失败会恢复先前数据库条目。编辑 inactive duplicate 不触碰原生文件；删除 active Prompt 被拒绝。显式启用前若原生内容不属于任何已保存 Prompt，会先生成不覆盖同秒既有记录的唯一 backup，再以 CAS 写入目标内容。
+- 首次导入 Pi `AGENTS.md` 时数据库条目保持 disabled，后续活动态仍从文件派生；交互式读取和首次导入都复用限长读取与锁。Tauri 新增固定系统文件和模板的读、替换、删除、列表、重命名/保存命令，应用启动首次导入列表也包含 Pi。
+- TDD 先以缺失 `pi_prompt_files` API 得到编译 RED，再以持久化 `enabled=true` 错判活动态得到行为 RED。批次最终 `cargo test --lib upstream_pi_ -- --nocapture` 为 25/25，原生文件模块边界为 3/3，数据库原生写失败回滚为 1/1；rustfmt 与 diff check 通过。未运行全量 Rust/frontend、Tauri/NSIS、安装或运行态验收；Task 8 仍需继续完成 Skill、session usage/schema/index 和前端。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi Skill 原生目录所有权
+
+- Pi Skill 的活动态由 `<pi-agent>/skills/<directory>` 是否真实存在派生；数据库不新增 Pi enabled 列，`SkillApps.pi` 只作为 API/临时投影视图，toggle 不把它持久化成第二事实源。通用全量 Skill 同步明确跳过 Pi，restore/profile 的旧 desired-state 不能清理或重建 Pi 原生目录。
+- Pi 同名目标只有两种可破坏性管理证据：符号链接解析后精确指向当前 SSOT 源，或完整目录树哈希与当前源一致。完整哈希包含隐藏文件、空目录、symlink 目标和文件类型；任何用户修改、未知同名目录、缺失 SSOT 或操作期间变化都会拒绝覆盖/删除并保留现场内容。
+- 普通安装、本地 ZIP、重复安装、启用、禁用、更新、卸载和存储迁移都接入该所有权边界。新安装在 DB 持久化前检查 Pi 冲突，后续同步失败回滚 DB；更新先记录旧部署证据，替换 SSOT 后再次校验再刷新；卸载对修改后的 Pi 副本返回 `preservedPiPath` 与 `piCleanupIncomplete`，备份源排除被保留目录，防止把用户原生内容复制进 CCSM 备份。
+- SSOT 与任何应用 Skills 根目录相同会在同步/删除前拒绝；迁移目标在移动任何文件前完成别名检查。迁移已受管 Pi copy/symlink 时记录旧部署证据，迁移后只刷新仍与旧证据匹配的目标；外部同名目录保持不动。Pi 原生目录与其他应用路径别名时，卸载也不会经另一应用清理路径误删已保留内容。
+- TDD 首条 RED 证明 Pi 原生目录存在后 API 仍错误返回 disabled；随后同名外部目录、隐藏文件修改、安装持久化顺序、卸载告警、迁移目标别名、迁移刷新和操作间变化均纳入回归。最终 Pi Skill 聚焦 10/10、完整 `services::skill::tests` 54/54、DAO metadata 3/3、`skill_sync` 集成 7/7；Windows 无 symlink 特权的两条既有集成断言按原测试设计跳过 symlink-only 分支。未运行全量 Rust/frontend、Tauri/NSIS 或安装态验收。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi Session 与用量索引
+
+- 官方 `40d747c0` 的 v16→v17 不能照搬到当前 CCSM schema；Pi 去重账本映射为 v21→v22，并同步进入 fresh DDL。`session_usage_dedup` 以 `(data_source, request_id)` 为主键，另建 `(data_source, semantic_id, has_entry_id)` 完整覆盖索引；request、semantic 与 legacy semantic 三类查询采用独立 SQL，避免 `OR` 让 SQLite 放弃完整身份索引。
+- 账本和 `session_log_sync` 都是本机文件扫描状态：WebDAV/SQL 同步继续 skip remote 并 preserve local，不能把另一台设备的 Pi request identity 或绝对路径覆盖进来。明细 rollup/prune 后，账本仍保留 fork/rewrite 去重身份。
+- Pi session browser 只读原生 JSONL，复用 Pi 的绝对 `sessionDir`、`~` 路径或默认目录；相对目录明确返回 `requires_project_context`，不猜启动 cwd。树解析按 parent/leaf 选择活动分支，限制 128 MiB、50 万条和 ID 长度；删除前重新验证 active root、目录布局与 header session ID。
+- Pi usage importer 与 session browser 共用文件发现规则，按捕获的文件大小扫描完整 JSONL 行，接受合法未终结尾行但不越过不完整 JSON。稳定 entry ID、canonical JSON semantic ID 与持久账本共同处理重写、fork 和 rollup 后重扫；reported cost 优先，否则按 fresh input 语义调用现有定价计算器。Provider/model 等不可信标签在 UTF-8 边界限制为 512 bytes，时间戳必须落在 SQLite 可表示范围。
+- TDD schema RED 精确失败为 `no such table: session_usage_dedup`，parser 注册 RED 精确失败为缺少 `session_usage_pi` 模块；GREEN 后集中 `cargo test --lib pi -- --nocapture` 为 602/602，其中 Pi usage 16 条、Pi session browser 12 条，并覆盖既有 Pi Provider/Prompt/Skill 边界。这里只证明源码与聚焦回归；前端类型、Session filter/提示和 Usage dashboard 仍属于下一批，尚未运行全量 Rust/frontend、Tauri/NSIS 或安装态验收。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi 前端、目录、工具生命周期与应用边界
+
+- Pi 已接入 App switcher/visibility、独立 Provider 表单、Prompt 原生资源、Skill、Session、Usage、目录设置和 About 工具卡。Provider duplicate 必须读取 `get_pi_current_state` 的原生 Provider IDs；remove 无论原生命令成功与否都失效 Pi current-state 与 Provider 缓存，不能让 UI 继续信任过期事实。
+- Pi Provider 表单从完整节点派生写回，保留未知字段；请求头和结构化 options 使用显式编辑器。共享 `ModelDropdown` 迁移官方 `7e152d75`/`076c2744` 的可搜索分组选择语义，按 model ID 与 vendor 匹配，选择后关闭；它不是 Pi 私有分叉。
+- Pi 明确不进入 MCP、Codex MultiRouter、Provider Set、本地代理、failover 或 tray takeover。`appConfig`、App 集成缓存/duplicate 回归与 MCP 支持矩阵都锁定此边界；Pi 的 auth、默认 Provider、默认 Model 和默认 Thinking 仍归 Pi 所有，CCSM 前端不冒充可编辑。
+- 工具生命周期把 Pi 固定为 npm 包 `@earendil-works/pi-coding-agent`，安装/升级沿用 npm，latest 查询也走 npm registry；Windows/POSIX 命令和 WSL 配置目录均已接入，不臆造 `pi update`。四个 locale 精确迁移官方 `84e75ad2` 的 15 个变更路径，当前源码引用的 103 个 Pi 文案键无缺失，JSON 严格 UTF-8 无 BOM。
+- 本批 TDD 的 RED 分别证明目录 hook 错误回退 Hermes、设置 UI/SettingsPage 未传 Pi、后端工具 normalization 丢弃 Pi、About 少一张 Pi 卡。最终集中 GREEN 证据为前端 20 文件 186/186、App Pi 边界 2/2、`upstream_pi_` 37/37、Pi session 12/12、Pi usage 16/16、model-fetch headers 3/3、credential redaction 1/1、Pi lifecycle 1/1、typecheck 与 rustfmt。该批只执行一次格式化后的聚焦复验，没有在开发中反复启动完整 9950X 全量套件。
+- Task 9 目前只可把共享模型下拉 `7e152d75`/`076c2744` 与本批有证据的 Pi/结构化编辑器范围标记完成。IME helper 只用于 Pi 请求头，并未覆盖官方 `d9d4a660`/`a98829ba` 的全部目标表单和测试；其他 preset、endpoint、reasoning dialect、表单布局与 usage UI 行继续保持待迁移，不能批量改成 adopted。
+
+## 2026-09-07 v3.20.1-1 官方 late-arrival 审计与 Codex OAuth 并行工具根修
+
+- `git fetch origin --prune --tags` 证明官方 `main` 从冻结点 `741e802f` 前进 9 个线性提交到 `1b34d322`。Matrix 直读 GitHub commits API 得到相同 tip、父链和提交说明；Codex 内置 Web 的 commits 页面仍停在 9 月 6 日，属于页面抓取缓存漂移，因此当前状态以实时 Git 与 GitHub API 为准。审计矩阵已显式扩展为 140 行，后续提交不得静默进入。
+- 九个 late arrivals 中，CCSM 已有更强 Images API 四别名与身份隔离实现，`17be9092` 标为 already-covered；`872ec775` 作为独立协议批次迁移；Claude takeover、未知 vendor modality、GPT-6 Astra/GLM-5.3 Flash/Gemini 3.8 Flash 价格、PPIO Pi preset、Tencent Pi/token-plan catalogue 仍分别待迁移。
+- 新价格双链核验：GPT-6 Astra 官方为 input/cache-read/output/cache-write `10/1/50/12.5`；Gemini 3.8 Flash 介绍价为 input/output `0.75/3.75`，持续到 2026-12-31。GLM-5.3 Flash 与上游 seed 存在时效差异：Z.AI 当前 50% 活动价为 input/output/cache-read `0.075/0.25/0.015`，2026-09-09 24:00 UTC+8 后恢复 list `0.15/0.50/0.03`。在到期策略和 guarded repair 明确前，不得直接照抄上游 list price 造成当前费用高估。
+- Codex OAuth 的 Anthropic→Responses 转换根因有两层：`map_tool_choice_to_responses` 只投影选择模式而丢弃 `disable_parallel_tool_use`，随后必填字段补全把 `parallel_tool_calls` 固定为 `false`。Anthropic 官方语义是 disable=true 时一轮至多一个工具，Responses 字段是正向 allow，因此显式值必须取反；未显式提供时沿用 Anthropic/Codex 默认并行能力。
+- TDD 先修改缺省断言并新增显式 true/false 双向映射测试；两条 RED 都稳定得到 actual=false。最小 GREEN 仅在同一转换边界取反映射显式值，并把 Codex OAuth 缺省改为 true；非 OAuth 路径继续不注入该字段。最终该转换模块 89/89、rustfmt、diff check 和 140 行矩阵状态计数均通过。
+
+## 2026-09-07 v3.20.1-1 late-arrival 模型价格种子
+
+- GPT-6 Astra 与 Gemini 3.8 Flash 只作为 `INSERT OR IGNORE` 基础价格种子迁移，不做 schema bump，也不加入 `repair_current_model_pricing`。因此新数据库和缺行数据库可以计费，再次执行 `ensure_model_pricing_seeded()` 不会覆盖用户自定义价格。
+- GPT-6 Astra 采用 OpenAI 官方标准短上下文 input/output/cache-read/cache-write `10/50/1/12.5`；超长上下文与 Fast/Batch/Flex 倍率不折进基础种子。Gemini 3.8 Flash 采用 Google 官方截至 2026-12-31 的介绍价 `0.75/3.75/0.075/0`；2027-01-01 的 `1.50/7.50/0.15` 切换必须以后续 guarded repair 显式处理，不能预先高估当前费用。
+- TDD 一次性加入“首次 seed 存在且值正确”和“重复 seed 保留用户四项自定义价格”两条回归；RED 均为 `QueryReturnedNoRows`，最小 GREEN 后 2/2。GLM-5.3 Flash 仍保持未落库，等待 2026-09-09 活动价到期策略，不能把上游 list price 与本批混合采用。
+
+## 2026-09-07 v3.20.1-1 Claude 5 takeover 与 adaptive thinking
+
+- Claude takeover 的 client-facing 稳定角色从 Sonnet 4.6/Opus 4.8 更新为 `claude-sonnet-5`/`claude-opus-5`，但实际路由模型与显示名仍从当前 Provider 配置派生；`[1M]` 只按上游模型的显式 marker 传递。热切换、Codex OAuth 和 Copilot 都复用同一字段构造器，不能各自维护别名。
+- 官方说明 Sonnet 5 与 Opus 5 都支持 adaptive thinking 且缺省开启。上游 `38cfafdc` 只补 optimizer classifier，但 CCSM 还有 Responses→Anthropic 转换链；因此根修同时把 Opus 5 纳入 `uses_adaptive_thinking` 与 `adaptive_thinking_is_default`，避免未显式 reasoning effort 时错误省略 thinking。Opus 5 仍不属于 cannot-disable 集合，因为官方允许在 high 及以下 effort 关闭。
+- TDD 集中 RED 分别得到旧 Sonnet 4.6 alias、Opus 5 classifier false、转换后 thinking null；最小 GREEN 后三条均通过。这个迁移不改 Haiku/Fable 降级、Provider 实际模型映射、认证占位符或运行服务。
+
+## 2026-09-07 v3.20.1-1 vendor catalog 未知模型 modalities
+
+- 官方 vendor catalog 只在 host 与 Native Responses profile 同时匹配时启用。精确命中的模型继续逐字继承 vendor 声明；未命中模型会克隆旗舰 harness，但不能继承旗舰的 modalities，否则未来 vision 型号会被错误标为 text-only。
+- CCSM 的能力来源比上游 `b5f9fd0d` 更完整：路由/模型目录可显式声明 `textOnly`、`supportsImage` 或 `inputModalities`，另有精确 text-only 注册表。因此未命中分支先尊重 `spec.text_only` 与显式 modalities，再调用共享 `codex_catalog_input_modalities`；只有证据仍 unknown 时才 fail-open 为 `text,image`。匹配的官方条目和后置显式 override 不变。
+- 首次测试因缺少活动 `model_provider` 而误走中性模板并通过；补齐真实配置后 RED 精确得到 unknown 模型继承 `text`，GREEN 后同一表驱动回归同时证明 unknown fail-open、显式 text-only 优先、matched vendor text-only 保持。此批不扩大到 vendor harness、reasoning、tool profile 或 image detail 字段。
+
+## 2026-09-07 v3.20.1-1 PPIO 跨 App 预设
+
+- PPIO 不是 Pi 单点增量：当前分支原先连官方 `3711e1a0` 的基础六端预设和品牌资源也未迁移。本批把基础提交与 late-arrival `5f3ea4d6` 作为一个不可拆分的跨 App 契约，覆盖 Claude Code、Claude Desktop、Codex、OpenCode、OpenClaw、Hermes、Pi 以及内联/独立 SVG 与图标 metadata。
+- Anthropic 客户端使用 `https://api.ppio.com/anthropic`，OpenAI-compatible 客户端使用带版本根 `https://api.ppio.com/openai/v1`；Claude Code 的模型发现必须显式固定到 `https://api.ppio.com/openai/v1/models`，不能从 Anthropic 根派生会返回 404 的候选。品牌字段统一采用当前合作入口 `https://ppio.com/activity/ccswitch`、`isPartner: true` 与 `partnerPromotionKey: "ppio"`。
+- 七端统一暴露 `deepseek/deepseek-v4-flash-0731`；Pi 定义通过 `thinkingProfile: "deepseekV4"` 在导出时物化为 `thinkingLevelMap`，并合并 `DEEPSEEK_THINKING_COMPAT`。测试必须断言导出的 level map 和 compat，而不是私有解析提示字段。
+- TDD 的一次 RED 为 13/13 全部因 PPIO 缺失而失败；实现后的首次 GREEN 仅剩测试误断言私有 `thinkingProfile`，纠正为导出契约后 13/13 通过。本批不安装、不重启，也不触碰 `127.0.0.1:15721`。
+
+## 2026-09-07 v3.20.1-1 Tencent Token Plan 与 TokenHub 目录迁移
+
+- Tencent 迁移按一个目录事务处理：六种 Token Plan 产品覆盖 Claude Code、Claude Desktop、Codex、OpenCode、OpenClaw、Hermes 和 Pi；Pi 另有国内/国际 TokenHub 两个按量产品。国内个人端点为 `/plan/v3` 与 `/plan/anthropic`，国内企业使用 `tokenhub.tencentmaas.com`，国际产品使用 `tokenhub-intl.tencentcloudmaas.com`；TokenHub 国内/国际分别使用对应 `/v1` 根，不能混用产品线或地域 Key。
+- 官方公告优先于仍有残留行的产品文档：`deepseek-v3.2`、`minimax-m2.5`、`kimi-k2.5`、`hy3-preview` 已下线，所有新预设均不 seed；`deepseek-v4-flash` 当前仍保留，但官方已公告将在 2026-09-27 下线，后续冻结刷新必须重新审计并移除，不能把本批目录当永久静态事实。
+- Pi 的 `thinkingLevelMap` 使用原生键 `off`，不是 Codex 的 `none`。Pi 官方文档说明缺省键表示沿用 provider 默认映射，`null` 才表示该档不可用；官方 `openai-completions` 源码进一步证明 `thinkingFormat: "deepseek"` 在 off 未被标为 null 时发送 `thinking: { type: "disabled" }`。因此 Tencent DeepSeek 的 off 应保持缺省，Kimi K2.7 Code/HighSpeed 则以 `off: null` 隐藏无法兑现的关闭选项；HighSpeed 同时保留 image 输入能力。
+- 初次 RED 为 16 项中 15 项因预设缺失失败；实现后首次 GREEN 只剩测试错误使用不存在的 `none` 键。经 Codex Web 与固定 Matrix 分别直读 Pi 官方文档和源码后，修正测试为真实导出契约。类型门禁随后揭示上游 `reasoningLevels` 不能直接进入 CCSM schema-v2 目录；`modelCatalog` 现在只把它作为构建期简写，导出前转换为 `CodexModelReasoningCapability`，其中 `none` 转为 `disableAllowed`、其余档位转为 `supportedEfforts`，不泄漏上游私有字段。新增能力投影断言后 Tencent 聚焦回归 17/17、TypeScript 通过。Hermes/Pi 的迁移生成器曾因假设 `models` 必为多行数组而在 Lite 单行数组上得到 `-1` 结束锚点并截断对象；恢复时改用字符串/注释感知的括号平衡扫描，从干净上游完整对象重建整个 Tencent 区域，而非逐行补括号。
+- 独立提交审查发现两项不能带入主线的迁移差异：OpenClaw 的产品专属能力被平台通用值覆盖，且六个 Codex 预设缺少稳定 `presetKey`。修复按原 `b45b2bd1` OpenClaw 产品对象逐型号恢复 app-specific reasoning/context/maxTokens，只对新增型号保留当前 roster 并按同族接入契约设置 reasoning；Codex 六项获得唯一稳定键，ProviderForm 回归证明 Enterprise Pro 保存为 `codexPresetId` 后重开仍恢复 maintained catalog/reasoning。扩展后的跨 App endpoint/API mode、退役别名、OpenClaw 能力和保存重开测试合计 33/33；测试套件仍有既有的 React `act(...)` warning，但零失败。
+
+## 2026-09-08 v3.20.1-1 最终全量测试门禁
+
+- 版本准备提交为 `a908c389`，四个版本源统一到 `3.20.1-1`。首次前端全量在 1537 条中失败 1 条，根因不是共享对象运行时污染，而是 `1a905f16` 在迁移 Tencent OpenCode 目录时误替换相邻 PPIO 的 `settingsConfig.models`。`110da36f` 恢复 PPIO 自有模型对象后，PPIO/Tencent 聚焦回归 31/31，最终前端全量为 185/185 files、1537/1537 tests。
+- 首次并行 Rust library 全量为 4045 passed、2 failed、6 ignored。CAS 失败单独运行通过，证明进程级 `CC_SWITCH_TEST_HOME`/settings 在并行测试间互扰；这不是产品 CAS 缺陷，最终候选改用单测试线程但保留 Cargo 并行编译。另一项 GrokBuild 用量测试稳定失败，根因是 `b30b470d` 已把 Grok 4.5 cache-read 从 0.50 改成 0.30，历史断言仍期待旧金额；`6b22a8d9` 将期望更新为 cache `0.000075`、total `0.001575`。
+- 最终 Rust 使用隔离目录 `C:\Users\sunda\AppData\Local\Temp\ccsm-v3.20.1-1-localappdata-110da36f` 和 `--test-threads=1`。Library 为 4047 passed、0 failed、6 ignored；12 个 integration binaries 共 125/125 通过。前端全量不因 Rust-only 断言修正重复执行；剩余候选门禁只运行静态检查、renderer/sidecar/Tauri release 构建与产物校验。
+- 静态门禁中 TypeScript、Prettier、`cargo check --all-targets`、rustfmt、diff 和 renderer production build 均通过。探索性扩大到 `cargo clippy --all-targets -- -D warnings` 时出现 30 条 Rust 1.95 lint，其中 2 条属于 production、28 条属于历史测试代码；仓库 CI 实际只运行 default-target Clippy。Production 两条分别改用 `contains(&id)` 与 `then_some`，Provider 契约聚焦测试 1/1 及 CI 原样严格 Clippy 随后通过。28 条 test-only 风格项未用 `allow` 掩盖，也未作为跨模块清洁重构混入发布候选。
+- `pnpm release:local` 从 clean commit `2f6dbb87df0708c2e21defa7774cc5b326a8a932` 成功完成 sidecar、主程序 release、NSIS、签名与原子导出。Sidecar 为 2,277,888 bytes / SHA-256 `839EAF944EC4E491353195C237F3F0E51C05AFD1ACDD93F74D0D9190FC573A0B`；NSIS 为 13,615,350 bytes / `6C50102CBF754811AC8A59D74F7F0B03550B66AA1B0C4ACFAE0DCBB3D201A512`；portable ZIP 为 16,095,636 bytes / `26FEC584101BF1A20663E092AAE246027EF8A1B13FA2801798604327854184EB`；raw EXE 为 43,657,728 bytes / `2704A043DDF80E916615E6B25F479200C6AD614CE5623248D1A05E0DA0EBF99B`，PE file/product version 均为 `3.20.1-1`。导出清单 16/16 重算匹配，metadata commit/version 正确，428 字节签名与 `latest.json` 完全一致；本机无独立 minisign verifier 且 Tauri CLI 2.10.1 不提供 verify 子命令，密码学公钥验签留给 GitHub updater workflow，不把本地一致性检查夸大成独立验签。

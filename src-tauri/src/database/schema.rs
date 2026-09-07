@@ -301,13 +301,38 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         // 18. Session Log Sync 表 (会话日志同步状态)
+        //
+        // last_byte_offset / last_tail_fingerprint 只由 Claude 增量扫描使用；
+        // NULL 保留旧行号游标和其他会话解析器的既有语义。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS session_log_sync (
                 file_path TEXT PRIMARY KEY,
                 last_modified INTEGER NOT NULL,
                 last_line_offset INTEGER NOT NULL DEFAULT 0,
-                last_synced_at INTEGER NOT NULL
+                last_synced_at INTEGER NOT NULL,
+                last_byte_offset INTEGER,
+                last_tail_fingerprint INTEGER
             )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // Session detail rows are pruned after rollup, so request identities
+        // needed for Pi fork/rewrite deduplication live in a compact ledger.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_usage_dedup (
+                data_source TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                semantic_id TEXT NOT NULL,
+                has_entry_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (data_source, request_id)
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_usage_dedup_semantic
+             ON session_usage_dedup(data_source, semantic_id, has_entry_id)",
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -548,6 +573,16 @@ impl Database {
                         );
                         Self::migrate_v19_to_v20(conn)?;
                         Self::set_user_version(conn, 20)?;
+                    }
+                    20 => {
+                        log::info!("迁移数据库从 v20 到 v21（Claude 会话日志字节游标）");
+                        Self::migrate_v20_to_v21(conn)?;
+                        Self::set_user_version(conn, 21)?;
+                    }
+                    21 => {
+                        log::info!("迁移数据库从 v21 到 v22（添加 Pi 会话用量持久去重账本）");
+                        Self::migrate_v21_to_v22(conn)?;
+                        Self::set_user_version(conn, 22)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1291,6 +1326,41 @@ impl Database {
         Ok(())
     }
 
+    /// v20 -> v21: 为 Claude 会话日志增加可验证的字节游标。
+    ///
+    /// 存量行保持 NULL，首次扫描会按旧行号游标转换，避免已被 rollup/prune
+    /// 的历史明细因全量重放而重复计费。异常夹具若缺表，则由启动时已执行的
+    /// `create_tables_on_conn` 使用当前 DDL 创建；迁移本身不伪造残缺核心表。
+    fn migrate_v20_to_v21(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "session_log_sync")? {
+            Self::add_column_if_missing(conn, "session_log_sync", "last_byte_offset", "INTEGER")?;
+            Self::add_column_if_missing(
+                conn,
+                "session_log_sync",
+                "last_tail_fingerprint",
+                "INTEGER",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// v21 -> v22: preserve Pi request identities after detail rollup.
+    fn migrate_v21_to_v22(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_usage_dedup (
+                data_source TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                semantic_id TEXT NOT NULL,
+                has_entry_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (data_source, request_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_session_usage_dedup_semantic
+             ON session_usage_dedup(data_source, semantic_id, has_entry_id);",
+        )
+        .map_err(|error| AppError::Database(format!("创建 Pi 会话用量去重账本失败: {error}")))?;
+        Ok(())
+    }
+
     /// v8 → v9: 全面补充模型定价（清空 + 重新 seed）
     fn migrate_v8_to_v9(conn: &Connection) -> Result<(), AppError> {
         conn.execute(
@@ -1734,6 +1804,24 @@ impl Database {
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
     fn seed_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_data = [
+            // Fable/Mythos 5.1 use a 0.025x cache-read multiplier rather than
+            // the usual 0.1x multiplier.
+            (
+                "claude-fable-5-1",
+                "Claude Fable 5.1",
+                "10",
+                "50",
+                "0.25",
+                "12.50",
+            ),
+            (
+                "claude-mythos-5-1",
+                "Claude Mythos 5.1",
+                "10",
+                "50",
+                "0.25",
+                "12.50",
+            ),
             // Claude Fable 5（Opus 之上的新档）
             (
                 "claude-fable-5",
@@ -1762,14 +1850,14 @@ impl Database {
                 "0.50",
                 "6.25",
             ),
-            // Claude Sonnet 5（list 价，与 Sonnet 4.6 一致；促销 $2/$10 至 2026-08-31 不入表）
+            // Claude Sonnet 5 的 $2/$10 介绍价已转为正式价。
             (
                 "claude-sonnet-5",
                 "Claude Sonnet 5",
-                "3",
-                "15",
-                "0.30",
-                "3.75",
+                "2",
+                "10",
+                "0.20",
+                "2.50",
             ),
             // Claude 4.7 系列
             (
@@ -1880,6 +1968,9 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
+            // GPT-6 Astra 标准短上下文价（2026-09-07）；超长上下文与
+            // Fast/Batch/Flex 倍率由计费模式决定，不折进基础种子。
+            ("gpt-6-astra", "GPT-6 Astra", "10", "50", "1", "12.5"),
             // GPT-5.6 系列：OpenAI API 标准短上下文价（2026-07-13）。
             // cache creation 是官方 pricing 页面单列的 cache writes，不与普通
             // input 混算，避免带 prompt cache 的请求少算费用。
@@ -2096,6 +2187,24 @@ impl Database {
             ("gpt-4.1", "GPT-4.1", "2", "8", "0.50", "0"),
             ("gpt-4.1-mini", "GPT-4.1 Mini", "0.40", "1.60", "0.10", "0"),
             ("gpt-4.1-nano", "GPT-4.1 Nano", "0.10", "0.40", "0.025", "0"),
+            // Gemini 3.8/3.7 Flash 介绍价有效至 2026-12-31；届时需要新的
+            // guarded repair 更新为 1.50/7.50/0.15。
+            (
+                "gemini-3.8-flash",
+                "Gemini 3.8 Flash",
+                "0.75",
+                "3.75",
+                "0.075",
+                "0",
+            ),
+            (
+                "gemini-3.7-flash",
+                "Gemini 3.7 Flash",
+                "0.75",
+                "3.75",
+                "0.075",
+                "0",
+            ),
             // Gemini 3.6 系列
             (
                 "gemini-3.6-flash",
@@ -2311,38 +2420,48 @@ impl Database {
                 "0",
             ),
             ("deepseek-v3", "DeepSeek V3", "0.28", "1.11", "0.028", "0"),
-            // deepseek-chat / deepseek-reasoner 自 2026-07 起为 V4 Flash 的 legacy 别名（同价）
+            // DeepSeek V4 has peak/off-peak pricing but the pricing table has
+            // one row per model. Store the vendor's base peak list price; the
+            // off-peak tier is half of these values.
+            // deepseek-chat / deepseek-reasoner are V4 Flash legacy aliases.
             (
                 "deepseek-chat",
                 "DeepSeek Chat",
-                "0.14",
-                "0.28",
-                "0.0028",
+                "0.44",
+                "1.32",
+                "0.014",
                 "0",
             ),
             (
                 "deepseek-reasoner",
                 "DeepSeek Reasoner",
-                "0.14",
-                "0.28",
-                "0.0028",
+                "0.44",
+                "1.32",
+                "0.014",
                 "0",
             ),
-            // DeepSeek V4 系列（官方 CNY 按 1 USD ≈ 7.14 折算）
             (
                 "deepseek-v4-flash",
                 "DeepSeek V4 Flash",
-                "0.14",
-                "0.28",
-                "0.0028",
+                "0.44",
+                "1.32",
+                "0.014",
+                "0",
+            ),
+            (
+                "deepseek-v4-flash-0731",
+                "DeepSeek V4 Flash",
+                "0.44",
+                "1.32",
+                "0.014",
                 "0",
             ),
             (
                 "deepseek-v4-pro",
                 "DeepSeek V4 Pro",
-                "0.435",
-                "0.87",
-                "0.003625",
+                "1.32",
+                "3.96",
+                "0.044",
                 "0",
             ),
             // Kimi (月之暗面)
@@ -2431,6 +2550,7 @@ impl Database {
             ("glm-5", "GLM-5", "1", "3.2", "0.2", "0"),
             ("glm-5.1", "GLM-5.1", "1.4", "4.4", "0.26", "0"),
             ("glm-5.2", "GLM-5.2", "1.4", "4.4", "0.26", "0"),
+            ("glm-5.3", "GLM-5.3", "1.4", "4.4", "0.26", "0"),
             ("glm-5-turbo", "GLM-5-Turbo", "1.2", "4", "0.24", "0"),
             ("glm-5v-turbo", "GLM-5V-Turbo", "1.2", "4", "0.24", "0"),
             // MiMo (小米)
@@ -2531,10 +2651,14 @@ impl Database {
             ("qwq-32b", "QwQ 32B", "0.20", "0.60", "0", "0"),
             ("qwen3-32b", "Qwen3 32B", "0.16", "0.64", "0", "0"),
             // Grok 系列 (xAI)
-            ("grok-4.5", "Grok 4.5", "2", "6", "0.50", "0"),
+            // Both rows use their below-200K base tier. Long-context requests
+            // double all three rates, which the current single-tier table
+            // cannot represent.
+            ("grok-4.6", "Grok 4.6", "2", "6", "0.50", "0"),
+            ("grok-4.5", "Grok 4.5", "2", "6", "0.30", "0"),
             // Grok CLI 官方 OAuth 态 modelUsage 上报的内部别名。定价由
             // costUsdTicks（1 tick = 1e-10 USD）双轮实测反推：input/output 与
-            // grok-4.5 同为 2/6，cache read 实际按 0.30 计（非 API 挂牌的 0.50）
+            // grok-4.5 同为 2/6，cache read 同为 0.30。
             ("grok-4.5-build", "Grok 4.5 Build", "2", "6", "0.30", "0"),
             ("grok-4.3", "Grok 4.3", "1.25", "2.50", "0.20", "0"),
             (
@@ -2704,6 +2828,25 @@ impl Database {
 
     fn repair_current_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_fixes = [
+            // The introductory Sonnet 5 rate became the standard rate. Only
+            // rewrite the exact previously seeded row; user prices remain.
+            (
+                "claude-sonnet-5",
+                "Claude Sonnet 5",
+                "2",
+                "10",
+                "0.20",
+                "2.50",
+                "3",
+                "15",
+                "0.30",
+                "3.75",
+            ),
+            // Correct the exact old Grok 4.5 cache-read seed. Grok 4.6 keeps
+            // the 0.50 rate, so the model IDs must not share a repair.
+            (
+                "grok-4.5", "Grok 4.5", "2", "6", "0.30", "0", "2", "6", "0.50", "0",
+            ),
             // 2026-07-30 OpenAI GPT-5.6 降价：luna -80%、terra -20%（sol 不变）。
             // 每档两条守卫：主守卫匹配 ≥v3.19（已跑过 07-12 cache_write 修正），
             // 0 态守卫匹配 <v3.19 直升用户（cache_write 仍为旧 seed 的 0）
@@ -3093,6 +3236,70 @@ impl Database {
                 "0.02",
                 "0",
             ),
+            // DeepSeek's older corrections above intentionally run first so
+            // every historical shape converges on the former V4 price. These
+            // final guards then advance that known value to the current peak
+            // list price without overwriting customized rows.
+            (
+                "deepseek-chat",
+                "DeepSeek Chat",
+                "0.44",
+                "1.32",
+                "0.014",
+                "0",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+            ),
+            (
+                "deepseek-reasoner",
+                "DeepSeek Reasoner",
+                "0.44",
+                "1.32",
+                "0.014",
+                "0",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+            ),
+            (
+                "deepseek-v4-flash",
+                "DeepSeek V4 Flash",
+                "0.44",
+                "1.32",
+                "0.014",
+                "0",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+            ),
+            (
+                "deepseek-v4-flash-0731",
+                "DeepSeek V4 Flash",
+                "0.44",
+                "1.32",
+                "0.014",
+                "0",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+            ),
+            (
+                "deepseek-v4-pro",
+                "DeepSeek V4 Pro",
+                "1.32",
+                "3.96",
+                "0.044",
+                "0",
+                "0.435",
+                "0.87",
+                "0.003625",
+                "0",
+            ),
         ];
 
         for (
@@ -3145,7 +3352,7 @@ impl Database {
         Self::ensure_model_pricing_seeded_on_conn(&conn)
     }
 
-    fn ensure_model_pricing_seeded_on_conn(conn: &Connection) -> Result<(), AppError> {
+    pub(crate) fn ensure_model_pricing_seeded_on_conn(conn: &Connection) -> Result<(), AppError> {
         // 每次启动都执行 INSERT OR IGNORE，增量追加新模型；仅修复仍等于旧内置值的定价。
         Self::seed_model_pricing(conn)?;
         Self::repair_current_model_pricing(conn)
@@ -3827,6 +4034,102 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
         assert_eq!(counts, (0, 1, 0, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_session_cursor_fresh_database_has_nullable_byte_cursor_columns(
+    ) -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+
+        Database::create_tables_on_conn(&conn)?;
+
+        assert!(Database::has_column(
+            &conn,
+            "session_log_sync",
+            "last_byte_offset"
+        )?);
+        assert!(Database::has_column(
+            &conn,
+            "session_log_sync",
+            "last_tail_fingerprint"
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_session_cursor_v20_upgrade_preserves_legacy_rows_and_is_idempotent(
+    ) -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE session_log_sync (
+                file_path TEXT PRIMARY KEY,
+                last_modified INTEGER NOT NULL,
+                last_line_offset INTEGER NOT NULL DEFAULT 0,
+                last_synced_at INTEGER NOT NULL
+             );
+             INSERT INTO session_log_sync VALUES ('C:/legacy/session.jsonl', 5, 3, 1);",
+        )?;
+        Database::set_user_version(&conn, 20)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        let cursor: (i64, Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT last_line_offset, last_byte_offset, last_tail_fingerprint
+             FROM session_log_sync WHERE file_path = 'C:/legacy/session.jsonl'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(cursor, (3, None, None));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_pi_session_usage_v21_migration_creates_indexed_dedup_ledger() -> Result<(), AppError>
+    {
+        let conn = Connection::open_in_memory()?;
+        Database::set_user_version(&conn, 21)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        conn.execute(
+            "INSERT INTO session_usage_dedup
+             (data_source, request_id, semantic_id, has_entry_id)
+             VALUES ('pi_session', 'request', 'semantic', 1)",
+            [],
+        )?;
+
+        for (sql, expected) in [
+            (
+                "SELECT EXISTS(SELECT 1 FROM session_usage_dedup
+                 WHERE data_source = ?1 AND request_id = ?2)",
+                "(data_source=? AND request_id=?)",
+            ),
+            (
+                "SELECT EXISTS(SELECT 1 FROM session_usage_dedup
+                 WHERE data_source = ?1 AND semantic_id = ?2)",
+                "(data_source=? AND semantic_id=?)",
+            ),
+            (
+                "SELECT EXISTS(SELECT 1 FROM session_usage_dedup
+                 WHERE data_source = ?1 AND semantic_id = ?2 AND has_entry_id = 0)",
+                "(data_source=? AND semantic_id=? AND has_entry_id=?)",
+            ),
+        ] {
+            let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+            let plan = statement
+                .query_map(params!["pi_session", "identity"], |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert!(
+                plan.iter().any(|step| step.contains(expected)),
+                "lookup does not constrain the complete identity {expected}: {plan:?}"
+            );
+        }
         Ok(())
     }
 

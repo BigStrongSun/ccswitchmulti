@@ -965,14 +965,10 @@ impl ChatToResponsesState {
             "status": status,
             "model": self.model,
             "output": output,
-            "usage": self.latest_usage.clone().unwrap_or_else(|| {
-                json!({
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                    "output_tokens_details": { "reasoning_tokens": 0 }
-                })
-            })
+            "usage": self
+                .latest_usage
+                .clone()
+                .unwrap_or_else(|| chat_usage_to_responses_usage(None))
         })
     }
 
@@ -2312,5 +2308,26 @@ mod tests {
         assert!(output.contains("quota exceeded"));
         assert!(output.contains("rate_limit_exceeded"));
         assert!(!output.contains("event: response.completed"));
+    }
+
+    #[tokio::test]
+    async fn upstream_usage_contract_stream_defaults_required_cache_details() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_usage\",\"model\":\"grok-4\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+        let events = parse_sse_events(&output);
+
+        for event_type in ["response.created", "response.completed"] {
+            let event = events
+                .iter()
+                .find(|event| event["type"] == event_type)
+                .expect("response lifecycle event");
+            assert_eq!(
+                event["response"]["usage"]["input_tokens_details"],
+                json!({"cached_tokens": 0})
+            );
+        }
     }
 }

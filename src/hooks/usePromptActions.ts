@@ -14,6 +14,7 @@ export function usePromptActions(appId: AppId) {
     null,
   );
   const [currentFileAppId, setCurrentFileAppId] = useState<AppId | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
   const reloadGenerationRef = useRef(0);
   const currentAppIdRef = useRef(appId);
   const promptsAppIdRef = useRef<AppId | null>(null);
@@ -154,6 +155,7 @@ export function usePromptActions(appId: AppId) {
 
   const toggleEnabled = useCallback(
     async (id: string, enabled: boolean) => {
+      setTogglingId(id);
       // Optimistic update
       const previousPrompts = visiblePrompts;
       const mutationGeneration = reloadGenerationRef.current;
@@ -206,6 +208,8 @@ export function usePromptActions(appId: AppId) {
           enabled ? t("prompts.enableFailed") : t("prompts.disableFailed"),
         );
         throw error;
+      } finally {
+        setTogglingId(null);
       }
     },
     [appId, reload, t, updatePromptsForApp, visiblePrompts],
@@ -229,6 +233,7 @@ export function usePromptActions(appId: AppId) {
     prompts: visiblePrompts,
     loading,
     currentFileContent: visibleCurrentFileContent,
+    togglingId,
     reload,
     savePrompt,
     deletePrompt,

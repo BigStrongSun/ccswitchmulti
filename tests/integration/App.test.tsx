@@ -49,6 +49,7 @@ vi.mock("@/components/providers/ProviderList", () => ({
     onOpenWebsite,
     onCreate,
     onStartCodexMultiRouterWizard,
+    onRemoveFromConfig,
   }: any) => (
     <div>
       <div data-testid="provider-list">{JSON.stringify(providers)}</div>
@@ -67,6 +68,13 @@ vi.mock("@/components/providers/ProviderList", () => ({
         open-website
       </button>
       <button onClick={() => onCreate?.()}>create</button>
+      {onRemoveFromConfig ? (
+        <button
+          onClick={() => onRemoveFromConfig(providers[currentProviderId])}
+        >
+          remove-from-config
+        </button>
+      ) : null}
       {onStartCodexMultiRouterWizard ? (
         <button onClick={() => onStartCodexMultiRouterWizard()}>
           open-multirouter-entry
@@ -243,6 +251,7 @@ vi.mock("@/components/AppSwitcher", () => ({
       <button onClick={() => onSwitch("claude")}>switch-claude</button>
       <button onClick={() => onSwitch("codex")}>switch-codex</button>
       <button onClick={() => onSwitch("openclaw")}>switch-openclaw</button>
+      <button onClick={() => onSwitch("pi")}>switch-pi</button>
     </div>
   ),
 }));
@@ -292,13 +301,16 @@ vi.mock("@/components/mcp/McpPanel", () => ({
 
 const renderApp = (AppComponent: ComponentType) => {
   const client = new QueryClient();
-  return render(
-    <QueryClientProvider client={client}>
-      <Suspense fallback={<div data-testid="loading">loading</div>}>
-        <AppComponent />
-      </Suspense>
-    </QueryClientProvider>,
-  );
+  return {
+    client,
+    ...render(
+      <QueryClientProvider client={client}>
+        <Suspense fallback={<div data-testid="loading">loading</div>}>
+          <AppComponent />
+        </Suspense>
+      </QueryClientProvider>,
+    ),
+  };
 };
 
 describe("App integration with MSW", () => {
@@ -623,6 +635,89 @@ describe("App integration with MSW", () => {
       expect.stringContaining("Provider key is required for openclaw"),
     );
   });
+
+  it("duplicates Pi providers with a key that avoids authoritative native IDs", async () => {
+    setProviders("pi", {
+      deepseek: {
+        id: "deepseek",
+        name: "DeepSeek",
+        settingsConfig: {
+          baseUrl: "https://api.deepseek.com/v1",
+          apiKey: "test-key",
+          api: "openai-completions",
+          models: [],
+        },
+        category: "custom",
+        sortIndex: 0,
+        createdAt: Date.now(),
+      },
+    });
+    setCurrentProviderId("pi", "deepseek");
+    server.use(
+      http.post("http://tauri.local/get_pi_current_state", () =>
+        HttpResponse.json({
+          enabledProviderIds: ["deepseek-copy"],
+          defaultProviderId: null,
+        }),
+      ),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+    fireEvent.click(screen.getByText("switch-pi"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "deepseek",
+      ),
+    );
+
+    fireEvent.click(screen.getByText("duplicate"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "deepseek-copy-2",
+      );
+    });
+  }, 30_000);
+
+  it("invalidates Pi provider state even when native removal fails", async () => {
+    setProviders("pi", {
+      deepseek: {
+        id: "deepseek",
+        name: "DeepSeek",
+        settingsConfig: {},
+        category: "custom",
+        sortIndex: 0,
+        createdAt: Date.now(),
+      },
+    });
+    setCurrentProviderId("pi", "deepseek");
+    server.use(
+      http.post("http://tauri.local/remove_provider_from_live_config", () =>
+        HttpResponse.json("write conflict", { status: 500 }),
+      ),
+    );
+
+    const { default: App } = await import("@/App");
+    const { client } = renderApp(App);
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    fireEvent.click(screen.getByText("switch-pi"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "deepseek",
+      ),
+    );
+
+    fireEvent.click(screen.getByText("remove-from-config"));
+    fireEvent.click(await screen.findByText("confirm-delete"));
+
+    await waitFor(() =>
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: ["pi", "currentState"],
+      }),
+    );
+    expect(toastErrorMock).toHaveBeenCalled();
+  }, 30_000);
 
   it("opens Codex MultiRouter provider edits in the router workspace", async () => {
     setProviders("codex", {

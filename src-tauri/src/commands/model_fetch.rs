@@ -5,7 +5,7 @@
 use crate::services::model_fetch::{self, FetchedModel};
 use reqwest::header::{HeaderValue, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -96,6 +96,8 @@ pub struct FetchModelsForConfigRequest {
     pub is_full_url: Option<bool>,
     pub models_url: Option<String>,
     pub custom_user_agent: Option<String>,
+    pub api_format: Option<String>,
+    pub request_headers: Option<BTreeMap<String, String>>,
     pub volcengine_model_list_action: Option<String>,
     pub volcengine_access_key_id: Option<String>,
     pub volcengine_secret_access_key: Option<String>,
@@ -130,6 +132,8 @@ pub async fn fetch_models_for_config(
         is_full_url: request.is_full_url.unwrap_or(false),
         models_url_override: request.models_url.as_deref(),
         user_agent,
+        api_format: request.api_format.as_deref(),
+        request_headers: request.request_headers.as_ref(),
         volcengine: model_fetch::VolcengineModelListRequest {
             action: request.volcengine_model_list_action.as_deref(),
             access_key_id: request.volcengine_access_key_id.as_deref(),

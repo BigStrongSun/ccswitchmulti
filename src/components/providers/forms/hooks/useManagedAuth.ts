@@ -9,6 +9,10 @@ import type {
 } from "@/lib/api";
 
 type PollingState = "idle" | "polling" | "success" | "error";
+type LoginRequest = {
+  flowGeneration: number;
+  targetAccountId?: string;
+};
 
 export function useManagedAuth(
   authProvider: ManagedAuthProvider,
@@ -29,6 +33,8 @@ export function useManagedAuth(
   const flowGenerationRef = useRef(0);
   const flowActiveRef = useRef(false);
   const expirationCheckRef = useRef(false);
+  const activeDeviceCodeRef = useRef<string | null>(null);
+  const retryTargetAccountIdRef = useRef<string | undefined>(undefined);
 
   const {
     data: authStatus,
@@ -55,19 +61,38 @@ export function useManagedAuth(
     }
   }, []);
 
+  const cancelBackendFlow = useCallback(
+    async (activeDeviceCode: string | null) => {
+      if (authProvider !== "codex_oauth" || !activeDeviceCode) return;
+      try {
+        await authApi.authCancelLogin(authProvider, activeDeviceCode);
+      } catch (cancelError) {
+        console.debug(
+          "[ManagedAuth] Failed to cancel backend device flow:",
+          cancelError,
+        );
+      }
+    },
+    [authProvider],
+  );
+
   useEffect(() => {
     return () => {
       flowGenerationRef.current += 1;
       flowActiveRef.current = false;
+      const activeDeviceCode = activeDeviceCodeRef.current;
+      activeDeviceCodeRef.current = null;
       stopPolling();
+      void cancelBackendFlow(activeDeviceCode);
     };
-  }, [stopPolling]);
+  }, [cancelBackendFlow, stopPolling]);
 
   const finishFlow = useCallback(
     (flowGeneration: number) => {
       if (flowGeneration !== flowGenerationRef.current) return false;
       stopPolling();
       flowActiveRef.current = false;
+      activeDeviceCodeRef.current = null;
       expirationCheckRef.current = false;
       flowGenerationRef.current += 1;
       return true;
@@ -115,12 +140,20 @@ export function useManagedAuth(
   );
 
   const startLoginMutation = useMutation({
-    mutationFn: async (flowGeneration: number) => ({
+    mutationFn: async ({ flowGeneration, targetAccountId }: LoginRequest) => ({
       flowGeneration,
-      response: await authApi.authStartLogin(authProvider, githubDomain),
+      response: await authApi.authStartLogin(
+        authProvider,
+        githubDomain,
+        targetAccountId,
+      ),
     }),
     onSuccess: async ({ flowGeneration, response }) => {
-      if (flowGeneration !== flowGenerationRef.current) return;
+      if (flowGeneration !== flowGenerationRef.current) {
+        void cancelBackendFlow(response.device_code);
+        return;
+      }
+      activeDeviceCodeRef.current = response.device_code;
       setDeviceCode(response);
       setPollingState("polling");
       setError(null);
@@ -157,6 +190,7 @@ export function useManagedAuth(
           );
           if (newAccount) {
             if (!finishFlow(flowGeneration)) return;
+            retryTargetAccountIdRef.current = undefined;
             setPollingState("success");
             await refetchStatus();
             await queryClient.invalidateQueries({ queryKey });
@@ -183,8 +217,8 @@ export function useManagedAuth(
         void finishExpiredFlow(flowGeneration);
       }, response.expires_in * 1000);
     },
-    onError: (e, flowGeneration) => {
-      if (!finishFlow(flowGeneration)) return;
+    onError: (e, request) => {
+      if (!finishFlow(request.flowGeneration)) return;
       setPollingState("error");
       setError(e instanceof Error ? e.message : String(e));
     },
@@ -240,28 +274,46 @@ export function useManagedAuth(
     },
   });
 
-  const startAuth = useCallback(() => {
-    if (flowActiveRef.current) return;
-    flowActiveRef.current = true;
-    expirationCheckRef.current = false;
-    const flowGeneration = flowGenerationRef.current + 1;
-    flowGenerationRef.current = flowGeneration;
-    setPollingState("idle");
-    setDeviceCode(null);
-    setError(null);
-    stopPolling();
-    startLoginMutation.mutate(flowGeneration);
-  }, [startLoginMutation, stopPolling]);
+  const beginLogin = useCallback(
+    (targetAccountId?: string) => {
+      if (flowActiveRef.current) return;
+      flowActiveRef.current = true;
+      expirationCheckRef.current = false;
+      retryTargetAccountIdRef.current = targetAccountId;
+      const flowGeneration = flowGenerationRef.current + 1;
+      flowGenerationRef.current = flowGeneration;
+      setPollingState("idle");
+      setDeviceCode(null);
+      setError(null);
+      stopPolling();
+      startLoginMutation.mutate({ flowGeneration, targetAccountId });
+    },
+    [startLoginMutation, stopPolling],
+  );
+
+  const startAuth = useCallback(() => beginLogin(), [beginLogin]);
+  const reauthAccount = useCallback(
+    (accountId: string) => beginLogin(accountId),
+    [beginLogin],
+  );
+  const retryAuth = useCallback(
+    () => beginLogin(retryTargetAccountIdRef.current),
+    [beginLogin],
+  );
 
   const cancelAuth = useCallback(() => {
     flowGenerationRef.current += 1;
     flowActiveRef.current = false;
     expirationCheckRef.current = false;
+    const activeDeviceCode = activeDeviceCodeRef.current;
+    activeDeviceCodeRef.current = null;
+    retryTargetAccountIdRef.current = undefined;
     stopPolling();
     setPollingState("idle");
     setDeviceCode(null);
     setError(null);
-  }, [stopPolling]);
+    void cancelBackendFlow(activeDeviceCode);
+  }, [cancelBackendFlow, stopPolling]);
 
   const logout = useCallback(() => {
     logoutMutation.mutate();
@@ -305,6 +357,8 @@ export function useManagedAuth(
     isSettingDefaultAccount: setDefaultAccountMutation.isPending,
     startAuth,
     addAccount: startAuth,
+    reauthAccount,
+    retryAuth,
     cancelAuth,
     logout,
     removeAccount,

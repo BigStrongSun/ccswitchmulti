@@ -70,6 +70,20 @@ wire_api = "{}"
     provider
 }
 
+fn moonshot_chat_provider() -> Provider {
+    let mut provider = third_party_provider("openai_chat");
+    provider.settings_config["base_url"] = json!("https://api.moonshot.cn/v1");
+    provider.settings_config["config"] = json!(
+        r#"model = "visible-model"
+model_provider = "moonshot"
+[model_providers.moonshot]
+base_url = "https://api.moonshot.cn/v1"
+wire_api = "chat"
+"#
+    );
+    provider
+}
+
 fn logical_request() -> Value {
     json!({
         "model": "visible-model",
@@ -722,6 +736,94 @@ fn moonshot_schema_compilation_is_identical_after_chat_tool_shape_conversion() {
         chat.body["tools"][0]["function"]["parameters"],
         responses.body["tools"][0]["parameters"]
     );
+}
+
+#[test]
+fn upstream_protocol_moonshot_ref_siblings_are_rewritten_after_dialect_compilation() {
+    let policy = CodexThirdPartyRequestPolicy::compile(&moonshot_chat_provider())
+        .expect("compile Moonshot request policy");
+    let body = json!({
+        "model": "visible-model",
+        "input": "probe",
+        "tools": [{
+            "type": "function",
+            "name": "lookup",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "$ref": "#/$defs/Query",
+                        "description": "query to run"
+                    }
+                },
+                "$defs": {"Query": {"type": "string"}}
+            }
+        }]
+    });
+
+    let openai = policy
+        .prepare(
+            CodexRequestTransport::ChatCompletions,
+            body.clone(),
+            CodexRequestOptions {
+                tool_schema_dialect: Some(ToolSchemaDialect::OpenAi),
+                history_replay: Some(HistoryReplay::Omit),
+                ..CodexRequestOptions::default()
+            },
+        )
+        .expect("OpenAI schema dialect should preserve the conjunction");
+    let query = &openai.body["tools"][0]["function"]["parameters"]["properties"]["query"];
+    assert!(query.get("$ref").is_none());
+    assert_eq!(query["allOf"], json!([{"$ref": "#/$defs/Query"}]));
+    assert_eq!(query["description"], "query to run");
+
+    policy
+        .prepare(
+            CodexRequestTransport::ChatCompletions,
+            body,
+            CodexRequestOptions {
+                tool_schema_dialect: Some(ToolSchemaDialect::MoonshotMfjs),
+                history_replay: Some(HistoryReplay::Omit),
+                ..CodexRequestOptions::default()
+            },
+        )
+        .expect("MFJS compilation must run before the Moonshot wire rewrite");
+}
+
+#[test]
+fn upstream_protocol_chat_history_omit_does_not_inject_reasoning_content() {
+    let policy = CodexThirdPartyRequestPolicy::compile(&moonshot_chat_provider())
+        .expect("compile Moonshot request policy");
+    let prepared = policy
+        .prepare(
+            CodexRequestTransport::ChatCompletions,
+            json!({
+                "model": "visible-model",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "lookup",
+                        "arguments": "{}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "done"
+                    }
+                ]
+            }),
+            CodexRequestOptions {
+                history_replay: Some(HistoryReplay::Omit),
+                ..CodexRequestOptions::default()
+            },
+        )
+        .expect("prepare Kimi/Moonshot Chat replay");
+
+    assert!(prepared.body["messages"][0]
+        .get("reasoning_content")
+        .is_none());
 }
 
 #[test]

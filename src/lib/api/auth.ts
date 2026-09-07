@@ -63,10 +63,12 @@ export interface CodexAccountPoolQuotaStatus {
 export async function authStartLogin(
   authProvider: ManagedAuthProvider,
   githubDomain?: string,
+  targetAccountId?: string,
 ): Promise<ManagedAuthDeviceCodeResponse> {
   return invoke<ManagedAuthDeviceCodeResponse>("auth_start_login", {
     authProvider,
     githubDomain: githubDomain || null,
+    targetAccountId: targetAccountId || null,
   });
 }
 
@@ -79,6 +81,16 @@ export async function authPollForAccount(
     authProvider,
     deviceCode,
     githubDomain: githubDomain || null,
+  });
+}
+
+export async function authCancelLogin(
+  authProvider: ManagedAuthProvider,
+  deviceCode: string,
+): Promise<boolean> {
+  return invoke<boolean>("auth_cancel_login", {
+    authProvider,
+    deviceCode,
   });
 }
 
@@ -145,6 +157,7 @@ export async function refreshCodexAccountPoolQuota(): Promise<
 export const authApi = {
   authStartLogin,
   authPollForAccount,
+  authCancelLogin,
   authListAccounts,
   authGetStatus,
   authRemoveAccount,

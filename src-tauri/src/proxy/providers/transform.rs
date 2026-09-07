@@ -140,7 +140,7 @@ pub fn anthropic_to_openai(body: Value) -> Result<Value, ProxyError> {
 
 /// Anthropic 请求 → OpenAI Chat Completions 请求
 ///
-/// `preserve_reasoning_content` 仅用于明确需要 Moonshot/Kimi/DeepSeek
+/// `preserve_reasoning_content` 仅用于明确需要 DeepSeek/MiMo
 /// `reasoning_content` 兼容字段的 provider。默认转换保持通用 OpenAI-compatible
 /// 请求体，避免向严格后端发送未知字段。
 pub fn anthropic_to_openai_with_reasoning_content(
@@ -164,14 +164,18 @@ pub fn anthropic_to_openai_with_reasoning_content(
                 messages.push(json!({"role": "system", "content": text}));
             }
         } else if let Some(arr) = system.as_array() {
+            let mut parts = Vec::new();
             for msg in arr {
                 if let Some(text) = msg.get("text").and_then(|t| t.as_str()) {
                     let text = strip_leading_anthropic_billing_header(text);
                     if text.is_empty() {
                         continue;
                     }
-                    messages.push(json!({"role": "system", "content": text}));
+                    parts.push(text.to_string());
                 }
+            }
+            if !parts.is_empty() {
+                messages.push(json!({"role": "system", "content": parts.join("\n")}));
             }
         }
     }
@@ -186,7 +190,6 @@ pub fn anthropic_to_openai_with_reasoning_content(
         }
     }
 
-    normalize_openai_system_messages(&mut messages);
     result["messages"] = json!(messages);
 
     // 转换参数 — o-series 和 GPT-5+ 模型需要 max_completion_tokens
@@ -308,57 +311,6 @@ fn map_tool_choice_to_chat(tool_choice: &Value) -> Value {
             _ => tool_choice.clone(),
         },
         _ => tool_choice.clone(),
-    }
-}
-
-fn normalize_openai_system_messages(messages: &mut Vec<Value>) {
-    let system_count = messages
-        .iter()
-        .filter(|message| message.get("role").and_then(|value| value.as_str()) == Some("system"))
-        .count();
-
-    if system_count == 0 {
-        return;
-    }
-
-    if system_count == 1 {
-        if let Some(index) = messages.iter().position(|message| {
-            message.get("role").and_then(|value| value.as_str()) == Some("system")
-        }) {
-            if index > 0 {
-                let message = messages.remove(index);
-                messages.insert(0, message);
-            }
-        }
-        return;
-    }
-
-    let mut parts = Vec::new();
-    messages.retain(|message| {
-        if message.get("role").and_then(|value| value.as_str()) != Some("system") {
-            return true;
-        }
-
-        match message.get("content") {
-            Some(Value::String(text)) if !text.is_empty() => parts.push(text.clone()),
-            Some(Value::Array(content_parts)) => {
-                let text = content_parts
-                    .iter()
-                    .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !text.is_empty() {
-                    parts.push(text);
-                }
-            }
-            _ => {}
-        }
-
-        false
-    });
-
-    if !parts.is_empty() {
-        messages.insert(0, json!({"role": "system", "content": parts.join("\n")}));
     }
 }
 
@@ -971,6 +923,32 @@ mod tests {
         );
         assert!(result["messages"][0].get("cache_control").is_none());
         assert_eq!(result["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn upstream_protocol_preserves_mid_conversation_system_for_prefix_cache() {
+        let input = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": "You are Claude Code.",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+                {"role": "system", "content": "<total_tokens>14963538 tokens left</total_tokens>"},
+                {"role": "user", "content": "Continue"}
+            ]
+        });
+
+        let result = anthropic_to_openai(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0]["content"], "You are Claude Code.");
+        assert_eq!(messages[3]["role"], "system");
+        assert_eq!(
+            messages[3]["content"],
+            "<total_tokens>14963538 tokens left</total_tokens>"
+        );
     }
 
     #[test]

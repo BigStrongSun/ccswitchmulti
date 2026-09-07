@@ -4,10 +4,10 @@
 //! 主要面向第三方聚合站（硅基流动、OpenRouter 等），以及把 Anthropic
 //! 协议挂在兼容子路径上的官方供应商（DeepSeek、Kimi、智谱 GLM 等）。
 
-use reqwest::header::{HeaderValue, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, USER_AGENT};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 /// 获取到的模型信息
@@ -34,6 +34,8 @@ pub struct FetchModelsRequest<'a> {
     pub is_full_url: bool,
     pub models_url_override: Option<&'a str>,
     pub user_agent: Option<HeaderValue>,
+    pub api_format: Option<&'a str>,
+    pub request_headers: Option<&'a BTreeMap<String, String>>,
     pub volcengine: VolcengineModelListRequest<'a>,
 }
 
@@ -89,6 +91,9 @@ struct ModelEntry {
 }
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
+const MAX_REQUEST_HEADERS: usize = 64;
+const MAX_HEADER_NAME_BYTES: usize = 256;
+const MAX_HEADER_VALUE_BYTES: usize = 16 * 1024;
 
 /// 智谱官方模型概览 markdown。
 ///
@@ -200,10 +205,6 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
         .await;
     }
 
-    if options.api_key.is_empty() {
-        return Err("API Key is required to fetch models".to_string());
-    }
-
     let candidates = build_models_url_candidates(
         options.base_url,
         options.is_full_url,
@@ -211,22 +212,26 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
     )?;
     let client = crate::proxy::http_client::get();
     let mut last_err: Option<String> = None;
-    let log_secrets = vec![options.api_key.to_string()];
+    let headers = build_model_fetch_headers(
+        options.api_key,
+        options.api_format,
+        options.user_agent.as_ref(),
+        options.request_headers,
+    )?;
+    let mut log_secrets = vec![options.api_key.to_string()];
+    if let Some(request_headers) = options.request_headers {
+        log_secrets.extend(request_headers.values().cloned());
+    }
 
     for url in &candidates {
         log::debug!(
             "[ModelFetch] Trying endpoint: {}",
             crate::url_for_log_with_secrets(url, &log_secrets)
         );
-        let mut request_builder = client
+        let request_builder = client
             .get(url)
-            .header("Authorization", format!("Bearer {}", options.api_key))
+            .headers(headers.clone())
             .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS));
-        // 自定义 User-Agent：部分 /models 端点同样有 UA 白名单（如 Kimi Coding Plan），
-        // 与转发 / 检测路径共用同一 UA，避免"代理可用但取模型失败"。
-        if let Some(ua) = &options.user_agent {
-            request_builder = request_builder.header(USER_AGENT, ua.clone());
-        }
         let response = match request_builder.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -293,7 +298,66 @@ fn parse_models_response(
 }
 
 fn redact_model_fetch_error_body(body: String, known_secrets: &[String]) -> String {
-    truncate_body(crate::redact_known_secrets(&body, known_secrets))
+    truncate_body(crate::redact_known_secrets_strict(&body, known_secrets))
+}
+
+fn build_model_fetch_headers(
+    api_key: &str,
+    api_format: Option<&str>,
+    user_agent: Option<&HeaderValue>,
+    request_headers: Option<&BTreeMap<String, String>>,
+) -> Result<HeaderMap, String> {
+    let custom_count = request_headers.map_or(0, BTreeMap::len);
+    if api_key.is_empty() && custom_count == 0 {
+        return Err("API Key or request headers are required to fetch models".to_string());
+    }
+    if custom_count > MAX_REQUEST_HEADERS {
+        return Err(format!(
+            "Too many model-fetch request headers (maximum {MAX_REQUEST_HEADERS})"
+        ));
+    }
+
+    let mut headers = HeaderMap::new();
+    if !api_key.is_empty() {
+        let (name, value) = match api_format {
+            Some("anthropic-messages") => (
+                HeaderName::from_static("x-api-key"),
+                HeaderValue::from_str(api_key)
+                    .map_err(|error| format!("Invalid API Key header value: {error}"))?,
+            ),
+            Some("google-generative-ai") => (
+                HeaderName::from_static("x-goog-api-key"),
+                HeaderValue::from_str(api_key)
+                    .map_err(|error| format!("Invalid API Key header value: {error}"))?,
+            ),
+            _ => (
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {api_key}"))
+                    .map_err(|error| format!("Invalid API Key header value: {error}"))?,
+            ),
+        };
+        headers.insert(name, value);
+    }
+    if let Some(user_agent) = user_agent {
+        headers.insert(USER_AGENT, user_agent.clone());
+    }
+    if let Some(request_headers) = request_headers {
+        for (raw_name, raw_value) in request_headers {
+            let name = raw_name.trim();
+            if name.is_empty() || name.len() > MAX_HEADER_NAME_BYTES {
+                return Err(format!("Invalid model-fetch header name: {raw_name}"));
+            }
+            if raw_value.len() > MAX_HEADER_VALUE_BYTES {
+                return Err(format!("Model-fetch header value is too large: {name}"));
+            }
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|error| format!("Invalid model-fetch header name {name}: {error}"))?;
+            let value = HeaderValue::from_str(raw_value)
+                .map_err(|error| format!("Invalid model-fetch header value for {name}: {error}"))?;
+            headers.insert(name, value);
+        }
+    }
+    Ok(headers)
 }
 
 /// 构造「模型列表端点」的候选 URL 列表
@@ -1102,6 +1166,68 @@ fn ends_with_version_segment(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_fetch_headers_follow_pi_api_format() {
+        let anthropic =
+            build_model_fetch_headers("anthropic-key", Some("anthropic-messages"), None, None)
+                .unwrap();
+        assert_eq!(anthropic["x-api-key"], "anthropic-key");
+        assert!(!anthropic.contains_key(AUTHORIZATION));
+
+        let google =
+            build_model_fetch_headers("google-key", Some("google-generative-ai"), None, None)
+                .unwrap();
+        assert_eq!(google["x-goog-api-key"], "google-key");
+        assert!(!google.contains_key(AUTHORIZATION));
+
+        let openai =
+            build_model_fetch_headers("openai-key", Some("openai-responses"), None, None).unwrap();
+        assert_eq!(openai[AUTHORIZATION], "Bearer openai-key");
+    }
+
+    #[test]
+    fn model_fetch_headers_allow_validated_header_only_auth_and_overrides() {
+        let custom = BTreeMap::from([
+            ("Authorization".to_string(), "Token literal".to_string()),
+            ("X-Tenant".to_string(), "tenant-a".to_string()),
+        ]);
+        let headers =
+            build_model_fetch_headers("", Some("openai-completions"), None, Some(&custom)).unwrap();
+        assert_eq!(headers[AUTHORIZATION], "Token literal");
+        assert_eq!(headers["x-tenant"], "tenant-a");
+
+        let override_default =
+            BTreeMap::from([("x-api-key".to_string(), "header-managed-key".to_string())]);
+        let headers = build_model_fetch_headers(
+            "provider-key",
+            Some("anthropic-messages"),
+            None,
+            Some(&override_default),
+        )
+        .unwrap();
+        assert_eq!(headers["x-api-key"], "header-managed-key");
+    }
+
+    #[test]
+    fn model_fetch_headers_reject_invalid_or_missing_credentials() {
+        assert!(build_model_fetch_headers("", None, None, None).is_err());
+        let invalid = BTreeMap::from([("bad header".to_string(), "literal-value".to_string())]);
+        assert!(build_model_fetch_headers("", None, None, Some(&invalid)).is_err());
+    }
+
+    #[test]
+    fn model_fetch_error_body_redacts_known_header_credentials() {
+        let secrets = vec![
+            "short".to_string(),
+            "Bearer literal-header-secret".to_string(),
+        ];
+        let body = redact_model_fetch_error_body(
+            "invalid short / Bearer literal-header-secret".to_string(),
+            &secrets,
+        );
+        assert_eq!(body, "invalid [REDACTED] / [REDACTED]");
+    }
 
     #[test]
     fn test_candidates_plain_root() {

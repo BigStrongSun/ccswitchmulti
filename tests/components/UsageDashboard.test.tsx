@@ -119,6 +119,25 @@ describe("UsageDashboard", () => {
     expect(screen.getByTestId("select-5000")).toBeInTheDocument();
   });
 
+  it("filters usage queries to Pi", async () => {
+    renderDashboard();
+
+    fireEvent.click(screen.getByRole("button", { name: "usage.appFilter.pi" }));
+
+    await waitFor(() =>
+      expect(useProviderStatsMock).toHaveBeenLastCalledWith(
+        expect.anything(),
+        { appType: "pi" },
+        expect.anything(),
+      ),
+    );
+    expect(useModelStatsMock).toHaveBeenLastCalledWith(
+      expect.anything(),
+      { appType: "pi", providerName: undefined },
+      expect.anything(),
+    );
+  });
+
   it("persists refresh interval changes", async () => {
     const onRefreshIntervalChange = vi.fn().mockResolvedValue(true);
     renderDashboard({ onRefreshIntervalChange });

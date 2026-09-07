@@ -23,10 +23,13 @@ const bulkToggleSkillAppMock = vi.fn();
 const checkUpdatesMock = vi.fn();
 const updateSkillMock = vi.fn();
 const refetchSkillBackupsMock = vi.fn();
-const { toastErrorMock, toastSuccessMock } = vi.hoisted(() => ({
-  toastErrorMock: vi.fn(),
-  toastSuccessMock: vi.fn(),
-}));
+const { toastErrorMock, toastSuccessMock, toastWarningMock } = vi.hoisted(
+  () => ({
+    toastErrorMock: vi.fn(),
+    toastSuccessMock: vi.fn(),
+    toastWarningMock: vi.fn(),
+  }),
+);
 let installedSkillsMock: InstalledSkill[] = [];
 let skillBackupsMock: SkillBackupEntry[] = [];
 let skillUpdatesMock: SkillUpdateInfo[] = [];
@@ -44,6 +47,7 @@ vi.mock("sonner", () => ({
   toast: {
     success: toastSuccessMock,
     error: toastErrorMock,
+    warning: toastWarningMock,
     info: vi.fn(),
   },
 }));
@@ -123,6 +127,7 @@ const makeInstalledSkill = (
     opencode: false,
     openclaw: false,
     hermes: false,
+    pi: false,
   };
   const { apps, ...skillOverrides } = overrides;
 
@@ -172,6 +177,7 @@ describe("UnifiedSkillsPanel", () => {
     bulkToggleSkillAppMock.mockResolvedValue({ succeeded: [], failed: [] });
     toastErrorMock.mockReset();
     toastSuccessMock.mockReset();
+    toastWarningMock.mockReset();
     uninstallSkillMock.mockReset();
     importSkillsMock.mockReset();
     installFromZipMock.mockReset();
@@ -245,6 +251,27 @@ describe("UnifiedSkillsPanel", () => {
     await waitFor(() => {
       expect(uninstallSkillMock).toHaveBeenCalledWith("owner/repo:skill-id");
     });
+  });
+
+  it("warns when uninstall preserves an unverified Pi directory", async () => {
+    installedSkillsMock = [makeInstalledSkill({ name: "Pi Skill" })];
+    uninstallSkillMock.mockResolvedValueOnce({
+      backupPath: "/tmp/backup",
+      preservedPiPath: "/tmp/pi/skills/pi-skill",
+    });
+    renderPanel();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTitle("skills.uninstall"));
+    await user.click(screen.getByRole("button", { name: "common.confirm" }));
+
+    await waitFor(() => {
+      expect(toastWarningMock).toHaveBeenCalledWith("skills.uninstallSuccess", {
+        description: "skills.uninstallPiPreserved",
+        closeButton: true,
+      });
+    });
+    expect(toastSuccessMock).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -751,5 +778,36 @@ describe("UnifiedSkillsPanel", () => {
       expect.any(Error),
     );
     consoleErrorSpy.mockRestore();
+  });
+
+  it("shows and toggles Pi only while managing Pi", async () => {
+    installedSkillsMock = [
+      makeInstalledSkill({
+        id: "skill-1",
+        name: "Pi Skill",
+        apps: { pi: true },
+      }),
+    ];
+
+    const { rerender } = render(
+      <UnifiedSkillsPanel onOpenDiscovery={() => {}} currentApp="pi" />,
+    );
+    const piToggle = screen.getByRole("button", { name: "Pi" });
+    expect(piToggle).toHaveAttribute("aria-pressed", "true");
+    await userEvent.setup().click(piToggle);
+    await waitFor(() => {
+      expect(toggleSkillAppMock).toHaveBeenCalledWith({
+        id: "skill-1",
+        app: "pi",
+        enabled: false,
+      });
+    });
+
+    rerender(
+      <UnifiedSkillsPanel onOpenDiscovery={() => {}} currentApp="claude" />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Pi" }),
+    ).not.toBeInTheDocument();
   });
 });

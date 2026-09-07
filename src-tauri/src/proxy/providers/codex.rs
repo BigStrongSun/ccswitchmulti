@@ -245,6 +245,20 @@ pub fn explain_codex_responses_upstream_protocol(
         );
     }
 
+    if let Some(base_url) = provider_codex_base_url(provider) {
+        if let Some(protocol) = zhipu_codex_endpoint_protocol(&base_url) {
+            return CodexResponsesUpstreamDecision::new(
+                protocol,
+                match protocol {
+                    CodexResponsesUpstreamProtocol::Responses => "native_responses_url",
+                    CodexResponsesUpstreamProtocol::Chat => "known_chat_completions_only_url",
+                    _ => unreachable!("Zhipu exposes only Responses or Chat endpoints"),
+                },
+                format!("base_url={base_url} 命中智谱协议专用端点"),
+            );
+        }
+    }
+
     if let Some(api_format) = provider
         .meta
         .as_ref()
@@ -1428,16 +1442,21 @@ fn endpoint_request_compatibility(
     provider: &Provider,
     transport: TransportKind,
 ) -> CodexRequestCompatibility {
-    let host = provider_codex_base_url(provider)
-        .and_then(|base_url| url::Url::parse(&base_url).ok())
+    let base_url = provider_codex_base_url(provider);
+    let host = base_url
+        .as_deref()
+        .and_then(|base_url| url::Url::parse(base_url).ok())
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
-    let tool_schema_dialect = if matches!(host.as_deref(), Some("api.kimi.com" | "api.moonshot.cn"))
-    {
+    let is_moonshot = base_url.as_deref().is_some_and(
+        super::transform_codex_chat_moonshot_schema::upstream_requires_ref_sibling_all_of,
+    );
+    let tool_schema_dialect = if is_moonshot {
         ToolSchemaDialect::MoonshotMfjs
     } else {
         ToolSchemaDialect::OpenAi
     };
     let history_replay = match transport {
+        TransportKind::OpenAiChat if is_moonshot => HistoryReplay::Omit,
         TransportKind::OpenAiChat => HistoryReplay::ChatReasoningContent,
         TransportKind::OpenAiResponses if host.as_deref() == Some("api.deepseek.com") => {
             HistoryReplay::ResponsesReasoningTextContent
@@ -2623,6 +2642,17 @@ pub fn resolve_codex_catalog_tool_profile(
     if provider.is_xai_oauth() {
         return CodexCatalogToolProfile::NativeResponses;
     }
+    if let Some(base_url) = provider_codex_base_url(provider) {
+        match zhipu_codex_endpoint_protocol(&base_url) {
+            Some(CodexResponsesUpstreamProtocol::Responses) => {
+                return CodexCatalogToolProfile::NativeResponses;
+            }
+            Some(CodexResponsesUpstreamProtocol::Chat) => {
+                return CodexCatalogToolProfile::ProxyChat;
+            }
+            _ => {}
+        }
+    }
     if codex_provider_uses_anthropic(provider) {
         return CodexCatalogToolProfile::Anthropic;
     }
@@ -2843,6 +2873,20 @@ pub(crate) fn prepare_codex_native_responses_model(
     body: &mut JsonValue,
 ) -> Result<Option<String>, ProxyError> {
     apply_codex_native_responses_reasoning_effort(provider, body)?;
+    let preserve_future_grok = provider_needs_responses_namespace_flatten(provider)
+        && body
+            .get("model")
+            .and_then(JsonValue::as_str)
+            .is_some_and(super::transform_codex_responses_xai_sanitize::request_is_grok_model);
+    if preserve_future_grok {
+        if let Some(mapped) = apply_codex_request_upstream_model(provider, body) {
+            return Ok(Some(mapped));
+        }
+        return Ok(body
+            .get("model")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string));
+    }
     Ok(apply_codex_upstream_model(provider, body))
 }
 
@@ -3218,16 +3262,27 @@ fn infer_codex_chat_reasoning_config(
         });
     }
 
-    // StepFun：仅 step-3.5-flash-2603 这一版支持 reasoning effort（low/high 两档），
-    // 其余 step 模型不暴露 effort，故 supports_effort 仅对含 "2603" 的模型置真。
+    // StepFun：step-3.5-flash-2603 支持 low/high 两档；step-3.7-flash
+    // 支持 low/medium/high 三档，其余 step 模型不暴露 effort。2603 沿用
+    // low_high 收敛映射；3.7 必须 passthrough，不能把 medium 塌成 high。
     // 第二个 OR 分支覆盖「经中转/聚合跑该模型、但平台 name/base_url 不含 stepfun」的情况。
-    if haystack.contains("stepfun") || haystack.contains("step-3.5-flash-2603") {
+    if haystack.contains("stepfun")
+        || haystack.contains("step-3.5-flash-2603")
+        || haystack.contains("step-3.7-flash")
+    {
         return Some(CodexChatReasoningConfig {
             supports_thinking: Some(true),
-            supports_effort: Some(model.contains("2603")),
+            supports_effort: Some(model.contains("2603") || model.contains("step-3.7-flash")),
             thinking_param: Some("none".to_string()),
             effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("low_high".to_string()),
+            effort_value_mode: Some(
+                if model.contains("2603") {
+                    "low_high"
+                } else {
+                    "passthrough"
+                }
+                .to_string(),
+            ),
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning".to_string()),
@@ -3427,6 +3482,23 @@ fn is_chat_completions_url(value: &str) -> bool {
         .ends_with("/chat/completions")
 }
 
+/// Zhipu publishes protocol-specific Coding Plan endpoints. Their path is
+/// authoritative when persisted metadata predates a preset update.
+fn zhipu_codex_endpoint_protocol(value: &str) -> Option<CodexResponsesUpstreamProtocol> {
+    if !crate::codex_config::codex_url_host_matches_any(value, &["bigmodel.cn", "z.ai"]) {
+        return None;
+    }
+    let parsed = url::Url::parse(value.trim()).ok()?;
+    let path = parsed.path().trim_end_matches('/').to_ascii_lowercase();
+    if path == "/api/v1" {
+        return Some(CodexResponsesUpstreamProtocol::Responses);
+    }
+    if path.contains("/paas/v4") || is_chat_completions_url(&path) {
+        return Some(CodexResponsesUpstreamProtocol::Chat);
+    }
+    None
+}
+
 /// 统一判断当前入口是否是 Codex Responses 路径。
 ///
 /// 参数:
@@ -3457,13 +3529,15 @@ pub(crate) fn is_codex_remote_compact_endpoint(endpoint: &str) -> bool {
 /// 用于兼容旧数据：一些 provider 曾经把 `wire_api` 误写成 `responses`，
 /// 但真实服务端只提供 `/chat/completions`。
 fn is_known_chat_completions_only_url(value: &str) -> bool {
+    if let Some(protocol) = zhipu_codex_endpoint_protocol(value) {
+        return protocol == CodexResponsesUpstreamProtocol::Chat;
+    }
     let lower = value.trim().to_ascii_lowercase();
     is_chat_completions_url(&lower)
         || [
             "api.deepseek.com",
             "api.moonshot.cn",
             "dashscope.aliyuncs.com",
-            "open.bigmodel.cn",
             "api.siliconflow.cn",
             "sensenova.cn",
             "openrouter.ai",
@@ -5810,6 +5884,59 @@ wire_api = "anthropic"
     }
 
     #[test]
+    fn zhipu_native_responses_endpoint_overrides_stale_chat_metadata() {
+        use crate::codex_config::CodexCatalogToolProfile;
+
+        let provider = |base_url: &str| {
+            let mut provider = create_provider(json!({
+                "config": format!(
+                    "model_provider = \"zhipu\"\nmodel = \"glm-5.3\"\n\n[model_providers.zhipu]\nname = \"Zhipu GLM\"\nbase_url = \"{base_url}\"\nwire_api = \"responses\"\n"
+                )
+            }));
+            provider.meta = Some(crate::provider::ProviderMeta {
+                api_format: Some("openai_chat".to_string()),
+                ..Default::default()
+            });
+            provider
+        };
+
+        for base_url in ["https://open.bigmodel.cn/api/v1", "https://api.z.ai/api/v1"] {
+            let native = provider(base_url);
+            let decision = explain_codex_responses_upstream_protocol(&native);
+            assert_eq!(
+                decision.protocol,
+                CodexResponsesUpstreamProtocol::Responses,
+                "{base_url}"
+            );
+            assert_eq!(decision.source, "native_responses_url", "{base_url}");
+            assert_eq!(
+                resolve_codex_catalog_tool_profile(&native),
+                CodexCatalogToolProfile::NativeResponses,
+                "{base_url}"
+            );
+        }
+
+        for base_url in [
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://api.z.ai/api/coding/paas/v4",
+            "https://api.xyz.ai/api/v1",
+        ] {
+            let chat = provider(base_url);
+            assert_eq!(
+                explain_codex_responses_upstream_protocol(&chat).protocol,
+                CodexResponsesUpstreamProtocol::Chat,
+                "{base_url}"
+            );
+            assert_eq!(
+                resolve_codex_catalog_tool_profile(&chat),
+                CodexCatalogToolProfile::ProxyChat,
+                "{base_url}"
+            );
+        }
+    }
+
+    #[test]
     fn test_apply_codex_upstream_model_preserves_one_m_catalog_model() {
         // Regression for the [1m] path: a request model carrying the [1m] marker must
         // match its catalog entry and be preserved (not overridden by the provider
@@ -7250,6 +7377,50 @@ wire_api = "responses"
         assert!(!provider_needs_responses_namespace_flatten(&deepseek));
     }
 
+    #[test]
+    fn upstream_protocol_xai_native_preparation_preserves_future_grok_models() {
+        let mut provider = create_provider(json!({
+            "auth": {},
+            "config": "model = \"grok-4.6\"",
+            "model": "grok-4.6"
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("xai_oauth".to_string()),
+            ..Default::default()
+        });
+        let mut body = json!({"model": "xai/Grok-4.7-Fast", "input": []});
+
+        prepare_codex_native_responses_model(&provider, &mut body)
+            .expect("prepare native xAI Responses model");
+
+        assert_eq!(body["model"], "xai/Grok-4.7-Fast");
+    }
+
+    #[test]
+    fn upstream_protocol_kimi_chat_default_omits_reasoning_replay() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "secret"},
+            "config": "model = \"kimi-k2.6\"\nbase_url = \"https://api.kimi.com/coding/v1\"\nwire_api = \"chat\"",
+            "base_url": "https://api.kimi.com/coding/v1"
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+
+        let compatibility = resolve_codex_request_compatibility(
+            &provider,
+            "kimi-k2.6",
+            "kimi-k2.6",
+            TransportKind::OpenAiChat,
+            &db,
+            100,
+        );
+
+        assert_eq!(compatibility.history_replay, HistoryReplay::Omit);
+    }
+
     fn v2_target_provider(id: &str, api_format: &str, models: serde_json::Value) -> Provider {
         let mut provider = Provider::with_id(
             id.to_string(),
@@ -8497,5 +8668,38 @@ wire_api = "responses"
             compatibility.history_replay,
             crate::protocol_compatibility::HistoryReplay::Omit
         );
+    }
+
+    #[test]
+    fn upstream_stepfun_reasoning_inference_is_model_specific() {
+        let provider = create_provider(json!({
+            "config": r#"
+model_provider = "stepfun"
+model = "step-3.7-flash"
+
+[model_providers.stepfun]
+name = "StepFun"
+base_url = "https://api.stepfun.com/v1"
+wire_api = "chat"
+"#
+        }));
+
+        let step_37 =
+            infer_codex_chat_reasoning_config(&provider, &json!({"model": "step-3.7-flash"}))
+                .expect("StepFun inference");
+        assert_eq!(step_37.supports_effort, Some(true));
+        assert_eq!(step_37.effort_value_mode.as_deref(), Some("passthrough"));
+
+        let step_35_2603 =
+            infer_codex_chat_reasoning_config(&provider, &json!({"model": "step-3.5-flash-2603"}))
+                .expect("StepFun inference");
+        assert_eq!(step_35_2603.supports_effort, Some(true));
+        assert_eq!(step_35_2603.effort_value_mode.as_deref(), Some("low_high"));
+
+        let step_35 =
+            infer_codex_chat_reasoning_config(&provider, &json!({"model": "step-3.5-flash"}))
+                .expect("StepFun inference");
+        assert_eq!(step_35.supports_effort, Some(false));
+        assert_eq!(step_35.thinking_param.as_deref(), Some("none"));
     }
 }

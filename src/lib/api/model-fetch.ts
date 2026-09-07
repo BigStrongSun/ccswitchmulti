@@ -13,9 +13,11 @@ export interface FetchedModel {
 }
 
 export interface VolcengineModelListOptions {
-  action: string;
-  accessKeyId: string;
-  secretAccessKey: string;
+  action?: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  apiFormat?: string;
+  requestHeaders?: Record<string, string>;
 }
 
 export interface CodexResponsesProbeResult {
@@ -50,6 +52,8 @@ export async function fetchModelsForConfig(
       volcengineModelListAction: volcengineModelList?.action,
       volcengineAccessKeyId: volcengineModelList?.accessKeyId,
       volcengineSecretAccessKey: volcengineModelList?.secretAccessKey,
+      apiFormat: volcengineModelList?.apiFormat,
+      requestHeaders: volcengineModelList?.requestHeaders,
     },
   });
 }

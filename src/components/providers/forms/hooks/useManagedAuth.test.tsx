@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   authGetStatus: vi.fn(),
   authStartLogin: vi.fn(),
   authPollForAccount: vi.fn(),
+  authCancelLogin: vi.fn(),
   openExternal: vi.fn(),
   copyText: vi.fn(),
 }));
@@ -21,6 +22,7 @@ vi.mock("@/lib/api", () => ({
     authGetStatus: mocks.authGetStatus,
     authStartLogin: mocks.authStartLogin,
     authPollForAccount: mocks.authPollForAccount,
+    authCancelLogin: mocks.authCancelLogin,
   },
   settingsApi: { openExternal: mocks.openExternal },
 }));
@@ -70,11 +72,30 @@ const deviceCode: ManagedAuthDeviceCodeResponse = {
   interval: 1,
 };
 
+const legacyReauthStatus: ManagedAuthStatus = {
+  provider: "codex_oauth",
+  authenticated: false,
+  default_account_id: null,
+  accounts: [
+    {
+      id: "legacy-local-id",
+      provider: "codex_oauth",
+      login: "legacy@example.test",
+      avatar_url: null,
+      authenticated_at: 1,
+      is_default: false,
+      github_domain: "github.com",
+      requires_reauth: true,
+    },
+  ],
+};
+
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   mocks.authGetStatus.mockResolvedValue(loggedOutStatus);
   mocks.authStartLogin.mockResolvedValue(deviceCode);
   mocks.authPollForAccount.mockResolvedValue(null);
+  mocks.authCancelLogin.mockResolvedValue(true);
   mocks.openExternal.mockResolvedValue(undefined);
   mocks.copyText.mockResolvedValue(undefined);
 });
@@ -127,5 +148,41 @@ describe("useManagedAuth device flow", () => {
     await waitFor(() => expect(result.current.pollingState).toBe("idle"));
     expect(result.current.error).toBeNull();
     expect(result.current.hasAnyAccount).toBe(true);
+  });
+
+  it("upstream_codex_login_cancel notifies the backend for an active Codex flow", async () => {
+    const { result } = renderManagedAuth();
+    await waitFor(() =>
+      expect(result.current.authStatus).toEqual(loggedOutStatus),
+    );
+
+    act(() => result.current.startAuth());
+    await waitFor(() => expect(result.current.pollingState).toBe("polling"));
+    act(() => result.current.cancelAuth());
+
+    await waitFor(() =>
+      expect(mocks.authCancelLogin).toHaveBeenCalledWith(
+        "codex_oauth",
+        "device-secret",
+      ),
+    );
+  });
+
+  it("upstream_codex_identity reauth keeps the existing local binding id", async () => {
+    mocks.authGetStatus.mockResolvedValue(legacyReauthStatus);
+    const { result } = renderManagedAuth();
+    await waitFor(() =>
+      expect(result.current.authStatus).toEqual(legacyReauthStatus),
+    );
+
+    act(() => result.current.reauthAccount("legacy-local-id"));
+
+    await waitFor(() =>
+      expect(mocks.authStartLogin).toHaveBeenCalledWith(
+        "codex_oauth",
+        undefined,
+        "legacy-local-id",
+      ),
+    );
   });
 });

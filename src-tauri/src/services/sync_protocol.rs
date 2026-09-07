@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::future::Future;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,7 @@ use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 use crate::error::AppError;
+use crate::services::skill::{skill_state_read_guard, skill_state_write_guard};
 
 // Re-export archive functions for use by transport layers.
 pub(crate) use super::webdav_sync::archive::{
@@ -34,6 +37,39 @@ pub(crate) const REMOTE_MANIFEST: &str = "manifest.json";
 pub(crate) const MAX_DEVICE_NAME_LEN: usize = 64;
 pub(crate) const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_SYNC_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+
+// ─── Sync operation lock ────────────────────────────────────
+
+/// Serialize snapshot upload/download/restore across every transport.
+pub(crate) fn sync_mutex() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+pub(crate) async fn run_with_sync_lock<T, Fut>(operation: Fut) -> Result<T, AppError>
+where
+    Fut: Future<Output = Result<T, AppError>>,
+{
+    let _guard = sync_mutex().lock().await;
+    operation.await
+}
+
+/// Shared configuration tables whose mutations make a remote snapshot stale.
+pub(crate) fn should_trigger_auto_sync_for_table(table: &str) -> bool {
+    let normalized = table.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "providers"
+            | "provider_endpoints"
+            | "mcp_servers"
+            | "prompts"
+            | "skills"
+            | "skill_repos"
+            | "profiles"
+            | "settings"
+            | "proxy_config"
+    )
+}
 
 // ─── Error helpers ───────────────────────────────────────────
 
@@ -111,6 +147,8 @@ pub(crate) fn build_local_snapshot(
     db: &crate::database::Database,
     include_keys: bool,
 ) -> Result<LocalSnapshot, AppError> {
+    let _skill_state_guard = skill_state_read_guard();
+
     // Export database to SQL string
     let sql_string = db.export_sql_string_for_sync(include_keys)?;
     let db_sql = sql_string.into_bytes();
@@ -340,6 +378,7 @@ pub(crate) fn apply_snapshot(
             format!("SQL is not valid UTF-8: {e}"),
         )
     })?;
+    let _skill_state_guard = skill_state_write_guard();
     let skills_backup = backup_current_skills()?;
 
     // Replace skills first, then import database; roll back skills on DB failure.
@@ -457,6 +496,31 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn upstream_sync_reliability_transports_share_one_global_lock() {
+        let webdav_lock = crate::services::webdav_sync::sync_mutex();
+        let s3_lock = crate::services::s3_sync::sync_mutex();
+        assert!(
+            std::ptr::eq(webdav_lock, s3_lock),
+            "WebDAV and S3 must serialize through one transport-neutral lock"
+        );
+        let guard = webdav_lock.lock().await;
+        assert!(s3_lock.try_lock().is_err());
+        drop(guard);
+        assert!(s3_lock.try_lock().is_ok());
+    }
+
+    #[test]
+    fn upstream_sync_reliability_profiles_trigger_both_auto_sync_transports() {
+        assert!(crate::services::webdav_auto_sync::should_trigger_for_table(
+            "profiles"
+        ));
+        assert!(crate::services::s3_auto_sync::should_trigger_for_table(
+            "profiles"
+        ));
+    }
 
     fn artifact(sha256: &str, size: u64) -> ArtifactMeta {
         ArtifactMeta {

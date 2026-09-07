@@ -6,16 +6,28 @@ use super::{lock_conn, Database};
 use crate::config::get_app_config_dir;
 use crate::error::AppError;
 use chrono::{Local, Utc};
-use rusqlite::backup::Backup;
+use rusqlite::backup::{Backup, StepResult};
 use rusqlite::types::ValueRef;
 use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tempfile::NamedTempFile;
+use std::sync::{Mutex, MutexGuard};
+use tempfile::{Builder, NamedTempFile};
 
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- CC Switch SQLite 导出";
 const PORTABLE_HOME_TOKEN: &str = "${CC_SWITCH_HOME}";
+
+/// Serialize every operation that observes or mutates the backup directory.
+/// Acquire this guard before the database connection lock.
+static BACKUP_FILE_OPERATION_LOCK: Mutex<()> = Mutex::new(());
+type BackupFileOperationGuard = MutexGuard<'static, ()>;
+
+fn lock_backup_file_operations() -> Result<BackupFileOperationGuard, AppError> {
+    BACKUP_FILE_OPERATION_LOCK
+        .lock()
+        .map_err(|e| AppError::Database(format!("Backup file operation lock failed: {e}")))
+}
 
 /// Bound combined INSERT batches while still amortizing statement parsing.
 /// A row larger than this cap is emitted alone because it cannot be split.
@@ -80,6 +92,7 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "proxy_live_backup",
     "usage_daily_rollups",
     "session_log_sync",
+    "session_usage_dedup",
 ];
 
 /// Tables whose local data is preserved (restored from local snapshot) during WebDAV import.
@@ -90,6 +103,7 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "proxy_live_backup",
     "usage_daily_rollups",
     "session_log_sync",
+    "session_usage_dedup",
 ];
 
 /// A database backup entry for the UI
@@ -176,6 +190,12 @@ impl Database {
         let temp_path = temp_file.path().to_path_buf();
         let temp_conn =
             Connection::open(&temp_path).map_err(|e| AppError::Database(e.to_string()))?;
+        // Backup copies the source database header into the destination. Set
+        // this before the imported SQL creates tables so restore cannot
+        // downgrade an incremental-vacuum database to NONE.
+        temp_conn
+            .execute("PRAGMA auto_vacuum = INCREMENTAL;", [])
+            .map_err(|e| AppError::Database(format!("设置暂存库 auto_vacuum 失败: {e}")))?;
 
         // authorizer 只覆盖外部 SQL，执行完立刻摘掉：紧随其后的
         // `create_tables_on_conn` / `apply_schema_migrations_on_conn` 是本程序自己的
@@ -186,14 +206,25 @@ impl Database {
             None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
         );
         batch_result.map_err(|e| AppError::Database(format!("执行 SQL 导入失败: {e}")))?;
+        if !temp_conn.is_autocommit() {
+            let _ = temp_conn.execute_batch("ROLLBACK;");
+            return Err(AppError::localized(
+                "backup.sql.incomplete_transaction",
+                "SQL 备份事务未完成，文件可能已截断。",
+                "The SQL backup transaction is incomplete; the file may be truncated.",
+            ));
+        }
 
-        // 补齐缺失表/索引并进行基础校验
+        // Validate the schema created by the untrusted input before migrations
+        // can fill in missing tables and make a truncated file look genuine.
+        Self::validate_imported_schema(&temp_conn)?;
+
+        // 补齐缺失表/索引并进行迁移
         if !preserve_tables.is_empty() {
             Self::localize_imported_sync_snapshot(&temp_conn)?;
         }
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
-        Self::validate_basic_state(&temp_conn)?;
         if let Some(local_snapshot) = local_snapshot.as_ref() {
             Self::restore_tables(local_snapshot, &temp_conn, preserve_tables)?;
         }
@@ -203,9 +234,7 @@ impl Database {
             let mut main_conn = lock_conn!(self.conn);
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
-            backup
-                .step(-1)
-                .map_err(|e| AppError::Database(e.to_string()))?;
+            Self::complete_backup(&backup, "替换主数据库")?;
         }
 
         let backup_id = backup_path
@@ -348,12 +377,25 @@ impl Database {
         {
             let backup =
                 Backup::new(&conn, &mut snapshot).map_err(|e| AppError::Database(e.to_string()))?;
-            backup
-                .step(-1)
-                .map_err(|e| AppError::Database(e.to_string()))?;
+            Self::complete_backup(&backup, "创建内存数据库快照")?;
         }
 
         Ok(snapshot)
+    }
+
+    fn complete_backup(backup: &Backup<'_, '_>, context: &str) -> Result<(), AppError> {
+        let result = backup
+            .step(-1)
+            .map_err(|e| AppError::Database(format!("{context}失败: {e}")))?;
+        match result {
+            StepResult::Done => Ok(()),
+            StepResult::More | StepResult::Busy | StepResult::Locked => Err(AppError::Database(
+                format!("{context}未完成: SQLite Backup 返回 {result:?}"),
+            )),
+            _ => Err(AppError::Database(format!(
+                "{context}未完成: SQLite Backup 返回未知状态"
+            ))),
+        }
     }
 
     fn validate_cc_switch_sql_export(sql: &str) -> Result<(), AppError> {
@@ -436,8 +478,54 @@ impl Database {
             }
         }
 
+        Self::restore_sqlite_sequences(source_conn, &tx, tables)?;
+
         tx.commit()
             .map_err(|e| AppError::Database(format!("提交恢复事务失败: {e}")))?;
+        Ok(())
+    }
+
+    fn restore_sqlite_sequences(
+        source_conn: &Connection,
+        target_conn: &Connection,
+        tables: &[&str],
+    ) -> Result<(), AppError> {
+        if !Self::table_exists(source_conn, "sqlite_sequence")?
+            || !Self::table_exists(target_conn, "sqlite_sequence")?
+        {
+            return Ok(());
+        }
+
+        let mut source_stmt = source_conn
+            .prepare(
+                "SELECT seq FROM sqlite_sequence
+                 WHERE name = ?1 ORDER BY rowid DESC LIMIT 1",
+            )
+            .map_err(|e| AppError::Database(format!("读取 AUTOINCREMENT 序列失败: {e}")))?;
+        for table in tables {
+            target_conn
+                .execute("DELETE FROM sqlite_sequence WHERE name = ?1", [*table])
+                .map_err(|e| {
+                    AppError::Database(format!("清理表 {table} 的 AUTOINCREMENT 序列失败: {e}"))
+                })?;
+
+            let mut rows = source_stmt
+                .query([*table])
+                .map_err(|e| AppError::Database(format!("查询表 {table} 序列失败: {e}")))?;
+            if let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
+                let sequence = row
+                    .get::<_, rusqlite::types::Value>(0)
+                    .map_err(|e| AppError::Database(format!("解析表 {table} 序列失败: {e}")))?;
+                target_conn
+                    .execute(
+                        "INSERT INTO sqlite_sequence (name, seq) VALUES (?1, ?2)",
+                        rusqlite::params![table, sequence],
+                    )
+                    .map_err(|e| {
+                        AppError::Database(format!("恢复表 {table} 的 AUTOINCREMENT 序列失败: {e}"))
+                    })?;
+            }
+        }
         Ok(())
     }
 
@@ -445,9 +533,10 @@ impl Database {
     pub(crate) fn periodic_backup_if_needed(&self) -> Result<(), AppError> {
         let interval_hours = crate::settings::effective_backup_interval_hours();
         if interval_hours > 0 {
+            let backup_file_guard = lock_backup_file_operations()?;
             let backup_dir = get_app_config_dir().join("backups");
             if !backup_dir.exists() {
-                self.backup_database_file()?;
+                self.backup_database_file_locked(&backup_file_guard)?;
             } else {
                 let latest = fs::read_dir(&backup_dir).ok().and_then(|entries| {
                     entries
@@ -470,7 +559,7 @@ impl Database {
                     log::info!(
                         "Periodic backup: latest backup is older than {interval_hours} hours, creating new backup"
                     );
-                    self.backup_database_file()?;
+                    self.backup_database_file_locked(&backup_file_guard)?;
                 }
             }
         }
@@ -505,6 +594,40 @@ impl Database {
 
     /// 生成一致性快照备份，返回备份文件路径（不存在主库时返回 None）
     pub(crate) fn backup_database_file(&self) -> Result<Option<PathBuf>, AppError> {
+        let backup_file_guard = lock_backup_file_operations()?;
+        self.backup_database_file_locked(&backup_file_guard)
+    }
+
+    fn backup_database_file_locked(
+        &self,
+        backup_file_guard: &BackupFileOperationGuard,
+    ) -> Result<Option<PathBuf>, AppError> {
+        let conn = lock_conn!(self.conn);
+        Self::backup_database_file_from_conn(backup_file_guard, &conn, &[])
+    }
+
+    fn backup_database_file_from_conn(
+        backup_file_guard: &BackupFileOperationGuard,
+        source_conn: &Connection,
+        protected_paths: &[&Path],
+    ) -> Result<Option<PathBuf>, AppError> {
+        Self::backup_database_file_from_conn_with_hook(
+            backup_file_guard,
+            source_conn,
+            protected_paths,
+            |_, _| Ok(()),
+        )
+    }
+
+    fn backup_database_file_from_conn_with_hook<F>(
+        _backup_file_guard: &BackupFileOperationGuard,
+        source_conn: &Connection,
+        protected_paths: &[&Path],
+        before_publish: F,
+    ) -> Result<Option<PathBuf>, AppError>
+    where
+        F: FnOnce(&Path, &Path) -> Result<(), AppError>,
+    {
         let db_path = get_app_config_dir().join("cc-switch.db");
         if !db_path.exists() {
             return Ok(None);
@@ -518,32 +641,76 @@ impl Database {
         fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
 
         let base_id = format!("db_backup_{}", Local::now().format("%Y%m%d_%H%M%S"));
-        let mut backup_id = base_id.clone();
-        let mut backup_path = backup_dir.join(format!("{backup_id}.db"));
-        let mut counter = 1;
-        while backup_path.exists() {
-            backup_id = format!("{base_id}_{counter}");
-            backup_path = backup_dir.join(format!("{backup_id}.db"));
-            counter += 1;
+        let mut next_suffix = 0;
+        let mut backup_path =
+            Self::next_available_backup_path(&backup_dir, &base_id, &mut next_suffix);
+
+        let mut temp_path = Builder::new()
+            .prefix(".cc-switch-backup-")
+            .suffix(".tmp")
+            .tempfile_in(&backup_dir)
+            .map_err(|e| AppError::io(&backup_dir, e))?
+            .into_temp_path();
+        let temp_db_path: &Path = temp_path.as_ref();
+        let mut dest_conn =
+            Connection::open(temp_db_path).map_err(|e| AppError::Database(e.to_string()))?;
+        let backup = Backup::new(source_conn, &mut dest_conn)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::complete_backup(&backup, "创建数据库安全备份")?;
+        drop(backup);
+        Self::validate_sqlite_integrity(&dest_conn)?;
+        dest_conn
+            .close()
+            .map_err(|(_, e)| AppError::Database(format!("关闭数据库安全备份失败: {e}")))?;
+        before_publish(temp_db_path, &backup_path)?;
+
+        loop {
+            match temp_path.persist_noclobber(&backup_path) {
+                Ok(()) => break,
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    temp_path = error.path;
+                    backup_path =
+                        Self::next_available_backup_path(&backup_dir, &base_id, &mut next_suffix);
+                }
+                Err(error) => return Err(AppError::io(&backup_path, error.error)),
+            }
         }
 
-        {
-            let conn = lock_conn!(self.conn);
-            let mut dest_conn =
-                Connection::open(&backup_path).map_err(|e| AppError::Database(e.to_string()))?;
-            let backup = Backup::new(&conn, &mut dest_conn)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            backup
-                .step(-1)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-        }
-
-        Self::cleanup_db_backups(&backup_dir)?;
+        let mut cleanup_protected = Vec::with_capacity(protected_paths.len() + 1);
+        cleanup_protected.push(backup_path.as_path());
+        cleanup_protected.extend_from_slice(protected_paths);
+        Self::cleanup_db_backups(&backup_dir, &cleanup_protected)?;
         Ok(Some(backup_path))
     }
 
+    fn next_available_backup_path(
+        backup_dir: &Path,
+        base_id: &str,
+        next_suffix: &mut usize,
+    ) -> PathBuf {
+        loop {
+            let backup_id = if *next_suffix == 0 {
+                base_id.to_string()
+            } else {
+                format!("{base_id}_{}", *next_suffix)
+            };
+            *next_suffix += 1;
+            let backup_path = backup_dir.join(format!("{backup_id}.db"));
+            if !backup_path.exists() {
+                return backup_path;
+            }
+        }
+    }
+
+    fn same_existing_backup_path(left: &Path, right: &Path) -> bool {
+        match (fs::canonicalize(left), fs::canonicalize(right)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => left == right,
+        }
+    }
+
     /// 清理旧的数据库备份，保留最新的 N 个
-    fn cleanup_db_backups(dir: &Path) -> Result<(), AppError> {
+    fn cleanup_db_backups(dir: &Path, protected_paths: &[&Path]) -> Result<(), AppError> {
         let retain = crate::settings::effective_backup_retain_count();
         let entries = match fs::read_dir(dir) {
             Ok(iter) => iter
@@ -567,26 +734,76 @@ impl Database {
         let mut sorted = entries;
         sorted.sort_by_key(|entry| entry.metadata().and_then(|m| m.modified()).ok());
 
-        for entry in sorted.into_iter().take(remove_count) {
-            if let Err(err) = fs::remove_file(entry.path()) {
-                log::warn!("删除旧数据库备份失败 {}: {}", entry.path().display(), err);
+        let mut removed = 0;
+        for entry in sorted {
+            if removed >= remove_count {
+                break;
+            }
+            let path = entry.path();
+            if protected_paths
+                .iter()
+                .any(|protected| Self::same_existing_backup_path(&path, protected))
+            {
+                continue;
+            }
+            if let Err(err) = fs::remove_file(&path) {
+                log::warn!("删除旧数据库备份失败 {}: {}", path.display(), err);
+            } else {
+                removed += 1;
             }
         }
         Ok(())
     }
 
-    /// 基础状态校验
-    fn validate_basic_state(conn: &Connection) -> Result<(), AppError> {
-        let provider_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        let mcp_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM mcp_servers", [], |row| row.get(0))
-            .map_err(|e| AppError::Database(e.to_string()))?;
+    fn validate_sqlite_integrity(conn: &Connection) -> Result<(), AppError> {
+        let mut stmt = conn
+            .prepare("PRAGMA quick_check;")
+            .map_err(|e| AppError::Database(format!("检查数据库完整性失败: {e}")))?;
+        let results = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| AppError::Database(format!("检查数据库完整性失败: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Database(format!("检查数据库完整性失败: {e}")))?;
+        if results.len() == 1 && results[0].eq_ignore_ascii_case("ok") {
+            return Ok(());
+        }
+        Err(AppError::localized(
+            "backup.db.integrity_failed",
+            format!("数据库备份完整性检查失败: {}", results.join("; ")),
+            format!(
+                "Database backup integrity check failed: {}",
+                results.join("; ")
+            ),
+        ))
+    }
 
-        if provider_count == 0 && mcp_count == 0 {
-            return Err(AppError::Config(
-                "导入的 SQL 未包含有效的供应商或 MCP 数据".to_string(),
+    /// Validate that the external SQL created a recognizable CC Switch schema.
+    /// These tables existed in the oldest supported SQL-export schema. This
+    /// check must run before migrations so generated tables cannot disguise a
+    /// header-only or truncated input.
+    fn validate_imported_schema(conn: &Connection) -> Result<(), AppError> {
+        const REQUIRED_TABLES: &[&str] = &[
+            "providers",
+            "provider_endpoints",
+            "mcp_servers",
+            "prompts",
+            "skills",
+            "skill_repos",
+            "settings",
+        ];
+
+        let mut missing = Vec::new();
+        for table in REQUIRED_TABLES {
+            if !Self::table_exists(conn, table)? {
+                missing.push(*table);
+            }
+        }
+        if !missing.is_empty() {
+            let names = missing.join(", ");
+            return Err(AppError::localized(
+                "backup.sql.invalid_schema",
+                format!("导入的 SQL 缺少 CC Switch 必需表：{names}"),
+                format!("The imported SQL is missing required CC Switch tables: {names}"),
             ));
         }
         Ok(())
@@ -716,6 +933,8 @@ impl Database {
             }
         }
 
+        Self::dump_sqlite_sequences(conn, skip_tables, &mut output)?;
+
         // Triggers must be created after loading table data so they cannot
         // change dump rows or abandon the remainder of a multi-row INSERT.
         for sql in triggers {
@@ -725,6 +944,48 @@ impl Database {
 
         output.push_str("COMMIT;\nPRAGMA foreign_keys=ON;\n");
         Ok(output)
+    }
+
+    fn dump_sqlite_sequences(
+        conn: &Connection,
+        skip_tables: &[&str],
+        output: &mut String,
+    ) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "sqlite_sequence")? {
+            return Ok(());
+        }
+
+        let mut stmt = conn
+            .prepare("SELECT name, seq FROM sqlite_sequence ORDER BY name")
+            .map_err(|e| AppError::Database(format!("读取 AUTOINCREMENT 序列失败: {e}")))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| AppError::Database(format!("查询 AUTOINCREMENT 序列失败: {e}")))?;
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
+            let table: String = row
+                .get(0)
+                .map_err(|e| AppError::Database(format!("解析 AUTOINCREMENT 表名失败: {e}")))?;
+            if skip_tables.iter().any(|skipped| *skipped == table) {
+                continue;
+            }
+            let sequence = row
+                .get_ref(1)
+                .map_err(|e| AppError::Database(format!("解析表 {table} 序列失败: {e}")))?;
+            values.push(format!(
+                "({}, {})",
+                Self::format_sql_value(ValueRef::Text(table.as_bytes()))?,
+                Self::format_sql_value(sequence)?
+            ));
+        }
+
+        output.push_str("DELETE FROM sqlite_sequence;\n");
+        if !values.is_empty() {
+            output.push_str("INSERT INTO sqlite_sequence (name, seq) VALUES ");
+            output.push_str(&values.join(","));
+            output.push_str(";\n");
+        }
+        Ok(())
     }
 
     fn quote_identifier(identifier: &str) -> String {
@@ -753,27 +1014,53 @@ impl Database {
         match value {
             ValueRef::Null => Ok("NULL".to_string()),
             ValueRef::Integer(i) => Ok(i.to_string()),
-            ValueRef::Real(f) => Ok(f.to_string()),
-            ValueRef::Text(t) => {
-                let text = std::str::from_utf8(t)
-                    .map_err(|e| AppError::Database(format!("文本字段不是有效的 UTF-8: {e}")))?;
-                let escaped = text.replace('\'', "''");
-                Ok(format!("'{escaped}'"))
-            }
-            ValueRef::Blob(bytes) => {
-                let mut s = String::from("X'");
-                for b in bytes {
-                    use std::fmt::Write;
-                    let _ = write!(&mut s, "{b:02X}");
+            ValueRef::Real(f) => Ok(Self::format_sql_real(f)),
+            ValueRef::Text(t) => match std::str::from_utf8(t) {
+                Ok(text) if !text.contains('\0') => {
+                    let escaped = text.replace('\'', "''");
+                    Ok(format!("'{escaped}'"))
                 }
-                s.push('\'');
-                Ok(s)
-            }
+                _ => Ok(format!("CAST({} AS TEXT)", Self::format_sql_blob(t))),
+            },
+            ValueRef::Blob(bytes) => Ok(Self::format_sql_blob(bytes)),
         }
+    }
+
+    fn format_sql_real(value: f64) -> String {
+        if value.is_nan() {
+            return "NULL".to_string();
+        }
+        if value.is_infinite() {
+            return if value.is_sign_negative() {
+                "-9.0e999".to_string()
+            } else {
+                "9.0e999".to_string()
+            };
+        }
+        if value == 0.0 && value.is_sign_negative() {
+            return "-0.0".to_string();
+        }
+
+        let mut literal = value.to_string();
+        if !literal.contains(['.', 'e', 'E']) {
+            literal.push_str(".0");
+        }
+        literal
+    }
+
+    fn format_sql_blob(bytes: &[u8]) -> String {
+        let mut literal = String::from("X'");
+        for byte in bytes {
+            use std::fmt::Write;
+            let _ = write!(&mut literal, "{byte:02X}");
+        }
+        literal.push('\'');
+        literal
     }
 
     /// List all database backup files, sorted by creation time (newest first)
     pub fn list_backups() -> Result<Vec<BackupEntry>, AppError> {
+        let _backup_file_guard = lock_backup_file_operations()?;
         let backup_dir = get_app_config_dir().join("backups");
         if !backup_dir.exists() {
             return Ok(vec![]);
@@ -810,6 +1097,17 @@ impl Database {
 
     /// Restore database from a backup file. Returns the safety backup ID.
     pub fn restore_from_backup(&self, filename: &str) -> Result<String, AppError> {
+        self.restore_from_backup_with_hook(filename, |_| Ok(()))
+    }
+
+    fn restore_from_backup_with_hook<F>(
+        &self,
+        filename: &str,
+        before_replace: F,
+    ) -> Result<String, AppError>
+    where
+        F: FnOnce(Option<&Path>) -> Result<(), AppError>,
+    {
         // Security: validate filename to prevent path traversal
         if filename.contains("..")
             || filename.contains('/')
@@ -821,6 +1119,7 @@ impl Database {
             ));
         }
 
+        let backup_file_guard = lock_backup_file_operations()?;
         let backup_dir = get_app_config_dir().join("backups");
         let backup_path = backup_dir.join(filename);
 
@@ -830,29 +1129,50 @@ impl Database {
             )));
         }
 
-        // Step 1: Create safety backup of current database
-        let safety_backup = self.backup_database_file()?;
+        let source_conn = Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // Validate and migrate an isolated staging image before touching live.
+        let temp_file = NamedTempFile::new().map_err(|e| AppError::IoContext {
+            context: "创建数据库恢复暂存文件失败".to_string(),
+            source: e,
+        })?;
+        let mut staging_conn =
+            Connection::open(temp_file.path()).map_err(|e| AppError::Database(e.to_string()))?;
+        {
+            let backup = Backup::new(&source_conn, &mut staging_conn)
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            Self::complete_backup(&backup, "读取数据库备份")?;
+        }
+        drop(source_conn);
+
+        Self::validate_sqlite_integrity(&staging_conn)?;
+        Self::validate_imported_schema(&staging_conn)?;
+        Self::ensure_incremental_auto_vacuum_on_conn(&staging_conn)?;
+        Self::create_tables_on_conn(&staging_conn)?;
+        Self::apply_schema_migrations_on_conn(&staging_conn)?;
+        Self::ensure_model_pricing_seeded_on_conn(&staging_conn)?;
+        Self::validate_sqlite_integrity(&staging_conn)?;
+
+        let safety_backup = {
+            let mut main_conn = lock_conn!(self.conn);
+            let safety_backup = Self::backup_database_file_from_conn(
+                &backup_file_guard,
+                &main_conn,
+                &[backup_path.as_path()],
+            )?;
+            before_replace(safety_backup.as_deref())?;
+            let backup = Backup::new(&staging_conn, &mut main_conn)
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            Self::complete_backup(&backup, "恢复主数据库")?;
+            safety_backup
+        };
         let safety_id = safety_backup
             .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
             .unwrap_or_default();
-
-        // Step 2: Open the backup file and restore it to the main database
-        let source_conn =
-            Connection::open(&backup_path).map_err(|e| AppError::Database(e.to_string()))?;
-
-        {
-            let mut main_conn = lock_conn!(self.conn);
-            let backup = Backup::new(&source_conn, &mut main_conn)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            backup
-                .step(-1)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-        }
-
-        // Step 3: Run schema migrations (backup may be from an older version)
-        self.create_tables()?;
-        self.apply_schema_migrations()?;
-        self.ensure_model_pricing_seeded()?;
 
         log::info!("Database restored from backup: {filename}, safety backup: {safety_id}");
         Ok(safety_id)
@@ -900,6 +1220,7 @@ impl Database {
 
         let new_filename = format!("{name_part}.db");
 
+        let _backup_file_guard = lock_backup_file_operations()?;
         let backup_dir = get_app_config_dir().join("backups");
         let old_path = backup_dir.join(old_filename);
         let new_path = backup_dir.join(&new_filename);
@@ -934,6 +1255,7 @@ impl Database {
             ));
         }
 
+        let _backup_file_guard = lock_backup_file_operations()?;
         let backup_path = get_app_config_dir().join("backups").join(filename);
         if !backup_path.exists() {
             return Err(AppError::InvalidInput(format!(
@@ -1137,7 +1459,8 @@ mod tests {
         PORTABLE_HOME_TOKEN,
     };
     use crate::error::AppError;
-    use crate::settings::{update_settings, AppSettings};
+    use crate::settings::{get_settings, update_settings, AppSettings};
+    use rusqlite::Connection;
     use serial_test::serial;
 
     struct TestHomeGuard {
@@ -1181,6 +1504,26 @@ mod tests {
                 Some(previous) => std::env::set_var("CC_SWITCH_TEST_HOME", previous),
                 None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
             }
+        }
+    }
+
+    struct SettingsGuard {
+        previous: AppSettings,
+    }
+
+    impl SettingsGuard {
+        fn with_backup_retain_count(retain: u32) -> Self {
+            let previous = get_settings();
+            let mut next = previous.clone();
+            next.backup_retain_count = Some(retain);
+            update_settings(next).expect("set backup retention for test");
+            Self { previous }
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            let _ = update_settings(self.previous.clone());
         }
     }
 
@@ -1254,6 +1597,421 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(name, "Provider One");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_backup_reliability_accepts_empty_provider_and_mcp_export() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let source = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(source.conn);
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('empty-export-marker', 'kept')",
+                [],
+            )?;
+        }
+        let sql = source.export_sql_string()?;
+
+        let target = Database::memory()?;
+        target.import_sql_string(&sql)?;
+
+        let conn = crate::database::lock_conn!(target.conn);
+        let counts: (i64, i64) = conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM providers),
+                (SELECT COUNT(*) FROM mcp_servers)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(counts, (0, 0));
+        let marker: String = conn.query_row(
+            "SELECT value FROM settings WHERE key = 'empty-export-marker'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(marker, "kept");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_backup_reliability_rejects_header_only_sql_without_replacing_live(
+    ) -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let target = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(target.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('sentinel', 'claude', 'Existing Provider', '{}', '{}')",
+                [],
+            )?;
+        }
+
+        let header_only = format!(
+            "{}\nPRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\nCOMMIT;\n",
+            super::CC_SWITCH_SQL_EXPORT_HEADER
+        );
+        let error = target
+            .import_sql_string(&header_only)
+            .expect_err("missing original schema must be rejected");
+        assert!(
+            error.to_string().contains("required CC Switch tables")
+                || error.to_string().contains("CC Switch 必需表"),
+            "unexpected error: {error}"
+        );
+
+        let conn = crate::database::lock_conn!(target.conn);
+        let provider: (i64, String) = conn.query_row(
+            "SELECT COUNT(*), MIN(name) FROM providers WHERE id = 'sentinel'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(provider, (1, "Existing Provider".into()));
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_backup_reliability_rejects_open_transaction_without_replacing_live(
+    ) -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let source = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(source.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                [],
+            )?;
+        }
+        let exported = source.export_sql_string()?;
+        let truncated = exported
+            .strip_suffix("COMMIT;\nPRAGMA foreign_keys=ON;\n")
+            .expect("CC Switch export should end with a committed transaction");
+
+        let target = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(target.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('live-provider', 'claude', 'Live Provider', '{}', '{}')",
+                [],
+            )?;
+        }
+
+        let error = target
+            .import_sql_string(truncated)
+            .expect_err("an export truncated before COMMIT must be rejected");
+        assert!(
+            error.to_string().contains("incomplete")
+                || error.to_string().contains("未完成")
+                || error.to_string().contains("截断"),
+            "unexpected error: {error}"
+        );
+        let conn = crate::database::lock_conn!(target.conn);
+        let ids = conn
+            .prepare("SELECT id FROM providers ORDER BY id")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(ids, vec!["live-provider"]);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_backup_reliability_preserves_incremental_auto_vacuum() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let source = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(source.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('vacuum-provider', 'claude', 'Vacuum Provider', '{}', '{}')",
+                [],
+            )?;
+        }
+        let sql = source.export_sql_string()?;
+        let target = Database::memory()?;
+        target.import_sql_string(&sql)?;
+
+        let conn = crate::database::lock_conn!(target.conn);
+        let mode: i64 = conn.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
+        assert_eq!(mode, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_backup_reliability_preserves_text_bytes_and_real_storage_class(
+    ) -> Result<(), AppError> {
+        let source = Connection::open_in_memory()?;
+        source.execute_batch(
+            "CREATE TABLE scalar_values (
+                 label TEXT PRIMARY KEY,
+                 value ANY
+             ) STRICT;
+             INSERT INTO scalar_values VALUES ('nul-text', CAST(X'610062' AS TEXT));
+             INSERT INTO scalar_values VALUES ('invalid-text', CAST(X'80FF' AS TEXT));",
+        )?;
+        for (label, value) in [
+            ("real-one", 1.0),
+            ("negative-zero", -0.0),
+            ("positive-infinity", f64::INFINITY),
+            ("negative-infinity", f64::NEG_INFINITY),
+        ] {
+            source.execute(
+                "INSERT INTO scalar_values (label, value) VALUES (?1, ?2)",
+                rusqlite::params![label, value],
+            )?;
+        }
+
+        let sql = Database::dump_sql(&source, &[])?;
+        let target = Connection::open_in_memory()?;
+        target.execute_batch(&sql)?;
+
+        for (label, expected_hex) in [("nul-text", "610062"), ("invalid-text", "80FF")] {
+            let (storage_class, bytes): (String, String) = target.query_row(
+                "SELECT typeof(value), hex(value) FROM scalar_values WHERE label = ?1",
+                [label],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(
+                (storage_class.as_str(), bytes.as_str()),
+                ("text", expected_hex)
+            );
+        }
+
+        for (label, expected, negative) in [
+            ("real-one", 1.0, false),
+            ("negative-zero", -0.0, true),
+            ("positive-infinity", f64::INFINITY, false),
+            ("negative-infinity", f64::NEG_INFINITY, true),
+        ] {
+            let (storage_class, actual): (String, f64) = target.query_row(
+                "SELECT typeof(value), value FROM scalar_values WHERE label = ?1",
+                [label],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(storage_class, "real");
+            assert_eq!(actual, expected);
+            assert_eq!(actual.is_sign_negative(), negative);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_backup_reliability_preserves_autoincrement_high_water_marks() -> Result<(), AppError>
+    {
+        let source = Connection::open_in_memory()?;
+        source.execute_batch(
+            "CREATE TABLE autoincrement_rows (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 value TEXT NOT NULL
+             );
+             INSERT INTO autoincrement_rows (value) VALUES ('one'), ('two'), ('deleted-high');
+             DELETE FROM autoincrement_rows WHERE id = 3;",
+        )?;
+
+        let sql = Database::dump_sql(&source, &[])?;
+        let target = Connection::open_in_memory()?;
+        target.execute_batch(&sql)?;
+        let sequence: i64 = target.query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'autoincrement_rows'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(sequence, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_backup_reliability_sync_restore_preserves_local_sequence() -> Result<(), AppError> {
+        let source = Connection::open_in_memory()?;
+        source.execute_batch(
+            "CREATE TABLE autoincrement_rows (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 value TEXT NOT NULL
+             );
+             INSERT INTO autoincrement_rows (value) VALUES ('one'), ('two'), ('deleted-high');
+             DELETE FROM autoincrement_rows WHERE id = 3;",
+        )?;
+
+        let staged_sql = Database::dump_sql(&source, &["autoincrement_rows"])?;
+        let target = Connection::open_in_memory()?;
+        target.execute_batch(&staged_sql)?;
+        Database::restore_tables(&source, &target, &["autoincrement_rows"])?;
+
+        let sequence: i64 = target.query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'autoincrement_rows'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(sequence, 3);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_backup_atomic_failed_publish_leaves_no_files() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let _settings = SettingsGuard::with_backup_retain_count(10);
+        let db = Database::init()?;
+        let backup_dir = crate::config::get_app_config_dir().join("backups");
+        std::fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+        let mut files_before = std::fs::read_dir(&backup_dir)
+            .map_err(|e| AppError::io(&backup_dir, e))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .collect::<Vec<_>>();
+        files_before.sort();
+
+        let result = {
+            let guard = super::lock_backup_file_operations()?;
+            let conn = crate::database::lock_conn!(db.conn);
+            Database::backup_database_file_from_conn_with_hook(
+                &guard,
+                &conn,
+                &[],
+                |temp_path, target_path| {
+                    assert_eq!(
+                        temp_path.extension().and_then(|ext| ext.to_str()),
+                        Some("tmp")
+                    );
+                    assert!(!target_path.exists());
+                    Err(AppError::Config("simulated publish failure".to_string()))
+                },
+            )
+        };
+        assert!(result.is_err());
+        let mut files_after = std::fs::read_dir(&backup_dir)
+            .map_err(|e| AppError::io(&backup_dir, e))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .collect::<Vec<_>>();
+        files_after.sort();
+        assert_eq!(files_after, files_before);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_backup_atomic_concurrent_rename_does_not_overwrite() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let _settings = SettingsGuard::with_backup_retain_count(10);
+        let db = Database::init()?;
+        let mut sources = Vec::new();
+        for id in ["first", "second"] {
+            {
+                let conn = crate::database::lock_conn!(db.conn);
+                conn.execute("DELETE FROM providers", [])?;
+                conn.execute(
+                    "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                     VALUES (?1, 'claude', ?1, '{}', '{}')",
+                    [id],
+                )?;
+            }
+            sources.push(
+                db.backup_database_file()?
+                    .expect("backup")
+                    .file_name()
+                    .expect("filename")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles = sources
+            .iter()
+            .cloned()
+            .map(|source| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Database::rename_backup(&source, "shared-target")
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("rename thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        let backup_dir = crate::config::get_app_config_dir().join("backups");
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|name| backup_dir.join(name).exists())
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_backup_atomic_rejects_corrupt_restore_before_live_change() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let db = Database::init()?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('live-provider', 'claude', 'Live Provider', '{}', '{}')",
+                [],
+            )?;
+        }
+        let backup_dir = crate::config::get_app_config_dir().join("backups");
+        std::fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+        let corrupt_path = backup_dir.join("corrupt.db");
+        std::fs::write(&corrupt_path, b"not sqlite").map_err(|e| AppError::io(&corrupt_path, e))?;
+
+        db.restore_from_backup("corrupt.db")
+            .expect_err("corrupt restore must fail");
+        let conn = crate::database::lock_conn!(db.conn);
+        let id: String = conn.query_row("SELECT id FROM providers", [], |row| row.get(0))?;
+        assert_eq!(id, "live-provider");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_backup_atomic_rejects_future_restore_before_live_change() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let db = Database::init()?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('future-source', 'claude', 'Future Source', '{}', '{}')",
+                [],
+            )?;
+        }
+        let source = db.backup_database_file()?.expect("backup");
+        Connection::open(&source)?.execute_batch(&format!(
+            "PRAGMA user_version = {};",
+            crate::database::SCHEMA_VERSION + 1
+        ))?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute("DELETE FROM providers", [])?;
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('live-provider', 'claude', 'Live Provider', '{}', '{}')",
+                [],
+            )?;
+        }
+
+        let filename = source.file_name().expect("filename").to_string_lossy();
+        db.restore_from_backup(&filename)
+            .expect_err("future restore must fail");
+        let conn = crate::database::lock_conn!(db.conn);
+        let id: String = conn.query_row("SELECT id FROM providers", [], |row| row.get(0))?;
+        assert_eq!(id, "live-provider");
         Ok(())
     }
 

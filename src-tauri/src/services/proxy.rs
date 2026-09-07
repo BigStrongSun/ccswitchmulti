@@ -29,6 +29,17 @@ const PORT_OWNERSHIP_GUARD_PREFIX: &str = "PORT_OWNERSHIP_GUARD";
 /// Codex 接管时暴露给官方客户端的本地代理入口名称。
 const CODEX_LOCAL_PROXY_PROVIDER_NAME: &str = "CCSwitch MultiRouter";
 
+pub(crate) fn parse_local_proxy_app(app_type: &str) -> Result<AppType, String> {
+    let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+    if !app.supports_local_proxy() {
+        return Err(format!(
+            "应用 {} 不支持 CCSwitchMulti 本地代理",
+            app.as_str()
+        ));
+    }
+    Ok(app)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortOwnership {
     CompatibleInstance,
@@ -200,8 +211,8 @@ const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 12] = [
 ];
 
 const CLAUDE_TAKEOVER_HAIKU_MODEL: &str = "claude-haiku-4-5";
-const CLAUDE_TAKEOVER_SONNET_MODEL: &str = "claude-sonnet-4-6";
-const CLAUDE_TAKEOVER_OPUS_MODEL: &str = "claude-opus-4-8";
+const CLAUDE_TAKEOVER_SONNET_MODEL: &str = "claude-sonnet-5";
+const CLAUDE_TAKEOVER_OPUS_MODEL: &str = "claude-opus-5";
 const CLAUDE_TAKEOVER_FABLE_MODEL: &str = "claude-fable-5";
 // 写给 Claude Code 时沿用文档示例的大写形式；解析侧大小写不敏感。
 const CLAUDE_ONE_M_MARKER_FOR_CLIENT: &str = "[1M]";
@@ -740,6 +751,10 @@ impl ProxyService {
         self.switch_locks.lock_for_app(app_type).await
     }
 
+    pub(crate) async fn is_switch_in_progress_for_app(&self, app_type: &str) -> bool {
+        self.switch_locks.is_locked_for_app(app_type).await
+    }
+
     /// 启动代理服务器
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
         // 1. 启动时自动设置 proxy_enabled = true
@@ -1005,7 +1020,7 @@ impl ProxyService {
     /// - 开启：自动启动代理服务，仅接管当前 app 的 Live 配置
     /// - 关闭：仅恢复当前 app 的 Live 配置；若无其它接管，则自动停止代理服务
     pub async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
-        let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+        let app = parse_local_proxy_app(app_type)?;
         let app_type_str = app.as_str();
         let _guard = self.switch_locks.lock_for_app(app_type_str).await;
 
@@ -1251,7 +1266,7 @@ impl ProxyService {
         &self,
         app_type: &str,
     ) -> Result<ForcedPortRecoveryResult, String> {
-        let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+        let app = parse_local_proxy_app(app_type)?;
         let port = self
             .db
             .get_proxy_config()
@@ -3241,8 +3256,7 @@ impl ProxyService {
         app_type: &str,
         provider: &Provider,
     ) -> Result<(), String> {
-        let app_type_enum =
-            AppType::from_str(app_type).map_err(|_| format!("未知的应用类型: {app_type}"))?;
+        let app_type_enum = parse_local_proxy_app(app_type)?;
         let mut effective_settings =
             build_effective_settings_with_common_config(self.db.as_ref(), &app_type_enum, provider)
                 .map_err(|e| format!("构建 {app_type} 有效配置失败: {e}"))?;
@@ -3350,8 +3364,7 @@ impl ProxyService {
         app_type: &str,
         provider_id: &str,
     ) -> Result<HotSwitchOutcome, String> {
-        let app_type_enum =
-            AppType::from_str(app_type).map_err(|_| format!("无效的应用类型: {app_type}"))?;
+        let app_type_enum = parse_local_proxy_app(app_type)?;
         let provider = self
             .db
             .get_provider_by_id(provider_id, app_type)
@@ -4823,6 +4836,16 @@ mod tests {
         assert_eq!(env.get(key).and_then(|value| value.as_str()), expected);
     }
 
+    #[test]
+    fn upstream_pi_is_rejected_by_every_local_proxy_entrypoint_parser() {
+        assert!(parse_local_proxy_app("pi").is_err());
+        assert!(parse_local_proxy_app("opencode").is_err());
+        assert_eq!(
+            parse_local_proxy_app("codex").expect("Codex supports local proxy"),
+            AppType::Codex
+        );
+    }
+
     async fn use_ephemeral_proxy_port(db: &Arc<Database>) {
         let mut proxy_config = db.get_proxy_config().await.expect("get test proxy config");
         proxy_config.listen_port = 0;
@@ -5023,6 +5046,44 @@ mod tests {
     }
 
     #[test]
+    fn claude_5_takeover_aliases_preserve_upstream_names_and_one_m_markers() {
+        let fields = ProxyService::build_claude_takeover_model_fields(&json!({
+            "env": {
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "vendor-sonnet[1M]",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Vendor Sonnet",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "vendor-opus [1m]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Vendor Opus"
+            }
+        }));
+        let fields: std::collections::HashMap<_, _> = fields.into_iter().collect();
+
+        assert_eq!(
+            fields
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .map(String::as_str),
+            Some("claude-sonnet-5[1M]")
+        );
+        assert_eq!(
+            fields
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME")
+                .map(String::as_str),
+            Some("Vendor Sonnet")
+        );
+        assert_eq!(
+            fields
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .map(String::as_str),
+            Some("claude-opus-5[1M]")
+        );
+        assert_eq!(
+            fields
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME")
+                .map(String::as_str),
+            Some("Vendor Opus")
+        );
+    }
+
+    #[test]
     fn managed_account_claude_takeover_sources_copilot_models_from_provider() {
         let mut provider = Provider::with_id(
             "copilot".to_string(),
@@ -5082,14 +5143,14 @@ mod tests {
         assert_env_str(
             env,
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            Some("claude-sonnet-4-6"),
+            Some("claude-sonnet-5"),
         );
         assert_env_str(
             env,
             "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
             Some("claude-sonnet-4.6"),
         );
-        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-4-8"));
+        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-5"));
         assert_env_str(
             env,
             "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
@@ -5200,10 +5261,10 @@ mod tests {
         assert_env_str(
             env,
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            Some("claude-sonnet-4-6"),
+            Some("claude-sonnet-5"),
         );
         assert_env_str(env, "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", Some("gpt-5.4"));
-        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-4-8"));
+        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-5"));
         assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", Some("gpt-5.4"));
         // Codex 系只保留 AUTH_TOKEN；双键会触发 Claude Code 告警（#4919）
         assert_env_str(env, "ANTHROPIC_API_KEY", None);
@@ -8240,7 +8301,7 @@ model = "gpt-5.1-codex"
             live_env
                 .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
                 .and_then(|v| v.as_str()),
-            Some("claude-sonnet-4-6[1M]"),
+            Some("claude-sonnet-5[1M]"),
             "Sonnet role should carry the local 1M declaration for Claude Code"
         );
         assert_eq!(
@@ -8254,7 +8315,7 @@ model = "gpt-5.1-codex"
             live_env
                 .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
                 .and_then(|v| v.as_str()),
-            Some("claude-opus-4-8[1M]"),
+            Some("claude-opus-5[1M]"),
             "Opus role should preserve the current provider 1M capability marker"
         );
         assert_eq!(

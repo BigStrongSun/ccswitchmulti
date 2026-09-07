@@ -138,6 +138,9 @@ impl ConfigService {
             AppType::Hermes => {
                 // Hermes uses additive mode, no live sync needed
             }
+            AppType::Pi => {
+                // Pi has a dedicated versioned models.json service.
+            }
         }
 
         Ok(())

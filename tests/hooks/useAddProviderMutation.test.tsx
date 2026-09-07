@@ -84,6 +84,30 @@ beforeEach(() => {
 });
 
 describe("useAddProviderMutation", () => {
+  it("uses Pi's explicit provider key and keeps native enablement opt-in", async () => {
+    const { wrapper } = createWrapper();
+    const { result } = renderHook(() => useAddProviderMutation("pi"), {
+      wrapper,
+    });
+
+    const provider = await act(async () =>
+      result.current.mutateAsync({
+        name: "Pi custom",
+        providerKey: "pi-custom",
+        settingsConfig: { baseUrl: "https://example.invalid" },
+        addToLive: false,
+      }),
+    );
+
+    expect(uuidMocks.generateUUID).not.toHaveBeenCalled();
+    expect(provider.id).toBe("pi-custom");
+    expect(apiMocks.add).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "pi-custom" }),
+      "pi",
+      false,
+    );
+  });
+
   it("duplicates Claude Desktop official providers with a fresh id", async () => {
     const { wrapper } = createWrapper();
     const { result } = renderHook(

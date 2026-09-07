@@ -239,6 +239,21 @@ pub fn extract_session_id(
     body: &serde_json::Value,
     client_format: &str,
 ) -> SessionIdResult {
+    // OpenCode Go 明确定义的跨请求会话身份。它与传入协议无关（Messages、Responses
+    // 和 Chat 都使用），因此必须先于各客户端格式自己的候选头读取。
+    if let Some(session_id) = headers
+        .get("x-opencode-session")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return SessionIdResult {
+            session_id: session_id.to_string(),
+            source: SessionIdSource::Header,
+            client_provided: true,
+        };
+    }
+
     if client_format == "claude" {
         if let Some(result) = extract_claude_session(headers, body) {
             return result;
@@ -630,6 +645,21 @@ mod tests {
         let result = extract_session_id(&headers, &body, "codex");
 
         assert_eq!(result.session_id, "019cf82b-6a62-7700-bbbd-46909794ef89");
+        assert_eq!(result.source, SessionIdSource::Header);
+        assert!(result.client_provided);
+    }
+
+    #[test]
+    fn test_opencode_session_header_has_priority_and_is_client_provided() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-opencode-session", "go-session-stable".parse().unwrap());
+        headers.insert(
+            "session-id",
+            "019cf82b-6a62-7700-bbbd-46909794ef89".parse().unwrap(),
+        );
+        let result = extract_session_id(&headers, &json!({ "input": "hello" }), "codex");
+
+        assert_eq!(result.session_id, "go-session-stable");
         assert_eq!(result.source, SessionIdSource::Header);
         assert!(result.client_provided);
     }
