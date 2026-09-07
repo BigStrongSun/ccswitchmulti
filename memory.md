@@ -5445,3 +5445,9 @@ supported in one streaming turn`。
 - Claude takeover 的 client-facing 稳定角色从 Sonnet 4.6/Opus 4.8 更新为 `claude-sonnet-5`/`claude-opus-5`，但实际路由模型与显示名仍从当前 Provider 配置派生；`[1M]` 只按上游模型的显式 marker 传递。热切换、Codex OAuth 和 Copilot 都复用同一字段构造器，不能各自维护别名。
 - 官方说明 Sonnet 5 与 Opus 5 都支持 adaptive thinking 且缺省开启。上游 `38cfafdc` 只补 optimizer classifier，但 CCSM 还有 Responses→Anthropic 转换链；因此根修同时把 Opus 5 纳入 `uses_adaptive_thinking` 与 `adaptive_thinking_is_default`，避免未显式 reasoning effort 时错误省略 thinking。Opus 5 仍不属于 cannot-disable 集合，因为官方允许在 high 及以下 effort 关闭。
 - TDD 集中 RED 分别得到旧 Sonnet 4.6 alias、Opus 5 classifier false、转换后 thinking null；最小 GREEN 后三条均通过。这个迁移不改 Haiku/Fable 降级、Provider 实际模型映射、认证占位符或运行服务。
+
+## 2026-09-07 v3.20.1-1 vendor catalog 未知模型 modalities
+
+- 官方 vendor catalog 只在 host 与 Native Responses profile 同时匹配时启用。精确命中的模型继续逐字继承 vendor 声明；未命中模型会克隆旗舰 harness，但不能继承旗舰的 modalities，否则未来 vision 型号会被错误标为 text-only。
+- CCSM 的能力来源比上游 `b5f9fd0d` 更完整：路由/模型目录可显式声明 `textOnly`、`supportsImage` 或 `inputModalities`，另有精确 text-only 注册表。因此未命中分支先尊重 `spec.text_only` 与显式 modalities，再调用共享 `codex_catalog_input_modalities`；只有证据仍 unknown 时才 fail-open 为 `text,image`。匹配的官方条目和后置显式 override 不变。
+- 首次测试因缺少活动 `model_provider` 而误走中性模板并通过；补齐真实配置后 RED 精确得到 unknown 模型继承 `text`，GREEN 后同一表驱动回归同时证明 unknown fail-open、显式 text-only 优先、matched vendor text-only 保持。此批不扩大到 vendor harness、reasoning、tool profile 或 image detail 字段。

@@ -2265,6 +2265,12 @@ fn codex_vendor_catalog_model_entry(
         entry_obj.insert("display_name".to_string(), json!(display_name));
         entry_obj.insert("description".to_string(), json!(display_name));
         entry_obj.insert("priority".to_string(), json!(1000 + priority));
+        let input_modalities = if spec.text_only {
+            vec!["text".to_string()]
+        } else {
+            codex_catalog_input_modalities(&spec.model, spec.input_modalities.as_deref())
+        };
+        entry_obj.insert("input_modalities".to_string(), json!(input_modalities));
     }
 
     // Explicit user overrides win over the official entry; absent values keep
@@ -8211,6 +8217,54 @@ mod tests {
                 {"effort": "max", "description": "Maximum reasoning depth for the hardest problems"}
             ]))
         );
+    }
+
+    #[test]
+    fn vendor_catalog_modalities_resolve_unknown_and_preserve_authoritative_declarations() {
+        let config = r#"
+model_provider = "deepseek"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+"#;
+        let cases = [
+            (
+                "unknown-fails-open",
+                json!({"modelCatalog": {"models": [{"model": "deepseek-future-vision"}]}}),
+                vec!["text", "image"],
+            ),
+            (
+                "explicit-text-only-wins",
+                json!({"modelCatalog": {"models": [{
+                    "model": "deepseek-future-vision",
+                    "inputModalities": ["text"]
+                }]}}),
+                vec!["text"],
+            ),
+            (
+                "matched-vendor-entry-wins",
+                json!({"modelCatalog": {"models": [{"model": "deepseek-v4-flash"}]}}),
+                vec!["text"],
+            ),
+        ];
+
+        for (name, settings, expected) in cases {
+            let catalog = codex_model_catalog_from_settings(
+                &settings,
+                config,
+                CodexCatalogToolProfile::NativeResponses,
+            )
+            .expect("vendor catalog generation should not error")
+            .expect("non-empty modelCatalog must yield a catalog");
+            let actual: Vec<&str> = catalog["models"][0]["input_modalities"]
+                .as_array()
+                .expect("input_modalities array")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert_eq!(actual, expected, "case={name}");
+        }
     }
 
     #[test]
