@@ -139,6 +139,44 @@ impl PiModelsStore {
     }
 }
 
+pub(crate) fn get_pi_agent_dir() -> Result<PathBuf, AppError> {
+    let path = crate::settings::get_pi_override_dir()
+        .or_else(|| std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| crate::config::get_home_dir().join(".pi").join("agent"));
+    if !path.is_absolute() {
+        return Err(AppError::InvalidInput(format!(
+            "Pi agent directory must be absolute: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+pub(crate) fn get_pi_models_path() -> Result<PathBuf, AppError> {
+    Ok(get_pi_agent_dir()?.join("models.json"))
+}
+
+pub(crate) fn provider_base_url(provider: &Value) -> Option<String> {
+    provider
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| {
+            provider
+                .get("models")
+                .and_then(Value::as_array)
+                .and_then(|models| {
+                    models.iter().find_map(|model| {
+                        model
+                            .get("baseUrl")
+                            .and_then(Value::as_str)
+                            .filter(|url| !url.trim().is_empty())
+                    })
+                })
+        })
+        .map(str::to_string)
+}
+
 struct LoadedModelsDocument {
     document: Value,
     original_bytes: Option<Vec<u8>>,

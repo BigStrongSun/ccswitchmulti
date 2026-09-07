@@ -29,6 +29,17 @@ const PORT_OWNERSHIP_GUARD_PREFIX: &str = "PORT_OWNERSHIP_GUARD";
 /// Codex 接管时暴露给官方客户端的本地代理入口名称。
 const CODEX_LOCAL_PROXY_PROVIDER_NAME: &str = "CCSwitch MultiRouter";
 
+pub(crate) fn parse_local_proxy_app(app_type: &str) -> Result<AppType, String> {
+    let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+    if !app.supports_local_proxy() {
+        return Err(format!(
+            "应用 {} 不支持 CCSwitchMulti 本地代理",
+            app.as_str()
+        ));
+    }
+    Ok(app)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortOwnership {
     CompatibleInstance,
@@ -1009,7 +1020,7 @@ impl ProxyService {
     /// - 开启：自动启动代理服务，仅接管当前 app 的 Live 配置
     /// - 关闭：仅恢复当前 app 的 Live 配置；若无其它接管，则自动停止代理服务
     pub async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
-        let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+        let app = parse_local_proxy_app(app_type)?;
         let app_type_str = app.as_str();
         let _guard = self.switch_locks.lock_for_app(app_type_str).await;
 
@@ -1255,7 +1266,7 @@ impl ProxyService {
         &self,
         app_type: &str,
     ) -> Result<ForcedPortRecoveryResult, String> {
-        let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+        let app = parse_local_proxy_app(app_type)?;
         let port = self
             .db
             .get_proxy_config()
@@ -3245,8 +3256,7 @@ impl ProxyService {
         app_type: &str,
         provider: &Provider,
     ) -> Result<(), String> {
-        let app_type_enum =
-            AppType::from_str(app_type).map_err(|_| format!("未知的应用类型: {app_type}"))?;
+        let app_type_enum = parse_local_proxy_app(app_type)?;
         let mut effective_settings =
             build_effective_settings_with_common_config(self.db.as_ref(), &app_type_enum, provider)
                 .map_err(|e| format!("构建 {app_type} 有效配置失败: {e}"))?;
@@ -3354,8 +3364,7 @@ impl ProxyService {
         app_type: &str,
         provider_id: &str,
     ) -> Result<HotSwitchOutcome, String> {
-        let app_type_enum =
-            AppType::from_str(app_type).map_err(|_| format!("无效的应用类型: {app_type}"))?;
+        let app_type_enum = parse_local_proxy_app(app_type)?;
         let provider = self
             .db
             .get_provider_by_id(provider_id, app_type)
@@ -4825,6 +4834,16 @@ mod tests {
 
     fn assert_env_str(env: &Map<String, Value>, key: &str, expected: Option<&str>) {
         assert_eq!(env.get(key).and_then(|value| value.as_str()), expected);
+    }
+
+    #[test]
+    fn upstream_pi_is_rejected_by_every_local_proxy_entrypoint_parser() {
+        assert!(parse_local_proxy_app("pi").is_err());
+        assert!(parse_local_proxy_app("opencode").is_err());
+        assert_eq!(
+            parse_local_proxy_app("codex").expect("Codex supports local proxy"),
+            AppType::Codex
+        );
     }
 
     async fn use_ephemeral_proxy_port(db: &Arc<Database>) {

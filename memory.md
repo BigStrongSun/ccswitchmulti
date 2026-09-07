@@ -5384,3 +5384,11 @@ supported in one streaming turn`。
 - `PiModelsStore` 把完整文件字节的 SHA-256 作为调用方可见 content-version。写入/删除必须携带读取版本；进程内写入统一串行化，锁内复核版本，写前把原始字节原子备份到 `models.json.cc-switch.bak`，备份后再复核一次才替换原文件。过期快照返回 `AppError::Conflict`，相同内容或重复删除不写文件也不滚动备份。
 - JSON/JSONC 读取限制为 1 MiB、严格 UTF-8，根节点及 `providers` 必须为对象。写回会规范化为 JSON，因此注释只在逐字节备份中保留；所有未知顶层字段、非目标 Provider 和调用方从完整节点带回的未知 Provider 字段继续保留。结构化编辑器后续必须从完整节点派生替换值，不能提交已知字段子集。
 - 第一层 TDD 为 5 条 `upstream_pi_config_` 回归：stale CAS、native auth/settings 不触碰、未知字段保留、逐字节写前备份、幂等写入及目标删除。首次 RED 是 API/Conflict 缺失；GREEN 后 5/5。此处尚未把 Pi 加入 AppType、Provider service、Prompt/Skill/session usage 或前端，也没有让 Pi 进入 MultiRouter、Provider Set、代理、failover、tray takeover 或 MCP sync。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi Provider 事务与代理隔离
+
+- Pi 已作为 additive managed app 注册，但 Provider CRUD 不复用通用 additive live writer。`ProviderService` 在 list/add/update/remove/delete/switch 六个入口先分派到 Pi 专用服务；每次完整操作持有 Pi app 写锁，并由 `PiModelsStore` 在文件层继续执行 content-version CAS。
+- add-to-live、enable、update、remove、delete 都拒绝 stale 数据库卡片。DB-only add/update 只保存当前版本而不创建原生节点；这修复了最初 `update_with_store` 无条件 `put_provider` 会把已移除卡片偷偷重新启用的所有权漏洞。Provider key 不允许通过 update 改名。
+- 原生文件写成功而数据库 INSERT/UPDATE/DELETE 失败时，会以写入后的新 content-version 恢复删除或原值；若期间发生外部编辑，CAS 回滚失败会与原数据库错误一起返回，不能覆盖外部内容。故障注入回归分别验证 add、update、delete 的原生回滚。
+- Pi 在代理边界 fail closed：`supports_local_proxy=false`；通用 live writer、Provider adapter、外部 OpenAI API 候选、proxy takeover/hot-switch/live 写入/强制恢复、failover 命令均拒绝或忽略 Pi。MCP flag 与全量 provider live sync 同样排除 Pi；Prompt/Skill 和 session usage 仍留给 Task 8 后续独立所有权批次。
+- 本批按低频门禁约定只集中运行 `cargo test --lib upstream_pi_ -- --nocapture`，结果 19/19；覆盖 App 注册、配置 CAS/备份、Provider 完整入口生命周期、DB-only 编辑不误启用、数据库失败回滚以及 proxy/failover/external API 排除。这里只证明源码与聚焦回归，尚未运行全量 Rust/frontend、Tauri/NSIS、安装或运行态验收。

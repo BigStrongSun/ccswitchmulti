@@ -2546,6 +2546,7 @@ pub async fn get_proxy_config_for_app(
     state: tauri::State<'_, AppState>,
     app_type: String,
 ) -> Result<AppProxyConfig, String> {
+    crate::services::proxy::parse_local_proxy_app(&app_type)?;
     let db = &state.db;
     db.get_proxy_config_for_app(&app_type)
         .await
@@ -2562,6 +2563,7 @@ pub async fn update_proxy_config_for_app(
 ) -> Result<(), String> {
     let db = &state.db;
     let app_type = config.app_type.clone();
+    crate::services::proxy::parse_local_proxy_app(&app_type)?;
     let circuit_config = CircuitBreakerConfig::from(&config);
 
     db.update_proxy_config_for_app(config)

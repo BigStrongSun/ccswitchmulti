@@ -5,6 +5,7 @@
 mod endpoints;
 mod gemini_auth;
 mod live;
+mod pi;
 mod usage;
 
 use indexmap::IndexMap;
@@ -5592,6 +5593,9 @@ impl ProviderService {
         state: &AppState,
         app_type: AppType,
     ) -> Result<IndexMap<String, Provider>, AppError> {
+        if app_type == AppType::Pi {
+            return pi::list(state);
+        }
         let mut providers = state.db.get_all_providers(app_type.as_str())?;
         if app_type == AppType::Codex {
             providers.retain(|_, provider| {
@@ -5702,6 +5706,14 @@ impl ProviderService {
         protocol_profiles: &[ProtocolCompatibilityRecord],
         protocol_observations: &[ProtocolCompatibilityRecord],
     ) -> Result<bool, AppError> {
+        if app_type == AppType::Pi {
+            if !protocol_profiles.is_empty() || !protocol_observations.is_empty() {
+                return Err(AppError::InvalidInput(
+                    "Pi providers do not accept Codex protocol evidence".to_string(),
+                ));
+            }
+            return pi::add(state, provider, add_to_live);
+        }
         let mut provider = Self::prepare_provider_for_mutation(state, &app_type, provider)?;
         if app_type.is_additive_mode() {
             Self::set_provider_live_config_managed(&mut provider, add_to_live);
@@ -5796,6 +5808,14 @@ impl ProviderService {
         protocol_profiles: &[ProtocolCompatibilityRecord],
         protocol_observations: &[ProtocolCompatibilityRecord],
     ) -> Result<bool, AppError> {
+        if app_type == AppType::Pi {
+            if !protocol_profiles.is_empty() || !protocol_observations.is_empty() {
+                return Err(AppError::InvalidInput(
+                    "Pi providers do not accept Codex protocol evidence".to_string(),
+                ));
+            }
+            return pi::update(state, original_id, provider);
+        }
         let original_id = original_id.unwrap_or(provider.id.as_str()).to_string();
         let existing_provider = state
             .db
@@ -6515,6 +6535,10 @@ impl ProviderService {
         app_type: AppType,
         id: &str,
     ) -> Result<crate::codex_multirouter::mutation::CodexProviderDeleteOutcome, AppError> {
+        if app_type == AppType::Pi {
+            pi::delete(state, id)?;
+            return Ok(Self::empty_provider_delete_outcome(id));
+        }
         // Additive mode apps - no current provider concept
         if app_type.is_additive_mode() {
             // Single DB read shared across all additive-mode sub-paths below.
@@ -6628,6 +6652,9 @@ impl ProviderService {
         app_type: AppType,
         id: &str,
     ) -> Result<(), AppError> {
+        if app_type == AppType::Pi {
+            return pi::remove(state, id);
+        }
         Self::ensure_codex_provider_id_is_user_operable(state, &app_type, id)?;
         match app_type {
             AppType::OpenCode => {
@@ -6693,6 +6720,10 @@ impl ProviderService {
     ///    d. Write target provider config to live files
     ///    e. Sync MCP configuration
     pub fn switch(state: &AppState, app_type: AppType, id: &str) -> Result<SwitchResult, AppError> {
+        if app_type == AppType::Pi {
+            pi::enable(state, id)?;
+            return Ok(SwitchResult::default());
+        }
         let mut result = Self::switch_inner(state, app_type.clone(), id)?;
 
         // The device-level provider and active project snapshot are two views
@@ -7411,6 +7442,7 @@ impl ProviderService {
             AppType::OpenCode => Self::extract_opencode_common_config(&provider.settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(&provider.settings_config),
             AppType::Hermes => Ok(String::new()), // Hermes doesn't use common config snippets
+            AppType::Pi => Ok(String::new()),
         }
     }
 
@@ -7428,6 +7460,7 @@ impl ProviderService {
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
             AppType::Hermes => Ok(String::new()), // Hermes doesn't use common config snippets
+            AppType::Pi => Ok(String::new()),
         }
     }
 
@@ -8209,6 +8242,13 @@ impl ProviderService {
                     ));
                 }
             }
+            AppType::Pi => {
+                if !provider.settings_config.is_object() {
+                    return Err(AppError::InvalidInput(
+                        "Pi provider configuration must be an object".to_string(),
+                    ));
+                }
+            }
         }
 
         // Validate and clean UsageScript configuration (common for all app types)
@@ -8396,7 +8436,7 @@ impl ProviderService {
 
                 Ok((api_key, base_url))
             }
-            AppType::OpenClaw | AppType::Hermes => {
+            AppType::OpenClaw | AppType::Hermes | AppType::Pi => {
                 // OpenClaw/Hermes use apiKey and baseUrl directly on the object
                 let api_key = provider
                     .settings_config
