@@ -5451,3 +5451,10 @@ supported in one streaming turn`。
 - 官方 vendor catalog 只在 host 与 Native Responses profile 同时匹配时启用。精确命中的模型继续逐字继承 vendor 声明；未命中模型会克隆旗舰 harness，但不能继承旗舰的 modalities，否则未来 vision 型号会被错误标为 text-only。
 - CCSM 的能力来源比上游 `b5f9fd0d` 更完整：路由/模型目录可显式声明 `textOnly`、`supportsImage` 或 `inputModalities`，另有精确 text-only 注册表。因此未命中分支先尊重 `spec.text_only` 与显式 modalities，再调用共享 `codex_catalog_input_modalities`；只有证据仍 unknown 时才 fail-open 为 `text,image`。匹配的官方条目和后置显式 override 不变。
 - 首次测试因缺少活动 `model_provider` 而误走中性模板并通过；补齐真实配置后 RED 精确得到 unknown 模型继承 `text`，GREEN 后同一表驱动回归同时证明 unknown fail-open、显式 text-only 优先、matched vendor text-only 保持。此批不扩大到 vendor harness、reasoning、tool profile 或 image detail 字段。
+
+## 2026-09-07 v3.20.1-1 PPIO 跨 App 预设
+
+- PPIO 不是 Pi 单点增量：当前分支原先连官方 `3711e1a0` 的基础六端预设和品牌资源也未迁移。本批把基础提交与 late-arrival `5f3ea4d6` 作为一个不可拆分的跨 App 契约，覆盖 Claude Code、Claude Desktop、Codex、OpenCode、OpenClaw、Hermes、Pi 以及内联/独立 SVG 与图标 metadata。
+- Anthropic 客户端使用 `https://api.ppio.com/anthropic`，OpenAI-compatible 客户端使用带版本根 `https://api.ppio.com/openai/v1`；Claude Code 的模型发现必须显式固定到 `https://api.ppio.com/openai/v1/models`，不能从 Anthropic 根派生会返回 404 的候选。品牌字段统一采用当前合作入口 `https://ppio.com/activity/ccswitch`、`isPartner: true` 与 `partnerPromotionKey: "ppio"`。
+- 七端统一暴露 `deepseek/deepseek-v4-flash-0731`；Pi 定义通过 `thinkingProfile: "deepseekV4"` 在导出时物化为 `thinkingLevelMap`，并合并 `DEEPSEEK_THINKING_COMPAT`。测试必须断言导出的 level map 和 compat，而不是私有解析提示字段。
+- TDD 的一次 RED 为 13/13 全部因 PPIO 缺失而失败；实现后的首次 GREEN 仅剩测试误断言私有 `thinkingProfile`，纠正为导出契约后 13/13 通过。本批不安装、不重启，也不触碰 `127.0.0.1:15721`。
