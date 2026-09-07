@@ -5400,3 +5400,11 @@ supported in one streaming turn`。
 - 编辑 active Prompt 时，先从原生内容确认条目仍 active，数据库统一存 `enabled=false`，随后以同一 snapshot revision 更新或删除 `AGENTS.md`；原生写失败会恢复先前数据库条目。编辑 inactive duplicate 不触碰原生文件；删除 active Prompt 被拒绝。显式启用前若原生内容不属于任何已保存 Prompt，会先生成不覆盖同秒既有记录的唯一 backup，再以 CAS 写入目标内容。
 - 首次导入 Pi `AGENTS.md` 时数据库条目保持 disabled，后续活动态仍从文件派生；交互式读取和首次导入都复用限长读取与锁。Tauri 新增固定系统文件和模板的读、替换、删除、列表、重命名/保存命令，应用启动首次导入列表也包含 Pi。
 - TDD 先以缺失 `pi_prompt_files` API 得到编译 RED，再以持久化 `enabled=true` 错判活动态得到行为 RED。批次最终 `cargo test --lib upstream_pi_ -- --nocapture` 为 25/25，原生文件模块边界为 3/3，数据库原生写失败回滚为 1/1；rustfmt 与 diff check 通过。未运行全量 Rust/frontend、Tauri/NSIS、安装或运行态验收；Task 8 仍需继续完成 Skill、session usage/schema/index 和前端。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi Skill 原生目录所有权
+
+- Pi Skill 的活动态由 `<pi-agent>/skills/<directory>` 是否真实存在派生；数据库不新增 Pi enabled 列，`SkillApps.pi` 只作为 API/临时投影视图，toggle 不把它持久化成第二事实源。通用全量 Skill 同步明确跳过 Pi，restore/profile 的旧 desired-state 不能清理或重建 Pi 原生目录。
+- Pi 同名目标只有两种可破坏性管理证据：符号链接解析后精确指向当前 SSOT 源，或完整目录树哈希与当前源一致。完整哈希包含隐藏文件、空目录、symlink 目标和文件类型；任何用户修改、未知同名目录、缺失 SSOT 或操作期间变化都会拒绝覆盖/删除并保留现场内容。
+- 普通安装、本地 ZIP、重复安装、启用、禁用、更新、卸载和存储迁移都接入该所有权边界。新安装在 DB 持久化前检查 Pi 冲突，后续同步失败回滚 DB；更新先记录旧部署证据，替换 SSOT 后再次校验再刷新；卸载对修改后的 Pi 副本返回 `preservedPiPath` 与 `piCleanupIncomplete`，备份源排除被保留目录，防止把用户原生内容复制进 CCSM 备份。
+- SSOT 与任何应用 Skills 根目录相同会在同步/删除前拒绝；迁移目标在移动任何文件前完成别名检查。迁移已受管 Pi copy/symlink 时记录旧部署证据，迁移后只刷新仍与旧证据匹配的目标；外部同名目录保持不动。Pi 原生目录与其他应用路径别名时，卸载也不会经另一应用清理路径误删已保留内容。
+- TDD 首条 RED 证明 Pi 原生目录存在后 API 仍错误返回 disabled；随后同名外部目录、隐藏文件修改、安装持久化顺序、卸载告警、迁移目标别名、迁移刷新和操作间变化均纳入回归。最终 Pi Skill 聚焦 10/10、完整 `services::skill::tests` 54/54、DAO metadata 3/3、`skill_sync` 集成 7/7；Windows 无 symlink 特权的两条既有集成断言按原测试设计跳过 symlink-only 分支。未运行全量 Rust/frontend、Tauri/NSIS 或安装态验收。
