@@ -7,6 +7,7 @@ import type {
   CodexCatalogModel,
   CodexChatReasoning,
   CodexModelReasoningCapability,
+  CodexReasoningEffort,
   PromptCacheRoutingMode,
 } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
@@ -168,6 +169,11 @@ function modelCatalog(
         // template default. Required by Codex, so the backend always emits one.
         baseInstructions?: string;
         reasoning?: CodexModelReasoningCapability;
+        // Concise seed syntax used by upstream preset tables. These fields are
+        // consumed here and projected into CCSwitchMulti's schema-v2
+        // `reasoning` capability; they never enter the exported catalog.
+        reasoningLevels?: CodexReasoningEffort[];
+        defaultReasoningLevel?: CodexReasoningEffort;
       }
   >,
 ): CodexCatalogModel[] {
@@ -181,7 +187,14 @@ function modelCatalog(
           ...(entry.inputModalities
             ? { inputModalities: entry.inputModalities }
             : {}),
-          reasoning: entry.reasoning ?? unsupportedBuiltinReasoning,
+          reasoning:
+            entry.reasoning ??
+            (entry.reasoningLevels
+              ? builtinReasoningFromLevels(
+                  entry.reasoningLevels,
+                  entry.defaultReasoningLevel,
+                )
+              : unsupportedBuiltinReasoning),
           ...(entry.textOnly !== undefined ? { textOnly: entry.textOnly } : {}),
           ...(entry.supportsImage !== undefined
             ? { supportsImage: entry.supportsImage }
@@ -195,6 +208,25 @@ function modelCatalog(
             : {}),
         },
   );
+}
+
+function builtinReasoningFromLevels(
+  levels: CodexReasoningEffort[],
+  defaultEffort?: CodexReasoningEffort,
+): CodexModelReasoningCapability {
+  const supportedEfforts = levels.filter((level) => level !== "none");
+  const resolvedDefault = defaultEffort ?? supportedEfforts[0];
+  return {
+    schemaVersion: 2,
+    supportStatus: "confirmed_supported",
+    controlKind: supportedEfforts.length > 0 ? "graded" : "boolean",
+    supportedEfforts,
+    ...(resolvedDefault ? { defaultEffort: resolvedDefault } : {}),
+    disableAllowed: levels.includes("none"),
+    upstream: { format: "string", parameter: "reasoning_effort" },
+    outputFormat: "reasoning_content",
+    source: "builtin",
+  };
 }
 
 const deepSeekV4Reasoning: CodexModelReasoningCapability = {
@@ -2080,5 +2112,629 @@ base_url = "https://cc-api.pipellm.ai/v1"`,
     partnerPromotionKey: "ppio",
     icon: "ppio",
     iconColor: "#2874FF",
+  },
+  {
+    // 腾讯云 Token Plan 个人版（1823/130060，2026-08-21 版）：通用 + Hy 两
+    // 系列共用同一端点与 API Key，catalog 合并两系列；Auto 智能路由的调用
+    // ID 是 tc-code-latest。公告优先于旧目录残留：kimi-k2.5 与
+    // minimax-m2.5 均已下线，因此不收录。
+    // 注意与 TokenHub 按量 API 市场（1823 线，Hunyuan 预设的 /v1 端点）是
+    // 两条产品线：订阅 Key 只能走 /plan 端点，TokenHub Key 对 /plan 不通
+    name: "Tencent Token Plan",
+    websiteUrl: "https://cloud.tencent.com/product/tokenhub",
+    apiKeyUrl: "https://console.cloud.tencent.com/tokenhub/tokenplan",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "tencent_token_plan",
+      "https://api.lkeap.cloud.tencent.com/plan/v3",
+      "tc-code-latest",
+    ),
+    endpointCandidates: ["https://api.lkeap.cloud.tencent.com/plan/v3"],
+    // Token Plan 仅提供 Chat Completions；Codex 需要本地路由转换
+    apiFormat: "openai_chat",
+    modelCatalog: modelCatalog([
+      {
+        model: "tc-code-latest",
+        displayName: "Auto",
+        contextWindow: 196608,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "deepseek-v4-flash-202605",
+        displayName: "DeepSeek V4 Flash Official",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-pro-202606",
+        displayName: "DeepSeek V4 Pro Official",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "minimax-m2.7",
+        displayName: "MiniMax M2.7",
+        contextWindow: 196608,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "minimax-m3",
+        displayName: "MiniMax M3",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "glm-5",
+        displayName: "GLM-5",
+        contextWindow: 200000,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "glm-5.1",
+        displayName: "GLM-5.1",
+        contextWindow: 200000,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "glm-5.2",
+        displayName: "GLM-5.2",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "glm-5.3",
+        displayName: "GLM-5.3",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "high",
+      },
+      {
+        model: "glm-5.3-flash",
+        displayName: "GLM-5.3 Flash",
+        contextWindow: 1048576,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "high",
+      },
+      {
+        model: "kimi-k2.7-code",
+        displayName: "Kimi K2.7 Code",
+        contextWindow: 262144,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "kimi-k3",
+        displayName: "Kimi K3",
+        contextWindow: 1048576,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "hy3",
+        displayName: "Hy3",
+        contextWindow: 256000,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "hy4-preview",
+        displayName: "Hy4 Preview",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+    ]),
+    // 真 Key 实测（2026-08-31）：thinking 参数在 /plan 端点真实生效
+    // （开/关均验证，thinking 文档 1300/80637 覆盖 /plan）；reasoning_effort
+    // 全模型容忍不报错（含默认 high）。effortValueMode 不声明=passthrough，
+    // 档位值域已由各模型 reasoningLevels 限定为实测安全集
+    codexChatReasoning: {
+      supportsThinking: true,
+      supportsEffort: true,
+      thinkingParam: "thinking",
+      effortParam: "reasoning_effort",
+      outputFormat: "reasoning_content",
+    },
+    category: "cn_official",
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
+    // 国际站（新加坡地域）个人版（intl 1300/81315，2026-08-20 版）：
+    // Auto 调用 ID 是 auto（≠国内个人版 tc-code-latest），阵容与国内不同
+    // （无 GLM-5/5.1/Hy3，多 GLM-5.2/MiniMax-M3）。端点用国际站文档钦定的
+    // tencentcloudmaas.com 域（DNS 实测解析新加坡节点）；国内站文档对新加坡
+    // 地域给的是 tokenhub-intl.tencentmaas.com，Key 按站独立不跨站通用，
+    // 故互不作候选
+    name: "Tencent Token Plan (Intl)",
+    websiteUrl: "https://www.tencentcloud.com/products/tokenhub",
+    apiKeyUrl: "https://console.tencentcloud.com/tokenhub/tokenplan",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "tencent_token_plan_intl",
+      "https://tokenhub-intl.tencentcloudmaas.com/plan/v3",
+      "auto",
+    ),
+    endpointCandidates: ["https://tokenhub-intl.tencentcloudmaas.com/plan/v3"],
+    apiFormat: "openai_chat",
+    modelCatalog: modelCatalog([
+      {
+        model: "auto",
+        displayName: "Auto",
+        contextWindow: 196608,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "glm-5.3-flash",
+        displayName: "GLM-5.3 Flash",
+        contextWindow: 1048576,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "high",
+      },
+      {
+        model: "glm-5.2",
+        displayName: "GLM-5.2",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "kimi-k3",
+        displayName: "Kimi K3",
+        contextWindow: 1048576,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "kimi-k2.6",
+        displayName: "Kimi K2.6",
+        contextWindow: 262144,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-pro-202606",
+        displayName: "DeepSeek V4 Pro Official",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-flash-202605",
+        displayName: "DeepSeek V4 Flash Official",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "minimax-m3",
+        displayName: "MiniMax M3",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+    ]),
+    // thinking/reasoning_effort 实测同国内个人版（全模型容忍、开关生效）
+    codexChatReasoning: {
+      supportsThinking: true,
+      supportsEffort: true,
+      thinkingParam: "thinking",
+      effortParam: "reasoning_effort",
+      outputFormat: "reasoning_content",
+    },
+    category: "cn_official",
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
+    // Token Plan 企业版专业套餐（1823/130659，2026-08-25 版，广州地域）：
+    // kimi-k2.5 与 minimax-m2.5 均已公告下线，不收录。新加坡地域阵容不同且
+    // Key 不跨站，见 (Intl) 预设
+    name: "Tencent Token Plan Enterprise Pro",
+    websiteUrl: "https://cloud.tencent.com/product/tokenhub",
+    apiKeyUrl: "https://console.cloud.tencent.com/tokenhub/tokenplan-e",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "tencent_token_plan_enterprise_pro",
+      "https://tokenhub.tencentmaas.com/plan/v3",
+      "auto",
+    ),
+    // 广州地域为默认端点；国内站企业套餐另可选新加坡地域（1823/130659、
+    // 131173 双地域表：tokenhub-intl.tencentmaas.com，需开通新加坡地域，
+    // 不支持跨地域调用，故仅作候选端点）
+    endpointCandidates: [
+      "https://tokenhub.tencentmaas.com/plan/v3",
+      "https://tokenhub-intl.tencentmaas.com/plan/v3",
+    ],
+    apiFormat: "openai_chat",
+    modelCatalog: modelCatalog([
+      {
+        model: "auto",
+        displayName: "Auto",
+        contextWindow: 196608,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "glm-5.3-flash",
+        displayName: "GLM-5.3 Flash",
+        contextWindow: 1048576,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "high",
+      },
+      {
+        model: "glm-5.3",
+        displayName: "GLM-5.3",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "high",
+      },
+      {
+        model: "glm-5.2",
+        displayName: "GLM-5.2",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "glm-5",
+        displayName: "GLM-5",
+        contextWindow: 200000,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "glm-5.1",
+        displayName: "GLM-5.1",
+        contextWindow: 200000,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "glm-5-turbo",
+        displayName: "GLM-5 Turbo",
+        contextWindow: 200000,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "kimi-k3",
+        displayName: "Kimi K3",
+        contextWindow: 1048576,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "kimi-k2.7-code",
+        displayName: "Kimi K2.7 Code",
+        contextWindow: 262144,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "kimi-k2.7-code-highspeed",
+        displayName: "Kimi K2.7 Code HighSpeed",
+        contextWindow: 262144,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "kimi-k2.6",
+        displayName: "Kimi K2.6",
+        contextWindow: 262144,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "minimax-m2.7",
+        displayName: "MiniMax M2.7",
+        contextWindow: 196608,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "minimax-m3",
+        displayName: "MiniMax M3",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-flash",
+        displayName: "DeepSeek V4 Flash",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-pro",
+        displayName: "DeepSeek V4 Pro",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-flash-0731",
+        displayName: "DeepSeek V4 Flash 0731 GA",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-pro-0813",
+        displayName: "DeepSeek V4 Pro 0813 GA",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-flash-202605",
+        displayName: "DeepSeek V4 Flash Official",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-pro-202606",
+        displayName: "DeepSeek V4 Pro Official",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek/deepseek-v4-flash-vision-exp",
+        displayName: "DeepSeek V4 Flash Vision Exp",
+        contextWindow: 1000000,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["none", "high"],
+      },
+    ]),
+    // reasoning_effort 默认 high 全模型实测容忍；glm-5.3 的 medium/xhigh
+    // 会 400，档位值域已由各模型 reasoningLevels 限定为实测安全集
+    codexChatReasoning: {
+      supportsThinking: true,
+      supportsEffort: true,
+      thinkingParam: "thinking",
+      effortParam: "reasoning_effort",
+      outputFormat: "reasoning_content",
+    },
+    category: "cn_official",
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
+    // 国际站企业版专业套餐（intl 1300/81489，2026-08-26 版，新加坡地域）：
+    // 阵容为广州地域子集（无 GLM-5/5.1/5-Turbo、Kimi-K2.6、MiniMax-M2.7）
+    name: "Tencent Token Plan Enterprise Pro (Intl)",
+    websiteUrl: "https://www.tencentcloud.com/products/tokenhub",
+    apiKeyUrl: "https://console.tencentcloud.com/tokenhub/tokenplan-e",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "tencent_token_plan_enterprise_pro_intl",
+      "https://tokenhub-intl.tencentcloudmaas.com/plan/v3",
+      "auto",
+    ),
+    // 新加坡地域为默认端点；国际站企业套餐另可选广州地域（1300/81489、
+    // 81490 双地域表：tokenhub.tencentcloudmaas.com，需开通广州地域，
+    // 不支持跨地域调用，故仅作候选端点）
+    endpointCandidates: [
+      "https://tokenhub-intl.tencentcloudmaas.com/plan/v3",
+      "https://tokenhub.tencentcloudmaas.com/plan/v3",
+    ],
+    apiFormat: "openai_chat",
+    modelCatalog: modelCatalog([
+      {
+        model: "auto",
+        displayName: "Auto",
+        contextWindow: 196608,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "glm-5.3-flash",
+        displayName: "GLM-5.3 Flash",
+        contextWindow: 1048576,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "high",
+      },
+      {
+        model: "glm-5.3",
+        displayName: "GLM-5.3",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "high",
+      },
+      {
+        model: "glm-5.2",
+        displayName: "GLM-5.2",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "minimax-m3",
+        displayName: "MiniMax M3",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "kimi-k3",
+        displayName: "Kimi K3",
+        contextWindow: 1048576,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "kimi-k2.7-code",
+        displayName: "Kimi K2.7 Code",
+        contextWindow: 262144,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "kimi-k2.7-code-highspeed",
+        displayName: "Kimi K2.7 Code HighSpeed",
+        contextWindow: 262144,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "deepseek-v4-flash",
+        displayName: "DeepSeek V4 Flash",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-pro",
+        displayName: "DeepSeek V4 Pro",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-flash-0731",
+        displayName: "DeepSeek V4 Flash 0731 GA",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-pro-0813",
+        displayName: "DeepSeek V4 Pro 0813 GA",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-flash-202605",
+        displayName: "DeepSeek V4 Flash Official",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek-v4-pro-202606",
+        displayName: "DeepSeek V4 Pro Official",
+        contextWindow: 1048576,
+        inputModalities: ["text"],
+        reasoningLevels: ["none", "high"],
+      },
+      {
+        model: "deepseek/deepseek-v4-flash-vision-exp",
+        displayName: "DeepSeek V4 Flash Vision Exp",
+        contextWindow: 1000000,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["none", "high"],
+      },
+    ]),
+    // reasoning_effort 默认 high 全模型实测容忍；同国内企业专业版
+    codexChatReasoning: {
+      supportsThinking: true,
+      supportsEffort: true,
+      thinkingParam: "thinking",
+      effortParam: "reasoning_effort",
+      outputFormat: "reasoning_content",
+    },
+    category: "cn_official",
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
+    // Token Plan 企业版轻享套餐（1823/131173，2026-08-28 版）：仅 Auto 模型。
+    // 国内 auto 关思考被静默忽略（真 Key 实测 2026-08-31），只列 high
+    name: "Tencent Token Plan Enterprise Lite",
+    websiteUrl: "https://cloud.tencent.com/product/tokenhub",
+    apiKeyUrl: "https://console.cloud.tencent.com/tokenhub/tokenplan-e",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "tencent_token_plan_enterprise_lite",
+      "https://tokenhub.tencentmaas.com/plan/v3",
+      "auto",
+    ),
+    // 广州地域为默认端点；国内站企业套餐另可选新加坡地域（1823/130659、
+    // 131173 双地域表：tokenhub-intl.tencentmaas.com，需开通新加坡地域，
+    // 不支持跨地域调用，故仅作候选端点）
+    endpointCandidates: [
+      "https://tokenhub.tencentmaas.com/plan/v3",
+      "https://tokenhub-intl.tencentmaas.com/plan/v3",
+    ],
+    apiFormat: "openai_chat",
+    modelCatalog: modelCatalog([
+      {
+        model: "auto",
+        displayName: "Auto",
+        contextWindow: 196608,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+    ]),
+    codexChatReasoning: {
+      supportsThinking: true,
+      supportsEffort: true,
+      thinkingParam: "thinking",
+      effortParam: "reasoning_effort",
+      outputFormat: "reasoning_content",
+    },
+    category: "cn_official",
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
+    // 国际站企业版轻享套餐（intl 1300/81490）：新加坡地域（资源调度范围
+    // Global），仅 Auto 模型。INTL auto 关思考真实生效（真 Key 实测）
+    name: "Tencent Token Plan Enterprise Lite (Intl)",
+    websiteUrl: "https://www.tencentcloud.com/products/tokenhub",
+    apiKeyUrl: "https://console.tencentcloud.com/tokenhub/tokenplan-e",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "tencent_token_plan_enterprise_lite_intl",
+      "https://tokenhub-intl.tencentcloudmaas.com/plan/v3",
+      "auto",
+    ),
+    // 新加坡地域为默认端点；国际站企业套餐另可选广州地域（1300/81489、
+    // 81490 双地域表：tokenhub.tencentcloudmaas.com，需开通广州地域，
+    // 不支持跨地域调用，故仅作候选端点）
+    endpointCandidates: [
+      "https://tokenhub-intl.tencentcloudmaas.com/plan/v3",
+      "https://tokenhub.tencentcloudmaas.com/plan/v3",
+    ],
+    apiFormat: "openai_chat",
+    modelCatalog: modelCatalog([
+      {
+        model: "auto",
+        displayName: "Auto",
+        contextWindow: 196608,
+        inputModalities: ["text"],
+        reasoningLevels: ["high"],
+      },
+    ]),
+    codexChatReasoning: {
+      supportsThinking: true,
+      supportsEffort: true,
+      thinkingParam: "thinking",
+      effortParam: "reasoning_effort",
+      outputFormat: "reasoning_content",
+    },
+    category: "cn_official",
+    icon: "tencent",
+    iconColor: "#0052D9",
   },
 ];

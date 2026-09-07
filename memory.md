@@ -5458,3 +5458,10 @@ supported in one streaming turn`。
 - Anthropic 客户端使用 `https://api.ppio.com/anthropic`，OpenAI-compatible 客户端使用带版本根 `https://api.ppio.com/openai/v1`；Claude Code 的模型发现必须显式固定到 `https://api.ppio.com/openai/v1/models`，不能从 Anthropic 根派生会返回 404 的候选。品牌字段统一采用当前合作入口 `https://ppio.com/activity/ccswitch`、`isPartner: true` 与 `partnerPromotionKey: "ppio"`。
 - 七端统一暴露 `deepseek/deepseek-v4-flash-0731`；Pi 定义通过 `thinkingProfile: "deepseekV4"` 在导出时物化为 `thinkingLevelMap`，并合并 `DEEPSEEK_THINKING_COMPAT`。测试必须断言导出的 level map 和 compat，而不是私有解析提示字段。
 - TDD 的一次 RED 为 13/13 全部因 PPIO 缺失而失败；实现后的首次 GREEN 仅剩测试误断言私有 `thinkingProfile`，纠正为导出契约后 13/13 通过。本批不安装、不重启，也不触碰 `127.0.0.1:15721`。
+
+## 2026-09-07 v3.20.1-1 Tencent Token Plan 与 TokenHub 目录迁移
+
+- Tencent 迁移按一个目录事务处理：六种 Token Plan 产品覆盖 Claude Code、Claude Desktop、Codex、OpenCode、OpenClaw、Hermes 和 Pi；Pi 另有国内/国际 TokenHub 两个按量产品。国内个人端点为 `/plan/v3` 与 `/plan/anthropic`，国内企业使用 `tokenhub.tencentmaas.com`，国际产品使用 `tokenhub-intl.tencentcloudmaas.com`；TokenHub 国内/国际分别使用对应 `/v1` 根，不能混用产品线或地域 Key。
+- 官方公告优先于仍有残留行的产品文档：`deepseek-v3.2`、`minimax-m2.5`、`kimi-k2.5`、`hy3-preview` 已下线，所有新预设均不 seed；`deepseek-v4-flash` 当前仍保留，但官方已公告将在 2026-09-27 下线，后续冻结刷新必须重新审计并移除，不能把本批目录当永久静态事实。
+- Pi 的 `thinkingLevelMap` 使用原生键 `off`，不是 Codex 的 `none`。Pi 官方文档说明缺省键表示沿用 provider 默认映射，`null` 才表示该档不可用；官方 `openai-completions` 源码进一步证明 `thinkingFormat: "deepseek"` 在 off 未被标为 null 时发送 `thinking: { type: "disabled" }`。因此 Tencent DeepSeek 的 off 应保持缺省，Kimi K2.7 Code/HighSpeed 则以 `off: null` 隐藏无法兑现的关闭选项；HighSpeed 同时保留 image 输入能力。
+- 初次 RED 为 16 项中 15 项因预设缺失失败；实现后首次 GREEN 只剩测试错误使用不存在的 `none` 键。经 Codex Web 与固定 Matrix 分别直读 Pi 官方文档和源码后，修正测试为真实导出契约。类型门禁随后揭示上游 `reasoningLevels` 不能直接进入 CCSM schema-v2 目录；`modelCatalog` 现在只把它作为构建期简写，导出前转换为 `CodexModelReasoningCapability`，其中 `none` 转为 `disableAllowed`、其余档位转为 `supportedEfforts`，不泄漏上游私有字段。新增能力投影断言后 Tencent 聚焦回归 17/17、TypeScript 通过。Hermes/Pi 的迁移生成器曾因假设 `models` 必为多行数组而在 Lite 单行数组上得到 `-1` 结束锚点并截断对象；恢复时改用字符串/注释感知的括号平衡扫描，从干净上游完整对象重建整个 Tencent 区域，而非逐行补括号。
