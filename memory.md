@@ -3,6 +3,7 @@
 ## 2026-09-08 CCSwitchMulti v3.20.1-1 正式发布
 
 - `main` 经合并与发布记录提交固定在 `325d96ed97fa114beb4a94829f64fca6ff752bfd`。发布前 CI run `34156912780` 的 Frontend、macOS、Ubuntu、Windows 全部成功；annotated tag `v3.20.1-1` 的 tag object 为 `b7829dca97f449f4b872a276c523c346eebe9878`，peel 后精确指向 `325d96ed`，tag annotation 以 `本次提交由BigStrongsSun完成` 结尾。
+- 发布证据文档提交 `9c092c2959bd9244f5532a1ca2214c15fb30735e` 推送到 `main` 后，CI run `34163657453` 也全部成功。该提交只补充审计与 memory，不移动或重定义 release tag；后续纯证据提交使用 `[skip ci]`，避免因记录上一轮 CI 而无限重复全平台门禁。
 - Release workflow run `34158636812` 的 Linux x64/ARM64、Windows x64/ARM64、macOS、Publish Release 与 Assemble `latest.json` 全部成功。正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.20.1-1`，是 Latest、非 draft、非 prerelease，共 19 个 uploaded assets。
 - 19 个资产已全部下载到 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.20.1-1-github-verify-20260908`，逐个文件大小与 SHA-256 均匹配 GitHub asset metadata。`latest.json` SHA-256 为 `5300E9F6AAA628D46B9C1111891BAE09721CB355D56333D8CEC89764D2CDC0BE`，版本为 `3.20.1-1`，恰好覆盖 darwin/linux/windows 的 x64 与 ARM64 六个平台；URL 全部指向本 tag，六个签名非空并与对应 `.sig` 文件精确一致。
 - `sync-r2.yml` 没有因本次 Release 自动启动，且本轮没有手动 dispatch，因此不得宣称 R2 已同步。发布也没有安装、停止、重启或替换本机 CCSwitchMulti，没有操作 `127.0.0.1:15721`；公开 Release 完成与本机 installed/runtime 验收必须继续分开表述。
