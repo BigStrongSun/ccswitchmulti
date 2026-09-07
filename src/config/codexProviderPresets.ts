@@ -2121,6 +2121,7 @@ base_url = "https://cc-api.pipellm.ai/v1"`,
     // 注意与 TokenHub 按量 API 市场（1823 线，Hunyuan 预设的 /v1 端点）是
     // 两条产品线：订阅 Key 只能走 /plan 端点，TokenHub Key 对 /plan 不通
     name: "Tencent Token Plan",
+    presetKey: "tencent-token-plan",
     websiteUrl: "https://cloud.tencent.com/product/tokenhub",
     apiKeyUrl: "https://console.cloud.tencent.com/tokenhub/tokenplan",
     auth: generateThirdPartyAuth(""),
@@ -2257,6 +2258,7 @@ base_url = "https://cc-api.pipellm.ai/v1"`,
     // 地域给的是 tokenhub-intl.tencentmaas.com，Key 按站独立不跨站通用，
     // 故互不作候选
     name: "Tencent Token Plan (Intl)",
+    presetKey: "tencent-token-plan-intl",
     websiteUrl: "https://www.tencentcloud.com/products/tokenhub",
     apiKeyUrl: "https://console.tencentcloud.com/tokenhub/tokenplan",
     auth: generateThirdPartyAuth(""),
@@ -2343,6 +2345,7 @@ base_url = "https://cc-api.pipellm.ai/v1"`,
     // kimi-k2.5 与 minimax-m2.5 均已公告下线，不收录。新加坡地域阵容不同且
     // Key 不跨站，见 (Intl) 预设
     name: "Tencent Token Plan Enterprise Pro",
+    presetKey: "tencent-token-plan-enterprise-pro",
     websiteUrl: "https://cloud.tencent.com/product/tokenhub",
     apiKeyUrl: "https://console.cloud.tencent.com/tokenhub/tokenplan-e",
     auth: generateThirdPartyAuth(""),
@@ -2520,6 +2523,7 @@ base_url = "https://cc-api.pipellm.ai/v1"`,
     // 国际站企业版专业套餐（intl 1300/81489，2026-08-26 版，新加坡地域）：
     // 阵容为广州地域子集（无 GLM-5/5.1/5-Turbo、Kimi-K2.6、MiniMax-M2.7）
     name: "Tencent Token Plan Enterprise Pro (Intl)",
+    presetKey: "tencent-token-plan-enterprise-pro-intl",
     websiteUrl: "https://www.tencentcloud.com/products/tokenhub",
     apiKeyUrl: "https://console.tencentcloud.com/tokenhub/tokenplan-e",
     auth: generateThirdPartyAuth(""),
@@ -2661,6 +2665,7 @@ base_url = "https://cc-api.pipellm.ai/v1"`,
     // Token Plan 企业版轻享套餐（1823/131173，2026-08-28 版）：仅 Auto 模型。
     // 国内 auto 关思考被静默忽略（真 Key 实测 2026-08-31），只列 high
     name: "Tencent Token Plan Enterprise Lite",
+    presetKey: "tencent-token-plan-enterprise-lite",
     websiteUrl: "https://cloud.tencent.com/product/tokenhub",
     apiKeyUrl: "https://console.cloud.tencent.com/tokenhub/tokenplan-e",
     auth: generateThirdPartyAuth(""),
@@ -2701,6 +2706,7 @@ base_url = "https://cc-api.pipellm.ai/v1"`,
     // 国际站企业版轻享套餐（intl 1300/81490）：新加坡地域（资源调度范围
     // Global），仅 Auto 模型。INTL auto 关思考真实生效（真 Key 实测）
     name: "Tencent Token Plan Enterprise Lite (Intl)",
+    presetKey: "tencent-token-plan-enterprise-lite-intl",
     websiteUrl: "https://www.tencentcloud.com/products/tokenhub",
     apiKeyUrl: "https://console.tencentcloud.com/tokenhub/tokenplan-e",
     auth: generateThirdPartyAuth(""),

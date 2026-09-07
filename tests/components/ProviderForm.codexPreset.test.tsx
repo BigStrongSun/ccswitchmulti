@@ -687,6 +687,56 @@ describe("ProviderForm Codex preset selection", () => {
     });
   });
 
+  it("persists and restores the Tencent maintained preset identity", async () => {
+    const onSubmit = vi.fn();
+    const first = renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /Tencent Token Plan Enterprise Pro$/,
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-catalog")).toHaveTextContent(
+        "deepseek-v4-pro-202606",
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "mock-set-api-key" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    const saved = onSubmit.mock.calls[0][0];
+    expect(saved.meta.codexPresetId).toBe("tencent-token-plan-enterprise-pro");
+    expect(JSON.parse(saved.settingsConfig).modelCatalog.models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          model: "deepseek-v4-pro-202606",
+          reasoning: expect.objectContaining({ source: "builtin" }),
+        }),
+      ]),
+    );
+
+    first.unmount();
+    renderProviderForm({
+      initialData: {
+        ...saved,
+        settingsConfig: JSON.parse(saved.settingsConfig),
+      },
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("codex-preset-reasoning-models"),
+      ).toHaveTextContent("deepseek-v4-pro-202606");
+      expect(
+        screen.getByTestId("codex-menu-projection-editability"),
+      ).toHaveTextContent("managed");
+    });
+  });
+
   it("clears the maintained preset identity after switching to a custom source", async () => {
     const onSubmit = vi.fn();
     renderProviderForm({ showButtons: true, submitLabel: "保存", onSubmit });

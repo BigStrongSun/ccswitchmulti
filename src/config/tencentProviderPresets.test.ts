@@ -81,6 +81,7 @@ const internationalEnterpriseModels = [
 const tokenPlanProducts = [
   {
     name: "Tencent Token Plan",
+    presetKey: "tencent-token-plan",
     endpoint: "https://api.lkeap.cloud.tencent.com/plan/v3",
     anthropic: "https://api.lkeap.cloud.tencent.com/plan/anthropic",
     primary: "tc-code-latest",
@@ -88,6 +89,7 @@ const tokenPlanProducts = [
   },
   {
     name: "Tencent Token Plan (Intl)",
+    presetKey: "tencent-token-plan-intl",
     endpoint: "https://tokenhub-intl.tencentcloudmaas.com/plan/v3",
     anthropic: "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic",
     primary: "auto",
@@ -95,6 +97,7 @@ const tokenPlanProducts = [
   },
   {
     name: "Tencent Token Plan Enterprise Pro",
+    presetKey: "tencent-token-plan-enterprise-pro",
     endpoint: "https://tokenhub.tencentmaas.com/plan/v3",
     anthropic: "https://tokenhub.tencentmaas.com/plan/anthropic",
     primary: "auto",
@@ -102,6 +105,7 @@ const tokenPlanProducts = [
   },
   {
     name: "Tencent Token Plan Enterprise Pro (Intl)",
+    presetKey: "tencent-token-plan-enterprise-pro-intl",
     endpoint: "https://tokenhub-intl.tencentcloudmaas.com/plan/v3",
     anthropic: "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic",
     primary: "auto",
@@ -109,6 +113,7 @@ const tokenPlanProducts = [
   },
   {
     name: "Tencent Token Plan Enterprise Lite",
+    presetKey: "tencent-token-plan-enterprise-lite",
     endpoint: "https://tokenhub.tencentmaas.com/plan/v3",
     anthropic: "https://tokenhub.tencentmaas.com/plan/anthropic",
     primary: "auto",
@@ -116,6 +121,7 @@ const tokenPlanProducts = [
   },
   {
     name: "Tencent Token Plan Enterprise Lite (Intl)",
+    presetKey: "tencent-token-plan-enterprise-lite-intl",
     endpoint: "https://tokenhub-intl.tencentcloudmaas.com/plan/v3",
     anthropic: "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic",
     primary: "auto",
@@ -154,7 +160,7 @@ describe("Tencent Token Plan presets", () => {
 
   it.each(tokenPlanProducts)(
     "keeps $name endpoints and model catalog aligned across apps",
-    ({ name, endpoint, anthropic, primary, models }) => {
+    ({ name, presetKey, endpoint, anthropic, primary, models }) => {
       const claude = byName(providerPresets, name)!;
       const desktop = byName(claudeDesktopProviderPresets, name)!;
       const codex = byName(codexProviderPresets, name)!;
@@ -174,14 +180,31 @@ describe("Tencent Token Plan presets", () => {
         apiFormat: "anthropic",
       });
       expect(extractCodexBaseUrl(codex.config)).toBe(endpoint);
+      expect(codex.presetKey).toBe(presetKey);
       expect(codex.modelCatalog?.map((model) => model.model)).toEqual(models);
+      expect(opencode.settingsConfig).toMatchObject({
+        npm: "@ai-sdk/openai-compatible",
+        options: { baseURL: endpoint },
+      });
       expect(Object.keys(opencode.settingsConfig.models)).toEqual(models);
+      expect(openclaw.settingsConfig).toMatchObject({
+        baseUrl: endpoint,
+        api: "openai-completions",
+      });
       expect(
         (openclaw.settingsConfig.models ?? []).map((model) => model.id),
       ).toEqual(models);
       expect(
         (hermes.settingsConfig.models ?? []).map((model) => model.id),
       ).toEqual(models);
+      expect(hermes.settingsConfig).toMatchObject({
+        base_url: endpoint,
+        api_mode: "chat_completions",
+      });
+      expect(pi.settingsConfig).toMatchObject({
+        baseUrl: endpoint,
+        api: "openai-completions",
+      });
       expect(pi.settingsConfig.models.map((model) => model.id)).toEqual(models);
     },
   );
@@ -213,6 +236,36 @@ describe("Tencent Token Plan presets", () => {
     });
   });
 
+  it("preserves OpenClaw-specific Tencent model metadata", () => {
+    const personal = byName(openclawProviderPresets, "Tencent Token Plan")!;
+    const enterprise = byName(
+      openclawProviderPresets,
+      "Tencent Token Plan Enterprise Pro",
+    )!;
+    const model = (preset: typeof personal, id: string) =>
+      preset.settingsConfig.models?.find((entry) => entry.id === id);
+
+    expect(model(personal, "deepseek-v4-pro-202606")).toMatchObject({
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 1_000_000,
+      maxTokens: 384_000,
+    });
+    expect(model(personal, "minimax-m2.7")).toMatchObject({
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 200_000,
+      maxTokens: 131_072,
+    });
+    expect(model(personal, "hy3")).toMatchObject({ reasoning: true });
+    expect(model(enterprise, "deepseek-v4-pro-202606")).toMatchObject({
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 1_048_576,
+      maxTokens: 393_216,
+    });
+  });
+
   it("materializes Tencent DeepSeek switching and Kimi image capability in Pi", () => {
     const enterprise = byName(
       piProviderPresets,
@@ -237,13 +290,33 @@ describe("Tencent Token Plan presets", () => {
     expect(kimi.input).toContain("image");
   });
 
-  it("does not seed already retired Tencent aliases", () => {
-    const tencentPresets = piProviderPresets.filter((preset) =>
-      preset.name.startsWith("Tencent Token"),
-    );
-    const ids = tencentPresets.flatMap((preset) =>
-      preset.settingsConfig.models.map((model) => model.id),
-    );
+  it("does not seed already retired aliases in any Tencent catalog", () => {
+    const names = tokenPlanProducts.map((product) => product.name);
+    const ids = names.flatMap((name) => {
+      const claude = byName(providerPresets, name)!;
+      const desktop = byName(claudeDesktopProviderPresets, name)!;
+      const codex = byName(codexProviderPresets, name)!;
+      const opencode = byName(opencodeProviderPresets, name)!;
+      const openclaw = byName(openclawProviderPresets, name)!;
+      const hermes = byName(hermesProviderPresets, name)!;
+      const pi = byName(piProviderPresets, name)!;
+      const env = (claude.settingsConfig as { env: Record<string, string> })
+        .env;
+      return [
+        env.ANTHROPIC_MODEL,
+        ...(desktop.modelRoutes?.map((route) => route.upstreamModel) ?? []),
+        ...(codex.modelCatalog?.map((model) => model.model) ?? []),
+        ...Object.keys(opencode.settingsConfig.models),
+        ...(openclaw.settingsConfig.models ?? []).map((model) => model.id),
+        ...(hermes.settingsConfig.models ?? []).map((model) => model.id),
+        ...pi.settingsConfig.models.map((model) => model.id),
+      ];
+    });
+    for (const preset of piProviderPresets.filter((item) =>
+      item.name.startsWith("Tencent TokenHub"),
+    )) {
+      ids.push(...preset.settingsConfig.models.map((model) => model.id));
+    }
     for (const retired of retiredModels) expect(ids).not.toContain(retired);
   });
 });
