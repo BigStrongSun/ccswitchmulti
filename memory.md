@@ -11,6 +11,12 @@
 - 未解决异常：16:25:59 运行中 Codex app 用其过期内存态全文件重写 config.toml，把 10 回写成 5（它启动时加载的是 5）；16:35:21 重启重投影后 16:50 复核仍为 10。复现时 CCSM 侧加固（takeover 激活时 consistency repair / retry 预算指纹）需用户决策，不擅自加码；一次 Codex app 重启可中和该风险并让既有线程拿到 10。
 - 日志在 `C:\Users\sunda\.cc-switch\logs\`（cc-switch.log、codex-router.log、proxy-errors.jsonl+.1/.2、recovery-outcomes.json、app-exit-events.jsonl）。本会话自身在 15:44→16:25 中断约 41 分钟（auto-reviewer 也命中同一 stream disconnection bug），是此类问题发生频率的活证据。
 
+## 2026-09-08 v3.20.1-1 发布前分叉复审与 stream 修复整合
+
+- `git fetch --all --prune --tags` 后，官方 `origin/main` 仍精确等于 `v3.20.2@f3b18df1`，tag 后提交数为 0。分叉复审发现新完成但未进入迁移候选/main 的唯一产品提交是 `c3537bc9`：其父提交 `74547518` 已在本地 main，只把 stream 修复语义移植为 `e28f6c7a`，没有整枝带回旧基线。memory 冲突仅为双方顶部追加记录，解决时保留 stream 完整记录和迁移候选原有记录；`streaming_retry` 37/37、重试预算 1/1、`cargo check --all-targets`、CI 原样严格 Clippy、rustfmt、diff 与 UTF-8 均通过。
+- 其他未合分支继续沿用已验证处置：power/commentary/portable 为实验或 NO-GO，AgentMesh 未接现有代理生命周期，Sub-Agent V2 为课件资料，其余旧分支已被当前 main/migration 的更完整架构覆盖；不能仅凭 `--no-merged` 整枝合并。main 只有未跟踪 `.tmp/` 和 provider settings preview，其他多个 dirty worktree 原样保留。stream-fix worktree 因旧沙箱 SID 触发 Git dubious ownership，本轮不写全局 `safe.directory`。
+- `2f6dbb87` 的本地 NSIS/portable/raw 产物是在 stream 修复进入候选前生成，现只作为被替代构建证据，禁止上传为 v3.20.1-1。最终候选必须从包含 `e28f6c7a` 的 clean commit 重新执行一次 release 构建并生成新哈希。
+
 ## 2026-09-08 v3.20.1-1 Rust 候选门禁两项失败分类
 
 - 修复 PPIO 后的前端最终全量在 `110da36f` 得到 185/185 files、1537/1537 tests。随后 Rust 并行全量完成编译，4053 个 library tests 中 4045 通过、6 ignored、2 失败；集成测试尚未执行，因为 library test binary 已非零退出。
