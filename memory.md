@@ -5377,3 +5377,10 @@ supported in one streaming turn`。
 - 重命名后的 route-follow 以认证解析事实为边界：有可注入 token，或表不会回退到官方 `auth.json` 时才跟随；只有 `requires_openai_auth=true` 且同时缺少 `env_key`、`experimental_bearer_token`、`auth`、`aws` 的表在无 token 时留在 built-in route，避免把保留的 Desktop OAuth 发到第三方地址。`auth`/`aws`/`env_key` 与不走官方认证的显式 Authorization 表阻止额外 bearer 注入，避免 Codex 0.149 的互斥字段拒载。
 - `update_codex_toml_field` 创建或触碰 custom Provider 表时补齐稳定非空 `name`，并按 Codex 的大小写精确语义处理 `OpenAI`。三条同前缀 TDD 回归先稳定得到 0/3 RED，再转为 3/3 GREEN；受影响 `codex_config` 模块门禁 219/219，`cargo check --all-targets --no-default-features` 通过。`1435223b`、`e12fc623`、`d01eab97`、`e47b5fca` 明确延至 Task 9，与各自 preset、endpoint、reasoning dialect 和 Provider 表单一起核验；不得把 Task 7 的后端配置修复冒充为这些预设已验证。
 - 官方事实由本轮既有双链审计确认：Codex 内置 Web 的 Discussion #7782 证明 Chat wire API 已移除；Matrix WebSearch 实时直读官方 `config_toml.rs` 与本地 `codex-source-latest@c6058cca` 一致给出五项 reserved ID。Codex 搜索缓存曾返回缺少 `amazon-bedrock-runtime` 的四项旧片段，属于索引漂移；实时 raw、本地同版本源码和 `model-provider-info` 仍定义 runtime Provider，因此采用五项当前契约。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi 核心配置所有权
+
+- Pi 必须作为独立 managed app 接入。Pi 当前官方契约把显式供应商放在 `~/.pi/agent/models.json`，把原生 API Key/OAuth 放在 `auth.json`，把默认 Provider/Model/Thinking 放在 `settings.json`；CCSM 只管理 `models.json.providers` 的目标显式节点，绝不接管认证或默认选择。Codex 内置 Web 与固定入口 Matrix WebSearch 均直接读取 Pi 官方 `models.md`、`settings.md`、`providers.md`，结论与本地官方 `84e75ad2` 一致。
+- `PiModelsStore` 把完整文件字节的 SHA-256 作为调用方可见 content-version。写入/删除必须携带读取版本；进程内写入统一串行化，锁内复核版本，写前把原始字节原子备份到 `models.json.cc-switch.bak`，备份后再复核一次才替换原文件。过期快照返回 `AppError::Conflict`，相同内容或重复删除不写文件也不滚动备份。
+- JSON/JSONC 读取限制为 1 MiB、严格 UTF-8，根节点及 `providers` 必须为对象。写回会规范化为 JSON，因此注释只在逐字节备份中保留；所有未知顶层字段、非目标 Provider 和调用方从完整节点带回的未知 Provider 字段继续保留。结构化编辑器后续必须从完整节点派生替换值，不能提交已知字段子集。
+- 第一层 TDD 为 5 条 `upstream_pi_config_` 回归：stale CAS、native auth/settings 不触碰、未知字段保留、逐字节写前备份、幂等写入及目标删除。首次 RED 是 API/Conflict 缺失；GREEN 后 5/5。此处尚未把 Pi 加入 AppType、Provider service、Prompt/Skill/session usage 或前端，也没有让 Pi 进入 MultiRouter、Provider Set、代理、failover、tray takeover 或 MCP sync。

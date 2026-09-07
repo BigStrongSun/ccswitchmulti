@@ -379,6 +379,22 @@ fn recover_partial_replace_move(tmp: &Path, path: &Path, backup: &Path) -> Parti
 
 /// 原子写入：写入临时文件后 rename 替换，避免半写状态
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
+    atomic_write_with_unix_mode(path, data, None)
+}
+
+/// 原子写入包含凭据或凭据引用的配置文件。Unix 上强制使用 0600。
+pub fn atomic_write_private(path: &Path, data: &[u8]) -> Result<(), AppError> {
+    atomic_write_with_unix_mode(path, data, Some(0o600))
+}
+
+fn atomic_write_with_unix_mode(
+    path: &Path,
+    data: &[u8],
+    unix_mode: Option<u32>,
+) -> Result<(), AppError> {
+    #[cfg(not(unix))]
+    let _ = unix_mode;
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
@@ -404,11 +420,14 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
                 "{file_name}.tmp.{}.{ts}.{counter}",
                 std::process::id()
             ));
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            if let Some(mode) = unix_mode {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(mode);
+            }
+            match options.open(&candidate) {
                 Ok(file) => return Ok((candidate, file)),
                 Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
                     last_collision = Some((candidate, source));
@@ -431,7 +450,12 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(path) {
+        if let Some(mode) = unix_mode {
+            if let Err(source) = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)) {
+                let _ = fs::remove_file(&tmp);
+                return Err(AppError::io(&tmp, source));
+            }
+        } else if let Ok(meta) = fs::metadata(path) {
             let perm = meta.permissions().mode();
             let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
         }

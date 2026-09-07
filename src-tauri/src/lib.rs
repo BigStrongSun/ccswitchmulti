@@ -37,6 +37,7 @@ mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
+mod pi_config;
 mod process_identity;
 mod prompt;
 mod prompt_files;

@@ -340,6 +340,7 @@ fn app_error_diagnostic_kind(error: &AppError) -> &'static str {
     match error {
         AppError::Config(_) => "config",
         AppError::InvalidInput(_) => "invalid_input",
+        AppError::Conflict(_) => "conflict",
         AppError::Io { .. } => "io",
         AppError::IoContext { .. } => "io_context",
         AppError::Json { .. } => "json",
