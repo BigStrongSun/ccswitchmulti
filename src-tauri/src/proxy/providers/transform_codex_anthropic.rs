@@ -2127,7 +2127,7 @@ mod tests {
     }
 
     #[test]
-    fn test_adaptive_thinking_respects_model_defaults() {
+    fn claude_5_adaptive_thinking_respects_model_defaults() {
         let request = |model: &str| {
             json!({
                 "model": model,
@@ -2137,6 +2137,9 @@ mod tests {
         };
         let sonnet = responses_request_to_anthropic(request("claude-sonnet-5"), 4096).unwrap();
         assert_eq!(sonnet["thinking"]["type"], "adaptive");
+
+        let opus_5 = responses_request_to_anthropic(request("claude-opus-5"), 4096).unwrap();
+        assert_eq!(opus_5["thinking"]["type"], "adaptive");
 
         let opus = responses_request_to_anthropic(request("claude-opus-4.8"), 4096).unwrap();
         assert!(opus.get("thinking").is_none());

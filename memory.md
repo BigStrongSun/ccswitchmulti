@@ -5439,3 +5439,9 @@ supported in one streaming turn`。
 - GPT-6 Astra 与 Gemini 3.8 Flash 只作为 `INSERT OR IGNORE` 基础价格种子迁移，不做 schema bump，也不加入 `repair_current_model_pricing`。因此新数据库和缺行数据库可以计费，再次执行 `ensure_model_pricing_seeded()` 不会覆盖用户自定义价格。
 - GPT-6 Astra 采用 OpenAI 官方标准短上下文 input/output/cache-read/cache-write `10/50/1/12.5`；超长上下文与 Fast/Batch/Flex 倍率不折进基础种子。Gemini 3.8 Flash 采用 Google 官方截至 2026-12-31 的介绍价 `0.75/3.75/0.075/0`；2027-01-01 的 `1.50/7.50/0.15` 切换必须以后续 guarded repair 显式处理，不能预先高估当前费用。
 - TDD 一次性加入“首次 seed 存在且值正确”和“重复 seed 保留用户四项自定义价格”两条回归；RED 均为 `QueryReturnedNoRows`，最小 GREEN 后 2/2。GLM-5.3 Flash 仍保持未落库，等待 2026-09-09 活动价到期策略，不能把上游 list price 与本批混合采用。
+
+## 2026-09-07 v3.20.1-1 Claude 5 takeover 与 adaptive thinking
+
+- Claude takeover 的 client-facing 稳定角色从 Sonnet 4.6/Opus 4.8 更新为 `claude-sonnet-5`/`claude-opus-5`，但实际路由模型与显示名仍从当前 Provider 配置派生；`[1M]` 只按上游模型的显式 marker 传递。热切换、Codex OAuth 和 Copilot 都复用同一字段构造器，不能各自维护别名。
+- 官方说明 Sonnet 5 与 Opus 5 都支持 adaptive thinking 且缺省开启。上游 `38cfafdc` 只补 optimizer classifier，但 CCSM 还有 Responses→Anthropic 转换链；因此根修同时把 Opus 5 纳入 `uses_adaptive_thinking` 与 `adaptive_thinking_is_default`，避免未显式 reasoning effort 时错误省略 thinking。Opus 5 仍不属于 cannot-disable 集合，因为官方允许在 high 及以下 effort 关闭。
+- TDD 集中 RED 分别得到旧 Sonnet 4.6 alias、Opus 5 classifier false、转换后 thinking null；最小 GREEN 后三条均通过。这个迁移不改 Haiku/Fable 降级、Provider 实际模型映射、认证占位符或运行服务。

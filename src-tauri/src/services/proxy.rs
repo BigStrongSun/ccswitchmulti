@@ -211,8 +211,8 @@ const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 12] = [
 ];
 
 const CLAUDE_TAKEOVER_HAIKU_MODEL: &str = "claude-haiku-4-5";
-const CLAUDE_TAKEOVER_SONNET_MODEL: &str = "claude-sonnet-4-6";
-const CLAUDE_TAKEOVER_OPUS_MODEL: &str = "claude-opus-4-8";
+const CLAUDE_TAKEOVER_SONNET_MODEL: &str = "claude-sonnet-5";
+const CLAUDE_TAKEOVER_OPUS_MODEL: &str = "claude-opus-5";
 const CLAUDE_TAKEOVER_FABLE_MODEL: &str = "claude-fable-5";
 // 写给 Claude Code 时沿用文档示例的大写形式；解析侧大小写不敏感。
 const CLAUDE_ONE_M_MARKER_FOR_CLIENT: &str = "[1M]";
@@ -5046,6 +5046,44 @@ mod tests {
     }
 
     #[test]
+    fn claude_5_takeover_aliases_preserve_upstream_names_and_one_m_markers() {
+        let fields = ProxyService::build_claude_takeover_model_fields(&json!({
+            "env": {
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "vendor-sonnet[1M]",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Vendor Sonnet",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "vendor-opus [1m]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Vendor Opus"
+            }
+        }));
+        let fields: std::collections::HashMap<_, _> = fields.into_iter().collect();
+
+        assert_eq!(
+            fields
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .map(String::as_str),
+            Some("claude-sonnet-5[1M]")
+        );
+        assert_eq!(
+            fields
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME")
+                .map(String::as_str),
+            Some("Vendor Sonnet")
+        );
+        assert_eq!(
+            fields
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .map(String::as_str),
+            Some("claude-opus-5[1M]")
+        );
+        assert_eq!(
+            fields
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME")
+                .map(String::as_str),
+            Some("Vendor Opus")
+        );
+    }
+
+    #[test]
     fn managed_account_claude_takeover_sources_copilot_models_from_provider() {
         let mut provider = Provider::with_id(
             "copilot".to_string(),
@@ -5105,14 +5143,14 @@ mod tests {
         assert_env_str(
             env,
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            Some("claude-sonnet-4-6"),
+            Some("claude-sonnet-5"),
         );
         assert_env_str(
             env,
             "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
             Some("claude-sonnet-4.6"),
         );
-        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-4-8"));
+        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-5"));
         assert_env_str(
             env,
             "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
@@ -5223,10 +5261,10 @@ mod tests {
         assert_env_str(
             env,
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            Some("claude-sonnet-4-6"),
+            Some("claude-sonnet-5"),
         );
         assert_env_str(env, "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", Some("gpt-5.4"));
-        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-4-8"));
+        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-5"));
         assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", Some("gpt-5.4"));
         // Codex 系只保留 AUTH_TOKEN；双键会触发 Claude Code 告警（#4919）
         assert_env_str(env, "ANTHROPIC_API_KEY", None);
@@ -8263,7 +8301,7 @@ model = "gpt-5.1-codex"
             live_env
                 .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
                 .and_then(|v| v.as_str()),
-            Some("claude-sonnet-4-6[1M]"),
+            Some("claude-sonnet-5[1M]"),
             "Sonnet role should carry the local 1M declaration for Claude Code"
         );
         assert_eq!(
@@ -8277,7 +8315,7 @@ model = "gpt-5.1-codex"
             live_env
                 .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
                 .and_then(|v| v.as_str()),
-            Some("claude-opus-4-8[1M]"),
+            Some("claude-opus-5[1M]"),
             "Opus role should preserve the current provider 1M capability marker"
         );
         assert_eq!(
