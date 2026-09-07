@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 v3.20.1-1 Rust 候选门禁两项失败分类
+
+- 修复 PPIO 后的前端最终全量在 `110da36f` 得到 185/185 files、1537/1537 tests。随后 Rust 并行全量完成编译，4053 个 library tests 中 4045 通过、6 ignored、2 失败；集成测试尚未执行，因为 library test binary 已非零退出。
+- `apply_ccsm_uses_compare_and_swap_and_creates_a_drift_backup` 单独运行通过。该组虽标 `#[serial]`，仓库其他模块仍用各自局部 mutex 或无统一锁修改进程级 `CC_SWITCH_TEST_HOME`、HOME/USERPROFILE 和 settings，因此并行全量可在 inspect 与 resolve 之间切换路径/状态，制造 stale fingerprint。最终 Rust 门禁用 `--test-threads=1` 隔离这类进程全局测试状态；Cargo 编译仍并行，不把测试调度竞态误判成产品 CAS 失败。
+- `test_backfill_deducts_cache_read_for_grokbuild_total_rows` 单独稳定 RED。根因是 `b30b470d` 已把 Grok 4.5 cache-read seed 从 0.50 修正为 0.30，旧测试注释和金额未同步；生产返回的 `0.000075` 正确。测试期望更新为 input `0.000900`、cache `0.000075`、total `0.001575` 后聚焦 GREEN。后续只需在新 commit 上重跑 Rust 全量，不重复与本次 Rust-only 变更无关的前端全量。
+
 ## 2026-09-08 v3.20.1-1 候选门禁暴露 PPIO 目录污染
 
 - Task 12 首次前端全量在 `a908c389` 得到 185 个文件中 184 通过、1 失败（1536/1537 tests）：OpenCode 的 PPIO 预设实际暴露了 `tc-code-latest`、GLM、Kimi 等 Tencent 个人 Token Plan 目录，而非 PPIO 的 `deepseek/deepseek-v4-flash-0731`。
