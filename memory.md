@@ -5430,5 +5430,6 @@ supported in one streaming turn`。
 
 - `git fetch origin --prune --tags` 证明官方 `main` 从冻结点 `741e802f` 前进 9 个线性提交到 `1b34d322`。Matrix 直读 GitHub commits API 得到相同 tip、父链和提交说明；Codex 内置 Web 的 commits 页面仍停在 9 月 6 日，属于页面抓取缓存漂移，因此当前状态以实时 Git 与 GitHub API 为准。审计矩阵已显式扩展为 140 行，后续提交不得静默进入。
 - 九个 late arrivals 中，CCSM 已有更强 Images API 四别名与身份隔离实现，`17be9092` 标为 already-covered；`872ec775` 作为独立协议批次迁移；Claude takeover、未知 vendor modality、GPT-6 Astra/GLM-5.3 Flash/Gemini 3.8 Flash 价格、PPIO Pi preset、Tencent Pi/token-plan catalogue 仍分别待迁移。
+- 新价格双链核验：GPT-6 Astra 官方为 input/cache-read/output/cache-write `10/1/50/12.5`；Gemini 3.8 Flash 介绍价为 input/output `0.75/3.75`，持续到 2026-12-31。GLM-5.3 Flash 与上游 seed 存在时效差异：Z.AI 当前 50% 活动价为 input/output/cache-read `0.075/0.25/0.015`，2026-09-09 24:00 UTC+8 后恢复 list `0.15/0.50/0.03`。在到期策略和 guarded repair 明确前，不得直接照抄上游 list price 造成当前费用高估。
 - Codex OAuth 的 Anthropic→Responses 转换根因有两层：`map_tool_choice_to_responses` 只投影选择模式而丢弃 `disable_parallel_tool_use`，随后必填字段补全把 `parallel_tool_calls` 固定为 `false`。Anthropic 官方语义是 disable=true 时一轮至多一个工具，Responses 字段是正向 allow，因此显式值必须取反；未显式提供时沿用 Anthropic/Codex 默认并行能力。
 - TDD 先修改缺省断言并新增显式 true/false 双向映射测试；两条 RED 都稳定得到 actual=false。最小 GREEN 仅在同一转换边界取反映射显式值，并把 Codex OAuth 缺省改为 true；非 OAuth 路径继续不注入该字段。最终该转换模块 89/89、rustfmt、diff check 和 140 行矩阵状态计数均通过。
