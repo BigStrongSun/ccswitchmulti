@@ -1164,7 +1164,7 @@ async fn handle_claude_transform(
     // Preserve raw Responses usage so a post-upstream conversion failure still
     // records the tokens already consumed by the successful upstream request.
     let raw_usage_response = (api_format == "openai_responses")
-        .then(|| upstream_response.as_ref())
+        .then_some(upstream_response.as_ref())
         .flatten()
         .map(|upstream_response| {
             json!({
