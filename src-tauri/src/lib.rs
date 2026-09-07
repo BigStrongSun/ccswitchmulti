@@ -1081,6 +1081,7 @@ pub fn run() {
                     crate::app_config::AppType::OpenCode,
                     crate::app_config::AppType::OpenClaw,
                     crate::app_config::AppType::Hermes,
+                    crate::app_config::AppType::Pi,
                 ] {
                     match crate::services::prompt::PromptService::import_from_file_on_first_launch(
                         &app_state,
@@ -1650,6 +1651,12 @@ pub fn run() {
             commands::enable_prompt,
             commands::import_prompt_from_file,
             commands::get_current_prompt_file_content,
+            commands::get_pi_prompt_file,
+            commands::replace_pi_prompt_file,
+            commands::delete_pi_prompt_file,
+            commands::list_pi_prompt_templates,
+            commands::upsert_pi_prompt_template,
+            commands::delete_pi_prompt_template,
             commands::list_profiles,
             commands::create_profile,
             commands::update_profile,

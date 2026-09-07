@@ -5392,3 +5392,11 @@ supported in one streaming turn`。
 - 原生文件写成功而数据库 INSERT/UPDATE/DELETE 失败时，会以写入后的新 content-version 恢复删除或原值；若期间发生外部编辑，CAS 回滚失败会与原数据库错误一起返回，不能覆盖外部内容。故障注入回归分别验证 add、update、delete 的原生回滚。
 - Pi 在代理边界 fail closed：`supports_local_proxy=false`；通用 live writer、Provider adapter、外部 OpenAI API 候选、proxy takeover/hot-switch/live 写入/强制恢复、failover 命令均拒绝或忽略 Pi。MCP flag 与全量 provider live sync 同样排除 Pi；Prompt/Skill 和 session usage 仍留给 Task 8 后续独立所有权批次。
 - 本批按低频门禁约定只集中运行 `cargo test --lib upstream_pi_ -- --nocapture`，结果 19/19；覆盖 App 注册、配置 CAS/备份、Provider 完整入口生命周期、DB-only 编辑不误启用、数据库失败回滚以及 proxy/failover/external API 排除。这里只证明源码与聚焦回归，尚未运行全量 Rust/frontend、Tauri/NSIS、安装或运行态验收。
+
+## 2026-09-07 v3.20.1-1 Task 8 Pi Prompt 原生所有权
+
+- Pi Prompt 库与原生文件采用分离所有权：数据库中的 `enabled` 不作为事实源；每次读取按 `AGENTS.md` 内容与稳定顺序中的首个精确匹配条目派生活动态。通用恢复和全量 Prompt 投影明确跳过 Pi，避免数据库 restore 覆盖用户或 Pi 自己维护的原生指令。
+- `AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md` 与 `prompts/*.md` 共用进程锁、1 MiB 限长、严格 UTF-8、原子写和调用方可见的 `sha256:<hex>` revision CAS。固定系统指令拒绝空白内容并要求用删除停用；slash-command 模板允许空内容，但 slug 必须拒绝路径分隔符、控制/空白字符、Windows 保留名和其他不可移植字符。
+- 编辑 active Prompt 时，先从原生内容确认条目仍 active，数据库统一存 `enabled=false`，随后以同一 snapshot revision 更新或删除 `AGENTS.md`；原生写失败会恢复先前数据库条目。编辑 inactive duplicate 不触碰原生文件；删除 active Prompt 被拒绝。显式启用前若原生内容不属于任何已保存 Prompt，会先生成不覆盖同秒既有记录的唯一 backup，再以 CAS 写入目标内容。
+- 首次导入 Pi `AGENTS.md` 时数据库条目保持 disabled，后续活动态仍从文件派生；交互式读取和首次导入都复用限长读取与锁。Tauri 新增固定系统文件和模板的读、替换、删除、列表、重命名/保存命令，应用启动首次导入列表也包含 Pi。
+- TDD 先以缺失 `pi_prompt_files` API 得到编译 RED，再以持久化 `enabled=true` 错判活动态得到行为 RED。批次最终 `cargo test --lib upstream_pi_ -- --nocapture` 为 25/25，原生文件模块边界为 3/3，数据库原生写失败回滚为 1/1；rustfmt 与 diff check 通过。未运行全量 Rust/frontend、Tauri/NSIS、安装或运行态验收；Task 8 仍需继续完成 Skill、session usage/schema/index 和前端。

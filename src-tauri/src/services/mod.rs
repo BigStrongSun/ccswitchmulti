@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod model_fetch;
 pub mod model_pricing;
 pub mod omo;
+pub mod pi_prompt_files;
 pub mod preset_catalog;
 pub mod preset_registry;
 pub mod profile;
