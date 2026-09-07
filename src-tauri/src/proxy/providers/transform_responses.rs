@@ -614,6 +614,13 @@ pub fn anthropic_to_responses_with_cache_retention(
     if let Some(v) = body.get("tool_choice") {
         result["tool_choice"] =
             map_tool_choice_to_responses(v, &hosted_web_search_names, is_codex_oauth);
+        if is_codex_oauth {
+            if let Some(disable_parallel) =
+                v.get("disable_parallel_tool_use").and_then(Value::as_bool)
+            {
+                result["parallel_tool_calls"] = json!(!disable_parallel);
+            }
+        }
     }
 
     const WEB_SEARCH_SOURCES_MARKER: &str = "web_search_call.action.sources";
@@ -708,7 +715,7 @@ pub fn anthropic_to_responses_with_cache_retention(
             obj.entry("instructions".to_string()).or_insert(json!(""));
             obj.entry("tools".to_string()).or_insert(json!([]));
             obj.entry("parallel_tool_calls".to_string())
-                .or_insert(json!(false));
+                .or_insert(json!(true));
 
             // —— 强制覆盖 stream = true ——
             // 即便客户端误传 stream:false 也要覆盖，因为 codex-rs 永远 true，
@@ -2982,10 +2989,36 @@ mod tests {
         assert_eq!(result["tools"], json!([]), "tools 缺失时应兜底为空数组");
         assert_eq!(
             result["parallel_tool_calls"],
-            json!(false),
-            "parallel_tool_calls 应兜底为 false"
+            json!(true),
+            "Codex OAuth 应沿用 Anthropic 默认允许并行工具调用的语义"
         );
         assert_eq!(result["stream"], json!(true), "stream 应被强制设为 true");
+    }
+
+    #[test]
+    fn test_codex_oauth_maps_anthropic_parallel_tool_choice() {
+        for (disable_parallel_tool_use, expected) in [(false, true), (true, false)] {
+            let result = anthropic_to_responses(
+                json!({
+                    "model": "gpt-5.6-sol",
+                    "tools": [{
+                        "name": "read_file",
+                        "input_schema": {"type": "object"}
+                    }],
+                    "tool_choice": {
+                        "type": "auto",
+                        "disable_parallel_tool_use": disable_parallel_tool_use
+                    },
+                    "messages": [{"role": "user", "content": "Read the files"}]
+                }),
+                None,
+                true,
+                true,
+            )
+            .expect("Codex OAuth conversion should succeed");
+
+            assert_eq!(result["parallel_tool_calls"], json!(expected));
+        }
     }
 
     #[test]

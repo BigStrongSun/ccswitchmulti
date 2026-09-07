@@ -5425,3 +5425,10 @@ supported in one streaming turn`。
 - 工具生命周期把 Pi 固定为 npm 包 `@earendil-works/pi-coding-agent`，安装/升级沿用 npm，latest 查询也走 npm registry；Windows/POSIX 命令和 WSL 配置目录均已接入，不臆造 `pi update`。四个 locale 精确迁移官方 `84e75ad2` 的 15 个变更路径，当前源码引用的 103 个 Pi 文案键无缺失，JSON 严格 UTF-8 无 BOM。
 - 本批 TDD 的 RED 分别证明目录 hook 错误回退 Hermes、设置 UI/SettingsPage 未传 Pi、后端工具 normalization 丢弃 Pi、About 少一张 Pi 卡。最终集中 GREEN 证据为前端 20 文件 186/186、App Pi 边界 2/2、`upstream_pi_` 37/37、Pi session 12/12、Pi usage 16/16、model-fetch headers 3/3、credential redaction 1/1、Pi lifecycle 1/1、typecheck 与 rustfmt。该批只执行一次格式化后的聚焦复验，没有在开发中反复启动完整 9950X 全量套件。
 - Task 9 目前只可把共享模型下拉 `7e152d75`/`076c2744` 与本批有证据的 Pi/结构化编辑器范围标记完成。IME helper 只用于 Pi 请求头，并未覆盖官方 `d9d4a660`/`a98829ba` 的全部目标表单和测试；其他 preset、endpoint、reasoning dialect、表单布局与 usage UI 行继续保持待迁移，不能批量改成 adopted。
+
+## 2026-09-07 v3.20.1-1 官方 late-arrival 审计与 Codex OAuth 并行工具根修
+
+- `git fetch origin --prune --tags` 证明官方 `main` 从冻结点 `741e802f` 前进 9 个线性提交到 `1b34d322`。Matrix 直读 GitHub commits API 得到相同 tip、父链和提交说明；Codex 内置 Web 的 commits 页面仍停在 9 月 6 日，属于页面抓取缓存漂移，因此当前状态以实时 Git 与 GitHub API 为准。审计矩阵已显式扩展为 140 行，后续提交不得静默进入。
+- 九个 late arrivals 中，CCSM 已有更强 Images API 四别名与身份隔离实现，`17be9092` 标为 already-covered；`872ec775` 作为独立协议批次迁移；Claude takeover、未知 vendor modality、GPT-6 Astra/GLM-5.3 Flash/Gemini 3.8 Flash 价格、PPIO Pi preset、Tencent Pi/token-plan catalogue 仍分别待迁移。
+- Codex OAuth 的 Anthropic→Responses 转换根因有两层：`map_tool_choice_to_responses` 只投影选择模式而丢弃 `disable_parallel_tool_use`，随后必填字段补全把 `parallel_tool_calls` 固定为 `false`。Anthropic 官方语义是 disable=true 时一轮至多一个工具，Responses 字段是正向 allow，因此显式值必须取反；未显式提供时沿用 Anthropic/Codex 默认并行能力。
+- TDD 先修改缺省断言并新增显式 true/false 双向映射测试；两条 RED 都稳定得到 actual=false。最小 GREEN 仅在同一转换边界取反映射显式值，并把 Codex OAuth 缺省改为 true；非 OAuth 路径继续不注入该字段。最终该转换模块 89/89、rustfmt、diff check 和 140 行矩阵状态计数均通过。
