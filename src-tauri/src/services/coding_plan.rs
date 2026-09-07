@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ── 供应商检测 ──────────────────────────────────────────────
 
 enum CodingPlanProvider {
+    OpenCodeGo,
     Kimi,
     ZhipuCn,
     ZhipuEn,
@@ -23,6 +24,9 @@ enum CodingPlanProvider {
 }
 
 fn detect_provider(base_url: &str) -> Option<CodingPlanProvider> {
+    if opencode_go_usage_url(base_url).is_some() {
+        return Some(CodingPlanProvider::OpenCodeGo);
+    }
     let url = base_url.to_lowercase();
     if url.contains("api.kimi.com/coding") {
         Some(CodingPlanProvider::Kimi)
@@ -43,6 +47,25 @@ fn detect_provider(base_url: &str) -> Option<CodingPlanProvider> {
     } else {
         None
     }
+}
+
+fn opencode_go_usage_url(base_url: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(base_url).ok()?;
+    if !url
+        .host_str()
+        .map(|host| host.eq_ignore_ascii_case("opencode.ai"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/');
+    if path != "/zen/go" && path != "/zen/go/v1" {
+        return None;
+    }
+    url.set_path("/zen/go/v1/usage");
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
 }
 
 fn now_millis() -> i64 {
@@ -97,6 +120,125 @@ fn make_error(msg: String) -> SubscriptionQuota {
         error: Some(msg),
         queried_at: Some(now_millis()),
     }
+}
+
+// ── OpenCode Go ────────────────────────────────────────────
+
+fn parse_opencode_go_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
+    let Some(usage) = body.get("usage").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+
+    [
+        ("rolling", TIER_FIVE_HOUR),
+        ("weekly", TIER_WEEKLY_LIMIT),
+        ("monthly", TIER_MONTHLY),
+    ]
+    .into_iter()
+    .filter_map(|(field, tier_name)| {
+        let window = usage.get(field)?.as_object()?;
+        let utilization = window.get("percent").and_then(parse_f64)?;
+        // A zero-usage window currently carries a synthetic now+window timestamp rather than
+        // an actual accounting reset, so presenting it as a countdown would be misleading.
+        let resets_at = if utilization > 0.0 {
+            window.get("resetsAt").and_then(extract_reset_time)
+        } else {
+            None
+        };
+        Some(QuotaTier {
+            name: tier_name.to_string(),
+            utilization,
+            resets_at,
+            used_value_usd: None,
+            max_value_usd: None,
+        })
+    })
+    .collect()
+}
+
+fn opencode_go_http_error(status: reqwest::StatusCode) -> Option<SubscriptionQuota> {
+    let (credential_status, credential_message, error) = match status {
+        reqwest::StatusCode::UNAUTHORIZED => (
+            CredentialStatus::Expired,
+            "Invalid API key for OpenCode Go".to_string(),
+            "Authentication failed: invalid OpenCode Go API key (HTTP 401)".to_string(),
+        ),
+        reqwest::StatusCode::FORBIDDEN => (
+            CredentialStatus::Valid,
+            "This API key is valid, but the account does not include OpenCode Go access"
+                .to_string(),
+            "API key is valid but has no OpenCode Go subscription (HTTP 403)".to_string(),
+        ),
+        _ => return None,
+    };
+    Some(SubscriptionQuota {
+        tool: "coding_plan".to_string(),
+        credential_status,
+        credential_message: Some(credential_message),
+        success: false,
+        tiers: vec![],
+        extra_usage: None,
+        reset_credits: None,
+        reset_credits_error: None,
+        error: Some(error),
+        queried_at: Some(now_millis()),
+    })
+}
+
+/// OpenCode Go first-party service exposes plan windows at `/zen/go/v1/usage`.
+/// Inference and usage requests both authenticate with a Bearer token.
+async fn query_opencode_go(base_url: &str, api_key: &str) -> Result<SubscriptionQuota, String> {
+    let endpoint = opencode_go_usage_url(base_url)
+        .ok_or_else(|| "Invalid OpenCode Go base URL".to_string())?;
+    let resp = crate::proxy::http_client::get()
+        .get(endpoint)
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .header(
+            "User-Agent",
+            concat!("CCSwitchMulti/", env!("CARGO_PKG_VERSION")),
+        )
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    let status = resp.status();
+    if let Some(error) = opencode_go_http_error(status) {
+        return Ok(error);
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Ok(make_error(format!("API error (HTTP {status}): {body}")));
+    }
+
+    let raw = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read response: {e}"))?;
+    let body: serde_json::Value = match serde_json::from_slice(&raw) {
+        Ok(value) => value,
+        Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
+    };
+    let tiers = parse_opencode_go_tiers(&body);
+    if tiers.is_empty() {
+        return Ok(make_error(
+            "OpenCode Go usage response did not contain any valid windows".to_string(),
+        ));
+    }
+
+    Ok(SubscriptionQuota {
+        tool: "coding_plan".to_string(),
+        credential_status: CredentialStatus::Valid,
+        credential_message: None,
+        success: true,
+        tiers,
+        extra_usage: None,
+        reset_credits: None,
+        reset_credits_error: None,
+        error: None,
+        queried_at: Some(now_millis()),
+    })
 }
 
 // ── Kimi For Coding ─────────────────────────────────────────
@@ -1346,6 +1488,7 @@ pub async fn get_coding_plan_quota(
     }
 
     match provider {
+        CodingPlanProvider::OpenCodeGo => query_opencode_go(base_url, api_key).await,
         CodingPlanProvider::Kimi => query_kimi(api_key).await,
         CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => {
             query_zhipu(base_url, api_key).await
@@ -1363,12 +1506,87 @@ pub async fn get_coding_plan_quota(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_afp_tiers, parse_coding_plan_tiers, parse_minimax_tiers, parse_zhipu_token_tiers,
-        query_zhipu_team_at, volcengine_canonical_query, volcengine_is_auth_error_code,
-        volcengine_region, volcengine_response_error, volcengine_sign, zhipu_quota_base,
+        detect_provider, opencode_go_http_error, parse_afp_tiers, parse_coding_plan_tiers,
+        parse_minimax_tiers, parse_opencode_go_tiers, parse_zhipu_token_tiers, query_zhipu_team_at,
+        volcengine_canonical_query, volcengine_is_auth_error_code, volcengine_region,
+        volcengine_response_error, volcengine_sign, zhipu_quota_base, CodingPlanProvider,
         TIER_FIVE_HOUR, TIER_MONTHLY, TIER_WEEKLY_LIMIT,
     };
     use serde_json::json;
+
+    #[test]
+    fn opencode_go_detection_accepts_both_roots_without_matching_zen() {
+        assert!(matches!(
+            detect_provider("https://opencode.ai/zen/go"),
+            Some(CodingPlanProvider::OpenCodeGo)
+        ));
+        assert!(matches!(
+            detect_provider("https://opencode.ai/zen/go/v1"),
+            Some(CodingPlanProvider::OpenCodeGo)
+        ));
+        assert!(detect_provider("https://opencode.ai/zen/v1").is_none());
+    }
+
+    #[test]
+    fn opencode_go_parses_three_usage_windows_and_skips_malformed_ones() {
+        let body = json!({
+            "usage": {
+                "rolling": { "status": "active", "percent": 12.5, "resetsAt": "2026-09-08T02:00:00Z" },
+                "weekly": { "status": "active", "percent": "broken", "resetsAt": "2026-09-14T00:00:00Z" },
+                "monthly": { "status": "active", "percent": 48, "resetsAt": "2026-10-01T00:00:00Z" }
+            }
+        });
+        let tiers = parse_opencode_go_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 12.5);
+        assert_eq!(tiers[1].name, TIER_MONTHLY);
+        assert_eq!(tiers[1].utilization, 48.0);
+    }
+
+    #[test]
+    fn opencode_go_zero_percent_reset_placeholder_is_not_rendered_as_epoch() {
+        let body = json!({
+            "usage": {
+                "rolling": { "status": "active", "percent": 0, "resetsAt": "2026-09-08T07:00:00Z" },
+                "weekly": { "status": "active", "percent": 20, "resetsAt": 1_800_000_000_000_i64 }
+            }
+        });
+        let tiers = parse_opencode_go_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 0.0);
+        assert!(tiers[0].resets_at.is_none());
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert!(tiers[1].resets_at.is_some());
+    }
+
+    #[test]
+    fn opencode_go_distinguishes_invalid_key_from_missing_entitlement() {
+        let invalid = opencode_go_http_error(reqwest::StatusCode::UNAUTHORIZED).unwrap();
+        assert!(matches!(
+            invalid.credential_status,
+            CredentialStatus::Expired
+        ));
+        assert!(invalid
+            .credential_message
+            .unwrap()
+            .contains("Invalid API key"));
+
+        let forbidden = opencode_go_http_error(reqwest::StatusCode::FORBIDDEN).unwrap();
+        assert!(matches!(
+            forbidden.credential_status,
+            CredentialStatus::Valid
+        ));
+        assert!(forbidden
+            .credential_message
+            .unwrap()
+            .contains("does not include OpenCode Go"));
+        assert!(forbidden
+            .error
+            .unwrap()
+            .contains("no OpenCode Go subscription"));
+    }
 
     #[test]
     fn zhipu_new_plan_two_tiers_sorted_by_reset_time() {

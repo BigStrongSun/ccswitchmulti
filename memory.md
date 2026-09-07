@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 OpenCode Go 用量与稳定请求身份第二批
+
+- 上游 `270a4ff3` 的用量意图已按 CCSwitchMulti 当前五 App Provider 结构重写：Claude 延续所有 Coding Plan 的自动识别；Claude Desktop、Codex、OpenCode、Pi 只对 OpenCode Go 自动注入 `token_plan`，且不覆盖用户已有 `usage_script`。各端分别从 `env.ANTHROPIC_BASE_URL`、Codex TOML `base_url`、`options.baseURL` 和 Pi `baseUrl` 读取真实持久化配置。
+- `/zen/go` 与 `/zen/go/v1` 都归一到第一方公开源码支持的 `GET /zen/go/v1/usage`，使用 Bearer。响应的 rolling/weekly/monthly 映射到 five_hour/weekly_limit/monthly；坏窗口单独跳过，全部无法解析时显式失败。0% 窗口即使带合法 ISO `resetsAt` 也是占位，不展示倒计时。401 表示 Key 无效；403 保持凭据 Valid，并在最终 UI 可见错误中明确说明账号没有 OpenCode Go 订阅。
+- 推理请求的根因边界也一并修正：`x-opencode-session` 现在是跨 Messages/Responses/Chat 的最高优先级稳定 session 真值。三条真实出站路径都会保留客户端明确值；缺失时只从 `session_client_provided=true` 的稳定身份派生，绝不发送每请求随机 UUID；OpenCode Go 上游统一使用 `CCSwitchMulti/<version>` 自有 User-Agent，不伪造 Claude、Codex 或 OpenCode 身份。
+- TDD 证据：前端首次 6/7 RED，纠正 Claude Desktop fixture 后再次精确 RED，最终 7/7 GREEN；Rust 用量和身份测试先因缺少路由/解析/出站处理 RED，修复后 `cargo test opencode --lib` 52/52 GREEN。未使用真实 Go Key，因此没有计费 canary；本批没有安装、重启、合并 main、push、tag 或发布。
+
 ## 2026-09-08 OpenCode Go 多协议目录第一批
 
 - OpenCode Go 当前不是单一 OpenAI Chat 兼容服务。第一方 Go 文档和当前服务端源码共同确认模型会按请求协议过滤：Responses 端点承载 Grok 4.6、GPT-5.6 Luna 与 Muse Spark Contributor；Anthropic Messages 承载 MiniMax M3/M2.7 与 Qwen3.8/3.7/3.6；其余 GLM、Kimi、LongCat、DeepSeek、MiMo、Hy、Omen 走 Chat Completions。错误协议会得到 `modelFormatNotSupported`，因此旧的全量 Chat 预设即使补齐模型名也会产生“可见但不可用”的目录。

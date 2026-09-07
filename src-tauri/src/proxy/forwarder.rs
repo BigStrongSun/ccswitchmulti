@@ -3634,6 +3634,12 @@ impl RequestForwarder {
                 is_copilot,
             );
         }
+        apply_opencode_go_identity(
+            &mut ordered_headers,
+            &url,
+            &self.session_id,
+            self.session_client_provided,
+        );
         enforce_codex_oauth_originator(
             &mut ordered_headers,
             is_codex_oauth || codex_official_auth_passthrough,
@@ -4664,6 +4670,12 @@ impl RequestForwarder {
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             false,
         );
+        apply_opencode_go_identity(
+            &mut ordered_headers,
+            &url,
+            &self.session_id,
+            self.session_client_provided,
+        );
         enforce_codex_oauth_originator(
             &mut ordered_headers,
             is_codex_oauth || codex_official_auth_passthrough,
@@ -4992,6 +5004,12 @@ impl RequestForwarder {
                 .as_ref()
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             false,
+        );
+        apply_opencode_go_identity(
+            &mut ordered_headers,
+            &upstream_url,
+            &self.session_id,
+            self.session_client_provided,
         );
         enforce_codex_oauth_originator(
             &mut ordered_headers,
@@ -6288,6 +6306,48 @@ fn build_codex_oauth_session_headers(
     }
 
     headers
+}
+
+fn is_opencode_go_upstream_url(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    url.host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("opencode.ai"))
+        && (url.path() == "/zen/go" || url.path().starts_with("/zen/go/"))
+}
+
+/// Normalize the identity required by OpenCode Go at the final outbound boundary.
+/// Preserve an explicit Go session header. If a protocol conversion removed it, derive it only
+/// from a stable client-provided session; the per-request fallback UUID is never sent upstream.
+fn apply_opencode_go_identity(
+    headers: &mut http::HeaderMap,
+    url: &str,
+    session_id: &str,
+    session_client_provided: bool,
+) {
+    if !is_opencode_go_upstream_url(url) {
+        return;
+    }
+
+    headers.insert(
+        http::header::USER_AGENT,
+        http::HeaderValue::from_static(concat!("CCSwitchMulti/", env!("CARGO_PKG_VERSION"))),
+    );
+
+    let session_header = http::HeaderName::from_static("x-opencode-session");
+    let has_explicit_session = headers
+        .get(&session_header)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_explicit_session || !session_client_provided {
+        return;
+    }
+    if let Ok(value) = http::HeaderValue::from_str(session_id.trim()) {
+        if !value.is_empty() {
+            headers.insert(session_header, value);
+        }
+    }
 }
 
 /// 判断 originator 是否属于官方 Codex 已声明的 first-party 客户端集合。
@@ -10518,6 +10578,62 @@ mod tests {
             map.get("x-codex-window-id"),
             Some(&HeaderValue::from_static("session-123:0"))
         );
+    }
+
+    #[test]
+    fn opencode_go_identity_preserves_client_session_and_sets_own_user_agent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-opencode-session",
+            HeaderValue::from_static("client-session"),
+        );
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("upstream-client/1.0"),
+        );
+
+        apply_opencode_go_identity(
+            &mut headers,
+            "https://opencode.ai/zen/go/v1/responses",
+            "derived-session",
+            true,
+        );
+
+        assert_eq!(
+            headers.get("x-opencode-session"),
+            Some(&HeaderValue::from_static("client-session"))
+        );
+        assert_eq!(
+            headers.get(http::header::USER_AGENT),
+            Some(&HeaderValue::from_static(concat!(
+                "CCSwitchMulti/",
+                env!("CARGO_PKG_VERSION")
+            )))
+        );
+    }
+
+    #[test]
+    fn opencode_go_identity_derives_session_only_from_stable_client_identity() {
+        let mut stable = HeaderMap::new();
+        apply_opencode_go_identity(
+            &mut stable,
+            "https://opencode.ai/zen/go/v1/chat/completions",
+            "stable-session",
+            true,
+        );
+        assert_eq!(
+            stable.get("x-opencode-session"),
+            Some(&HeaderValue::from_static("stable-session"))
+        );
+
+        let mut generated = HeaderMap::new();
+        apply_opencode_go_identity(
+            &mut generated,
+            "https://opencode.ai/zen/go/v1/messages",
+            "random-per-request-uuid",
+            false,
+        );
+        assert!(!generated.contains_key("x-opencode-session"));
     }
 
     #[test]
