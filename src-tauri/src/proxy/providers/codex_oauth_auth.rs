@@ -84,6 +84,9 @@ pub enum CodexOAuthError {
     #[error("Refresh Token 失效或已过期")]
     RefreshTokenInvalid,
 
+    #[error("账号 {0} 缺少新版身份信息，需要重新认证")]
+    IdentityUpgradeRequired(String),
+
     #[error("网络错误: {0}")]
     NetworkError(String),
 
@@ -1030,16 +1033,18 @@ impl CodexOAuthManager {
         let account = accounts
             .get(account_id)
             .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?;
-        if !account.is_request_usable() {
-            return Err(CodexOAuthError::ParseError(format!(
-                "账号 {account_id} 缺少可证明的用户身份或 workspace，请重新认证"
-            )));
+        if !account.is_usable() {
+            return Err(CodexOAuthError::RefreshTokenInvalid);
         }
-        account.chatgpt_account_id.clone().ok_or_else(|| {
-            CodexOAuthError::ParseError(format!(
-                "账号 {account_id} 缺少 chatgpt_account_id，请重新认证"
-            ))
-        })
+        if account.chatgpt_account_id.is_none() || account.user_subject().is_none() {
+            return Err(CodexOAuthError::IdentityUpgradeRequired(
+                account_id.to_string(),
+            ));
+        }
+        account
+            .chatgpt_account_id
+            .clone()
+            .ok_or_else(|| CodexOAuthError::IdentityUpgradeRequired(account_id.to_string()))
     }
 
     pub async fn get_valid_token_and_workspace_for_account(
@@ -1516,10 +1521,13 @@ impl CodexOAuthManager {
         let account = accounts
             .get(account_id)
             .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?;
-        if !account.is_request_usable() {
-            return Err(CodexOAuthError::ParseError(format!(
-                "账号 {account_id} 缺少可证明的用户身份或 workspace，请重新认证"
-            )));
+        if !account.is_usable() {
+            return Err(CodexOAuthError::RefreshTokenInvalid);
+        }
+        if account.chatgpt_account_id.is_none() || account.user_subject().is_none() {
+            return Err(CodexOAuthError::IdentityUpgradeRequired(
+                account_id.to_string(),
+            ));
         }
         Ok(())
     }
@@ -2270,6 +2278,8 @@ mod tests {
                   "account_id": "legacy-workspace",
                   "email": "legacy@example.test",
                   "refresh_token": "legacy-refresh",
+                  "access_token": "still-time-valid-access",
+                  "access_token_expires_at_ms": 4102444800000,
                   "authenticated_at": 1
                 }
               },
@@ -2293,14 +2303,24 @@ mod tests {
         assert!(status.accounts[0].requires_reauth);
         assert!(!status.authenticated);
         assert!(manager.default_account_id().await.is_none());
-        assert!(manager
+        let workspace_error = manager
             .chatgpt_account_id_for_account("legacy-workspace")
             .await
-            .is_err());
-        assert!(manager
+            .unwrap_err();
+        assert!(matches!(
+            workspace_error,
+            CodexOAuthError::IdentityUpgradeRequired(ref account_id)
+                if account_id == "legacy-workspace"
+        ));
+        let token_error = manager
             .get_valid_token_for_account("legacy-workspace")
             .await
-            .is_err());
+            .unwrap_err();
+        assert!(matches!(
+            token_error,
+            CodexOAuthError::IdentityUpgradeRequired(ref account_id)
+                if account_id == "legacy-workspace"
+        ));
         assert!(manager
             .account_pool_policy()
             .await

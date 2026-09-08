@@ -1086,6 +1086,7 @@ function renderQuotaProblem(
   const isCredentialProblem =
     quota.credentialStatus === "not_found" ||
     quota.credentialStatus === "expired" ||
+    quota.credentialStatus === "reauth_required" ||
     quota.credentialStatus === "parse_error";
 
   if (!isCredentialProblem && quota.success) return null;

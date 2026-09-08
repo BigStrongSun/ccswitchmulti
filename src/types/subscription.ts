@@ -1,6 +1,7 @@
 export type CredentialStatus =
   | "valid"
   | "expired"
+  | "reauth_required"
   | "not_found"
   | "parse_error";
 

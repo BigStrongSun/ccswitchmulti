@@ -3170,6 +3170,10 @@
     "extraUsage": "Extra Usage",
     "expired": "Session expired",
     "expiredHint": "Run the {{tool}} command to refresh your login",
+    "reauthRequired": "Sign-in required",
+    "reauthRequiredHint": "This saved account needs a one-time identity upgrade",
+    "reauthenticate": "Sign in again",
+    "reauthenticating": "Signing in…",
     "queryFailed": "Query failed",
     "refresh": "Refresh"
   },

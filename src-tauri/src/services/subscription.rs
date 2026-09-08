@@ -18,6 +18,7 @@ use crate::config;
 pub enum CredentialStatus {
     Valid,
     Expired,
+    ReauthRequired,
     NotFound,
     ParseError,
 }
@@ -1478,6 +1479,11 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                     CredentialStatus::ParseError,
                     message.unwrap_or_else(|| "Failed to parse credentials".to_string()),
                 )),
+                CredentialStatus::ReauthRequired => Ok(SubscriptionQuota::error(
+                    "claude",
+                    CredentialStatus::ReauthRequired,
+                    message.unwrap_or_else(|| "Sign-in is required".to_string()),
+                )),
                 CredentialStatus::Expired => {
                     // 即使过期也尝试调用 API（token 可能实际上仍有效）
                     if let Some(token) = token {
@@ -1507,6 +1513,11 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                     "codex",
                     CredentialStatus::ParseError,
                     message.unwrap_or_else(|| "Failed to parse credentials".to_string()),
+                )),
+                CredentialStatus::ReauthRequired => Ok(SubscriptionQuota::error(
+                    "codex",
+                    CredentialStatus::ReauthRequired,
+                    message.unwrap_or_else(|| "Sign-in is required".to_string()),
                 )),
                 CredentialStatus::Expired => {
                     // 即使可能过期也尝试调用 API
@@ -1549,6 +1560,11 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                     "gemini",
                     CredentialStatus::ParseError,
                     message.unwrap_or_else(|| "Failed to parse credentials".to_string()),
+                )),
+                CredentialStatus::ReauthRequired => Ok(SubscriptionQuota::error(
+                    "gemini",
+                    CredentialStatus::ReauthRequired,
+                    message.unwrap_or_else(|| "Sign-in is required".to_string()),
                 )),
                 CredentialStatus::Expired => {
                     // Gemini access_token 仅 ~1h 有效，尝试用 refresh_token 刷新

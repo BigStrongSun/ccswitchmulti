@@ -736,7 +736,11 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                   </div>
                 </div>
                 {showAccountQuota && (
-                  <CodexOauthAccountQuota accountId={account.id} />
+                  <CodexOauthAccountQuota
+                    accountId={account.id}
+                    onReauthenticate={() => reauthAccount(account.id)}
+                    reauthenticating={isAddingAccount || isPolling}
+                  />
                 )}
               </div>
             ))}

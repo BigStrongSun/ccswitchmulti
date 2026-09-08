@@ -121,6 +121,11 @@ export function useManagedAuth(
           setDeviceCode(null);
           setError(null);
           await queryClient.invalidateQueries({ queryKey });
+          if (authProvider === "codex_oauth") {
+            await queryClient.invalidateQueries({
+              queryKey: ["codex_oauth", "quota"],
+            });
+          }
           return;
         }
       } catch (statusError) {
@@ -136,7 +141,14 @@ export function useManagedAuth(
         setError("Device code expired. Please try again.");
       }
     },
-    [finishFlow, queryClient, queryKey, refetchStatus, stopPolling],
+    [
+      authProvider,
+      finishFlow,
+      queryClient,
+      queryKey,
+      refetchStatus,
+      stopPolling,
+    ],
   );
 
   const startLoginMutation = useMutation({
@@ -194,6 +206,11 @@ export function useManagedAuth(
             setPollingState("success");
             await refetchStatus();
             await queryClient.invalidateQueries({ queryKey });
+            if (authProvider === "codex_oauth") {
+              await queryClient.invalidateQueries({
+                queryKey: ["codex_oauth", "quota"],
+              });
+            }
             setPollingState("idle");
             setDeviceCode(null);
           }

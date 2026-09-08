@@ -6,6 +6,8 @@ import { SubscriptionQuotaView } from "@/components/SubscriptionQuotaFooter";
 interface CodexOauthAccountQuotaProps {
   /** cc-switch 自管的 ChatGPT 账号 ID */
   accountId: string;
+  onReauthenticate: () => void;
+  reauthenticating?: boolean;
 }
 
 /**
@@ -19,6 +21,8 @@ interface CodexOauthAccountQuotaProps {
  */
 const CodexOauthAccountQuota: React.FC<CodexOauthAccountQuotaProps> = ({
   accountId,
+  onReauthenticate,
+  reauthenticating = false,
 }) => {
   const {
     data: quota,
@@ -46,6 +50,8 @@ const CodexOauthAccountQuota: React.FC<CodexOauthAccountQuotaProps> = ({
       quota={quota}
       loading={loading}
       refetch={refetch}
+      onReauthenticate={onReauthenticate}
+      reauthenticating={reauthenticating}
       appIdForExpiredHint="codex_oauth"
       inline={false}
     />

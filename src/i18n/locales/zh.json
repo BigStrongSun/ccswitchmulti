@@ -3175,6 +3175,10 @@
     "extraUsage": "超额用量",
     "expired": "会话已过期",
     "expiredHint": "请运行 {{tool}} 命令刷新登录",
+    "reauthRequired": "需要重新认证",
+    "reauthRequiredHint": "旧账号缺少新版身份信息，需要重新认证",
+    "reauthenticate": "重新认证",
+    "reauthenticating": "正在重新认证",
     "queryFailed": "查询失败",
     "refresh": "刷新"
   },

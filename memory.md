@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 Codex OAuth 旧身份误报过期与无效刷新根修
+
+- 截图中的“会话已过期”并不是 access/refresh token 已被服务端明确判定失效。旧版自管 Codex OAuth 账号可能仍有可用 token，但持久化记录缺少新版强制身份字段 `chatgpt_account_id` 或 `id_token.sub`；额度命令此前把 `get_valid_token_and_workspace_for_account` 的所有错误统一压成 `CredentialStatus::Expired`，前端又只提供额度 `refetch`，因此既误报过期，又出现点击刷新无法补齐身份、界面没有实质变化。
+- 根修新增 `CodexOAuthError::IdentityUpgradeRequired` 和序列化状态 `reauth_required`，把身份升级、明确无效 refresh token、账号不存在、解析错误和临时网络/Device Code 授权错误分开。只有 `RefreshTokenInvalid` 映射为 `expired`；RFC 8628 的 `expired_token` 只结束本轮 Device Code 授权，不再污染既有账号凭据状态。
+- 额度卡在 `reauth_required` 时不再显示无效的圆形刷新按钮，而是显示“旧账号缺少新版身份信息”和定向“重新认证”；认证进行中按钮禁用并有旋转反馈。该动作复用 `reauthAccount(account.id)`，成功后同时失效账号状态与 `['codex_oauth','quota']` 前缀缓存，避免成功登录后仍残留旧提示。中英日繁四套文案和 Codex 用量页状态识别同步完成。
+- TDD 证据包括 UI 2/2、认证 hook 5/5、后端错误分类 3/3，以及“仍有效 access token 但缺身份字段”的 manager 回归 1/1。最终 TypeScript、rustfmt、diff、四套 locale JSON、严格 UTF-8/无 BOM/U+FFFD 均通过；隔离 `LOCALAPPDATA/TEMP/TMP` 后 Rust 全量为 4051 passed、6 ignored，12 个 integration binaries 全部通过。本轮前端全量首次为 186 files 中 185 passed、1541 tests 中 1539 passed，唯一失败文件 `tests/integration/App.test.tsx` 单独复跑 23/23；最终以单 worker 完整复跑得到 186/186 files、1541/1541 tests，确认原失败来自高并发测试干扰。本次两个修改测试文件聚焦门禁为 7/7。
+- Rust 初次全量唯一失败的 Windows `where.exe` 测试单独也可复现，但把 `TEMP/TMP` 从受限 AppData 临时目录切到工作树隔离目录后通过，根因是沙箱目录可见性而非产品逻辑或测试并发。源码修复尚未构建、安装或应用到当前运行实例；本轮没有触碰账号文件、进程和 `127.0.0.1:15721`。
+- 外部事实按项目规则由 Codex 内置 Web 与固定 Matrix WebSearch 两条独立链交叉核验 RFC 8628；两链一致支持 Device Code 到期边界。CCSM 的具体误分类与缓存根因仍以本地源码、脱敏账号形态和 RED→GREEN 测试为准。
+
 ## 2026-09-08 CCSwitchMulti v3.20.1-1 正式发布
 
 - `main` 经合并与发布记录提交固定在 `325d96ed97fa114beb4a94829f64fca6ff752bfd`。发布前 CI run `34156912780` 的 Frontend、macOS、Ubuntu、Windows 全部成功；annotated tag `v3.20.1-1` 的 tag object 为 `b7829dca97f449f4b872a276c523c346eebe9878`，peel 后精确指向 `325d96ed`，tag annotation 以 `本次提交由BigStrongsSun完成` 结尾。

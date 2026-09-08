@@ -1,5 +1,11 @@
 import React from "react";
-import { RefreshCw, AlertCircle, Clock, RotateCcw } from "lucide-react";
+import {
+  RefreshCw,
+  AlertCircle,
+  Clock,
+  RotateCcw,
+  Loader2,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
 import { useSubscriptionQuota } from "@/lib/query/subscription";
@@ -16,6 +22,8 @@ interface SubscriptionQuotaViewProps {
   quota: SubscriptionQuota | undefined;
   loading: boolean;
   refetch: () => void;
+  onReauthenticate?: () => void;
+  reauthenticating?: boolean;
   /** 用于 `subscription.expiredHint` 的 {tool} 插值；解耦了 hook 的 appId */
   appIdForExpiredHint: string;
   inline?: boolean;
@@ -125,6 +133,8 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
   quota,
   loading,
   refetch,
+  onReauthenticate,
+  reauthenticating = false,
   appIdForExpiredHint,
   inline = false,
 }) => {
@@ -143,6 +153,59 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
 
   // 凭据解析错误 → 不显示（静默）
   if (quota.credentialStatus === "parse_error") return null;
+
+  // 旧凭据仍在，但缺少新版账号身份字段。重新拉取额度无法补齐身份，必须
+  // 进入该账号的定向认证流程，避免给用户一个看似可点但永远无效的刷新按钮。
+  if (quota.credentialStatus === "reauth_required" && !quota.success) {
+    const title = t("subscription.reauthRequired", "需要重新认证");
+    const detail = t(
+      "subscription.reauthRequiredHint",
+      "旧账号缺少新版身份信息，需要重新认证",
+    );
+    const actionLabel = reauthenticating
+      ? t("subscription.reauthenticating", "正在重新认证")
+      : t("subscription.reauthenticate", "重新认证");
+    const action = onReauthenticate ? (
+      <button
+        type="button"
+        onClick={onReauthenticate}
+        disabled={reauthenticating}
+        className="inline-flex items-center gap-1 rounded px-2 py-1 font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50 dark:text-amber-300 dark:hover:bg-amber-800/30"
+      >
+        {reauthenticating && <Loader2 size={12} className="animate-spin" />}
+        {actionLabel}
+      </button>
+    ) : null;
+
+    if (inline) {
+      return (
+        <div className="inline-flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs shadow-sm dark:border-amber-800 dark:bg-amber-900/20">
+          <div className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
+            <AlertCircle size={12} />
+            <span>{title}</span>
+          </div>
+          {action}
+        </div>
+      );
+    }
+
+    return (
+      <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 shadow-sm dark:border-amber-800 dark:bg-amber-900/20">
+        <div className="flex items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 text-amber-600 dark:text-amber-400">
+            <AlertCircle size={14} />
+            <div>
+              <span className="font-medium">{title}</span>
+              <span className="ml-2 text-amber-500/70 dark:text-amber-400/70">
+                {detail}
+              </span>
+            </div>
+          </div>
+          {action}
+        </div>
+      </div>
+    );
+  }
 
   // 凭据过期
   if (quota.credentialStatus === "expired" && !quota.success) {

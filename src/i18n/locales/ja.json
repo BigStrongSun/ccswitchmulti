@@ -3163,6 +3163,10 @@
     "extraUsage": "超過使用量",
     "expired": "セッション期限切れ",
     "expiredHint": "{{tool}}コマンドを実行してログインを更新してください",
+    "reauthRequired": "再認証が必要です",
+    "reauthRequiredHint": "保存済みアカウントには一度だけ本人情報の更新が必要です",
+    "reauthenticate": "再認証",
+    "reauthenticating": "再認証中…",
     "queryFailed": "クエリに失敗しました",
     "refresh": "更新"
   },

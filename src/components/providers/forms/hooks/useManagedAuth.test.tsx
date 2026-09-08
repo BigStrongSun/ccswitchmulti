@@ -35,7 +35,10 @@ function renderManagedAuth() {
   });
   const wrapper = ({ children }: React.PropsWithChildren) =>
     React.createElement(QueryClientProvider, { client: queryClient }, children);
-  return renderHook(() => useManagedAuth("codex_oauth"), { wrapper });
+  return {
+    ...renderHook(() => useManagedAuth("codex_oauth"), { wrapper }),
+    queryClient,
+  };
 }
 
 const loggedOutStatus: ManagedAuthStatus = {
@@ -184,5 +187,23 @@ describe("useManagedAuth device flow", () => {
         "legacy-local-id",
       ),
     );
+  });
+
+  it("successful targeted reauthentication invalidates the stale account quota", async () => {
+    mocks.authGetStatus
+      .mockResolvedValueOnce(legacyReauthStatus)
+      .mockResolvedValue(loggedInStatus);
+    mocks.authPollForAccount.mockResolvedValue(loggedInStatus.accounts[0]);
+    const { result, queryClient } = renderManagedAuth();
+    const quotaKey = ["codex_oauth", "quota", "legacy-local-id"];
+    queryClient.setQueryData(quotaKey, { credentialStatus: "reauth_required" });
+    await waitFor(() =>
+      expect(result.current.authStatus).toEqual(legacyReauthStatus),
+    );
+
+    act(() => result.current.reauthAccount("legacy-local-id"));
+
+    await waitFor(() => expect(result.current.pollingState).toBe("idle"));
+    expect(queryClient.getQueryState(quotaKey)?.isInvalidated).toBe(true);
   });
 });

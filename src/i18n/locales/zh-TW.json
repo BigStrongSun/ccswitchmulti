@@ -3164,6 +3164,10 @@
     "extraUsage": "超額用量",
     "expired": "工作階段已過期",
     "expiredHint": "請執行 {{tool}} 命令重新整理登入",
+    "reauthRequired": "需要重新驗證",
+    "reauthRequiredHint": "舊帳號缺少新版身分資訊，需要重新驗證",
+    "reauthenticate": "重新驗證",
+    "reauthenticating": "正在重新驗證",
     "queryFailed": "查詢失敗",
     "refresh": "重新整理"
   },

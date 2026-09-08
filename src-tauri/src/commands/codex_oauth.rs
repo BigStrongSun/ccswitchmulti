@@ -5,8 +5,9 @@
 //! 大部分认证命令通过通用 `auth_*` 命令（参见 `commands::auth`）暴露给前端，
 //! 此处定义 State wrapper 以及 Codex OAuth 专属的订阅额度和模型列表查询命令。
 
-use crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy;
-use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
+use crate::proxy::providers::codex_oauth_auth::{
+    CodexAccountPoolPolicy, CodexOAuthError, CodexOAuthManager,
+};
 use crate::services::model_fetch::FetchedModel;
 use crate::services::subscription::{query_codex_quota, CredentialStatus, SubscriptionQuota};
 use crate::store::AppState;
@@ -35,6 +36,23 @@ fn quota_remaining_percent(quota: &SubscriptionQuota) -> Option<f64> {
                 .map(|used| (100.0 - used).clamp(0.0, 100.0))
         })
         .flatten()
+}
+
+fn credential_status_for_codex_oauth_error(error: &CodexOAuthError) -> CredentialStatus {
+    match error {
+        CodexOAuthError::IdentityUpgradeRequired(_) => CredentialStatus::ReauthRequired,
+        CodexOAuthError::RefreshTokenInvalid => CredentialStatus::Expired,
+        CodexOAuthError::AccountNotFound(_) => CredentialStatus::NotFound,
+        CodexOAuthError::ParseError(_) | CodexOAuthError::IoError(_) => {
+            CredentialStatus::ParseError
+        }
+        CodexOAuthError::AuthorizationPending
+        | CodexOAuthError::AccessDenied
+        | CodexOAuthError::ExpiredToken
+        | CodexOAuthError::TokenFetchFailed(_)
+        | CodexOAuthError::DuplicateAccount
+        | CodexOAuthError::NetworkError(_) => CredentialStatus::Valid,
+    }
 }
 
 /// Codex OAuth 认证状态
@@ -66,9 +84,10 @@ pub async fn get_codex_oauth_quota(
     let (token, workspace_id) = match manager.get_valid_token_and_workspace_for_account(&id).await {
         Ok(credentials) => credentials,
         Err(e) => {
+            let credential_status = credential_status_for_codex_oauth_error(&e);
             return Ok(SubscriptionQuota::error(
                 "codex_oauth",
-                CredentialStatus::Expired,
+                credential_status,
                 format!("Codex OAuth token unavailable: {e}"),
             ));
         }
@@ -212,4 +231,32 @@ pub async fn get_codex_oauth_models(
 #[tauri::command]
 pub fn get_codex_oauth_cached_models() -> Result<Vec<FetchedModel>, String> {
     crate::services::codex_oauth_models::fetch_cached_models_from_disk()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_upgrade_is_not_reported_as_an_expired_credential() {
+        let status = credential_status_for_codex_oauth_error(
+            &CodexOAuthError::IdentityUpgradeRequired("legacy-account".to_string()),
+        );
+
+        assert!(matches!(status, CredentialStatus::ReauthRequired));
+    }
+
+    #[test]
+    fn definitively_invalid_refresh_token_is_reported_as_expired() {
+        let status = credential_status_for_codex_oauth_error(&CodexOAuthError::RefreshTokenInvalid);
+
+        assert!(matches!(status, CredentialStatus::Expired));
+    }
+
+    #[test]
+    fn device_authorization_expiry_is_not_reported_as_credential_expiry() {
+        let status = credential_status_for_codex_oauth_error(&CodexOAuthError::ExpiredToken);
+
+        assert!(matches!(status, CredentialStatus::Valid));
+    }
 }
