@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 CCSwitchMulti v3.20.1-2 发布准备
+
+- 发布前 `git fetch --all --prune --tags` 后，`fork/main` 与本地 `main@26abe211` 完全一致；官方 `origin/main`/`upstream/main` 仍精确等于已审计的 `v3.20.2@f3b18df1`，没有 tag 后新提交。本轮唯一新的已完成产品分支是 `bigstrongsun/fix-oauth-status-refresh@5eaf58e0`，已快进合入本地 `main`；其他实验、NO-GO、原型和已被主线覆盖的旧分支不因发布再次整枝合并。
+- 下一修订版采用 `3.20.1-2`，四个版本源已统一。范围只是在 `v3.20.1-1` 上交付 Codex OAuth 旧身份误报过期、无效额度刷新和重认证后缓存残留的根修；数据库 schema 保持 v22。协议探测的既有边界不变：Partial/Unverified 可明确手动采用或排除，已有有效证据可复用，但新建 MultiRouter 仍需取得一次协议证据。
+- 候选门禁、clean 本地 release 构建、CI、tag、公开 Release、下载资产校验和 R2 状态均待执行。不得复用 `v3.20.1-1` 产物，不安装、不重启、不替换当前运行实例，也不触碰 `127.0.0.1:15721`。
+
 ## 2026-09-08 Codex OAuth 旧身份误报过期与无效刷新根修
 
 - 截图中的“会话已过期”并不是 access/refresh token 已被服务端明确判定失效。旧版自管 Codex OAuth 账号可能仍有可用 token，但持久化记录缺少新版强制身份字段 `chatgpt_account_id` 或 `id_token.sub`；额度命令此前把 `get_valid_token_and_workspace_for_account` 的所有错误统一压成 `CredentialStatus::Expired`，前端又只提供额度 `refetch`，因此既误报过期，又出现点击刷新无法补齐身份、界面没有实质变化。
