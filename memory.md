@@ -1,13 +1,16 @@
 # CC Switch Repository Memory
 
-## 2026-09-08 CCSwitchMulti v3.20.1-2 发布准备
+## 2026-09-08 CCSwitchMulti v3.20.1-2 正式发布
 
 - 发布前 `git fetch --all --prune --tags` 后，`fork/main` 与本地 `main@26abe211` 完全一致；官方 `origin/main`/`upstream/main` 仍精确等于已审计的 `v3.20.2@f3b18df1`，没有 tag 后新提交。本轮唯一新的已完成产品分支是 `bigstrongsun/fix-oauth-status-refresh@5eaf58e0`，已快进合入本地 `main`；其他实验、NO-GO、原型和已被主线覆盖的旧分支不因发布再次整枝合并。
 - 下一修订版采用 `3.20.1-2`，四个版本源已统一。范围只是在 `v3.20.1-1` 上交付 Codex OAuth 旧身份误报过期、无效额度刷新和重认证后缓存残留的根修；数据库 schema 保持 v22。协议探测的既有边界不变：Partial/Unverified 可明确手动采用或排除，已有有效证据可复用，但新建 MultiRouter 仍需取得一次协议证据。
 - 发布门禁首次从主工作树运行 Vitest 时额外发现 `.local/CCSwitchMulti-Task6/.../.codex/plugins` 下 26 个外部缓存测试；CCSM 自身 186 个文件、1541 条测试全部通过，外部文件因不是 Vitest 套件或缺少其自身 Playwright 依赖而失败。根因是 `vitest.config.ts` 已排除 `.worktrees/.tmp/node_modules/dist`，但漏掉仓库本地任务快照根 `.local`；配置现永久排除 `.local`，完整复跑精确得到 186/186 files、1541/1541 tests。
 - 同一候选的集中门禁还得到 Rust library 4051 passed、6 ignored，integration 125/125，TypeScript、Prettier、renderer production build、`cargo check --all-targets`、CI 范围严格 Clippy、rustfmt、diff、JSON 和 24 个 release-delta 文件严格 UTF-8/no-BOM/no-U+FFFD 全通过。Prettier 只机械格式化新增的 OAuth quota footer 测试，并针对性复跑 2/2；为遵守门禁不过度重复的约束，未因纯格式变化再次运行 1541 条完整前端套件。
 - `pnpm release:local` 从 clean tracked commit `8858b79c05a227e9f94c036820723b766f6f013b` 只运行一次并原子导出。16/16 清单哈希重算一致；sidecar 为 2,277,888 bytes / `C7A366F4FEDB817AD5A0A164BEB0E39BC530094B4F2D550BEF4025A87B17807A`，NSIS 为 13,618,039 bytes / `0853CC97EA93027C380301A1159B447556BE42AEDF5F8721014677A3FACAD4E5`，portable ZIP 为 16,094,526 bytes / `552553B3313F306199D648FBA5A7F48EAF0CE63AAF4961DA371B587841FB582F`，raw EXE 为 43,657,728 bytes / `F49CC32DFE285EB273402BDEA7AEEEB779BCEF21D0DBC6E0A7F2421EB8C9231E`。ZIP 内 EXE 与 raw 一致，PE file/product version 均为 `3.20.1-2`，NSIS installed hash 与 428-byte Tauri updater signature/latest.json 均一致；Windows Authenticode 仍为 `NotSigned`，不能把 updater 签名等同于微软代码签名。
-- CI、tag、公开 Release、下载资产校验和 R2 状态仍待执行。不得安装、不重启、不替换当前运行实例，也不触碰 `127.0.0.1:15721`。
+- 发布前 CI run `34188602941` 的 Frontend、Windows、Ubuntu、macOS 全部成功。Annotated tag `v3.20.1-2` 的 tag object 为 `872b474864328f04251cdb4dd95f48732aca234f`，peel 后精确指向 `ce8d01347b5cf75de06ad5d00c713613bf8c97bd`，tag annotation 以 `本次提交由BigStrongsSun完成` 结尾；远端 `fork/main` 也指向该提交。
+- Release workflow run `34190436633` 的 Linux x64/ARM64、Windows x64/ARM64、macOS、Publish GitHub Release 与 Assemble `latest.json` 全部成功。正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.20.1-2`，是 Latest、非 draft、非 prerelease，共 19 个 uploaded assets。
+- 19 个公开资产已全部下载到 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.20.1-2-github-verify-20260908`，逐项大小和 SHA-256 均与 GitHub asset metadata 一致。`latest.json` SHA-256 为 `8AFF5DFF6F0FDD16D916AD45E02D6ADE95485DF88D9D006F9F5CF59C43F9A58E`，版本为 `3.20.1-2`，六个平台 URL 全指向本 tag，签名 6/6 与对应 `.sig` 精确一致。
+- 手动 R2 sync run `34195649823` 虽显示 overall success，但日志明确写 `R2 secrets not configured; skipping download mirror sync.`，下载、改写、上传和清理步骤全部 skipped；fork 缺少 `R2_ACCOUNT_ID`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`，因此 `https://dl.ccswitch.io/latest.json` 没有被本次发布更新，仍不能作为 CCSwitchMulti `3.20.1-2` 的镜像证据。发布没有安装、停止、重启或替换本机 CCSwitchMulti，也没有操作 `127.0.0.1:15721`。
 
 ## 2026-09-08 Codex OAuth 旧身份误报过期与无效刷新根修
 
