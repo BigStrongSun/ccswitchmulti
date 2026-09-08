@@ -16,6 +16,7 @@ export default defineConfig({
     // Linked worktrees and local task snapshots carry copied test trees. They
     // are evidence/artifacts, not additional suites for the active checkout.
     exclude: [
+      "**/.local/**",
       "**/.worktrees/**",
       "**/.tmp/**",
       "**/node_modules/**",

@@ -33,7 +33,9 @@ describe("SubscriptionQuotaView credential recovery", () => {
       />,
     );
 
-    expect(screen.getByText("旧账号缺少新版身份信息，需要重新认证")).toBeVisible();
+    expect(
+      screen.getByText("旧账号缺少新版身份信息，需要重新认证"),
+    ).toBeVisible();
     expect(screen.queryByTitle("subscription.refresh")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重新认证" }));
     expect(reauthenticate).toHaveBeenCalledTimes(1);

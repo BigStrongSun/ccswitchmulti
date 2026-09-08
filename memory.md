@@ -4,7 +4,9 @@
 
 - 发布前 `git fetch --all --prune --tags` 后，`fork/main` 与本地 `main@26abe211` 完全一致；官方 `origin/main`/`upstream/main` 仍精确等于已审计的 `v3.20.2@f3b18df1`，没有 tag 后新提交。本轮唯一新的已完成产品分支是 `bigstrongsun/fix-oauth-status-refresh@5eaf58e0`，已快进合入本地 `main`；其他实验、NO-GO、原型和已被主线覆盖的旧分支不因发布再次整枝合并。
 - 下一修订版采用 `3.20.1-2`，四个版本源已统一。范围只是在 `v3.20.1-1` 上交付 Codex OAuth 旧身份误报过期、无效额度刷新和重认证后缓存残留的根修；数据库 schema 保持 v22。协议探测的既有边界不变：Partial/Unverified 可明确手动采用或排除，已有有效证据可复用，但新建 MultiRouter 仍需取得一次协议证据。
-- 候选门禁、clean 本地 release 构建、CI、tag、公开 Release、下载资产校验和 R2 状态均待执行。不得复用 `v3.20.1-1` 产物，不安装、不重启、不替换当前运行实例，也不触碰 `127.0.0.1:15721`。
+- 发布门禁首次从主工作树运行 Vitest 时额外发现 `.local/CCSwitchMulti-Task6/.../.codex/plugins` 下 26 个外部缓存测试；CCSM 自身 186 个文件、1541 条测试全部通过，外部文件因不是 Vitest 套件或缺少其自身 Playwright 依赖而失败。根因是 `vitest.config.ts` 已排除 `.worktrees/.tmp/node_modules/dist`，但漏掉仓库本地任务快照根 `.local`；配置现永久排除 `.local`，完整复跑精确得到 186/186 files、1541/1541 tests。
+- 同一候选的集中门禁还得到 Rust library 4051 passed、6 ignored，integration 125/125，TypeScript、Prettier、renderer production build、`cargo check --all-targets`、CI 范围严格 Clippy、rustfmt、diff、JSON 和 24 个 release-delta 文件严格 UTF-8/no-BOM/no-U+FFFD 全通过。Prettier 只机械格式化新增的 OAuth quota footer 测试，并针对性复跑 2/2；为遵守门禁不过度重复的约束，未因纯格式变化再次运行 1541 条完整前端套件。
+- clean 本地 release 构建、CI、tag、公开 Release、下载资产校验和 R2 状态仍待执行。不得复用 `v3.20.1-1` 产物，不安装、不重启、不替换当前运行实例，也不触碰 `127.0.0.1:15721`。
 
 ## 2026-09-08 Codex OAuth 旧身份误报过期与无效刷新根修
 
