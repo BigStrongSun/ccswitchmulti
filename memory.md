@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 CCSwitchMulti v3.20.1-3 本地候选
+
+- `aab43413` 根修新建 Codex/Universal Provider 强制深测，`46bb0b76` 把四个版本源统一到 `3.20.1-3` 并补 release notes。发布日前 `git fetch --all --prune --tags` 确认 `origin/main`/`upstream/main` 仍为已审计的 `v3.20.2@f3b18df1`，没有新的官方提交需要合并；`fork/main` 仍为上一版发布记录 `fb1ed5e0`。
+- 集中门禁通过：前端 186/186 files、1543/1543 tests；Rust library 4052 passed、6 ignored，12 个 integration binaries 合计 125/125；TypeScript、Prettier、renderer build、`cargo check --all-targets`、Clippy、rustfmt、diff 均通过。首次 Vitest 只因单独设置 maxWorkers 与默认 minWorkers 冲突而在发现测试前退出，改为显式 1–4 workers 后完整通过；Rust 首次详细输出的尾部被终端截断，为取得可引用汇总仅用 warm target 静默复跑一次，没有源码失败或反复改码重测。
+- `pnpm release:local` 从 clean tracked `46bb0b7626e533b394801c6e3f46d1bc20e0ea39` 只运行一次，17:14:01–17:34:40 在本机完成并原子导出到 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti`。16/16 清单哈希重算一致；NSIS 13,622,585 bytes / `7716FA6D…331E5`，portable ZIP 16,097,994 bytes / `F1FCA296…D09A2`，raw EXE 43,657,728 bytes / `A03C042A…D2BB`。ZIP 内 EXE 与 raw 一致，PE 版本为 `3.20.1-3`，428-byte updater signature 与 latest.json 一致；Windows Authenticode 仍为 `NotSigned`。
+- 当前只完成本地候选，尚未推送、打 tag 或创建公开 Release；也没有安装、停止、重启或替换本机运行实例，没有操作 `127.0.0.1:15721`。发布执行记录见 `docs/audits/2026-09-08-v3.20.1-3-release-execution.md`。
+
 ## 2026-09-08 新建 Codex 供应商被强制深度测试根修
 
 - 用户截图确认 `v3.20.1-2` 的“单独接入模型源”仍在点击新增后弹出付费深度测试确认，Universal Provider 的新建“保存并同步”也有同一问题。根因不是按钮失效，而是新建入口把无 receipt 的自动草稿直接交给通用 Protocol Lab；adapter 的 `requiresProbe()` 与后端自动 Provider Set 门禁因此按设计要求先取得协议证据。此前 `097f2ce2` 只解决编辑已有供应商复用有效证据，没有覆盖新建保存语义。
