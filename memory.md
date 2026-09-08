@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-08 新建 Codex 供应商被强制深度测试根修
+
+- 用户截图确认 `v3.20.1-2` 的“单独接入模型源”仍在点击新增后弹出付费深度测试确认，Universal Provider 的新建“保存并同步”也有同一问题。根因不是按钮失效，而是新建入口把无 receipt 的自动草稿直接交给通用 Protocol Lab；adapter 的 `requiresProbe()` 与后端自动 Provider Set 门禁因此按设计要求先取得协议证据。此前 `097f2ce2` 只解决编辑已有供应商复用有效证据，没有覆盖新建保存语义。
+- 根修不全局关闭探测门禁：只有新建且尚无 receipt 的保存入口，才把表单当前明确声明的 `openai_chat` / `openai_responses` 转为既有 manual Provider Set 事务；Universal Provider 当前固定生成 Responses，因此新建/复制时明确保存为 manual Responses。保存后提示“未经深度验证，可稍后主动测试”。已有 receipt 继续按自动证据提交；编辑、同步已有自动供应商仍要求有效证据或主动深测。
+- 后端既有 manual 事务会规范化并原子保存单协议 Provider，且不创建虚假 profile/observation。新增 Rust 合约测试同时证明“自动模式 + 空 receipt”仍返回 `codex_provider_set_probe_required`，而“明确 manual + 空 receipt”可提交且证据表保持为空；前端 RED→GREEN 覆盖普通 Codex 与 Universal 两个新建入口，并补充 Universal 表单的 `isNew` 意图传递。
+- 本轮外部检索按规则使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链。公开上游资料只能确认 Codex Provider/Responses 的一般配置和当前仓库活动，均没有 CCSwitchMulti 内部 Provider Set 门禁实现细节；Matrix 精确查询无有效一手结果。因此根因与修复判断以本地源码、截图和 RED→GREEN 为准，外部证据不足以单独解释该问题。
+
 ## 2026-09-08 CCSwitchMulti v3.20.1-2 正式发布
 
 - 发布前 `git fetch --all --prune --tags` 后，`fork/main` 与本地 `main@26abe211` 完全一致；官方 `origin/main`/`upstream/main` 仍精确等于已审计的 `v3.20.2@f3b18df1`，没有 tag 后新提交。本轮唯一新的已完成产品分支是 `bigstrongsun/fix-oauth-status-refresh@5eaf58e0`，已快进合入本地 `main`；其他实验、NO-GO、原型和已被主线覆盖的旧分支不因发布再次整枝合并。

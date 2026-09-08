@@ -388,6 +388,7 @@ export function AddProviderDialog({
           await persistCodexProviderSet(
             provider,
             values.protocolProbeReceiptIds ?? [],
+            { allowUnverifiedSave: true },
           );
         } catch (error) {
           if (isCodexProviderSetCancelled(error)) return;

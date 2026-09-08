@@ -40,6 +40,7 @@ const queryClientMocks = vi.hoisted(() => ({
 }));
 const formSubmission = vi.hoisted(() => ({
   current: null as UniversalProvider | null,
+  isNew: false,
 }));
 const toastMocks = vi.hoisted(() => ({
   success: vi.fn(),
@@ -116,8 +117,7 @@ vi.mock("@/lib/api", () => ({
   universalProvidersApi: apiMocks,
   providersApi: {
     updateTrayMenu: apiMocks.updateTrayMenu,
-    retryCodexMultiRouterProjection:
-      apiMocks.retryCodexMultiRouterProjection,
+    retryCodexMultiRouterProjection: apiMocks.retryCodexMultiRouterProjection,
   },
 }));
 vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => {
@@ -139,7 +139,10 @@ vi.mock("@/components/universal/UniversalProviderFormModal", () => ({
     onSaveAndSync,
     onSave,
   }: {
-    onSaveAndSync: (provider: UniversalProvider) => void | Promise<void>;
+    onSaveAndSync: (
+      provider: UniversalProvider,
+      options: { isNew: boolean },
+    ) => void | Promise<void>;
     onSave?: (provider: UniversalProvider) => void | Promise<void>;
   }) => (
     <>
@@ -147,10 +150,11 @@ vi.mock("@/components/universal/UniversalProviderFormModal", () => ({
       <button
         type="button"
         onClick={() =>
-          Promise.resolve(onSaveAndSync(formSubmission.current!)).then(
-            callbackOutcome.resolved,
-            callbackOutcome.rejected,
-          )
+          Promise.resolve(
+            onSaveAndSync(formSubmission.current!, {
+              isNew: formSubmission.isNew,
+            }),
+          ).then(callbackOutcome.resolved, callbackOutcome.rejected)
         }
       >
         invoke-save-and-sync
@@ -173,6 +177,42 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
       projections: [],
     });
     formSubmission.current = provider;
+    formSubmission.isNew = false;
+  });
+
+  it("saves a new Codex-enabled Universal provider as unverified without deep probing", async () => {
+    formSubmission.isNew = true;
+
+    render(<UniversalProviderPanel />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "invoke-save-and-sync" }),
+    );
+
+    await waitFor(() => expect(callbackOutcome.resolved).toHaveBeenCalled());
+    expect(protocolMocks.preflight).not.toHaveBeenCalled();
+    expect(protocolMocks.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: expect.objectContaining({
+          codexProtocolMode: "manual",
+          apiFormat: "openai_responses",
+        }),
+      }),
+      [],
+    );
+    expect(protocolMocks.commit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: expect.objectContaining({
+          codexProtocolMode: "manual",
+          apiFormat: "openai_responses",
+        }),
+      }),
+      [],
+      "universal-digest",
+      "confirm_manual",
+    );
+    expect(toastMocks.success).toHaveBeenCalledWith(
+      expect.stringContaining("未经深度验证"),
+    );
   });
 
   it("deep-probes, prepares, and directly commits a Single plan", async () => {
@@ -182,9 +222,7 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
       screen.getByRole("button", { name: "invoke-save-and-sync" }),
     );
     expect(protocolMocks.preflight).not.toHaveBeenCalled();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "确认测试" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "确认测试" }));
 
     await waitFor(() => expect(callbackOutcome.resolved).toHaveBeenCalled());
     expect(protocolMocks.preflight).toHaveBeenCalledWith(
@@ -293,9 +331,7 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "invoke-save-and-sync" }),
     );
-    fireEvent.click(
-      await screen.findByRole("button", { name: "确认测试" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "确认测试" }));
 
     await waitFor(() => expect(callbackOutcome.resolved).toHaveBeenCalled());
     expect(protocolMocks.commit).toHaveBeenCalledTimes(1);
@@ -334,9 +370,7 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "invoke-save-and-sync" }),
     );
-    fireEvent.click(
-      await screen.findByRole("button", { name: "确认测试" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "确认测试" }));
 
     const dialog = await screen.findByRole("dialog", {
       name: "暂时无法保存",
@@ -359,9 +393,7 @@ describe("UniversalProviderPanel Provider Set persistence", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "invoke-save-and-sync" }),
     );
-    fireEvent.click(
-      await screen.findByRole("button", { name: "确认测试" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "确认测试" }));
 
     const dialog = await screen.findByRole("dialog", {
       name: "Codex 兼容性深度探测",

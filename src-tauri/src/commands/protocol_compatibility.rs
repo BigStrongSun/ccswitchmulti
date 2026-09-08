@@ -3261,6 +3261,66 @@ mod tests {
     }
 
     #[test]
+    fn unverified_single_provider_save_requires_manual_protocol_and_writes_no_evidence() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let mut provider = ordinary_provider();
+        let now = chrono::Utc::now().timestamp();
+
+        let automatic_error = prepare_codex_provider_set_internal(
+            &state,
+            PrepareCodexProviderSetRequest {
+                provider: provider.clone(),
+                receipt_ids: Vec::new(),
+            },
+            now,
+        )
+        .expect_err("automatic mode without evidence must remain protected");
+        assert!(automatic_error.contains("codex_provider_set_probe_required"));
+
+        provider
+            .meta
+            .get_or_insert_with(ProviderMeta::default)
+            .codex_protocol_mode = Some(crate::provider::CodexProtocolMode::Manual);
+        let preview = prepare_codex_provider_set_internal(
+            &state,
+            PrepareCodexProviderSetRequest {
+                provider: provider.clone(),
+                receipt_ids: Vec::new(),
+            },
+            now,
+        )
+        .expect("explicit manual mode may save the declared Provider protocol");
+        let outcome = commit_codex_provider_set_internal_with_publisher(
+            &state,
+            CommitCodexProviderSetRequest {
+                provider,
+                receipt_ids: Vec::new(),
+                digest: preview.digest,
+                intent: CodexProviderSetCommitIntent::ConfirmManual,
+            },
+            now,
+            |_| panic!("a Single manual Provider has no Router projection"),
+        )
+        .expect("commit unverified manual Provider");
+
+        assert!(matches!(
+            outcome.preview.plan,
+            crate::codex_multirouter::provider_set::CodexProviderSetPlan::Single {
+                transport: TransportKind::OpenAiResponses
+            }
+        ));
+        assert!(db
+            .list_protocol_probe_observations("provider-a")
+            .expect("read observations")
+            .is_empty());
+        assert!(db
+            .list_protocol_compatibility_profiles("provider-a")
+            .expect("read profiles")
+            .is_empty());
+    }
+
+    #[test]
     fn manual_provider_set_requires_explicit_whole_provider_intent() {
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());

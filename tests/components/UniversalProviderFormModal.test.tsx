@@ -129,6 +129,13 @@ describe("UniversalProviderFormModal async persistence", () => {
         within(syncDialog()).getByRole("button", { name: "保存并同步" }),
       ).toBeEnabled(),
     );
+    expect(onSaveAndSync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: "https://new.example/v1",
+        apps: expect.objectContaining({ codex: true }),
+      }),
+      { isNew: true },
+    );
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByLabelText("API 地址")).toHaveValue(
       "https://new.example/v1",

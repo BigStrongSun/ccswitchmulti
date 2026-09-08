@@ -21,7 +21,10 @@ import { deepClone } from "@/utils/deepClone";
 interface UniversalProviderFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSaveAndSync: (provider: UniversalProvider) => void | Promise<void>;
+  onSaveAndSync: (
+    provider: UniversalProvider,
+    options: { isNew: boolean },
+  ) => void | Promise<void>;
   editingProvider?: UniversalProvider | null;
   initialPreset?: UniversalProviderPreset | null;
 }
@@ -274,7 +277,7 @@ wire_api = "responses"`;
     if (!pendingProvider || !beginSubmission()) return;
 
     try {
-      await onSaveAndSync(pendingProvider);
+      await onSaveAndSync(pendingProvider, { isNew: !editingProvider });
       setSyncConfirmOpen(false);
       setPendingProvider(null);
       onClose();
@@ -287,6 +290,7 @@ wire_api = "responses"`;
     beginSubmission,
     finishSubmission,
     pendingProvider,
+    editingProvider,
     onSaveAndSync,
     onClose,
   ]);

@@ -113,14 +113,19 @@ export function UniversalProviderPanel({
 
   // 保存并同步供应商
   const handleSaveAndSync = useCallback(
-    async (provider: UniversalProvider) => {
+    async (provider: UniversalProvider, { isNew }: { isNew: boolean }) => {
       try {
-        const outcome = await persistUniversalProviderSet(provider);
+        const saveUnverified = isNew && provider.apps.codex;
+        const outcome = await persistUniversalProviderSet(provider, {
+          allowUnverifiedSave: saveUnverified,
+        });
         notifyCommitOutcome(
           outcome,
-          t("universalProvider.savedAndSynced", {
-            defaultValue: "已保存并同步到所有应用",
-          }),
+          saveUnverified
+            ? "已保存并同步；Codex 配置未经深度验证，可稍后主动测试"
+            : t("universalProvider.savedAndSynced", {
+                defaultValue: "已保存并同步到所有应用",
+              }),
         );
         setEditingProvider(null);
       } catch (error) {
@@ -211,12 +216,16 @@ export function UniversalProviderPanel({
         createdAt: Date.now(),
       };
       try {
-        const outcome = await persistUniversalProviderSet(duplicated);
+        const outcome = await persistUniversalProviderSet(duplicated, {
+          allowUnverifiedSave: duplicated.apps.codex,
+        });
         notifyCommitOutcome(
           outcome,
-          t("universalProvider.duplicatedAndSynced", {
-            defaultValue: "统一供应商已复制并同步",
-          }),
+          duplicated.apps.codex
+            ? "统一供应商已复制并同步；Codex 配置未经深度验证，可稍后主动测试"
+            : t("universalProvider.duplicatedAndSynced", {
+                defaultValue: "统一供应商已复制并同步",
+              }),
         );
       } catch (error) {
         showSaveError(

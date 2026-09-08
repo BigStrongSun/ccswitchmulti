@@ -265,6 +265,52 @@ describe("AddProviderDialog", () => {
     expect(handleOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("普通 Codex 新增没有 receipt 时按当前协议保存为未验证且不触发深度测试", async () => {
+    const user = userEvent.setup();
+    mockFormValues = {
+      name: "Untested Chat Relay",
+      settingsConfig: JSON.stringify({
+        auth: { OPENAI_API_KEY: "secret" },
+        apiFormat: "openai_chat",
+        config:
+          'model = "model-a"\nmodel_provider = "relay"\n[model_providers.relay]\nbase_url = "https://relay.example/v1"\nwire_api = "chat"\n',
+        modelCatalog: { models: [{ model: "model-a" }] },
+      }),
+      meta: { apiFormat: "openai_chat" },
+      protocolProbeReceiptIds: [],
+    };
+
+    render(
+      <AddProviderDialog
+        open
+        onOpenChange={vi.fn()}
+        appId="codex"
+        onSubmit={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("tab", { name: "单独接入模型源" }));
+    await user.click(screen.getByRole("button", { name: "common.add" }));
+
+    await waitFor(() =>
+      expect(universalProtocolMocks.commitCodex).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "Untested Chat Relay",
+          meta: expect.objectContaining({
+            apiFormat: "openai_chat",
+            codexProtocolMode: "manual",
+          }),
+        }),
+        [],
+        "codex-provider-digest",
+        "confirm_manual",
+      ),
+    );
+    expect(universalProtocolMocks.preflightCodex).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "确认测试" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("Codex 手动 Chat 覆盖保留 receipt 并以 confirm_manual 提交", async () => {
     const user = userEvent.setup();
     mockFormValues = {

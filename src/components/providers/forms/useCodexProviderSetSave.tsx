@@ -13,6 +13,7 @@ import {
   useProtocolLabWorkflow,
 } from "@/lib/protocol-lab/useProtocolLabWorkflow";
 import type { Provider } from "@/types";
+import { prepareUnverifiedCodexProvider } from "@/lib/protocol-lab/unverified-save";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -55,8 +56,19 @@ export function useCodexProviderSetSave() {
   }, [queryClient]);
 
   const persistCodexProviderSet = useCallback(
-    async (provider: Provider, receiptIds: string[] = []) => {
-      const outcome = await workflow.save(provider, receiptIds);
+    async (
+      provider: Provider,
+      receiptIds: string[] = [],
+      options: { allowUnverifiedSave?: boolean } = {},
+    ) => {
+      const saveUnverified =
+        options.allowUnverifiedSave === true &&
+        receiptIds.length === 0 &&
+        adapter.requiresProbe(provider, receiptIds);
+      const draft = saveUnverified
+        ? prepareUnverifiedCodexProvider(provider)
+        : provider;
+      const outcome = await workflow.save(draft, receiptIds);
       await refreshProviderViews();
       if (
         (outcome as CodexProviderSetCommitOutcome).status ===
@@ -65,9 +77,13 @@ export function useCodexProviderSetSave() {
         toast.warning(
           "模型源已保存，但 Codex 当前配置尚未完成刷新；可稍后重新投影或重新激活该模型源。",
         );
+      } else if (saveUnverified) {
+        toast.warning(
+          "模型源已按当前协议保存，但未经深度验证；可稍后主动测试 Chat / Responses。",
+        );
       }
     },
-    [refreshProviderViews, workflow],
+    [adapter, refreshProviderViews, workflow],
   );
 
   const handleBack = useCallback(() => {

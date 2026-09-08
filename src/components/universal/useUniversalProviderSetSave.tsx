@@ -24,6 +24,7 @@ import {
   useProtocolLabWorkflow,
 } from "@/lib/protocol-lab/useProtocolLabWorkflow";
 import type { UniversalProvider } from "@/types";
+import { prepareUnverifiedUniversalProvider } from "@/lib/protocol-lab/unverified-save";
 
 export class UniversalProviderSetCancelled extends ProtocolLabCancelled {}
 
@@ -73,12 +74,21 @@ export function useUniversalProviderSetSave({
   }, [onCommitted, queryClient]);
 
   const persistUniversalProviderSet = useCallback(
-    async (provider: UniversalProvider) => {
-      const outcome = await workflow.save(provider);
+    async (
+      provider: UniversalProvider,
+      options: { allowUnverifiedSave?: boolean } = {},
+    ) => {
+      const saveUnverified =
+        options.allowUnverifiedSave === true &&
+        adapter.requiresProbe(provider, []);
+      const draft = saveUnverified
+        ? prepareUnverifiedUniversalProvider(provider)
+        : provider;
+      const outcome = await workflow.save(draft);
       await refreshProviderViews();
       return outcome;
     },
-    [refreshProviderViews, workflow],
+    [adapter, refreshProviderViews, workflow],
   );
 
   const retryProjection = useCallback(
