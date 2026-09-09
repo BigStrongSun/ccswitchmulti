@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-09 官方 3.20.2 语义迁移与 Trace 修复
+
+- 上游边界为 `v3.20.2` / `upstream/main@f3b18df1`，采用逐项语义迁移而非整分支覆盖。详情和最终门禁见 `docs/audits/2026-09-09-upstream-3.20.2-trace.md`；旧 154 行矩阵保留冻结历史，新增 superseding status 表记录本次完成项。
+- `26c80ee6` 修复 UTF-8 URL 脱敏截断 panic、Claude workflow journal 幽灵会话与 updater 字符串错误丢失。新增 Novita model URL，以及保存过的 Novita/JieKou Anthropic 根地址精确 host fallback；用户显式 modelsUrl 优先。SoleAPI 九端仅作为可选预设，不附带赞助/推广关系或实测认证。价格选择器完成英日文浏览器布局检查。
+- Codex 接管认证标志仅在单供应商 `PROXY_MANAGED` 写入边界按真实凭据存储调整；保留官方、OAuth、账号池、MultiRouter 所有权，不读取 keyring、不改 auth.json。非空对象/数组 token 曾被误认作登录材料，已通过 RED 复现后收紧为非空字符串；agent identity 结构独立处理。
+- Trace 历史首阶段传输失败未复现，不能把猜测记成网络根因。已修错误 source 链丢失、响应读取后才执行 64 KiB 限制、自动探测返回 error 未显示、失败重探测仍保留旧 Apply。错误链脱敏，诊断 DNS 限 2 秒并与 HTTP 并发；join 仍可能等待该 2 秒，不宣称零延迟。不修改代理/TLS/重试/监控退避。
+- 官方 `ccc140a2` 9 月价格依旧 deferred：内置 Web 没有可用结果，Matrix 价格文档缺少价格表，活动期限证据不足。SoleAPI 文档打开 404，vendor endpoint TLS 检查未成功；源码契约通过不等于厂商在线服务已验证。
+- 当前变更不升级版本、不生成安装包、不安装、不重启、不推送。先前运行 `3.19.2-31` 的证据属于检查时快照，不能把本地源码合并说成运行实例已更新。最终测试结果记录在本次审计中。
+
 ## 2026-09-09 出口时区探测错误只读诊断
 
 - 截图 `Could not reach ChatGPT egress trace: error sending request for url (...)` 对应 `codex_egress_timezone.rs` 的第一阶段 `send()` 失败，尚未进入 trace 解析、ipwho.is 定位或时区应用。当前源码仅格式化 reqwest Error 的 Display，未保留 source 链；无法凭该提示区分 DNS、TCP、TLS、超时等原因。
