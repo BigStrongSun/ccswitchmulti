@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-09 分页历史完整性修正（隔离源码，未安装）
+
+- Provider 历史迁移不再原地改写分页历史；迁移、恢复、可见性修复统一预检 JSONL 与 SQLite，整个混合批次在首次写入前拒绝。压缩或无法确认格式的历史也拒绝，保留 legacy 支持。
+- fork 只校验活动段任务身份；祖先允许不同 ID，但 `history_base` 字节截止位置必须在记录边界，否则继续 blocked，不能显示成已修复。
+- 详见 `memory-2026-09-09-history-integrity-fix.md`。本轮未安装、重启或修复真实历史；Codex 自身序号分配问题在另一个隔离源码仓库修正。
+
 ## 2026-09-09 出口时区探测错误只读诊断
 
 - 截图 `Could not reach ChatGPT egress trace: error sending request for url (...)` 对应 `codex_egress_timezone.rs` 的第一阶段 `send()` 失败，尚未进入 trace 解析、ipwho.is 定位或时区应用。当前源码仅格式化 reqwest Error 的 Display，未保留 source 链；无法凭该提示区分 DNS、TCP、TLS、超时等原因。

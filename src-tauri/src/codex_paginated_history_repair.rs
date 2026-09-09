@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::{
@@ -183,7 +183,7 @@ fn resolve_active_rollout_lineage(
             return Err(format!("cyclic_history_base: rollout_id={rollout_id}"));
         }
         let metadata = rollout_session_metadata(&current)?;
-        if metadata.id != expected_thread_id {
+        if lineage.is_empty() && metadata.id != expected_thread_id {
             return Err(format!(
                 "rollout_session_id_mismatch: expected={expected_thread_id}, actual={}",
                 metadata.id
@@ -220,6 +220,19 @@ fn resolve_active_rollout_lineage(
         if base.end_byte_offset > parent_len {
             return Err(format!(
                 "history_base_offset_past_end: rollout_id={}, offset={}, file_len={parent_len}",
+                base.thread_id, base.end_byte_offset
+            ));
+        }
+        let mut file = fs::File::open(&parent)
+            .map_err(|error| format!("read_history_base_failed: {error}"))?;
+        let mut preceding = [0_u8; 1];
+        let boundary = base.end_byte_offset > 0
+            && file.seek(SeekFrom::Start(base.end_byte_offset - 1)).is_ok()
+            && file.read_exact(&mut preceding).is_ok()
+            && preceding[0] == b'\n';
+        if !boundary {
+            return Err(format!(
+                "history_base_offset_not_record_boundary: rollout_id={}, offset={}",
                 base.thread_id, base.end_byte_offset
             ));
         }
@@ -1366,6 +1379,65 @@ mod tests {
 
         assert!(error.contains("unsafe_projection_duplicate_record"));
         assert_eq!(std::fs::read(&rollout).expect("unchanged rollout"), bytes);
+    }
+
+    #[test]
+    fn active_history_base_lineage_accepts_a_different_parent_thread() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let parent_id = "01a00000-0000-7000-8000-000000000060";
+        let child_id = "01a00000-0000-7000-8000-000000000061";
+        let parent = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-00-00-{parent_id}.jsonl"));
+        let child = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-10-00-{child_id}.jsonl"));
+        write_paginated_lineage_segment(&parent, parent_id, 0, None);
+        let end = fs::metadata(&parent).unwrap().len();
+        write_paginated_lineage_segment(&child, child_id, 2, Some((parent_id, 2, end)));
+
+        assert_eq!(
+            resolve_active_rollout_lineage(child_id, &child, &[parent.clone(), child.clone()]),
+            Ok(vec![parent, child])
+        );
+    }
+
+    #[test]
+    fn active_history_base_lineage_rejects_a_cutoff_inside_a_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let id = "01a00000-0000-7000-8000-000000000062";
+        let next_id = "01a00000-0000-7000-8000-000000000063";
+        let parent = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-00-00-{id}.jsonl"));
+        let child = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-10-00-{next_id}.jsonl"));
+        write_paginated_lineage_segment(&parent, id, 0, None);
+        let before = fs::read(&parent).unwrap();
+        write_paginated_lineage_segment(&child, id, 2, Some((id, 2, before.len() as u64 - 1)));
+
+        let error = resolve_active_rollout_lineage(id, &child, &[parent.clone(), child.clone()])
+            .expect_err("a shifted byte cutoff must not be accepted");
+        assert!(
+            error.contains("history_base_offset_not_record_boundary"),
+            "{error}"
+        );
+        assert_eq!(fs::read(parent).unwrap(), before);
+    }
+
+    #[test]
+    fn active_history_base_lineage_still_rejects_a_foreign_active_thread() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let id = "01a00000-0000-7000-8000-000000000064";
+        let foreign = "01a00000-0000-7000-8000-000000000065";
+        let path = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-00-00-{id}.jsonl"));
+        write_paginated_lineage_segment(&path, foreign, 0, None);
+        let error = resolve_active_rollout_lineage(id, &path, &[path.clone()])
+            .expect_err("only ancestor identities may differ");
+        assert!(error.contains("rollout_session_id_mismatch"));
     }
 
     #[test]

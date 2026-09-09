@@ -3321,7 +3321,7 @@
     "statusWarning": "需要处理",
     "statusPending": "重启后验证",
     "noPaginatedHistoryIssue": "未发现可安全修复的分页历史异常。",
-    "codexHistoryBugNotice": "这是 Codex Desktop 自身的历史显示缺陷；CCSM 只提供检测与修复工具。",
+    "codexHistoryBugNotice": "历史错误可能涉及 Codex 记录序号或历史文件改写。请以检测结果为准；被阻止的项目尚未修复。",
     "rotatedHistoryThreads": "文件轮转任务",
     "rotatedHistorySegments": "续写分段",
     "rendererIndependentHint": "此项只影响 Codex 界面的跨 Provider 历史查询，不会撤销已经生效的配置或分页历史修复。",

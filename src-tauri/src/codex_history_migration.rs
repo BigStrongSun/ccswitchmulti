@@ -3,6 +3,13 @@
 //! 只迁移本机 `~/.codex` 历史数据；完成标记写入设备级 `settings.json`，
 //! 失败时不写标记，下一次启动自动重试。
 
+#[cfg(test)]
+#[path = "codex_history_integrity_tests.rs"]
+mod integrity_tests;
+
+#[path = "codex_history_migration_guard.rs"]
+mod migration_guard;
+
 use crate::codex_config::{
     get_codex_config_dir, read_codex_config_text, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
     CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
@@ -1198,6 +1205,8 @@ fn repair_codex_history_visibility_at(
     normalized_project_path: Option<String>,
     runtime: HistoryVisibilityRepairRuntimeOptions,
 ) -> Result<CodexHistoryVisibilityRepairOutcome, AppError> {
+    migration_guard::ensure_legacy_history(codex_dir)?;
+    migration_guard::ensure_legacy_db(&active_db.path)?;
     let mut conn = Connection::open(&active_db.path)
         .map_err(|e| AppError::Database(format!("打开 Codex active state DB 失败: {e}")))?;
     conn.busy_timeout(Duration::from_secs(5))
@@ -2741,6 +2750,7 @@ fn prepare_rollout_provider_update(
         return Ok(None);
     };
     let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
+    migration_guard::ensure_legacy_content(&path, &content)?;
     let old_mtime_ms = fs::metadata(&path)
         .ok()
         .and_then(|metadata| metadata.modified().ok())
@@ -3694,6 +3704,10 @@ fn restore_codex_official_history_inner(
         });
     }
 
+    migration_guard::ensure_legacy_history(codex_dir)?;
+    for path in codex_state_db_paths(codex_dir, config_text) {
+        migration_guard::ensure_legacy_db(&path)?;
+    }
     let mut files = Vec::new();
     collect_jsonl_files(&codex_dir.join("sessions"), &mut files, 0, 8);
     collect_jsonl_files(&codex_dir.join("archived_sessions"), &mut files, 0, 4);
@@ -3897,6 +3911,7 @@ fn restore_codex_state_db_official_threads(
         return Ok(0);
     }
 
+    migration_guard::ensure_legacy_db(db_path)?;
     let mut conn = Connection::open(db_path)
         .map_err(|e| AppError::Database(format!("打开 Codex state DB 失败: {e}")))?;
     conn.busy_timeout(Duration::from_secs(5))
@@ -4274,6 +4289,7 @@ fn migrate_codex_jsonl_files_to_target(
     backup_root: &Path,
     target_provider_id: &str,
 ) -> Result<usize, AppError> {
+    migration_guard::ensure_legacy_history(codex_dir)?;
     let mut files = Vec::new();
     collect_jsonl_files(&codex_dir.join("sessions"), &mut files, 0, 8);
     collect_jsonl_files(&codex_dir.join("archived_sessions"), &mut files, 0, 4);
@@ -4300,6 +4316,7 @@ fn migrate_all_non_target_codex_jsonl_files(
     backup_root: &Path,
     target_provider_id: &str,
 ) -> Result<(BTreeSet<String>, usize), AppError> {
+    migration_guard::ensure_legacy_history(codex_dir)?;
     let mut files = Vec::new();
     collect_jsonl_files(&codex_dir.join("sessions"), &mut files, 0, 8);
     collect_jsonl_files(&codex_dir.join("archived_sessions"), &mut files, 0, 4);
@@ -4466,6 +4483,7 @@ fn rewrite_codex_session_file_lines(
     let modified_before = metadata_before.modified().ok();
     let len_before = metadata_before.len();
     let content = fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
+    migration_guard::ensure_legacy_content(path, &content)?;
 
     let mut rewritten = String::with_capacity(content.len());
     let mut changed = false;
@@ -4535,7 +4553,8 @@ fn migrate_codex_state_dbs_to_target(
     backup_root: &Path,
     target_provider_id: &str,
 ) -> Result<usize, AppError> {
-    let config_text = read_codex_config_text().unwrap_or_default();
+    migration_guard::ensure_legacy_history(codex_dir)?;
+    let config_text = fs::read_to_string(codex_dir.join("config.toml")).unwrap_or_default();
     let mut migrated = 0;
     for db_path in codex_state_db_paths(codex_dir, &config_text) {
         migrated += migrate_codex_state_db_provider_bucket_to_target(
@@ -4555,7 +4574,8 @@ fn migrate_all_non_target_codex_state_dbs(
     backup_root: &Path,
     target_provider_id: &str,
 ) -> Result<(BTreeSet<String>, usize), AppError> {
-    let config_text = read_codex_config_text().unwrap_or_default();
+    migration_guard::ensure_legacy_history(codex_dir)?;
+    let config_text = fs::read_to_string(codex_dir.join("config.toml")).unwrap_or_default();
     let mut source_provider_ids = BTreeSet::new();
     let mut migrated = 0;
     for db_path in codex_state_db_paths(codex_dir, &config_text) {
@@ -4675,6 +4695,7 @@ fn migrate_codex_state_db_provider_bucket_to_target(
         return Ok(0);
     }
 
+    migration_guard::ensure_legacy_db(db_path)?;
     let mut conn = Connection::open(db_path)
         .map_err(|e| AppError::Database(format!("打开 Codex state DB 失败: {e}")))?;
     conn.busy_timeout(Duration::from_secs(5))
@@ -4728,6 +4749,7 @@ fn migrate_all_non_target_codex_state_db_provider_buckets(
     if !db_path.exists() {
         return Ok(Default::default());
     }
+    migration_guard::ensure_legacy_db(db_path)?;
     let mut conn = Connection::open(db_path)
         .map_err(|e| AppError::Database(format!("打开 Codex state DB 失败: {e}")))?;
     conn.busy_timeout(Duration::from_secs(5))

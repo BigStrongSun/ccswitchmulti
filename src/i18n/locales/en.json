@@ -3316,7 +3316,7 @@
     "statusWarning": "Needs attention",
     "statusPending": "Verified after restart",
     "noPaginatedHistoryIssue": "No safely repairable paginated-history anomalies were found.",
-    "codexHistoryBugNotice": "This is a history-display defect in Codex Desktop itself. CCSM only provides detection and repair tooling.",
+    "codexHistoryBugNotice": "History errors can involve Codex record sequencing or changes to history files. Detection results identify what is verified; blocked items are not repaired.",
     "rotatedHistoryThreads": "Tasks with rotated files",
     "rotatedHistorySegments": "Continuation segments",
     "rendererIndependentHint": "This affects only all-provider history queries in the Codex UI. It does not undo an applied configuration or paginated-history repair.",
