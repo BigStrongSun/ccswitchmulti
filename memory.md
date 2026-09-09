@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-09 3.20.2、Trace 与 Qwen 修复同步到 fork/main
+
+- 用户要求 CCSM 修复进入 `main` 后复核发现：`26c80ee6`、`662076eb`、`2293a637`、`511dba7c` 和 Qwen 运行证据 `1e0b36ea` 均已是本地 `main` 祖先；对 `bigstrongsun/upstream-3.20.2-trace` 执行 `git merge --ff-only` 返回 `Already up to date`，没有重复制造 merge commit。
+- 个人仓库 `fork/main` 当时仍停在 `dbf36560`，比本地 `main` 落后 6 个提交。本轮通过普通 fast-forward push 更新到 `1e0b36ea`，未 force push；fetch 后再次核对远端 SHA 精确一致。
+- 推送前集中门禁只覆盖本批变更：前端 5 个文件 37/37；Rust `trace_transport` 4 passed、1 个显式网络诊断 ignored；Rust `upstream_v3202` 6/6；`git diff --check` 通过。未重复全量 1557/4062 项，也未安装、替换或重启 CCSM/vLLM/Qwen。
+- 官方 `origin/main` 同日已前进到 `f21e0944`，相对本地主线另有 155 个上游提交；这属于后续独立语义迁移范围，本轮没有把未审计的新上游历史粗合进 CCSwitchMulti。
+
 ## 2026-09-09 Qwen3.8 Responses Lite `additional_tools` 运行态根修
 
 - 截图中的“正在重新连接 6/10 / high demand”只是 Codex 通用重试文案。CCSM `codex-router.log` 证明目标 session `01a08490-59cd-73d3-b831-8b6a1eb3bf16` 已正确路由到 Qwen `/v1/responses`，但每次自动压缩请求在推理前返回 HTTP 500：`'AdditionalTools' object has no attribute 'get'`；后续 521 属于服务不可用窗口，不是最初根因。
