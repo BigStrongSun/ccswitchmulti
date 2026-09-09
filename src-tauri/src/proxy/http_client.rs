@@ -361,9 +361,13 @@ pub fn mask_url(url: &str) -> String {
             None => format!("{}://{}", parsed.scheme(), host),
         }
     } else {
-        // URL 解析失败，返回部分内容
+        // Keep the byte budget without splitting a UTF-8 character.
         if url.len() > 20 {
-            format!("{}...", &url[..20])
+            let cut = (0..=20)
+                .rev()
+                .find(|&index| url.is_char_boundary(index))
+                .unwrap_or(0);
+            format!("{}...", &url[..cut])
         } else {
             url.to_string()
         }
@@ -400,6 +404,14 @@ mod tests {
         assert_eq!(
             mask_url("https://user:pass@proxy.example.com"),
             "https://proxy.example.com"
+        );
+    }
+
+    #[test]
+    fn upstream_v3202_mask_url_multibyte_boundary() {
+        assert_eq!(
+            mask_url("这是一个无效的代理地址不能解析"),
+            "这是一个无效..."
         );
     }
 

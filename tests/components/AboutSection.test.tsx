@@ -1,8 +1,13 @@
-import { render, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AboutSection } from "@/components/settings/AboutSection";
 
 const getToolVersionsMock = vi.hoisted(() => vi.fn());
+const checkUpdateMock = vi.hoisted(() => vi.fn());
+const toastErrorMock = vi.hoisted(() => vi.fn());
+vi.mock("sonner", () => ({
+  toast: { error: toastErrorMock, success: vi.fn(), info: vi.fn() },
+}));
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn().mockResolvedValue("3.20.1-1"),
@@ -12,7 +17,7 @@ vi.mock("@/contexts/UpdateContext", () => ({
   useUpdate: () => ({
     hasUpdate: false,
     updateInfo: null,
-    checkUpdate: vi.fn().mockResolvedValue(false),
+    checkUpdate: checkUpdateMock,
     resetDismiss: vi.fn(),
     isChecking: false,
   }),
@@ -44,6 +49,8 @@ vi.mock("framer-motion", () => ({
 
 describe("AboutSection", () => {
   beforeEach(() => {
+    checkUpdateMock.mockReset().mockResolvedValue(false);
+    toastErrorMock.mockReset();
     getToolVersionsMock.mockReset();
     getToolVersionsMock.mockImplementation(async ([name]: [string]) => [
       {
@@ -63,6 +70,20 @@ describe("AboutSection", () => {
 
     await waitFor(() =>
       expect(getToolVersionsMock).toHaveBeenCalledWith(["pi"], {}),
+    );
+  });
+
+  it("shows the updater plugin string rejection in the failure toast", async () => {
+    checkUpdateMock.mockRejectedValue("TLS certificate expired");
+    render(<AboutSection isPortable={false} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "settings.checkForUpdates" }),
+    );
+    await waitFor(() =>
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "settings.checkUpdateFailed",
+        expect.objectContaining({ description: "TLS certificate expired" }),
+      ),
     );
   });
 });

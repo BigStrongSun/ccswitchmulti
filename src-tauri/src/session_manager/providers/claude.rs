@@ -255,7 +255,7 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
 fn is_agent_session(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.starts_with("agent-"))
+        .map(|name| name.starts_with("agent-") || name == "journal.jsonl")
         .unwrap_or(false)
 }
 
@@ -303,6 +303,18 @@ fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn upstream_v3202_workflow_journal_is_not_a_session() {
+        let temp = tempdir().unwrap();
+        let journal = temp.path().join("journal.jsonl");
+        let session = temp.path().join("session.jsonl");
+        let body = "{\"sessionId\":\"session-123\",\"cwd\":\"/tmp/project\",\"timestamp\":\"2026-03-06T10:00:00Z\"}\n";
+        std::fs::write(&journal, body).unwrap();
+        std::fs::write(&session, body).unwrap();
+        assert!(parse_session(&journal).is_none());
+        assert!(parse_session(&session).is_some());
+    }
 
     #[test]
     fn delete_session_removes_main_file_and_sidecar_directory() {
