@@ -206,9 +206,7 @@ fn mapped_offsets_for_history_base(
     parent_path: &Path,
     base: &RolloutHistoryBase,
 ) -> Option<u64> {
-    let Some(child_id) = source_id_from_rollout_path(child_path) else {
-        return None;
-    };
+    let child_id = source_id_from_rollout_path(child_path)?;
     let current_child_record = match first_record(child_path) {
         Ok(record) => record,
         Err(_) => return None,
