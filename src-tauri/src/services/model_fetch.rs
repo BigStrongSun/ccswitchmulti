@@ -1098,6 +1098,20 @@ pub fn build_models_url_candidates(
         return Ok(candidates);
     }
 
+    // These vendors expose model discovery outside their Anthropic API tree.
+    // Resolve saved providers too; an explicit user override above always wins.
+    if let Ok(mut url) = reqwest::Url::parse(trimmed) {
+        if url.scheme() == "https"
+            && matches!(url.host_str(), Some("api.novita.ai" | "api.jiekou.ai"))
+            && url.path().trim_end_matches('/') == "/anthropic"
+            && url.query().is_none()
+        {
+            url.set_path("/openai/v1/models");
+            url.set_fragment(None);
+            return Ok(vec![url.to_string()]);
+        }
+    }
+
     // baseURL 已以版本段 /v{N} 结尾时（如 `/v1`、智谱 `/api/coding/paas/v4`），
     // OpenAI 惯例的模型端点是 `{base}/models`，不能再补 `/v1`
     // （否则 .../coding/paas/v4/v1/models → 404）。
@@ -1166,6 +1180,31 @@ fn ends_with_version_segment(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_v3202_anthropic_model_directory_uses_vendor_openai_path() {
+        for host in ["api.novita.ai", "api.jiekou.ai"] {
+            assert_eq!(
+                build_models_url_candidates(&format!("https://{host}/anthropic"), false, None)
+                    .unwrap()[0],
+                format!("https://{host}/openai/v1/models"),
+            );
+        }
+        assert_eq!(
+            build_models_url_candidates(
+                "https://api.novita.ai/anthropic",
+                false,
+                Some("https://custom.test/models")
+            )
+            .unwrap(),
+            vec!["https://custom.test/models"],
+        );
+        assert_eq!(
+            build_models_url_candidates("https://api.novita.ai.evil.test/anthropic", false, None)
+                .unwrap()[0],
+            "https://api.novita.ai.evil.test/anthropic/v1/models",
+        );
+    }
 
     #[test]
     fn model_fetch_headers_follow_pi_api_format() {

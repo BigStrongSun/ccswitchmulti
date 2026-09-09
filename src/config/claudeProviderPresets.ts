@@ -636,6 +636,19 @@ export const providerPresets: ProviderPreset[] = [
     iconColor: "#000000",
   },
   {
+    name: "SoleAPI",
+    websiteUrl: "https://soleapi.com",
+    apiKeyUrl: "https://soleapi.com",
+    settingsConfig: {
+      env: {
+        ANTHROPIC_BASE_URL: "https://soleapi.com",
+        ANTHROPIC_AUTH_TOKEN: "",
+      },
+    },
+    endpointCandidates: ["https://soleapi.com"],
+    category: "aggregator",
+  },
+  {
     name: "Micu",
     websiteUrl: "https://www.micuapi.ai",
     apiKeyUrl: "https://www.micuapi.ai/register?aff=aOYQ",
@@ -1280,6 +1293,7 @@ export const providerPresets: ProviderPreset[] = [
     },
     category: "aggregator",
     endpointCandidates: ["https://api.novita.ai/anthropic"],
+    modelsUrl: "https://api.novita.ai/openai/v1/models",
     icon: "novita",
     iconColor: "#000000",
   },

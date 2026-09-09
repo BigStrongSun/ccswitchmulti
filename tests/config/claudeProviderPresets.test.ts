@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { providerPresets } from "@/config/claudeProviderPresets";
 
+describe("upstream 3.20.2 model discovery", () => {
+  it("uses Novita's OpenAI model directory for its Anthropic preset", () => {
+    expect(
+      providerPresets.find((preset) => preset.name === "Novita AI")?.modelsUrl,
+    ).toBe("https://api.novita.ai/openai/v1/models");
+  });
+});
+
 describe("Kimi For Coding Provider Preset", () => {
   const kimiForCoding = providerPresets.find(
     (p) => p.name === "Kimi For Coding",

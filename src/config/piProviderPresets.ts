@@ -756,6 +756,26 @@ const piProviderPresetDefinitions: PiProviderPreset[] = [
     iconColor: "#000000",
   },
   {
+    name: "SoleAPI",
+    providerKey: "cc-switch-sole-api",
+    websiteUrl: "https://soleapi.com",
+    apiKeyUrl: "https://soleapi.com",
+    settingsConfig: {
+      name: "SoleAPI",
+      baseUrl: "https://soleapi.com",
+      api: "anthropic-messages",
+      apiKey: "",
+      models: [
+        piModel("anthropic/claude-opus-5", { id: "claude-opus-5" }),
+        piModel("anthropic/claude-sonnet-5", { id: "claude-sonnet-5" }),
+        piModel("anthropic/claude-haiku-4.5-20251001", {
+          id: "claude-haiku-4-5-20251001",
+        }),
+      ],
+    },
+    category: "aggregator",
+  },
+  {
     name: "Micu",
     providerKey: "cc-switch-micu",
     websiteUrl: "https://www.micuapi.ai",

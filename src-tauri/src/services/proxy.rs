@@ -4280,6 +4280,109 @@ impl ProxyService {
         auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER)
     }
 
+    /// OpenAI account state, not generic credential presence: Bedrock credentials
+    /// outrank a stale API key but cannot authenticate an OpenAI account probe.
+    fn codex_auth_has_openai_account(auth: &Value) -> bool {
+        let present = |key: &str| auth.get(key).is_some_and(|value| !value.is_null());
+        let token = |value: &Value| value.as_str().is_some_and(|text| !text.trim().is_empty());
+        let material = |value: &Value| match value {
+            Value::String(text) => !text.trim().is_empty(),
+            Value::Object(map) => !map.is_empty(),
+            Value::Array(items) => !items.is_empty(),
+            _ => false,
+        };
+        let mode = match auth.get("auth_mode").filter(|value| !value.is_null()) {
+            Some(value) => value.as_str().unwrap_or("invalid"),
+            None if present("personal_access_token") => "personalAccessToken",
+            None if present("bedrock_api_key") => "bedrockApiKey",
+            None if present("bedrock_access_keys") => "bedrockAccessKeys",
+            None if present("OPENAI_API_KEY") => "apikey",
+            None => "chatgpt",
+        };
+        match mode {
+            "apikey" => crate::codex_config::extract_codex_auth_api_key(auth)
+                .is_some_and(|key| key != PROXY_TOKEN_PLACEHOLDER),
+            "personalAccessToken" => auth.get("personal_access_token").is_some_and(token),
+            "agentIdentity" => auth.get("agent_identity").is_some_and(material),
+            "chatgpt" | "chatgptAuthTokens" => auth
+                .get("tokens")
+                .and_then(Value::as_object)
+                .is_some_and(|tokens| {
+                    ["access_token", "id_token", "refresh_token"]
+                        .iter()
+                        .any(|key| tokens.get(*key).is_some_and(token))
+                }),
+            _ => false,
+        }
+    }
+
+    fn align_codex_takeover_login(
+        config_text: &str,
+        provider: Option<&Provider>,
+    ) -> Result<String, String> {
+        // MultiRouter and official providers have a separate auth facade owner.
+        // In particular, never hide the managed pool's Desktop account UI.
+        if Self::codex_provider_has_enabled_routing(provider)
+            || provider.is_some_and(crate::proxy::providers::is_codex_official_provider)
+            || provider.is_some_and(Provider::is_codex_oauth)
+        {
+            return Ok(config_text.to_string());
+        }
+        let mut doc = config_text
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("Invalid Codex takeover config: {error}"))?;
+        let login = if provider.is_some_and(|p| p.is_xai_oauth() || p.is_github_copilot()) {
+            Some(false)
+        } else {
+            match doc
+                .get("cli_auth_credentials_store")
+                .map(Item::as_str)
+                .unwrap_or(Some("file"))
+            {
+                Some("file") => Some(
+                    read_json_file(&crate::codex_config::get_codex_auth_path())
+                        .ok()
+                        .is_some_and(|auth| Self::codex_auth_has_openai_account(&auth)),
+                ),
+                Some("ephemeral") => Some(false),
+                // Disk cannot determine a keyring-backed login.
+                _ => None,
+            }
+        };
+        let Some(login) = login else {
+            return Ok(config_text.to_string());
+        };
+        let Some(id) = doc
+            .get("model_provider")
+            .and_then(Item::as_str)
+            .map(str::to_string)
+        else {
+            return Ok(config_text.to_string());
+        };
+        // Also protect the router identity when invoked without Provider context.
+        if matches!(
+            id.as_str(),
+            "openai" | "codex_model_router_v2" | "ollama" | "lmstudio"
+        ) {
+            return Ok(config_text.to_string());
+        }
+        if let Some(table) = doc
+            .get_mut("model_providers")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|providers| providers.get_mut(&id))
+            .and_then(Item::as_table_like_mut)
+        {
+            if table
+                .get("experimental_bearer_token")
+                .and_then(Item::as_str)
+                == Some(PROXY_TOKEN_PLACEHOLDER)
+            {
+                table.insert("requires_openai_auth", toml_edit::value(login));
+            }
+        }
+        Ok(doc.to_string())
+    }
+
     fn write_codex_takeover_live_for_provider(
         &self,
         config: &Value,
@@ -4323,6 +4426,7 @@ impl ProxyService {
                     &provider_context,
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+            let prepared_config = Self::align_codex_takeover_login(&prepared_config, provider)?;
             crate::codex_config::write_codex_live_config_atomic(Some(&prepared_config))
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             return Ok(());
@@ -6028,6 +6132,166 @@ wire_api = "responses"
             crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
                 .expect("read auth");
         assert_eq!(live_auth, auth);
+    }
+
+    #[test]
+    fn upstream_v3202_malformed_token_containers_are_not_openai_accounts() {
+        assert!(!ProxyService::codex_auth_has_openai_account(
+            &json!({"tokens":{"access_token":{"junk":1}}})
+        ));
+        assert!(!ProxyService::codex_auth_has_openai_account(
+            &json!({"personal_access_token":["invalid"]})
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_v3202_takeover_auth_stamp_preserves_store_and_identity_boundaries() {
+        let cases = [
+            ("file", None, false),
+            (
+                "file",
+                Some(json!({"auth_mode":"chatgpt", "tokens":{"access_token":"fixture-token"}})),
+                true,
+            ),
+            (
+                "file",
+                Some(json!({"OPENAI_API_KEY":"PROXY_MANAGED"})),
+                false,
+            ),
+            (
+                "file",
+                Some(json!({"bedrock_api_key":"fixture-bedrock", "OPENAI_API_KEY":"stale-key"})),
+                false,
+            ),
+            (
+                "ephemeral",
+                Some(json!({"OPENAI_API_KEY":"fixture-key"})),
+                false,
+            ),
+            ("keyring", None, true),
+            ("auto", None, true),
+            (
+                "file",
+                Some(json!({"auth_mode":"chatgpt", "last_refresh":"metadata-only"})),
+                false,
+            ),
+            (
+                "file",
+                Some(json!({"auth_mode":"bedrockAccessKeys", "OPENAI_API_KEY":"stale-key"})),
+                false,
+            ),
+            (
+                "file",
+                Some(json!({"auth_mode":"headers", "OPENAI_API_KEY":"stale-key"})),
+                false,
+            ),
+            (
+                "file",
+                Some(
+                    json!({"auth_mode":"apikey", "OPENAI_API_KEY":"fixture-key", "bedrock_api_key":"ignored"}),
+                ),
+                true,
+            ),
+            (
+                "file",
+                Some(json!({"personal_access_token":"fixture-pat", "bedrock_api_key":"ignored"})),
+                true,
+            ),
+            (
+                "file",
+                Some(
+                    json!({"auth_mode":"agentIdentity", "agent_identity":{"credential":"fixture"}}),
+                ),
+                true,
+            ),
+            (
+                "file",
+                Some(json!({"personal_access_token":"", "OPENAI_API_KEY":"stale-key"})),
+                false,
+            ),
+        ];
+        for (store, auth, expected) in cases {
+            let _home = TempHome::new();
+            crate::settings::reload_settings().unwrap();
+            let service = ProxyService::new(Arc::new(Database::memory().unwrap()));
+            if let Some(auth) = &auth {
+                write_json_file(&crate::codex_config::get_codex_auth_path(), auth).unwrap();
+            }
+            let mut provider = Provider::with_id(
+                "test-third-party".to_string(),
+                "Test third party".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "fixture-key"},
+                    "config": format!("cli_auth_credentials_store = \"{store}\"\nmodel_provider = \"custom\"\nmodel = \"test-model\"\n[model_providers.custom]\nname = \"Test\"\nbase_url = \"https://example.test/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n")
+                }),
+                None,
+            );
+            provider.category = Some("custom".to_string());
+            let mut config = provider.settings_config.clone();
+            ProxyService::apply_codex_takeover_fields_for_provider(
+                &mut config,
+                "http://127.0.0.1:15721/v1",
+                &provider,
+                false,
+            )
+            .unwrap();
+            service
+                .write_codex_takeover_live_for_provider(&config, Some(&provider))
+                .unwrap();
+            let text =
+                std::fs::read_to_string(crate::codex_config::get_codex_config_path()).unwrap();
+            let doc: toml::Value = text.parse().unwrap();
+            let id = doc["model_provider"].as_str().unwrap();
+            assert_eq!(
+                doc["model_providers"][id]["requires_openai_auth"].as_bool(),
+                Some(expected),
+                "{store}: {auth:?}"
+            );
+            let after: Option<Value> =
+                read_json_file(&crate::codex_config::get_codex_auth_path()).ok();
+            assert_eq!(after, auth, "takeover must never mutate login material");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn upstream_v3202_auth_stamp_never_replaces_router_or_official_facades() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().unwrap();
+        let config = "model_provider = \"custom\"\n[model_providers.custom]\nrequires_openai_auth = true\nexperimental_bearer_token = \"PROXY_MANAGED\"\n";
+        let mut provider = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({"codexRouting":{"enabled":true,"routes":[{}]}}),
+            None,
+        );
+        assert_eq!(
+            ProxyService::align_codex_takeover_login(config, Some(&provider)).unwrap(),
+            config
+        );
+        provider.settings_config = json!({});
+        provider.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
+        provider.category = Some("official".to_string());
+        assert_eq!(
+            ProxyService::align_codex_takeover_login(config, Some(&provider)).unwrap(),
+            config
+        );
+        let router_config = config.replace("custom", "codex_model_router_v2");
+        assert_eq!(
+            ProxyService::align_codex_takeover_login(&router_config, None).unwrap(),
+            router_config
+        );
+        provider.id = "managed-account".to_string();
+        provider.category = Some("custom".to_string());
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            ProxyService::align_codex_takeover_login(config, Some(&provider)).unwrap(),
+            config
+        );
     }
 
     #[test]
@@ -9559,6 +9823,14 @@ supports_websockets = false
             .expect("set local current openai");
         crate::codex_config::write_codex_live_config_atomic(Some(openai_config))
             .expect("seed openai live config");
+
+        // This regression promises to preserve the OAuth account facade, so seed
+        // actual login material rather than relying on a stale true flag alone.
+        write_json_file(
+            &crate::codex_config::get_codex_auth_path(),
+            &json!({"auth_mode":"chatgpt", "tokens":{"access_token":"fixture-oauth"}}),
+        )
+        .expect("seed OAuth account");
 
         crate::services::provider::ProviderService::switch(
             &state,
