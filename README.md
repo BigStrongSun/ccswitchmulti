@@ -115,6 +115,8 @@ Codex MultiRouter 不是简单地把 Codex 切到某一个第三方 Provider。C
 
 - 当前分支的包名/产品名是 `ccswitchmulti` / `CCSwitchMulti`。
 - Windows 发布导出使用 `pnpm release:export`；本地打包在没有签名私钥时会显式关闭 updater artifact 签名。
+- `pnpm release:local` 会为本次构建创建隔离的 Cargo target，并在制品导出成功或失败后自动清理；不会删除其他 worktree 正在使用的构建目录。
+- `pnpm cache:clean:dry-run` 可只读列出超过 6 小时的历史 `src-tauri/target*`，确认后使用 `pnpm cache:clean` 清理；检测到任意 `cargo`/`rustc` 进程时，实际清理会整轮跳过。
 - 免安装版仍使用系统默认用户数据和配置目录，因此除非明确要共享状态，否则不要同时运行多个安装版或便携版实例。
 - macOS 产物需要 macOS 构建、签名和 notarization 环境；Windows/WSL 构建不会产出已签名公证的 macOS 包。
 

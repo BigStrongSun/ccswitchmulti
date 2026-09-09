@@ -19,6 +19,112 @@ function Remove-TauriBuildConfigFile {
     }
 }
 
+function Get-LocalReleaseCargoTargetRoot {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $repoFull = [System.IO.Path]::GetFullPath($RepoRoot)
+    return [System.IO.Path]::GetFullPath((Join-Path $repoFull ".tmp\local-release-cargo"))
+}
+
+function New-LocalReleaseCargoTargetDir {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $cacheRoot = Get-LocalReleaseCargoTargetRoot -RepoRoot $RepoRoot
+    [System.IO.Directory]::CreateDirectory($cacheRoot) | Out-Null
+    $targetDir = Join-Path $cacheRoot ("run-$PID-" + [guid]::NewGuid().ToString("N"))
+    [System.IO.Directory]::CreateDirectory($targetDir) | Out-Null
+    return [System.IO.Path]::GetFullPath($targetDir)
+}
+
+function Remove-LocalReleaseCargoTargetDir {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$TargetDir
+    )
+
+    $cacheRoot = Get-LocalReleaseCargoTargetRoot -RepoRoot $RepoRoot
+    $targetFull = [System.IO.Path]::GetFullPath($TargetDir)
+    $targetParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $targetFull))
+    if (-not [string]::Equals(
+            $targetParent,
+            $cacheRoot,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "local release Cargo target is outside the repository-owned local release Cargo cache root: $targetFull"
+    }
+
+    if (-not (Test-Path -LiteralPath $targetFull)) {
+        return
+    }
+    $targetItem = Get-Item -LiteralPath $targetFull -Force
+    if (-not $targetItem.PSIsContainer) {
+        throw "local release Cargo target is not a directory: $targetFull"
+    }
+    if (($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "local release Cargo target must not be a reparse point: $targetFull"
+    }
+
+    $manifestPath = Join-Path ([System.IO.Path]::GetFullPath($RepoRoot)) "src-tauri\Cargo.toml"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Cargo manifest is missing for local release cleanup: $manifestPath"
+    }
+    & cargo clean --manifest-path $manifestPath --target-dir $targetFull 2>&1 |
+        ForEach-Object { Write-Host ([string]$_) }
+    $cargoExitCode = $LASTEXITCODE
+    if ($cargoExitCode -ne 0) {
+        throw "cargo clean failed with exit code $cargoExitCode for local release target: $targetFull"
+    }
+}
+
+function Resolve-CargoTargetDir {
+    param(
+        [Parameter(Mandatory = $true)][string]$TauriDir,
+        [string]$RequestedTargetDir = ""
+    )
+
+    $tauriFull = [System.IO.Path]::GetFullPath($TauriDir)
+    if ([string]::IsNullOrWhiteSpace($RequestedTargetDir)) {
+        return [System.IO.Path]::GetFullPath((Join-Path $tauriFull "target"))
+    }
+    if ([System.IO.Path]::IsPathRooted($RequestedTargetDir)) {
+        return [System.IO.Path]::GetFullPath($RequestedTargetDir)
+    }
+
+    $repoRoot = Split-Path -Parent $tauriFull
+    return [System.IO.Path]::GetFullPath((Join-Path $repoRoot $RequestedTargetDir))
+}
+
+function Invoke-WithLocalReleaseCargoTarget {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][bool]$Enabled,
+        [Parameter(Mandatory = $true)][scriptblock]$Action
+    )
+
+    if (-not $Enabled) {
+        return & $Action $null
+    }
+
+    $hadPreviousTarget = Test-Path Env:CARGO_TARGET_DIR
+    $previousTarget = $env:CARGO_TARGET_DIR
+    $targetDir = New-LocalReleaseCargoTargetDir -RepoRoot $RepoRoot
+    try {
+        $env:CARGO_TARGET_DIR = $targetDir
+        return & $Action $targetDir
+    } finally {
+        if ($hadPreviousTarget) {
+            $env:CARGO_TARGET_DIR = $previousTarget
+        } else {
+            Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+        }
+        try {
+            Remove-LocalReleaseCargoTargetDir -RepoRoot $RepoRoot -TargetDir $targetDir
+        } catch {
+            Write-Warning "local release Cargo target cleanup failed for '$targetDir': $($_.Exception.Message)"
+        }
+    }
+}
+
 function Get-ReleaseFileSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
 

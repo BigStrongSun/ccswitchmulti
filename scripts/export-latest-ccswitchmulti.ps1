@@ -154,7 +154,10 @@ function Initialize-TauriSigningKey {
 
 # Build the feature-gated history repair sidecar before Tauri bundles the app.
 function Build-HistoryRepairSidecar {
-    param([string]$TauriDir)
+    param(
+        [string]$TauriDir,
+        [string]$CargoTargetDir
+    )
 
     $manifestPath = Join-Path $TauriDir "Cargo.toml"
     cargo build --manifest-path $manifestPath --bin codex-history-repairer --features history-repairer --release
@@ -162,7 +165,7 @@ function Build-HistoryRepairSidecar {
         throw "codex-history-repairer sidecar build failed with exit code $LASTEXITCODE"
     }
 
-    $sidecarPath = Join-Path $TauriDir "target\release\codex-history-repairer.exe"
+    $sidecarPath = Join-Path $CargoTargetDir "release\codex-history-repairer.exe"
     if (-not (Test-Path -LiteralPath $sidecarPath)) {
         throw "codex-history-repairer sidecar was not produced: $sidecarPath"
     }
@@ -320,7 +323,8 @@ function Write-LatestJson {
 $repoRoot = Get-RepoRoot
 $exportRoot = Resolve-CcswitchmultiReleaseRoot -RepoRoot $repoRoot -RequestedRoot $ReleaseRoot
 $tauriDir = Join-Path $repoRoot "src-tauri"
-$releaseDir = Join-Path $tauriDir "target\release"
+$cargoTargetDir = Resolve-CargoTargetDir -TauriDir $tauriDir -RequestedTargetDir $env:CARGO_TARGET_DIR
+$releaseDir = Join-Path $cargoTargetDir "release"
 $bundleDir = Join-Path $releaseDir "bundle"
 $packageJson = Get-Content -LiteralPath (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json
 $version = [string]$packageJson.version
@@ -335,7 +339,7 @@ if (-not $SkipBuild) {
         if (-not $hasUpdaterSigningKey) {
             Write-Warning "Tauri updater signing key was not found. Building without updater signatures."
         }
-        Build-HistoryRepairSidecar -TauriDir $tauriDir
+        Build-HistoryRepairSidecar -TauriDir $tauriDir -CargoTargetDir $cargoTargetDir
         pnpm tauri build --bundles nsis --config $buildConfigPath
         if ($LASTEXITCODE -ne 0) {
             throw "tauri build failed with exit code $LASTEXITCODE"
