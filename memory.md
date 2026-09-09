@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-09 Qwen3.8 Responses Lite `additional_tools` 运行态根修
+
+- 截图中的“正在重新连接 6/10 / high demand”只是 Codex 通用重试文案。CCSM `codex-router.log` 证明目标 session `01a08490-59cd-73d3-b831-8b6a1eb3bf16` 已正确路由到 Qwen `/v1/responses`，但每次自动压缩请求在推理前返回 HTTP 500：`'AdditionalTools' object has no attribute 'get'`；后续 521 属于服务不可用窗口，不是最初根因。
+- 远端 vLLM `0.27.2rc1.dev91+g1f7427bc0` 的完整 traceback 落在 `responses/utils.py::_construct_message_from_response_item`。新版 Codex Responses Lite 会给 `input[].type=additional_tools` 添加稳定 `id`；Pydantic 联合类型因此把它解析为 `response_output_item.AdditionalTools` 模型。vLLM 错把该结构载体追加进 chat message 列表，下一项处理调用 `prev_msg.get()` 时崩溃。只跳过载体会丢失全部客户端工具，因此不是合格修复。
+- 根修位于独立 vLLM 工作树 `C:\Users\sunda\Documents\LLMservice\vllm-qwen38-additional-tools-fix`、分支 `bigstrongsun/fix-vllm-additional-tools`、提交 `c1095f15a86b0b2e43158ebe078716d18662dca4`：在 Pydantic Union 解析和 `check_tool_usage` 前把合法 carrier 的工具提升到规范顶层 `tools`，从 `input` 移除结构项；格式错误的 carrier 保留给正常校验，避免静默吞错。回归锁定带稳定 `id` 的真实形态，并同时断言 input、工具和 `tool_choice=auto`。
+- TDD 证据：旧安装代码稳定在 `len(request.input) == 1` 断言 RED；候选及安装态均为 3/3 focused protocol tests GREEN，`py_compile` 与 `git diff --check` 通过。运行文件原哈希 `0d7335e0...fd343`，候选/安装哈希 `0ada6da2...2ec6`；可回滚备份为远端 `/opt/vllm-stack/backups/vllm-additional-tools-c1095f15a-20260909/protocol.py.original`。
+- `vllm-qwen36-tp.service` 只重启一次并完成 Qwen3.8 两卡 TP、FP8 KV cache、MTP 与 CUDA graph 初始化。真实验收先直连远端 5001、透明代理 5000，再经本机 CCSM `127.0.0.1:15721/responses`；最后一条完整链路返回 HTTP 200、`status=completed`、输出含 reasoning/message，未再出现 AdditionalTools traceback。截图中的旧任务已耗尽那轮重试，需要用户重新发送或重试才能产生新请求。
+- 外部核验按规则使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链。内置 Web 的 OpenAI Codex 当前源码/测试确认 Responses Lite 把工具放在 `additional_tools` 且省略顶层 tools；vLLM 当前 main 的 `responses/utils.py` 仍未处理该类型。Matrix 精确错误检索无结果、宽检索也未找到一手修复，证据不足以提供现成上游方案；最终结论以本地 Codex 源码、CCSM 日志、远端 vLLM traceback 和 RED→GREEN/活体请求为准。
+
 ## 2026-09-09 官方 3.20.2 语义迁移与 Trace 修复
 
 - 上游边界为 `v3.20.2` / `upstream/main@f3b18df1`，采用逐项语义迁移而非整分支覆盖。详情和最终门禁见 `docs/audits/2026-09-09-upstream-3.20.2-trace.md`；旧 154 行矩阵保留冻结历史，新增 superseding status 表记录本次完成项。
