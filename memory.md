@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-09 出口时区探测错误只读诊断
+
+- 截图 `Could not reach ChatGPT egress trace: error sending request for url (...)` 对应 `codex_egress_timezone.rs` 的第一阶段 `send()` 失败，尚未进入 trace 解析、ipwho.is 定位或时区应用。当前源码仅格式化 reqwest Error 的 Display，未保留 source 链；无法凭该提示区分 DNS、TCP、TLS、超时等原因。
+- 同机当次 curl 请求 trace 返回 HTTP 200，总耗时约 0.491 秒；这只证明检查时 curl 路径可达，不证明截图发生时或 CCSM 进程同样成功。探测复用 protocol probe client，连接超时 5 秒、单请求超时 8 秒，无显式重试；不可仅据此断言超时就是本次根因。
+- 运行 PID 10084 的 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 文件版本为 `3.19.2-31`；12:35:52 初始化日志显示无显式全局代理，当前 Windows ProxyEnable=0。此前发布 `3.20.1-3` 不等于本机已升级，也不证明升级会修复本次错误。
+- 本轮只诊断，没有修改产品代码、代理、系统时区或运行服务，没有运行全量测试。内置 Web 请求未得到可用文档；Matrix 独立检索找到 reqwest 官方源码和 docs.rs 入口，但不足以解释当时传输失败。具体底层根因仍需复现时的错误链证据，不应宣称网络故障或产品修复已确认。
+
 ## 2026-09-08 CCSwitchMulti v3.20.1-3 正式发布
 
 - `aab43413` 根修新建 Codex/Universal Provider 强制深测，`46bb0b76` 把四个版本源统一到 `3.20.1-3` 并补 release notes。发布日前 `git fetch --all --prune --tags` 确认 `origin/main`/`upstream/main` 仍为已审计的 `v3.20.2@f3b18df1`，没有新的官方提交需要合并；`fork/main` 仍为上一版发布记录 `fb1ed5e0`。
