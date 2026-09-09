@@ -50,6 +50,25 @@ describe("CodexEgressTimezoneSettings", () => {
     );
   });
 
+  it("shows a failed automatic probe even when IPC resolves to an error state", async () => {
+    vi.mocked(codexEgressTimezoneApi.triggerAutomaticProbe).mockResolvedValue({
+      state: "error",
+      lastError: "ChatGPT egress trace: timeout; path=system_or_transparent",
+      monitorIntervalMinutes: 15,
+      restartRequired: false,
+    });
+    render(
+      <CodexEgressTimezoneSettings
+        value={{ mode: "off" }}
+        onChange={vi.fn().mockResolvedValue(true)}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "开启自动监测" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "ChatGPT egress trace: timeout",
+    );
+  });
+
   it("detects the real ChatGPT egress behind fake-IP DNS and lets the user opt in", async () => {
     vi.mocked(codexEgressTimezoneApi.detect).mockResolvedValue({
       targetHost: "chatgpt.com",
@@ -106,6 +125,17 @@ describe("CodexEgressTimezoneSettings", () => {
         }),
       ),
     );
+
+    vi.mocked(codexEgressTimezoneApi.detect).mockRejectedValue(
+      "ChatGPT egress trace: timeout",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "探测出口时区" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "ChatGPT egress trace: timeout",
+    );
+    expect(
+      screen.queryByRole("button", { name: "使用探测结果" }),
+    ).not.toBeInTheDocument();
   });
 
   it("supports an explicit IANA timezone override without touching the system timezone", async () => {

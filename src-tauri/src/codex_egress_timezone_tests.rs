@@ -368,3 +368,18 @@ fn monitor_status_exposes_failure_backoff_as_the_next_check() {
     assert_eq!(status.state, CodexEgressMonitorState::Error);
     assert_eq!(status.next_check_at, Some(2_180));
 }
+#[tokio::test]
+#[ignore = "Explicit network diagnostic; never run as a regular test gate"]
+async fn live_trace_transport_diagnostic() {
+    let started = std::time::Instant::now();
+    match crate::codex_egress_timezone::detect_codex_egress_timezone().await {
+        Ok(detection) => eprintln!(
+            "trace + geolocation passed; path={} elapsed={:?}",
+            detection.network_path,
+            started.elapsed()
+        ),
+        Err(error) => {
+            panic!("trace elapsed={:?}: {error}", started.elapsed());
+        }
+    }
+}

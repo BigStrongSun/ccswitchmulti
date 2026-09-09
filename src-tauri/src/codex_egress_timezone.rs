@@ -462,25 +462,194 @@ pub(crate) fn build_detection_from_payloads(
 }
 
 async fn resolve_target_dns() -> Vec<String> {
-    tokio::net::lookup_host((CODEX_EGRESS_TARGET_HOST, 443))
-        .await
-        .map(|addresses| addresses.map(|address| address.ip().to_string()).collect())
-        .unwrap_or_default()
+    // DNS is diagnostic only: an explicit proxy may resolve the target remotely.
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::lookup_host((CODEX_EGRESS_TARGET_HOST, 443)),
+    )
+    .await
+    {
+        Ok(Ok(addresses)) => addresses.map(|address| address.ip().to_string()).collect(),
+        _ => Vec::new(),
+    }
 }
 
-async fn read_bounded_response(response: reqwest::Response, label: &str) -> Result<String, String> {
+fn detection_transport_error(label: &str, error: reqwest::Error) -> String {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect (DNS/TCP/TLS)"
+    } else if error.is_body() || error.is_decode() {
+        "response body"
+    } else {
+        "request"
+    };
+    let path = if crate::proxy::http_client::get_current_proxy_url().is_some() {
+        "ccsm_global_proxy"
+    } else {
+        "system_or_transparent"
+    };
+    // Match the router's error-chain handling without disclosing the geolocation
+    // URL (which contains the observed IP) or a proxy's credentials.
+    let detail = crate::proxy::error::error_chain_message(&error.without_url());
+    let detail = crate::proxy::codex_error_capture::redact(&detail, 1200);
+    let message = format!("{label}: {kind}; path={path}; {detail}");
+    log::warn!("[CodexEgress] {message}");
+    message
+}
+
+async fn read_bounded_response(
+    mut response: reqwest::Response,
+    label: &str,
+) -> Result<String, String> {
     let status = response.status();
     if !status.is_success() {
         return Err(format!("{label} failed with HTTP {status}"));
     }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| format!("Could not read {label}: {error}"))?;
-    if body.len() > MAX_DETECTION_BODY_BYTES {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_DETECTION_BODY_BYTES as u64)
+    {
         return Err(format!("{label} response exceeded the safety limit"));
     }
-    String::from_utf8(body.to_vec()).map_err(|_| format!("{label} response was not UTF-8"))
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| detection_transport_error(label, error))?
+    {
+        if chunk.len() > MAX_DETECTION_BODY_BYTES.saturating_sub(body.len()) {
+            return Err(format!("{label} response exceeded the safety limit"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|_| format!("{label} response was not UTF-8"))
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn trace_transport_stream_limit_accepts_exact_boundary_without_content_length() {
+        for length in [MAX_DETECTION_BODY_BYTES, MAX_DETECTION_BODY_BYTES + 1] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                socket.read(&mut request).await.unwrap();
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                socket.write_all(&vec![b'x'; length]).await.unwrap();
+            });
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .unwrap();
+            let result = read_bounded_response(response, "trace").await;
+            server.await.unwrap();
+            if length == MAX_DETECTION_BODY_BYTES {
+                assert_eq!(result.unwrap().len(), 65536);
+            } else {
+                assert!(result.unwrap_err().contains("safety limit"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn trace_transport_send_failure_reports_connection_stage_without_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/8.8.8.8?api_key=private-value"))
+            .send()
+            .await
+            .unwrap_err();
+        let message = detection_transport_error("trace", error);
+        assert!(message.contains("connect (DNS/TCP/TLS)"), "{message}");
+        assert!(
+            message.contains("tcp connect error") || message.contains("10061"),
+            "{message}"
+        );
+        assert!(!message.contains("private-value"), "{message}");
+        assert!(!message.contains("8.8.8.8"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn trace_transport_rejects_oversized_body_before_waiting_for_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 65537\r\n\r\n")
+                .await
+                .unwrap();
+            // A response with a declared over-limit size must be rejected
+            // before this deliberately delayed body (or its timeout).
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            read_bounded_response(response, "trace"),
+        )
+        .await;
+        server.abort();
+        let _ = server.await;
+        assert!(result.unwrap().unwrap_err().contains("safety limit"));
+    }
+
+    #[tokio::test]
+    async fn trace_transport_body_failure_preserves_cause_without_request_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+                .await
+                .unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/?api_key=private-value"))
+            .send()
+            .await
+            .unwrap();
+        let error = read_bounded_response(response, "trace").await.unwrap_err();
+        server.await.unwrap();
+        assert!(
+            error.contains("end of file") || error.contains("IncompleteBody"),
+            "{error}"
+        );
+        assert!(!error.contains("private-value"), "{error}");
+    }
 }
 
 /// Detect the public egress observed by the same ChatGPT hostname used by Codex.
@@ -490,16 +659,17 @@ async fn read_bounded_response(response: reqwest::Response, label: &str) -> Resu
 /// explicitly to the geolocation service.
 #[tauri::command]
 pub async fn detect_codex_egress_timezone() -> Result<CodexEgressTimezoneDetection, String> {
-    let dns_addresses = resolve_target_dns().await;
     let client = crate::proxy::http_client::build_protocol_probe_client()?;
-    let trace_body = read_bounded_response(
+    let (dns_addresses, trace_response) = tokio::join!(
+        resolve_target_dns(),
         client
             .get(CODEX_EGRESS_TRACE_URL)
             .header(reqwest::header::USER_AGENT, "CCSwitchMulti timezone probe")
             .timeout(Duration::from_secs(8))
             .send()
-            .await
-            .map_err(|error| format!("Could not reach ChatGPT egress trace: {error}"))?,
+    );
+    let trace_body = read_bounded_response(
+        trace_response.map_err(|error| detection_transport_error("ChatGPT egress trace", error))?,
         "ChatGPT egress trace",
     )
     .await?;
@@ -512,7 +682,7 @@ pub async fn detect_codex_egress_timezone() -> Result<CodexEgressTimezoneDetecti
             .timeout(Duration::from_secs(8))
             .send()
             .await
-            .map_err(|error| format!("Could not geolocate the observed egress IP: {error}"))?,
+            .map_err(|error| detection_transport_error("IP geolocation", error))?,
         "IP geolocation",
     )
     .await?;

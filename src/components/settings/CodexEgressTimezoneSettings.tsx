@@ -62,6 +62,7 @@ export function CodexEgressTimezoneSettings({
   const detect = async () => {
     setDetecting(true);
     setError("");
+    setReport(null);
     try {
       setReport(await codexEgressTimezoneApi.detect());
     } catch (caught) {
@@ -96,7 +97,12 @@ export function CodexEgressTimezoneSettings({
         monitorIntervalMinutes: value.monitorIntervalMinutes ?? 15,
       });
       if (saved !== false) {
-        await codexEgressTimezoneApi.triggerAutomaticProbe();
+        const status = await codexEgressTimezoneApi.triggerAutomaticProbe();
+        if (status.state === "error") {
+          setError(
+            status.lastError || "出口时区探测失败，已保留最近一次有效配置。",
+          );
+        }
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -255,7 +261,7 @@ export function CodexEgressTimezoneSettings({
 
       {error && (
         <p
-          className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive"
+          className="break-words rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive"
           role="alert"
         >
           {error}
