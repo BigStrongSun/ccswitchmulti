@@ -1,17 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use std::{
     fs::OpenOptions,
     io::{BufWriter, Write},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
+
+#[path = "codex_paginated_history_migration_recovery.rs"]
+mod migration_recovery;
 
 #[cfg(test)]
 static REPAIR_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -30,6 +33,8 @@ pub(crate) struct RolloutOrdinalScan {
 pub struct PaginatedHistoryRepairPreflight {
     pub affected_rollout_count: usize,
     pub duplicate_ordinal_count: usize,
+    pub provider_migration_cursor_count: usize,
+    pub provider_migration_history_base_count: usize,
     pub rotated_thread_count: usize,
     pub rotated_segment_count: usize,
     pub affected_bytes: u64,
@@ -41,6 +46,8 @@ pub struct PaginatedHistoryRepairPreflight {
 pub(crate) struct PaginatedHistoryRepairOutcome {
     pub repaired_rollout_count: usize,
     pub repaired_duplicate_count: usize,
+    pub repaired_provider_migration_cursor_count: usize,
+    pub repaired_provider_migration_history_base_count: usize,
     pub repaired_rotated_thread_count: usize,
     pub repaired_rotated_segment_count: usize,
     pub(super) targets: Vec<ProjectionCatchUpTarget>,
@@ -61,12 +68,13 @@ struct RolloutRepairCandidate {
     projection_db: PathBuf,
     #[cfg(any(target_os = "windows", test))]
     repair: ProjectionCursorRepair,
-    scan: RolloutOrdinalScan,
 }
 
 #[derive(Default)]
 struct RolloutRepairPlan {
+    projection_db: Option<PathBuf>,
     candidates: Vec<RolloutRepairCandidate>,
+    provider_migration: migration_recovery::ProviderMigrationRecoveryPlan,
     blocked: Vec<String>,
 }
 
@@ -77,6 +85,13 @@ struct ProjectionCursorRepair {
     stalled_expected_ordinal: u64,
     minimum_next_byte_offset: u64,
     minimum_next_ordinal: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderMigrationBoundaryMapping {
+    current_offset: u64,
+    changed_provider_records: usize,
+    backup_end_ordinal: u64,
 }
 
 #[cfg(test)]
@@ -147,16 +162,181 @@ fn rollout_session_metadata(path: &Path) -> Result<RolloutSessionMetadata, Strin
     .map_err(|error| format!("parse_rollout_session_payload_failed: {error}"))
 }
 
+fn provider_state_pointer(value: &serde_json::Value) -> Option<&'static str> {
+    match (
+        value.get("type").and_then(serde_json::Value::as_str),
+        value
+            .pointer("/payload/type")
+            .and_then(serde_json::Value::as_str),
+    ) {
+        (Some("session_meta"), _) => Some("/payload/model_provider"),
+        (Some("event_msg"), Some("thread_settings_applied")) => {
+            Some("/payload/thread_settings/model_provider_id")
+        }
+        _ => None,
+    }
+}
+
+fn provider_only_record_change(before: &[u8], after: &[u8]) -> Result<bool, String> {
+    if before == after {
+        return Ok(false);
+    }
+    let mut before_value: serde_json::Value = serde_json::from_slice(before)
+        .map_err(|error| format!("parse_provider_migration_backup_record_failed: {error}"))?;
+    let after_value: serde_json::Value = serde_json::from_slice(after)
+        .map_err(|error| format!("parse_provider_migration_current_record_failed: {error}"))?;
+    let pointer = provider_state_pointer(&before_value)
+        .ok_or_else(|| "provider_migration_changed_non_provider_record".to_string())?;
+    let before_provider = before_value.pointer(pointer).cloned();
+    let after_provider = after_value.pointer(pointer).cloned();
+    if before_provider == after_provider {
+        return Err("provider_migration_record_has_other_changes".to_string());
+    }
+    let destination = before_value
+        .pointer_mut(pointer)
+        .ok_or_else(|| "provider_migration_backup_missing_provider_field".to_string())?;
+    *destination = after_provider
+        .ok_or_else(|| "provider_migration_current_missing_provider_field".to_string())?;
+    if before_value != after_value {
+        return Err("provider_migration_record_has_other_changes".to_string());
+    }
+    Ok(true)
+}
+
+fn map_provider_migration_boundary(
+    backup_path: &Path,
+    current_path: &Path,
+    backup_offset: u64,
+) -> Result<Option<ProviderMigrationBoundaryMapping>, String> {
+    if backup_offset == 0 {
+        return Err("provider_migration_boundary_is_zero".to_string());
+    }
+    let backup = File::open(backup_path)
+        .map_err(|error| format!("open_provider_migration_backup_failed: {error}"))?;
+    let current = File::open(current_path)
+        .map_err(|error| format!("open_provider_migration_current_failed: {error}"))?;
+    let mut backup_reader = BufReader::new(backup);
+    let mut current_reader = BufReader::new(current);
+    let mut backup_line = Vec::new();
+    let mut current_line = Vec::new();
+    let mut last_backup_line = Vec::new();
+    let mut backup_position = 0_u64;
+    let mut current_position = 0_u64;
+    let mut changed_provider_records = 0_usize;
+
+    while backup_position < backup_offset {
+        backup_line.clear();
+        current_line.clear();
+        let backup_read = backup_reader
+            .read_until(b'\n', &mut backup_line)
+            .map_err(|error| format!("read_provider_migration_backup_failed: {error}"))?;
+        let current_read = current_reader
+            .read_until(b'\n', &mut current_line)
+            .map_err(|error| format!("read_provider_migration_current_failed: {error}"))?;
+        if backup_read == 0 || current_read == 0 {
+            return Err("provider_migration_prefix_ended_before_boundary".to_string());
+        }
+        backup_position = backup_position
+            .checked_add(backup_read as u64)
+            .ok_or_else(|| "provider_migration_backup_offset_overflow".to_string())?;
+        current_position = current_position
+            .checked_add(current_read as u64)
+            .ok_or_else(|| "provider_migration_current_offset_overflow".to_string())?;
+        if backup_position > backup_offset {
+            return Err("provider_migration_backup_offset_not_record_boundary".to_string());
+        }
+        if provider_only_record_change(&backup_line, &current_line)? {
+            changed_provider_records = changed_provider_records
+                .checked_add(1)
+                .ok_or_else(|| "provider_migration_change_count_overflow".to_string())?;
+        }
+        last_backup_line.clear();
+        last_backup_line.extend_from_slice(&backup_line);
+    }
+
+    if changed_provider_records == 0 || current_position == backup_offset {
+        return Ok(None);
+    }
+    let last_value: serde_json::Value = serde_json::from_slice(&last_backup_line)
+        .map_err(|error| format!("parse_provider_migration_boundary_record_failed: {error}"))?;
+    let backup_end_ordinal = last_value
+        .get("ordinal")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "provider_migration_boundary_record_missing_ordinal".to_string())?;
+    Ok(Some(ProviderMigrationBoundaryMapping {
+        current_offset: current_position,
+        changed_provider_records,
+        backup_end_ordinal,
+    }))
+}
+
+fn rewrite_history_base_offset_preserving_record_len(
+    record: &[u8],
+    expected_old_offset: u64,
+    new_offset: u64,
+) -> Result<Vec<u8>, String> {
+    let (content, newline): (&[u8], &[u8]) = if let Some(content) = record.strip_suffix(b"\r\n") {
+        (content, b"\r\n")
+    } else if let Some(content) = record.strip_suffix(b"\n") {
+        (content, b"\n")
+    } else {
+        return Err("history_base_record_missing_newline".to_string());
+    };
+    let mut value: serde_json::Value = serde_json::from_slice(content)
+        .map_err(|error| format!("parse_history_base_record_failed: {error}"))?;
+    let offset = value
+        .pointer_mut("/payload/history_base/end_byte_offset")
+        .ok_or_else(|| "history_base_record_missing_end_byte_offset".to_string())?;
+    if offset.as_u64() != Some(expected_old_offset) {
+        return Err("history_base_offset_changed_during_repair".to_string());
+    }
+    *offset = serde_json::Value::from(new_offset);
+    let mut rewritten = serde_json::to_vec(&value)
+        .map_err(|error| format!("serialize_history_base_record_failed: {error}"))?;
+    if rewritten.len() > content.len() {
+        return Err("history_base_rewrite_cannot_preserve_record_length".to_string());
+    }
+    rewritten.resize(content.len(), b' ');
+    rewritten.extend_from_slice(newline);
+    Ok(rewritten)
+}
+
 #[cfg(test)]
 fn rollout_session_id(path: &Path) -> Result<String, String> {
     Ok(rollout_session_metadata(path)?.id)
 }
 
+#[cfg(test)]
 fn resolve_active_rollout_lineage(
     expected_thread_id: &str,
     active_path: &Path,
     candidate_paths: &[PathBuf],
 ) -> Result<Vec<PathBuf>, String> {
+    resolve_active_rollout_lineage_with_overrides(
+        expected_thread_id,
+        active_path,
+        candidate_paths,
+        &HashMap::new(),
+    )
+}
+
+#[cfg(test)]
+fn resolve_active_rollout_lineage_with_overrides(
+    expected_thread_id: &str,
+    active_path: &Path,
+    candidate_paths: &[PathBuf],
+    history_base_offsets: &HashMap<PathBuf, u64>,
+) -> Result<Vec<PathBuf>, String> {
+    let paths_by_rollout_id = rollout_paths_by_id(candidate_paths)?;
+    resolve_active_rollout_lineage_from_map(
+        expected_thread_id,
+        active_path,
+        &paths_by_rollout_id,
+        history_base_offsets,
+    )
+}
+
+fn rollout_paths_by_id(candidate_paths: &[PathBuf]) -> Result<HashMap<String, PathBuf>, String> {
     let mut paths_by_rollout_id = HashMap::new();
     for path in candidate_paths {
         let Some(rollout_id) = source_id_from_rollout_path(path) else {
@@ -172,7 +352,15 @@ fn resolve_active_rollout_lineage(
             }
         }
     }
+    Ok(paths_by_rollout_id)
+}
 
+fn resolve_active_rollout_lineage_from_map(
+    expected_thread_id: &str,
+    active_path: &Path,
+    paths_by_rollout_id: &HashMap<String, PathBuf>,
+    history_base_offsets: &HashMap<PathBuf, u64>,
+) -> Result<Vec<PathBuf>, String> {
     let mut lineage = Vec::new();
     let mut seen = HashSet::new();
     let mut current = active_path.to_path_buf();
@@ -183,7 +371,7 @@ fn resolve_active_rollout_lineage(
             return Err(format!("cyclic_history_base: rollout_id={rollout_id}"));
         }
         let metadata = rollout_session_metadata(&current)?;
-        if metadata.id != expected_thread_id {
+        if lineage.is_empty() && metadata.id != expected_thread_id {
             return Err(format!(
                 "rollout_session_id_mismatch: expected={expected_thread_id}, actual={}",
                 metadata.id
@@ -217,10 +405,27 @@ fn resolve_active_rollout_lineage(
         let parent_len = fs::metadata(&parent)
             .map_err(|error| format!("read_history_base_metadata_failed: {error}"))?
             .len();
-        if base.end_byte_offset > parent_len {
+        let end_byte_offset = history_base_offsets
+            .get(&current)
+            .copied()
+            .unwrap_or(base.end_byte_offset);
+        if end_byte_offset > parent_len {
             return Err(format!(
                 "history_base_offset_past_end: rollout_id={}, offset={}, file_len={parent_len}",
-                base.thread_id, base.end_byte_offset
+                base.thread_id, end_byte_offset
+            ));
+        }
+        let mut file = fs::File::open(&parent)
+            .map_err(|error| format!("read_history_base_failed: {error}"))?;
+        let mut preceding = [0_u8; 1];
+        let boundary = end_byte_offset > 0
+            && file.seek(SeekFrom::Start(end_byte_offset - 1)).is_ok()
+            && file.read_exact(&mut preceding).is_ok()
+            && preceding[0] == b'\n';
+        if !boundary {
+            return Err(format!(
+                "history_base_offset_not_record_boundary: rollout_id={}, offset={}",
+                base.thread_id, end_byte_offset
             ));
         }
         current = parent;
@@ -873,18 +1078,49 @@ fn build_repair_plan_for_paths(
     projection_db: &Path,
     active_paths: &[(String, PathBuf)],
     all_rollout_paths: &[PathBuf],
+    backup_generations: &[PathBuf],
 ) -> RolloutRepairPlan {
-    let mut plan = RolloutRepairPlan::default();
+    let provider_migration = migration_recovery::build_plan(
+        projection_db,
+        active_paths,
+        all_rollout_paths,
+        backup_generations,
+    );
+    let history_base_offsets = migration_recovery::history_base_overrides(&provider_migration);
+    let mut migrated_cursor_ids = provider_migration
+        .cursor_repairs
+        .iter()
+        .map(|repair| repair.source_id.clone())
+        .collect::<HashSet<_>>();
+    migrated_cursor_ids.extend(provider_migration.blocked_cursor_ids.iter().cloned());
+    let duplicate_candidate_ids = provider_migration.duplicate_candidate_ids.clone();
+    let mut plan = RolloutRepairPlan {
+        projection_db: Some(projection_db.to_path_buf()),
+        blocked: provider_migration.blocked.clone(),
+        provider_migration,
+        ..Default::default()
+    };
+    let paths_by_rollout_id = match rollout_paths_by_id(all_rollout_paths) {
+        Ok(paths) => paths,
+        Err(error) => {
+            plan.blocked.push(error);
+            return plan;
+        }
+    };
     let mut inspected_rollouts = HashSet::new();
     for (thread_id, active_path) in active_paths {
-        let lineage =
-            match resolve_active_rollout_lineage(thread_id, active_path, all_rollout_paths) {
-                Ok(lineage) => lineage,
-                Err(error) => {
-                    plan.blocked.push(error);
-                    continue;
-                }
-            };
+        let lineage = match resolve_active_rollout_lineage_from_map(
+            thread_id,
+            active_path,
+            &paths_by_rollout_id,
+            &history_base_offsets,
+        ) {
+            Ok(lineage) => lineage,
+            Err(error) => {
+                plan.blocked.push(error);
+                continue;
+            }
+        };
         for path in lineage {
             let Some(rollout_id) = source_id_from_rollout_path(&path) else {
                 plan.blocked
@@ -892,6 +1128,12 @@ fn build_repair_plan_for_paths(
                 continue;
             };
             if !inspected_rollouts.insert(rollout_id.clone()) {
+                continue;
+            }
+            if migrated_cursor_ids.contains(&rollout_id) {
+                continue;
+            }
+            if !duplicate_candidate_ids.contains(&rollout_id) {
                 continue;
             }
             let repair = match inspect_verified_duplicate_projection_cursor(
@@ -908,20 +1150,12 @@ fn build_repair_plan_for_paths(
             };
             #[cfg(not(any(target_os = "windows", test)))]
             let _ = &repair;
-            let scan = match scan_rollout_ordinals(&path) {
-                Ok(scan) => scan,
-                Err(error) => {
-                    plan.blocked.push(error);
-                    continue;
-                }
-            };
             plan.candidates.push(RolloutRepairCandidate {
                 path,
                 source_id: rollout_id,
                 projection_db: projection_db.to_path_buf(),
                 #[cfg(any(target_os = "windows", test))]
                 repair,
-                scan,
             });
         }
     }
@@ -933,34 +1167,59 @@ fn build_repair_plan() -> Result<RolloutRepairPlan, String> {
     let Some(projection_db) = projection_db_path(&config_dir) else {
         return Ok(RolloutRepairPlan::default());
     };
-    let all_rollout_paths = collect_rollout_paths(&config_dir.join("sessions"))?;
+    let mut all_rollout_paths = collect_rollout_paths(&config_dir.join("sessions"))?;
+    all_rollout_paths.extend(collect_rollout_paths(
+        &config_dir.join("archived_sessions"),
+    )?);
+    let backup_generations = migration_recovery::configured_backup_generations();
     Ok(build_repair_plan_for_paths(
         &projection_db,
         &paths,
         &all_rollout_paths,
+        &backup_generations,
     ))
 }
 
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn inspect_paginated_history_repair() -> Result<PaginatedHistoryRepairPreflight, String>
 {
-    let plan = build_repair_plan()?;
+    let mut plan = build_repair_plan()?;
+    plan.blocked.sort();
+    plan.blocked.dedup();
+    let affected_paths = plan
+        .candidates
+        .iter()
+        .map(|candidate| candidate.path.clone())
+        .chain(
+            plan.provider_migration
+                .cursor_repairs
+                .iter()
+                .map(|repair| repair.rollout_path.clone()),
+        )
+        .chain(
+            plan.provider_migration
+                .history_base_repairs
+                .iter()
+                .map(|repair| repair.path.clone()),
+        )
+        .collect::<HashSet<_>>();
     Ok(PaginatedHistoryRepairPreflight {
-        affected_rollout_count: plan.candidates.len(),
+        affected_rollout_count: affected_paths.len(),
         duplicate_ordinal_count: plan
             .candidates
             .iter()
             .map(|candidate| candidate.repair.skipped_duplicate_count)
             .sum(),
+        provider_migration_cursor_count: plan.provider_migration.cursor_repairs.len(),
+        provider_migration_history_base_count: plan.provider_migration.history_base_repairs.len(),
         // `thread/revert` legitimately creates multiple immutable rollout files joined by
         // `history_base`. They are not damaged "rotated" files and must never be flattened.
         rotated_thread_count: 0,
         rotated_segment_count: 0,
-        affected_bytes: plan
-            .candidates
+        affected_bytes: affected_paths
             .iter()
-            .map(|candidate| candidate.scan.byte_len)
-            .sum::<u64>(),
+            .filter_map(|path| fs::metadata(path).ok().map(|metadata| metadata.len()))
+            .sum(),
         blocked_rollout_count: plan.blocked.len(),
         blocked_reason: plan.blocked.first().cloned(),
     })
@@ -970,7 +1229,59 @@ pub(crate) fn repair_paginated_history_after_codex_exit(
 ) -> Result<PaginatedHistoryRepairOutcome, String> {
     let plan = build_repair_plan()?;
     let mut outcome = PaginatedHistoryRepairOutcome::default();
+    if !plan.provider_migration.cursor_repairs.is_empty()
+        || !plan.provider_migration.history_base_repairs.is_empty()
+    {
+        let backup_root = crate::config::get_app_config_dir()
+            .join("backups")
+            .join("codex-paginated-history-migration-recovery-v1")
+            .join(format!(
+                "{}_{}_{}",
+                chrono::Local::now().format("%Y%m%d_%H%M%S"),
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|error| format!("system_time_before_unix_epoch: {error}"))?
+                    .subsec_nanos()
+            ));
+        let repaired = migration_recovery::apply_plan(
+            plan.projection_db
+                .as_deref()
+                .ok_or_else(|| "provider_migration_recovery_projection_db_missing".to_string())?,
+            &backup_root,
+            &plan.provider_migration,
+        )?;
+        outcome.repaired_provider_migration_cursor_count = repaired.repaired_cursor_count;
+        outcome.repaired_provider_migration_history_base_count =
+            repaired.repaired_history_base_count;
+        outcome.repaired_rollout_count += plan
+            .provider_migration
+            .cursor_repairs
+            .iter()
+            .map(|repair| repair.rollout_path.clone())
+            .chain(
+                plan.provider_migration
+                    .history_base_repairs
+                    .iter()
+                    .map(|repair| repair.path.clone()),
+            )
+            .collect::<HashSet<_>>()
+            .len();
+        for repair in &plan.provider_migration.cursor_repairs {
+            let scan = scan_rollout_ordinals(&repair.rollout_path)?;
+            outcome.targets.push(ProjectionCatchUpTarget {
+                source_id: repair.source_id.clone(),
+                rollout_path: repair.rollout_path.clone(),
+                minimum_next_ordinal: scan
+                    .last_original_ordinal
+                    .unwrap_or(repair.expected_ordinal.saturating_sub(1))
+                    .saturating_add(1),
+                minimum_next_byte_offset: scan.byte_len,
+            });
+        }
+    }
     for candidate in plan.candidates {
+        let scan = scan_rollout_ordinals(&candidate.path)?;
         let Some(repaired) = repair_verified_duplicate_projection_cursor(
             &candidate.projection_db,
             &candidate.source_id,
@@ -991,12 +1302,11 @@ pub(crate) fn repair_paginated_history_after_codex_exit(
         outcome.targets.push(ProjectionCatchUpTarget {
             source_id: candidate.source_id,
             rollout_path: candidate.path,
-            minimum_next_ordinal: candidate
-                .scan
+            minimum_next_ordinal: scan
                 .last_original_ordinal
                 .unwrap_or(repaired.minimum_next_ordinal.saturating_sub(1))
                 .saturating_add(1),
-            minimum_next_byte_offset: candidate.scan.byte_len,
+            minimum_next_byte_offset: scan.byte_len,
         });
     }
     Ok(outcome)
@@ -1369,6 +1679,65 @@ mod tests {
     }
 
     #[test]
+    fn active_history_base_lineage_accepts_a_different_parent_thread() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let parent_id = "01a00000-0000-7000-8000-000000000060";
+        let child_id = "01a00000-0000-7000-8000-000000000061";
+        let parent = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-00-00-{parent_id}.jsonl"));
+        let child = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-10-00-{child_id}.jsonl"));
+        write_paginated_lineage_segment(&parent, parent_id, 0, None);
+        let end = fs::metadata(&parent).unwrap().len();
+        write_paginated_lineage_segment(&child, child_id, 2, Some((parent_id, 2, end)));
+
+        assert_eq!(
+            resolve_active_rollout_lineage(child_id, &child, &[parent.clone(), child.clone()]),
+            Ok(vec![parent, child])
+        );
+    }
+
+    #[test]
+    fn active_history_base_lineage_rejects_a_cutoff_inside_a_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let id = "01a00000-0000-7000-8000-000000000062";
+        let next_id = "01a00000-0000-7000-8000-000000000063";
+        let parent = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-00-00-{id}.jsonl"));
+        let child = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-10-00-{next_id}.jsonl"));
+        write_paginated_lineage_segment(&parent, id, 0, None);
+        let before = fs::read(&parent).unwrap();
+        write_paginated_lineage_segment(&child, id, 2, Some((id, 2, before.len() as u64 - 1)));
+
+        let error = resolve_active_rollout_lineage(id, &child, &[parent.clone(), child.clone()])
+            .expect_err("a shifted byte cutoff must not be accepted");
+        assert!(
+            error.contains("history_base_offset_not_record_boundary"),
+            "{error}"
+        );
+        assert_eq!(fs::read(parent).unwrap(), before);
+    }
+
+    #[test]
+    fn active_history_base_lineage_still_rejects_a_foreign_active_thread() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let id = "01a00000-0000-7000-8000-000000000064";
+        let foreign = "01a00000-0000-7000-8000-000000000065";
+        let path = temp
+            .path()
+            .join(format!("rollout-2026-08-24T00-00-00-{id}.jsonl"));
+        write_paginated_lineage_segment(&path, foreign, 0, None);
+        let error = resolve_active_rollout_lineage(id, &path, &[path.clone()])
+            .expect_err("only ancestor identities may differ");
+        assert!(error.contains("rollout_session_id_mismatch"));
+    }
+
+    #[test]
     fn active_history_base_lineage_ignores_sibling_revert_branches() {
         let temp = tempfile::tempdir().expect("tempdir");
         let thread_id = "01a00000-0000-7000-8000-000000000030";
@@ -1449,6 +1818,7 @@ mod tests {
             &projection_db,
             &[(thread_id.to_string(), active.clone())],
             &[root, active],
+            &[],
         );
 
         assert!(plan.candidates.is_empty());
@@ -1691,6 +2061,54 @@ mod tests {
                 )
                 .expect("projection rows remain"),
             2
+        );
+    }
+
+    #[test]
+    fn provider_migration_backup_maps_an_old_record_boundary_to_current_bytes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backup = temp.path().join("backup.jsonl");
+        let current = temp.path().join("current.jsonl");
+        let old_provider = "codex_model_router_v2";
+        let new_provider = "openai";
+        let backup_text = format!(
+            "{{\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{{\"id\":\"01a00000-0000-7000-8000-000000000070\",\"history_mode\":\"paginated\",\"model_provider\":\"{old_provider}\"}}}}\n{{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\"}}}}\n"
+        );
+        let current_text = backup_text.replace(old_provider, new_provider)
+            + "{\"ordinal\":2,\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
+        fs::write(&backup, backup_text.as_bytes()).expect("backup");
+        fs::write(&current, current_text.as_bytes()).expect("current");
+
+        let mapping = map_provider_migration_boundary(&backup, &current, backup_text.len() as u64)
+            .expect("provider-only migration should be provable")
+            .expect("changed boundary");
+
+        assert_eq!(mapping.current_offset, (backup_text.len() - 15) as u64);
+        assert_eq!(mapping.changed_provider_records, 1);
+        assert_eq!(mapping.backup_end_ordinal, 1);
+    }
+
+    #[test]
+    fn history_base_rewrite_preserves_the_first_record_byte_length() {
+        let old_offset = 1_128_203_u64;
+        let new_offset = 1_128_173_u64;
+        let line = "{\"ordinal\":106,\"type\":\"session_meta\",\"payload\":{\"id\":\"01a00000-0000-7000-8000-000000000071\",\"history_mode\":\"paginated\",\"history_base\":{\"thread_id\":\"01a00000-0000-7000-8000-000000000070\",\"end_ordinal_exclusive\":106,\"end_byte_offset\":__OFFSET__}}}\n"
+            .replace("__OFFSET__", &old_offset.to_string());
+
+        let rewritten = rewrite_history_base_offset_preserving_record_len(
+            line.as_bytes(),
+            old_offset,
+            new_offset,
+        )
+        .expect("same-width offset should be repairable");
+
+        assert_eq!(rewritten.len(), line.len());
+        let value: serde_json::Value = serde_json::from_slice(&rewritten).expect("valid json");
+        assert_eq!(
+            value
+                .pointer("/payload/history_base/end_byte_offset")
+                .and_then(serde_json::Value::as_u64),
+            Some(new_offset)
         );
     }
 }

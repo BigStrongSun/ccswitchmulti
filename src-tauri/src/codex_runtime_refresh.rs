@@ -34,7 +34,7 @@ fn runtime_verification_timeout(
     let Some(history_repair) = history_repair else {
         return CODEX_RUNTIME_READY_TIMEOUT;
     };
-    if history_repair.repaired_rotated_thread_count == 0 {
+    if history_repair.targets.is_empty() {
         return CODEX_RUNTIME_READY_TIMEOUT;
     }
     let bytes = history_repair
@@ -139,6 +139,8 @@ pub struct CodexRuntimeRefreshResult {
     pub closed_process_count: usize,
     pub repaired_history_rollout_count: usize,
     pub repaired_history_duplicate_count: usize,
+    pub repaired_history_provider_migration_cursor_count: usize,
+    pub repaired_history_provider_migration_history_base_count: usize,
     pub repaired_history_rotated_thread_count: usize,
     pub repaired_history_rotated_segment_count: usize,
 }
@@ -289,6 +291,10 @@ where
         closed_process_count,
         repaired_history_rollout_count: history_repair.repaired_rollout_count,
         repaired_history_duplicate_count: history_repair.repaired_duplicate_count,
+        repaired_history_provider_migration_cursor_count: history_repair
+            .repaired_provider_migration_cursor_count,
+        repaired_history_provider_migration_history_base_count: history_repair
+            .repaired_provider_migration_history_base_count,
         repaired_history_rotated_thread_count: history_repair.repaired_rotated_thread_count,
         repaired_history_rotated_segment_count: history_repair.repaired_rotated_segment_count,
     })
@@ -1114,13 +1120,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_verification_budget_scales_for_large_projection_rebuilds() {
+    fn runtime_verification_budget_scales_for_large_projection_catch_up() {
         assert_eq!(
             runtime_verification_timeout(None),
             CODEX_RUNTIME_READY_TIMEOUT
         );
         let large_rebuild = paginated_history::PaginatedHistoryRepairOutcome {
-            repaired_rotated_thread_count: 1,
+            repaired_provider_migration_cursor_count: 1,
             targets: vec![paginated_history::ProjectionCatchUpTarget {
                 source_id: "thread".to_string(),
                 rollout_path: PathBuf::from("rollout.jsonl"),

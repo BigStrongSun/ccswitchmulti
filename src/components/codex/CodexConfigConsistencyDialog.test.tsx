@@ -57,6 +57,8 @@ vi.mock("react-i18next", () => ({
           "检测到可安全恢复的分页历史投影",
         "codexConfigConsistency.paginatedHistoryFiles": "历史文件",
         "codexConfigConsistency.duplicateOrdinals": "重复序号",
+        "codexConfigConsistency.providerMigrationCursors": "迁移游标",
+        "codexConfigConsistency.historyBaseReferences": "父段引用",
         "codexConfigConsistency.paginatedHistorySkipped":
           "其他异常历史保持原样：",
         "codexConfigConsistency.historyCompatibilityCheck":
@@ -291,6 +293,8 @@ describe("CodexConfigConsistencyDialog", () => {
             paginatedHistory: {
               affectedRolloutCount: 1,
               duplicateOrdinalCount: 3,
+              providerMigrationCursorCount: 4,
+              providerMigrationHistoryBaseCount: 2,
               affectedBytes: 1_100_000_000,
               blockedRolloutCount: 1,
               blockedReason: "unsafe_rollout_ordinal_sequence",
@@ -326,6 +330,8 @@ describe("CodexConfigConsistencyDialog", () => {
     ).toBeInTheDocument();
     expect(within(confirmation).getByText(/历史文件.*1/)).toBeInTheDocument();
     expect(within(confirmation).getByText(/重复序号.*3/)).toBeInTheDocument();
+    expect(within(confirmation).getByText(/迁移游标.*4/)).toBeInTheDocument();
+    expect(within(confirmation).getByText(/父段引用.*2/)).toBeInTheDocument();
     expect(
       within(confirmation).getByText(/其他异常历史保持原样：.*1/),
     ).toBeInTheDocument();
@@ -431,6 +437,8 @@ describe("CodexConfigConsistencyDialog", () => {
             closedProcessCount: 2,
             repairedHistoryRolloutCount: 3,
             repairedHistoryDuplicateCount: 5,
+            repairedHistoryProviderMigrationCursorCount: 4,
+            repairedHistoryProviderMigrationHistoryBaseCount: 2,
           },
         }}
         onApply={vi.fn()}
@@ -445,6 +453,8 @@ describe("CodexConfigConsistencyDialog", () => {
 
     expect(screen.getByText(/已恢复分页历史文件.*3/)).toBeInTheDocument();
     expect(screen.getByText(/重复序号.*5/)).toBeInTheDocument();
+    expect(screen.getByText(/迁移游标.*4/)).toBeInTheDocument();
+    expect(screen.getByText(/父段引用.*2/)).toBeInTheDocument();
   });
 
   it("keeps config and paginated history successful when renderer compatibility warns", () => {

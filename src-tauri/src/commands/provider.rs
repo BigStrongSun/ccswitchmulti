@@ -1263,7 +1263,7 @@ pub fn switch_codex_to_official_and_repair_history(
             Err(error) => {
                 let message = error.to_string();
                 switch_warnings.push(format!(
-                "已切回 OpenAI 官方；历史修复未完成，请完全退出 Codex/ChatGPT App 后再执行历史修复。原因: {message}"
+                "已切回 OpenAI 官方；历史修复未完成，请按具体原因处理。分页历史不支持原地迁移供应商，退出 App 后重试也不会解除此保护。原因: {message}"
             ));
                 crate::codex_history_migration::CodexHistoryProviderBucketMigrationOutcome {
                     skipped_reason: Some(

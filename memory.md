@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-09 分页历史完整性修正（隔离源码，未安装）
+
+- Provider 历史迁移不再原地改写分页历史；迁移、恢复、可见性修复统一预检 JSONL 与 SQLite，整个混合批次在首次写入前拒绝。压缩或无法确认格式的历史也拒绝，保留 legacy 支持。
+- fork 只校验活动段任务身份；祖先允许不同 ID，但 `history_base` 字节截止位置必须在记录边界，否则继续 blocked，不能显示成已修复。
+- 详见 `memory-2026-09-09-history-integrity-fix.md`。本轮未安装、重启或修复真实历史；Codex 自身序号分配问题在另一个隔离源码仓库修正。
+- CCSM 后续补齐了旧 Provider 迁移损坏的严格证据恢复：按迁移前备份逐记录映射游标与 `history_base` 字节引用，只接受 Provider 字段差异；SQLite 使用事务 CAS，JSONL 保持长度与 mtime，失败回滚，恢复备份目录拒绝覆盖。真实数据只读预检为 442 个受影响 rollout、440 个迁移游标、16 个父段引用、7 个 blocked，未应用修复。最终分页历史 23/23、广域 `codex_` 1517 passed/1 ignored、前端 17/17 和 typecheck 通过；Codex ordinal 缺陷交给官方，本次不修改或部署 Codex。
+
 ## 2026-09-09 Qwen3.8 Responses Lite `additional_tools` 运行态根修
 
 - 截图中的“正在重新连接 6/10 / high demand”只是 Codex 通用重试文案。CCSM `codex-router.log` 证明目标 session `01a08490-59cd-73d3-b831-8b6a1eb3bf16` 已正确路由到 Qwen `/v1/responses`，但每次自动压缩请求在推理前返回 HTTP 500：`'AdditionalTools' object has no attribute 'get'`；后续 521 属于服务不可用窗口，不是最初根因。
