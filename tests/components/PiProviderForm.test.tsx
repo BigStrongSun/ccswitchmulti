@@ -644,7 +644,7 @@ describe("PiProviderForm", () => {
       />,
     );
 
-    await user.click(
+    fireEvent.click(
       screen.getByRole("button", { name: "providerPreset.custom" }),
     );
     fireEvent.change(screen.getByPlaceholderText("my-provider"), {
@@ -667,9 +667,7 @@ describe("PiProviderForm", () => {
     fireEvent.change(screen.getByPlaceholderText("model-id"), {
       target: { value: "identity-model" },
     });
-    await user.click(
-      screen.getByRole("button", { name: "展开或收起模型详情" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "展开或收起模型详情" }));
     fireEvent.change(screen.getByLabelText("pi.form.contextWindow"), {
       target: { value: "128000" },
     });
@@ -677,7 +675,7 @@ describe("PiProviderForm", () => {
       target: { value: "16384" },
     });
 
-    await user.click(screen.getByRole("button", { name: "Add header" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add header" }));
     const headerName = screen.getByLabelText("Header");
     fireEvent.change(headerName, {
       target: { value: "X-Client-Name" },
@@ -686,7 +684,7 @@ describe("PiProviderForm", () => {
     fireEvent.change(screen.getByLabelText("Value"), {
       target: { value: "pi-ui" },
     });
-    await user.click(screen.getByRole("button", { name: "Save identity" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save identity" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     const config = JSON.parse(onSubmit.mock.calls[0][0].settingsConfig);
