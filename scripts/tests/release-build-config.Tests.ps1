@@ -221,6 +221,261 @@ Describe "CCSwitchMulti local release build config" {
         (Test-Path -LiteralPath $configPath) | Should Be $false
     }
 
+    It "creates each local release Cargo target inside the repository-owned cache root" {
+        . $helperPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-target-" + [guid]::NewGuid().ToString("N"))
+        [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        try {
+            $first = New-LocalReleaseCargoTargetDir -RepoRoot $fixtureRoot
+            $second = New-LocalReleaseCargoTargetDir -RepoRoot $fixtureRoot
+            $expectedRoot = [System.IO.Path]::GetFullPath((Join-Path $fixtureRoot ".tmp\local-release-cargo"))
+
+            (Split-Path -Parent $first) | Should Be $expectedRoot
+            (Split-Path -Parent $second) | Should Be $expectedRoot
+            $first | Should Not Be $second
+            (Test-Path -LiteralPath $first -PathType Container) | Should Be $true
+            (Test-Path -LiteralPath $second -PathType Container) | Should Be $true
+        } finally {
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                [System.IO.Directory]::Delete($fixtureRoot, $true)
+            }
+        }
+    }
+
+    It "removes only the selected repository-owned local release Cargo target" {
+        . $helperPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-clean-" + [guid]::NewGuid().ToString("N"))
+        [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        try {
+            [System.IO.Directory]::CreateDirectory((Join-Path $fixtureRoot "src-tauri\src")) | Out-Null
+            [System.IO.File]::WriteAllText(
+                (Join-Path $fixtureRoot "src-tauri\Cargo.toml"),
+                "[package]`nname = `"release-clean-fixture`"`nversion = `"0.1.0`"`nedition = `"2021`"`n",
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            [System.IO.File]::WriteAllText((Join-Path $fixtureRoot "src-tauri\src\lib.rs"), "pub fn fixture() {}")
+            $target = New-LocalReleaseCargoTargetDir -RepoRoot $fixtureRoot
+            $sibling = New-LocalReleaseCargoTargetDir -RepoRoot $fixtureRoot
+            [System.IO.File]::WriteAllText((Join-Path $target "artifact.bin"), "generated")
+            [System.IO.File]::WriteAllText((Join-Path $sibling "keep.bin"), "keep")
+
+            Remove-LocalReleaseCargoTargetDir -RepoRoot $fixtureRoot -TargetDir $target
+
+            (Test-Path -LiteralPath $target) | Should Be $false
+            (Test-Path -LiteralPath (Join-Path $sibling "keep.bin") -PathType Leaf) | Should Be $true
+        } finally {
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                [System.IO.Directory]::Delete($fixtureRoot, $true)
+            }
+        }
+    }
+
+    It "rejects local release Cargo cleanup outside the repository-owned cache root" {
+        . $helperPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-boundary-" + [guid]::NewGuid().ToString("N"))
+        $outside = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-outside-" + [guid]::NewGuid().ToString("N"))
+        [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        [System.IO.Directory]::CreateDirectory($outside) | Out-Null
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $outside "keep.bin"), "keep")
+
+            { Remove-LocalReleaseCargoTargetDir -RepoRoot $fixtureRoot -TargetDir $outside } |
+                Should Throw "outside the repository-owned local release Cargo cache root"
+            (Test-Path -LiteralPath (Join-Path $outside "keep.bin") -PathType Leaf) | Should Be $true
+        } finally {
+            foreach ($path in @($fixtureRoot, $outside)) {
+                if (Test-Path -LiteralPath $path) {
+                    [System.IO.Directory]::Delete($path, $true)
+                }
+            }
+        }
+    }
+
+    It "rejects local release Cargo cleanup when the repository manifest is missing" {
+        . $helperPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-manifest-" + [guid]::NewGuid().ToString("N"))
+        [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        try {
+            $target = New-LocalReleaseCargoTargetDir -RepoRoot $fixtureRoot
+            [System.IO.File]::WriteAllText((Join-Path $target "keep.bin"), "keep")
+
+            { Remove-LocalReleaseCargoTargetDir -RepoRoot $fixtureRoot -TargetDir $target } |
+                Should Throw "Cargo manifest is missing for local release cleanup"
+            (Test-Path -LiteralPath (Join-Path $target "keep.bin") -PathType Leaf) | Should Be $true
+        } finally {
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                [System.IO.Directory]::Delete($fixtureRoot, $true)
+            }
+        }
+    }
+
+    It "resolves release artifacts from an explicit Cargo target directory" {
+        . $helperPath
+
+        $tauriDir = 'C:\workspace\cc-switch\src-tauri'
+        $targetDir = 'D:\ccsm-cache\release-run'
+
+        Resolve-CargoTargetDir -TauriDir $tauriDir -RequestedTargetDir $targetDir |
+            Should Be $targetDir
+        Resolve-CargoTargetDir -TauriDir $tauriDir -RequestedTargetDir '' |
+            Should Be 'C:\workspace\cc-switch\src-tauri\target'
+    }
+
+    It "cleans the isolated Cargo target and restores the caller environment after failure" {
+        . $helperPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-lifecycle-" + [guid]::NewGuid().ToString("N"))
+        [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        [System.IO.Directory]::CreateDirectory((Join-Path $fixtureRoot "src-tauri\src")) | Out-Null
+        [System.IO.File]::WriteAllText(
+            (Join-Path $fixtureRoot "src-tauri\Cargo.toml"),
+            "[package]`nname = `"release-lifecycle-fixture`"`nversion = `"0.1.0`"`nedition = `"2021`"`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        [System.IO.File]::WriteAllText((Join-Path $fixtureRoot "src-tauri\src\lib.rs"), "pub fn fixture() {}")
+        $hadPrevious = Test-Path Env:CARGO_TARGET_DIR
+        $previous = $env:CARGO_TARGET_DIR
+        $env:CARGO_TARGET_DIR = 'D:\caller-owned-cargo-target'
+        $script:capturedReleaseTarget = $null
+        try {
+            {
+                Invoke-WithLocalReleaseCargoTarget -RepoRoot $fixtureRoot -Enabled $true -Action {
+                    param($targetDir)
+                    $script:capturedReleaseTarget = $targetDir
+                    [System.IO.File]::WriteAllText((Join-Path $targetDir "partial.bin"), "partial")
+                    throw "simulated export failure"
+                }
+            } | Should Throw "simulated export failure"
+
+            (Test-Path -LiteralPath $script:capturedReleaseTarget) | Should Be $false
+            $env:CARGO_TARGET_DIR | Should Be 'D:\caller-owned-cargo-target'
+        } finally {
+            if ($hadPrevious) {
+                $env:CARGO_TARGET_DIR = $previous
+            } else {
+                Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+            }
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                [System.IO.Directory]::Delete($fixtureRoot, $true)
+            }
+        }
+    }
+
+    It "does not create or override a Cargo target when the release build is skipped" {
+        . $helperPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-skip-target-" + [guid]::NewGuid().ToString("N"))
+        [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        $hadPrevious = Test-Path Env:CARGO_TARGET_DIR
+        $previous = $env:CARGO_TARGET_DIR
+        $env:CARGO_TARGET_DIR = 'D:\caller-owned-cargo-target'
+        try {
+            $observed = Invoke-WithLocalReleaseCargoTarget -RepoRoot $fixtureRoot -Enabled $false -Action {
+                param($targetDir)
+                [pscustomobject]@{
+                    TargetDir = $targetDir
+                    Environment = $env:CARGO_TARGET_DIR
+                }
+            }
+
+            $observed.TargetDir | Should BeNullOrEmpty
+            $observed.Environment | Should Be 'D:\caller-owned-cargo-target'
+            (Test-Path -LiteralPath (Join-Path $fixtureRoot ".tmp\local-release-cargo")) | Should Be $false
+        } finally {
+            if ($hadPrevious) {
+                $env:CARGO_TARGET_DIR = $previous
+            } else {
+                Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+            }
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                [System.IO.Directory]::Delete($fixtureRoot, $true)
+            }
+        }
+    }
+
+    It "exports release artifacts from the Cargo target selected by the environment" {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-export-target-" + [guid]::NewGuid().ToString("N"))
+        $fixtureScripts = Join-Path $fixtureRoot "scripts"
+        $fixtureTauri = Join-Path $fixtureRoot "src-tauri"
+        $cargoTarget = Join-Path $fixtureRoot ".tmp\selected-cargo-target"
+        $releaseDir = Join-Path $cargoTarget "release"
+        $bundleDir = Join-Path $releaseDir "bundle\nsis"
+        $outputRoot = Join-Path $fixtureRoot "exported"
+        $hadPreviousTarget = Test-Path Env:CARGO_TARGET_DIR
+        $previousTarget = $env:CARGO_TARGET_DIR
+        $previousUserProfile = $env:USERPROFILE
+        [System.IO.Directory]::CreateDirectory($fixtureScripts) | Out-Null
+        [System.IO.Directory]::CreateDirectory($fixtureTauri) | Out-Null
+        [System.IO.Directory]::CreateDirectory($bundleDir) | Out-Null
+        [System.IO.Directory]::CreateDirectory((Join-Path $fixtureScripts "codex-history-tool")) | Out-Null
+        try {
+            Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\export-latest-ccswitchmulti.ps1") -Destination $fixtureScripts
+            Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\release-build-config.ps1") -Destination $fixtureScripts
+            [System.IO.File]::WriteAllText(
+                (Join-Path $fixtureRoot "package.json"),
+                '{"version":"9.9.9"}',
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            [System.IO.File]::WriteAllText(
+                (Join-Path $bundleDir "CCSwitchMulti_9.9.9_x64-setup.exe"),
+                "fixture installer"
+            )
+            [System.IO.File]::WriteAllBytes(
+                (Join-Path $releaseDir "cc-switch.exe"),
+                [System.Text.Encoding]::ASCII.GetBytes("before__TAURI_BUNDLE_TYPE_VAR_UNKafter")
+            )
+            [System.IO.File]::WriteAllText(
+                (Join-Path $fixtureScripts "codex-history-tool\codex_history_tool.py"),
+                "print('fixture')",
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            $env:CARGO_TARGET_DIR = $cargoTarget
+            $env:USERPROFILE = $fixtureRoot
+
+            & (Join-Path $fixtureScripts "export-latest-ccswitchmulti.ps1") -SkipBuild -ReleaseRoot $outputRoot
+
+            (Test-Path -LiteralPath (Join-Path $outputRoot "windows\installer\CCSwitchMulti_9.9.9_x64-setup.exe") -PathType Leaf) |
+                Should Be $true
+            (Test-Path -LiteralPath (Join-Path $outputRoot "windows\raw-exe\CCSwitchMulti_9.9.9_x64.exe") -PathType Leaf) |
+                Should Be $true
+        } finally {
+            if ($hadPreviousTarget) {
+                $env:CARGO_TARGET_DIR = $previousTarget
+            } else {
+                Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+            }
+            $env:USERPROFILE = $previousUserProfile
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                [System.IO.Directory]::Delete($fixtureRoot, $true)
+            }
+        }
+    }
+
+    It "runs the local release body inside the isolated Cargo target lifecycle" {
+        $pipelinePath = Join-Path (Split-Path -Parent $helperPath) "local-release-pipeline.ps1"
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $pipelinePath,
+            [ref]$tokens,
+            [ref]$errors
+        )
+        $errors.Count | Should Be 0
+
+        $lifecycleCalls = @($ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq "Invoke-WithLocalReleaseCargoTarget"
+                }, $true))
+
+        $lifecycleCalls.Count | Should Be 1
+    }
+
     It "computes SHA256 without PowerShell utility cmdlets" {
         . $helperPath
 

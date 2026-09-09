@@ -145,7 +145,6 @@ $lockPath = Join-Path $logDir "local-release.lock"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $pipelineLockToken = $null
-$stageRoot = $null
 try {
     $pipelineLockToken = Enter-PipelineLock -LockPath $lockPath
     Push-Location $repoRoot
@@ -155,49 +154,64 @@ try {
     if ($sourceIdentity.TrackedWorktree -ne "clean") {
         throw "local release requires a clean tracked worktree; commit or stash tracked changes before building"
     }
-    $stageRoot = New-ReleaseStageRoot -ReleaseRoot $releaseRoot
-    Assert-ReleaseStagePair -StageRoot $stageRoot -ReleaseRoot $releaseRoot
 
-    Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("install", "--frozen-lockfile", "--force")
-    Assert-LocalTauriCliVersion -RepoRoot $repoRoot
-    Assert-ReleaseSourceIdentity `
-        -Expected $sourceIdentity `
-        -Actual (Get-ReleaseSourceIdentity -RepoRoot $repoRoot)
+    Invoke-WithLocalReleaseCargoTarget `
+        -RepoRoot $repoRoot `
+        -Enabled (-not $SkipBuild.IsPresent) `
+        -Action {
+        param($cargoTargetDir)
 
-    if (-not $NoTypecheck) {
-        Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("typecheck")
+        $stageRoot = $null
+        try {
+            if ($cargoTargetDir) {
+                Write-Log "Using isolated Cargo target for this release: $cargoTargetDir"
+            }
+            $stageRoot = New-ReleaseStageRoot -ReleaseRoot $releaseRoot
+            Assert-ReleaseStagePair -StageRoot $stageRoot -ReleaseRoot $releaseRoot
+
+            Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("install", "--frozen-lockfile", "--force")
+            Assert-LocalTauriCliVersion -RepoRoot $repoRoot
+            Assert-ReleaseSourceIdentity `
+                -Expected $sourceIdentity `
+                -Actual (Get-ReleaseSourceIdentity -RepoRoot $repoRoot)
+
+            if (-not $NoTypecheck) {
+                Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("typecheck")
+            }
+
+            $exportArgs = @(
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "scripts/export-latest-ccswitchmulti.ps1",
+                "-ReleaseRoot",
+                $stageRoot
+            )
+            if ($SkipBuild) {
+                $exportArgs += "-SkipBuild"
+            }
+
+            Invoke-CheckedCommand -FilePath "powershell" -Arguments $exportArgs
+            Assert-ReleaseSourceIdentity `
+                -Expected $sourceIdentity `
+                -Actual (Get-ReleaseSourceIdentity -RepoRoot $repoRoot)
+            Write-ReleaseMetadata -Root $stageRoot -Reason $Reason -Identity $sourceIdentity
+            Write-Checksums -Root $stageRoot
+            Assert-ReleaseSourceIdentity `
+                -Expected $sourceIdentity `
+                -Actual (Get-ReleaseSourceIdentity -RepoRoot $repoRoot)
+            Replace-ReleaseRootFromStage -StageRoot $stageRoot -ReleaseRoot $releaseRoot
+            $stageRoot = $null
+
+            Write-Log "Local release pipeline completed. Artifacts exported to: $releaseRoot"
+        } finally {
+            if ($stageRoot -and (Test-Path -LiteralPath $stageRoot)) {
+                Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
-
-    $exportArgs = @(
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "scripts/export-latest-ccswitchmulti.ps1",
-        "-ReleaseRoot",
-        $stageRoot
-    )
-    if ($SkipBuild) {
-        $exportArgs += "-SkipBuild"
-    }
-
-    Invoke-CheckedCommand -FilePath "powershell" -Arguments $exportArgs
-    Assert-ReleaseSourceIdentity `
-        -Expected $sourceIdentity `
-        -Actual (Get-ReleaseSourceIdentity -RepoRoot $repoRoot)
-    Write-ReleaseMetadata -Root $stageRoot -Reason $Reason -Identity $sourceIdentity
-    Write-Checksums -Root $stageRoot
-    Assert-ReleaseSourceIdentity `
-        -Expected $sourceIdentity `
-        -Actual (Get-ReleaseSourceIdentity -RepoRoot $repoRoot)
-    Replace-ReleaseRootFromStage -StageRoot $stageRoot -ReleaseRoot $releaseRoot
-    $stageRoot = $null
-
-    Write-Log "Local release pipeline completed. Artifacts exported to: $releaseRoot"
 } finally {
     Pop-Location -ErrorAction SilentlyContinue
-    if ($stageRoot -and (Test-Path -LiteralPath $stageRoot)) {
-        Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
     Exit-PipelineLock -LockPath $lockPath -Token $pipelineLockToken
 }
