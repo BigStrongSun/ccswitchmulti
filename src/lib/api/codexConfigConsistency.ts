@@ -59,6 +59,8 @@ export interface CodexRuntimeRefreshPreflight {
   paginatedHistory: {
     affectedRolloutCount: number;
     duplicateOrdinalCount: number;
+    providerMigrationCursorCount?: number;
+    providerMigrationHistoryBaseCount?: number;
     rotatedThreadCount?: number;
     rotatedSegmentCount?: number;
     affectedBytes: number;
@@ -77,6 +79,8 @@ export interface CodexRuntimeRefreshResult {
   closedProcessCount: number;
   repairedHistoryRolloutCount: number;
   repairedHistoryDuplicateCount: number;
+  repairedHistoryProviderMigrationCursorCount?: number;
+  repairedHistoryProviderMigrationHistoryBaseCount?: number;
   repairedHistoryRotatedThreadCount?: number;
   repairedHistoryRotatedSegmentCount?: number;
 }

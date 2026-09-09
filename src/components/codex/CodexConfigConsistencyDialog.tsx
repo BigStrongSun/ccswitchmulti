@@ -217,7 +217,7 @@ export function CodexConfigConsistencyDialog({
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {refresh.preflight.paginatedHistory.affectedRolloutCount > 0
-                      ? `${t("codexConfigConsistency.paginatedHistoryFiles")} ${refresh.preflight.paginatedHistory.affectedRolloutCount} · ${t("codexConfigConsistency.duplicateOrdinals")} ${refresh.preflight.paginatedHistory.duplicateOrdinalCount}`
+                      ? `${t("codexConfigConsistency.paginatedHistoryFiles")} ${refresh.preflight.paginatedHistory.affectedRolloutCount} · ${t("codexConfigConsistency.duplicateOrdinals")} ${refresh.preflight.paginatedHistory.duplicateOrdinalCount} · ${t("codexConfigConsistency.providerMigrationCursors")} ${refresh.preflight.paginatedHistory.providerMigrationCursorCount ?? 0} · ${t("codexConfigConsistency.historyBaseReferences")} ${refresh.preflight.paginatedHistory.providerMigrationHistoryBaseCount ?? 0}`
                       : refresh.preflight.paginatedHistory.blockedRolloutCount >
                           0
                         ? `${t("codexConfigConsistency.paginatedHistorySkipped")} ${refresh.preflight.paginatedHistory.blockedRolloutCount}`
@@ -280,6 +280,16 @@ export function CodexConfigConsistencyDialog({
                       {" · "}
                       {t("codexConfigConsistency.duplicateOrdinals")}{" "}
                       {refresh.preflight.paginatedHistory.duplicateOrdinalCount}
+                      {" · "}
+                      {t(
+                        "codexConfigConsistency.providerMigrationCursors",
+                      )}{" "}
+                      {refresh.preflight.paginatedHistory
+                        .providerMigrationCursorCount ?? 0}
+                      {" · "}
+                      {t("codexConfigConsistency.historyBaseReferences")}{" "}
+                      {refresh.preflight.paginatedHistory
+                        .providerMigrationHistoryBaseCount ?? 0}
                     </p>
                     {rotatedThreadCount > 0 ? (
                       <p className="mt-1 text-xs">
@@ -378,6 +388,16 @@ export function CodexConfigConsistencyDialog({
                       {" · "}
                       {t("codexConfigConsistency.duplicateOrdinals")}{" "}
                       {refresh.result?.repairedHistoryDuplicateCount}
+                      {" · "}
+                      {t(
+                        "codexConfigConsistency.providerMigrationCursors",
+                      )}{" "}
+                      {refresh.result
+                        ?.repairedHistoryProviderMigrationCursorCount ?? 0}
+                      {" · "}
+                      {t("codexConfigConsistency.historyBaseReferences")}{" "}
+                      {refresh.result
+                        ?.repairedHistoryProviderMigrationHistoryBaseCount ?? 0}
                     </p>
                   ) : null}
                 </div>

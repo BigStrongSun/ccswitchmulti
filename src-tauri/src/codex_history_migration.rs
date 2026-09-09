@@ -4065,6 +4065,21 @@ fn migration_backup_root(migration_name: &str) -> PathBuf {
         .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
 }
 
+pub(crate) fn codex_history_provider_migration_backup_parents() -> Vec<PathBuf> {
+    let backups = get_app_config_dir().join("backups");
+    [
+        MIGRATION_NAME,
+        OPENAI_HISTORY_MIGRATION_NAME,
+        MULTIROUTER_CUSTOM_HISTORY_SYNC_NAME,
+        OFFICIAL_OPENAI_HISTORY_RESTORE_NAME,
+        OFFICIAL_UNIFY_MIGRATION_NAME,
+        OFFICIAL_UNIFY_RESTORE_BACKUP_NAME,
+    ]
+    .into_iter()
+    .map(|name| backups.join(name))
+    .collect()
+}
+
 fn is_known_cc_switch_legacy_codex_model_provider_id(provider_id: &str) -> bool {
     CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS
         .iter()

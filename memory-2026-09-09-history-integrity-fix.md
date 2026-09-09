@@ -57,3 +57,40 @@
 - Built-in Web and Matrix were independently attempted. No sufficient public
   evidence resolved the exact local failure; local source and RED/GREEN tests
   establish these changes, not a claimed upstream release fix.
+
+## Provider Migration Recovery Completion
+
+- CCSM now reconstructs old-to-current record boundaries from its own
+  pre-migration backups. A candidate is accepted only when every changed record
+  differs exclusively in `session_meta.model_provider` or
+  `thread_settings_applied.model_provider_id`, and the backup boundary ordinal
+  matches the projection cursor or `history_base` contract.
+- Recovery updates `thread_history_projection_state.next_rollout_byte_offset`
+  with a transactional compare-and-set and rewrites only the first-record
+  `history_base.end_byte_offset`. The JSONL byte length and mtime are preserved;
+  current projection SQLite and every modified JSONL are backed up first, and a
+  stale cursor causes the JSONL changes to roll back.
+- Backup generations are ordered globally by generation directory name, newest
+  first. Recovery backup directories must be newly created and never overwrite
+  prior evidence. Sessions and archived sessions are both indexed, while
+  ambiguous IDs, insufficient evidence, non-provider drift, invalid boundaries,
+  and unknown states remain blocked.
+- Duplicate-ordinal repair, provider-migration cursor recovery, and parent
+  reference recovery are distinct diagnostics in the Rust result, TypeScript
+  API, dialog, tests, and all four locales. Large projection catch-up targets
+  receive a byte-scaled verification budget capped at 15 minutes.
+- Final read-only preflight against the real local corpus completed in about 16
+  seconds: 442 affected rollouts, 440 provider-migration cursors, 16 parent
+  references, 4,897,657,672 affected bytes, and 7 blocked findings. The first
+  blocked finding was
+  `history_base_offset_not_record_boundary: rollout_id=01a04e4f-55be-7463-98ca-d5d8fb1cd158, offset=13809762`.
+- Final isolated verification used a worktree-exclusive Cargo target after an
+  unrelated worktree ran `cargo clean`: rustfmt and clean `cargo check`; 23/23
+  paginated-history tests; 1/1 large catch-up budget test; 1517 passed and 1
+  existing ignored `codex_` test; frontend typecheck; and 17/17 focused Vitest
+  tests. Strict UTF-8 and final diff checks are delivery gates.
+- This completes the CCSM source recovery capability only. No real rollout,
+  SQLite database, config, installed binary, or running Codex/CCSM process was
+  modified. No recovery was applied, no package was installed, and no process
+  was restarted. The Codex ordinal defect is left to the official project and
+  is not part of this CCSM delivery.
