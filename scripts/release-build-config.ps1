@@ -68,9 +68,17 @@ function Remove-LocalReleaseCargoTargetDir {
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw "Cargo manifest is missing for local release cleanup: $manifestPath"
     }
-    & cargo clean --manifest-path $manifestPath --target-dir $targetFull 2>&1 |
-        ForEach-Object { Write-Host ([string]$_) }
-    $cargoExitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 turns native stderr into error records. Cargo
+        # writes successful cleanup progress there, so inspect its exit code.
+        $ErrorActionPreference = "Continue"
+        & cargo clean --manifest-path $manifestPath --target-dir $targetFull 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $cargoExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($cargoExitCode -ne 0) {
         throw "cargo clean failed with exit code $cargoExitCode for local release target: $targetFull"
     }

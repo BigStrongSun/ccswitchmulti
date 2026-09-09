@@ -272,6 +272,75 @@ Describe "CCSwitchMulti local release build config" {
         }
     }
 
+    It "treats Cargo cleanup progress on stderr as success under stop semantics" {
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-clean-stop-" + [guid]::NewGuid().ToString("N"))
+        [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        try {
+            [System.IO.Directory]::CreateDirectory((Join-Path $fixtureRoot "src-tauri\src")) | Out-Null
+            [System.IO.File]::WriteAllText(
+                (Join-Path $fixtureRoot "src-tauri\Cargo.toml"),
+                "[package]`nname = `"release-clean-stop-fixture`"`nversion = `"0.1.0`"`nedition = `"2021`"`n",
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            [System.IO.File]::WriteAllText((Join-Path $fixtureRoot "src-tauri\src\lib.rs"), "pub fn fixture() {}")
+            $target = Join-Path $fixtureRoot ".tmp\local-release-cargo\run-fixture"
+            [System.IO.Directory]::CreateDirectory($target) | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $target "artifact.bin"), "generated")
+            $scriptPath = Join-Path $fixtureRoot "cleanup.ps1"
+            $scriptBody = @"
+`$ErrorActionPreference = "Stop"
+. '$($helperPath.Replace("'", "''"))'
+Remove-LocalReleaseCargoTargetDir -RepoRoot '$($fixtureRoot.Replace("'", "''"))' -TargetDir '$($target.Replace("'", "''"))'
+"@
+            [System.IO.File]::WriteAllText($scriptPath, $scriptBody, [System.Text.UTF8Encoding]::new($false))
+
+            $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+            $output = & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath 2>&1
+            $exitCode = $LASTEXITCODE
+
+            $exitCode | Should Be 0
+            (Test-Path -LiteralPath $target) | Should Be $false
+        } finally {
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                [System.IO.Directory]::Delete($fixtureRoot, $true)
+            }
+        }
+    }
+
+    It "still rejects a real nonzero Cargo cleanup exit" {
+        . $helperPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-clean-fail-" + [guid]::NewGuid().ToString("N"))
+        $fakeBin = Join-Path $fixtureRoot "bin"
+        $target = Join-Path $fixtureRoot ".tmp\local-release-cargo\run-fixture"
+        [System.IO.Directory]::CreateDirectory((Join-Path $fixtureRoot "src-tauri")) | Out-Null
+        [System.IO.Directory]::CreateDirectory($fakeBin) | Out-Null
+        [System.IO.Directory]::CreateDirectory($target) | Out-Null
+        [System.IO.File]::WriteAllText(
+            (Join-Path $fixtureRoot "src-tauri\Cargo.toml"),
+            "[package]`nname = `"release-clean-fail-fixture`"`nversion = `"0.1.0`"`nedition = `"2021`"`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        [System.IO.File]::WriteAllText(
+            (Join-Path $fakeBin "cargo.cmd"),
+            "@echo simulated cargo failure 1>&2`r`n@exit /b 7`r`n",
+            [System.Text.Encoding]::ASCII
+        )
+        $previousPath = $env:PATH
+        try {
+            $env:PATH = "$fakeBin;$previousPath"
+
+            { Remove-LocalReleaseCargoTargetDir -RepoRoot $fixtureRoot -TargetDir $target } |
+                Should Throw "cargo clean failed with exit code 7 for local release target: $target"
+            (Test-Path -LiteralPath $target -PathType Container) | Should Be $true
+        } finally {
+            $env:PATH = $previousPath
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                [System.IO.Directory]::Delete($fixtureRoot, $true)
+            }
+        }
+    }
+
     It "rejects local release Cargo cleanup outside the repository-owned cache root" {
         . $helperPath
 

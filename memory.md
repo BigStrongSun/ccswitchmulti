@@ -6,6 +6,7 @@
 - fork 只校验活动段任务身份；祖先允许不同 ID，但 `history_base` 字节截止位置必须在记录边界，否则继续 blocked，不能显示成已修复。
 - 详见 `memory-2026-09-09-history-integrity-fix.md`。本轮未安装、重启或修复真实历史；Codex 自身序号分配问题在另一个隔离源码仓库修正。
 - CCSM 后续补齐了旧 Provider 迁移损坏的严格证据恢复：按迁移前备份逐记录映射游标与 `history_base` 字节引用，只接受 Provider 字段差异；SQLite 使用事务 CAS，JSONL 保持长度与 mtime，失败回滚，恢复备份目录拒绝覆盖。真实数据只读预检为 442 个受影响 rollout、440 个迁移游标、16 个父段引用、7 个 blocked，未应用修复。最终分页历史 23/23、广域 `codex_` 1517 passed/1 ignored、前端 17/17 和 typecheck 通过；Codex ordinal 缺陷交给官方，本次不修改或部署 Codex。
+- `v3.20.2-1` 候选首次使用隔离 Cargo target 的真实 post-commit release 时，3.1 GiB target 已被 `cargo clean` 删除，但 Windows PowerShell 5.1 在全局 `ErrorActionPreference=Stop` 下把 Cargo 写到 stderr 的正常 `Removed ...` 进度提升为 `NativeCommandError`，误记为 cleanup failed。根修仅在 native 命令合流期间局部使用 Continue，随后仍严格检查真实退出码并恢复原偏好；独立 PowerShell 5.1 子进程回归先稳定 exit 1，再修复为 exit 0，完整 release Pester 为 34/34。
 
 ## 2026-09-09 3.20.2、Trace 与 Qwen 修复同步到 fork/main
 
