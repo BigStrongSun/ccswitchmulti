@@ -9,6 +9,8 @@
 - 外部事实用 Codex 内置 Web 与 Matrix WebSearch 独立核对。OpenAI 官方模型文档和 `openai/codex` 当前 `models.json` 都确认 Astra 存在；Matrix 搜索无结果，但直接打开官方 raw `models.json` 得到同一条目。CCSM 错误根因仍以本地源码、0.147.0 bundled 输出和 RED→GREEN 为准。
 - TDD 红灯分别稳定得到工作流 `failed` 而非 `action_required`、对话框错误文案以及缺少 packaged catalog 的 Rust 编译错误；实现后前端聚焦 114/114、全量前端 188 文件 1559/1559、Rust library 4083 passed/7 ignored、全部独立 Rust 集成目标、Rust packaged 2/2、official merge 2/2、OAuth model parser 9/9、Pester 30/30、`cargo check --all-targets`、CI 同口径 Clippy、typecheck、renderer build、Prettier、rustfmt、diff 和 19 个 release delta 文本的严格 UTF-8 校验均通过。
 - 溯源：功能提交 `dcb0291f`，no-FF 合入 `main` 为 `8ac3e419`，`v3.20.2-2` 发布准备为 `a9bf7944`，Prettier 收尾为 `5cca3b8`；后续发布状态以 `fork/main`、tag 和 GitHub Release 实际产物为准。未安装、停止或重启 CCSM/Codex，未操作 `127.0.0.1:15721`。
+- `v3.20.2-2` annotated tag object `95792f18` 已推送，peel 为发布合并提交 `70d1aa80`。首轮 main CI `34463591980` 仅 Windows backend 失败：普通 JSONL 迁移测试与 `#[serial]` 的路径测试仍可并行，后者短暂修改进程级 `CODEX_SQLITE_HOME`，使前者预检到另一个测试故意创建的伪 SQLite 并报 `file is not a database`；macOS、Ubuntu 和 frontend 均成功。
+- 根修提交 `ecd56eda` 只改变 `#[cfg(test)]`：把 `CODEX_SQLITE_HOME` 测试覆盖改为线程本地三态注入，生产环境变量读取不变，因此 tag 中生产二进制不受该 CI 测试竞态影响。TDD 新用例旧实现 1/1 稳定失败；修复后相关路径 6/6、原失败测试 1/1、串行全量 Rust 4084 passed/7 ignored、Clippy `-D warnings`、rustfmt、diff 和严格 UTF-8 均通过。该提交需推送 `main` 并以新 CI Windows job 验证。
 
 ## 2026-09-10 CCSwitchMulti v3.20.2-1 正式发布
 
