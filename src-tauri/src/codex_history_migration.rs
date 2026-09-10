@@ -4661,8 +4661,25 @@ fn sqlite_home_from_codex_config(config_text: &str) -> Option<PathBuf> {
     Some(resolve_user_path(raw))
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_CODEX_SQLITE_HOME_OVERRIDE: std::cell::RefCell<Option<Option<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn sqlite_home_from_env() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(override_value) =
+        TEST_CODEX_SQLITE_HOME_OVERRIDE.with(|value| value.borrow().clone())
+    {
+        return override_value.and_then(|raw| sqlite_home_from_raw(&raw));
+    }
+
     let raw = std::env::var("CODEX_SQLITE_HOME").ok()?;
+    sqlite_home_from_raw(&raw)
+}
+
+fn sqlite_home_from_raw(raw: &str) -> Option<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
@@ -4932,38 +4949,50 @@ mod tests {
     use crate::codex_state_db::CODEX_STATE_DB_FILENAME;
     use crate::provider::Provider;
     use serial_test::serial;
-    use std::ffi::OsString;
     use tempfile::tempdir;
 
     struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
+        previous: Option<Option<String>>,
     }
 
     impl EnvVarGuard {
         /// 临时设置环境变量，并在测试结束时恢复原值。
         fn set(key: &'static str, value: &Path) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
+            assert_eq!(key, "CODEX_SQLITE_HOME");
+            let value = value.to_string_lossy().into_owned();
+            let previous =
+                TEST_CODEX_SQLITE_HOME_OVERRIDE.with(|slot| slot.replace(Some(Some(value))));
+            Self { previous }
         }
 
         /// 临时移除环境变量，避免外部开发机环境影响路径优先级断言。
         fn remove(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::remove_var(key);
-            Self { key, previous }
+            assert_eq!(key, "CODEX_SQLITE_HOME");
+            let previous = TEST_CODEX_SQLITE_HOME_OVERRIDE.with(|slot| slot.replace(Some(None)));
+            Self { previous }
         }
     }
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            if let Some(previous) = &self.previous {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
+            TEST_CODEX_SQLITE_HOME_OVERRIDE.with(|slot| {
+                slot.replace(self.previous.clone());
+            });
         }
+    }
+
+    #[test]
+    #[serial]
+    fn codex_sqlite_home_test_override_does_not_leak_to_parallel_tests() {
+        let dir = tempdir().expect("tempdir");
+        let sqlite_home = dir.path().join("sqlite-home");
+        let _guard = EnvVarGuard::set("CODEX_SQLITE_HOME", &sqlite_home);
+
+        let observed = std::thread::spawn(sqlite_home_from_env)
+            .join()
+            .expect("read sqlite home from another test thread");
+
+        assert_ne!(observed, Some(sqlite_home));
     }
 
     fn source_ids(values: &[&str]) -> BTreeSet<String> {
