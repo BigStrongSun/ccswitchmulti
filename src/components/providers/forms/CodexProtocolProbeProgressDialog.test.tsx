@@ -925,6 +925,32 @@ describe("CodexProtocolProbeProgressDialog", () => {
     expect(screen.getAllByText("未返回探测结果")).toHaveLength(2);
   });
 
+  it("describes a missing manual protocol as an unapplied configuration instead of a failed probe", () => {
+    render(
+      <CodexProtocolProbeProgressDialog
+        open
+        running={false}
+        actionRequired
+        expectedModels={["qwen3.8"]}
+        events={[]}
+        outcome={null}
+        error="codex_provider_set_manual_intent_required"
+        onOpenChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("未执行新的探测；配置未应用。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "当前是手动协议模式，但尚未选择 Responses 或 Chat Completions。关闭可跳过本次应用，选择协议后可直接保存，无需重复探测。",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/探测未完成/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/探测中断/)).not.toBeInTheDocument();
+  });
+
   it.each([
     [401, "HTTP 401 · 认证失败"],
     [403, "HTTP 403 · 当前凭据无权限"],

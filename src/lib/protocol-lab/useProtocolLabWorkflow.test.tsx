@@ -111,6 +111,37 @@ describe("useProtocolLabWorkflow", () => {
     expect(result.current.state.errorCode).toBe("projection_pending");
   });
 
+  it("keeps completed probe evidence when manual protocol selection blocks prepare", async () => {
+    const adapter = createAdapter({
+      prepare: vi.fn(async () => {
+        throw new Error("codex_provider_set_manual_intent_required");
+      }),
+      errorCode: (error) =>
+        error instanceof Error &&
+        error.message === "codex_provider_set_manual_intent_required"
+          ? "manual_intent_required"
+          : undefined,
+    });
+    const { result } = renderHook(() => useProtocolLabWorkflow(adapter));
+    let savePromise!: Promise<string>;
+
+    act(() => {
+      savePromise = result.current.save({ id: "provider-one" });
+      savePromise.catch(() => undefined);
+    });
+    await act(async () => {
+      await result.current.confirmProbe();
+    });
+
+    expect(result.current.probeOutcome).toBe("probe-outcome");
+    expect(result.current.state.receiptIds).toEqual(["receipt-one"]);
+    expect(result.current.state.phase).toBe("action_required");
+    expect(result.current.state.errorCode).toBe("manual_intent_required");
+
+    act(() => result.current.cancel());
+    await expect(savePromise).rejects.toBeInstanceOf(ProtocolLabCancelled);
+  });
+
   it("resets stale probe output and rejects an active operation", async () => {
     const adapter = createAdapter();
     const { result } = renderHook(() => useProtocolLabWorkflow(adapter));

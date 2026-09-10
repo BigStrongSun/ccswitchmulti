@@ -180,6 +180,13 @@ export function protocolLabReducer<
         errorCode: "dependency_changed_twice",
         errorDetail: null,
       };
+    case "action_required":
+      return {
+        ...state,
+        phase: "action_required",
+        errorCode: event.errorCode,
+        errorDetail: event.detail,
+      };
     case "failed":
       return {
         ...state,

@@ -172,6 +172,7 @@ export function useProtocolLabWorkflow<
       finish(operation, result.outcome);
     } catch (error) {
       if (activeOperation.current !== operation) return;
+      const errorCode = adapter.errorCode?.(error);
       if (adapter.isDependencyChanged(error)) {
         transition({ type: "dependency_changed" });
         if (staleRetryCount === 0) {
@@ -180,9 +181,17 @@ export function useProtocolLabWorkflow<
           return;
         }
       }
+      if (errorCode === "manual_intent_required") {
+        transition({
+          type: "action_required",
+          errorCode,
+          detail: errorDetail(error),
+        });
+        return;
+      }
       transition({
         type: "failed",
-        errorCode: adapter.errorCode?.(error),
+        errorCode,
         detail: errorDetail(error),
       });
     }
