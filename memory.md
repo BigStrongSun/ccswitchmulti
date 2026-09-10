@@ -10,7 +10,8 @@
 - TDD 红灯分别稳定得到工作流 `failed` 而非 `action_required`、对话框错误文案以及缺少 packaged catalog 的 Rust 编译错误；实现后前端聚焦 114/114、全量前端 188 文件 1559/1559、Rust library 4083 passed/7 ignored、全部独立 Rust 集成目标、Rust packaged 2/2、official merge 2/2、OAuth model parser 9/9、Pester 30/30、`cargo check --all-targets`、CI 同口径 Clippy、typecheck、renderer build、Prettier、rustfmt、diff 和 19 个 release delta 文本的严格 UTF-8 校验均通过。
 - 溯源：功能提交 `dcb0291f`，no-FF 合入 `main` 为 `8ac3e419`，`v3.20.2-2` 发布准备为 `a9bf7944`，Prettier 收尾为 `5cca3b8`；后续发布状态以 `fork/main`、tag 和 GitHub Release 实际产物为准。未安装、停止或重启 CCSM/Codex，未操作 `127.0.0.1:15721`。
 - `v3.20.2-2` annotated tag object `95792f18` 已推送，peel 为发布合并提交 `70d1aa80`。首轮 main CI `34463591980` 仅 Windows backend 失败：普通 JSONL 迁移测试与 `#[serial]` 的路径测试仍可并行，后者短暂修改进程级 `CODEX_SQLITE_HOME`，使前者预检到另一个测试故意创建的伪 SQLite 并报 `file is not a database`；macOS、Ubuntu 和 frontend 均成功。
-- 根修提交 `ecd56eda` 只改变 `#[cfg(test)]`：把 `CODEX_SQLITE_HOME` 测试覆盖改为线程本地三态注入，生产环境变量读取不变，因此 tag 中生产二进制不受该 CI 测试竞态影响。TDD 新用例旧实现 1/1 稳定失败；修复后相关路径 6/6、原失败测试 1/1、串行全量 Rust 4084 passed/7 ignored、Clippy `-D warnings`、rustfmt、diff 和严格 UTF-8 均通过。该提交需推送 `main` 并以新 CI Windows job 验证。
+- 根修提交 `ecd56eda` 只改变 `#[cfg(test)]`：把 `CODEX_SQLITE_HOME` 测试覆盖改为线程本地三态注入，生产环境变量读取不变，因此 tag 中生产二进制不受该 CI 测试竞态影响。TDD 新用例旧实现 1/1 稳定失败；修复后相关路径 6/6、原失败测试 1/1、串行全量 Rust 4084 passed/7 ignored、Clippy `-D warnings`、rustfmt、diff 和严格 UTF-8 均通过。记录提交 `4f0ee108` 后推送 `fork/main`，新 CI `34465941642` 的 Frontend、Windows、Ubuntu、macOS 全部 success。
+- 正式 Release run `34463636414` 全部 success；GitHub Release 是 Latest、非 draft/prerelease，共 19 个资产。全部下载到 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.20.2-2-github-verify-20260910` 后，19/19 size 与 GitHub digest、本地 SHA-256 一致；`latest.json` SHA-256 为 `528269bd...c0b89`，版本正确、六个平台 URL 均指向本 tag、6/6 signature 匹配对应 `.sig`。当前 workflow 不发布 `SHA256SUMS.txt`，也没有本 tag 的 R2 sync run；完整审计见 `docs/audits/2026-09-10-v3.20.2-2-release-execution.md`。
 
 ## 2026-09-10 CCSwitchMulti v3.20.2-1 正式发布
 

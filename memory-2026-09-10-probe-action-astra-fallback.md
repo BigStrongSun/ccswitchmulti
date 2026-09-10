@@ -42,6 +42,6 @@ API 产品页显示的 1,050,000 总上下文与 Codex picker 的 context/max �
 - `v3.20.2-2` 版本与发布说明：`a9bf7944`；Prettier 格式收尾：`5cca3b8`。
 - 当前待把发布分支 `bigstrongsun/release-v3.20.2-2` 合回 `main`，再推送 `fork`、创建并推送 annotated tag `v3.20.2-2`，以触发 GitHub Release 工作流。
 
-发布分支已由 `70d1aa80` 合入并推送 `main`；annotated tag object `95792f18` peel 为该提交。tag 后首轮 main CI 的 Windows backend 暴露进程级 `CODEX_SQLITE_HOME` 测试覆盖会泄漏到普通并行测试，根修 `ecd56eda` 改用仅测试态的线程本地覆盖，生产读取语义和 tag 二进制均不变。修复后串行全量 Rust 4084 passed/7 ignored，等待新 main CI 与 tag Release 最终状态。
+发布分支已由 `70d1aa80` 合入并推送 `main`；annotated tag object `95792f18` peel 为该提交。tag 后首轮 main CI 的 Windows backend 暴露进程级 `CODEX_SQLITE_HOME` 测试覆盖会泄漏到普通并行测试，根修 `ecd56eda` 改用仅测试态的线程本地覆盖，生产读取语义和 tag 二进制均不变。修复后串行全量 Rust 4084 passed/7 ignored，新 main CI `34465941642` 四个 job 全部 success。Release run `34463636414` 全部 success，19/19 资产 digest 与本地 SHA-256 一致，`latest.json` 六个平台和签名 6/6 通过；完整记录见 `docs/audits/2026-09-10-v3.20.2-2-release-execution.md`。
 
 本轮源代码验证没有安装、替换或重启本机应用，也没有触碰真实 Provider、历史、SQLite、代理监听或 `127.0.0.1:15721`。
