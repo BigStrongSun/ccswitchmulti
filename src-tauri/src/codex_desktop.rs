@@ -1149,6 +1149,25 @@ fn history_lineage_hydration_core_script() -> &'static str {
 "#
 }
 
+/// Locate the current app-server request client from Codex's cached signal
+/// module. The signal getter can replace its client without replacing the
+/// module object, so this function must run on every lightweight heartbeat.
+/// Kept as an executable core so the replacement behavior is regression-tested.
+fn app_server_module_client_discovery_core_script() -> &'static str {
+    r#"
+  const patchAppServerModuleClients = (module) => {
+    let patched = 0;
+    for (const candidate of Object.values(module || {}).filter((item) => item && typeof item === "object")) {
+      if (patchRequestClient(candidate)) patched += 1;
+      if (typeof candidate.sendRequest !== "function" && typeof candidate.get === "function") {
+        try { if (patchRequestClient(candidate.get())) patched += 1; } catch {}
+      }
+    }
+    return patched;
+  };
+"#
+}
+
 /// 构造 renderer 注入脚本：触发新版本地历史目录同步，并修复模型白名单和缓存。
 fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> String {
     let payload = serde_json::to_string(catalog).unwrap_or_else(|_| "{}".to_string());
@@ -1156,6 +1175,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     let guardian_v2_patch_core = guardian_v2_compatibility_patch_core_script();
     let request_normalization_core = app_server_request_normalization_core_script();
     let history_lineage_hydration_core = history_lineage_hydration_core_script();
+    let module_client_discovery_core = app_server_module_client_discovery_core_script();
     format!(
         r#"
 (async () => {{
@@ -1166,6 +1186,21 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   state.requestIds = state.requestIds || new Set();
   state.modulePromises = state.modulePromises || new Map();
   state.failures = state.failures || [];
+  const rendererSchedulerVersion = "2";
+  if (state.rendererSchedulerVersion !== rendererSchedulerVersion) {{
+    if (state.interval) clearInterval(state.interval);
+    try {{ state.reactRootObserver?.disconnect(); }} catch {{}}
+    state.interval = null;
+    state.runPromise = null;
+    state.reactRootObserver = null;
+    state.reactDiscoveryPromise = null;
+    state.pendingReactNodes = new Set();
+    state.lastReactFullScanAt = 0;
+    state.lastReactIncrementalScanAt = 0;
+    state.rendererSchedulerVersion = rendererSchedulerVersion;
+  }}
+  state.pendingReactNodes = state.pendingReactNodes || new Set();
+  state.historyManagerCandidates = state.historyManagerCandidates || new Set();
   const recordFailure = (error) => {{
     const message = String(error?.message || error);
     if (state.failures.at(-1) !== message) state.failures.push(message);
@@ -1176,6 +1211,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
 {guardian_v2_patch_core}
 {request_normalization_core}
 {history_lineage_hydration_core}
+{module_client_discovery_core}
   const patchStatsigConfig = (name, config, repairLegacyPollution = false) => {{
     const prepared = prepareStatsigDynamicConfig(name, config, repairLegacyPollution);
     config = prepared.config;
@@ -1408,117 +1444,207 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       return false;
     }}
   }};
-  const reactRoots = () => {{
-    const root = document.getElementById("root") || document.body;
-    const nodes = [root, ...document.querySelectorAll("*")].filter(Boolean);
-    const values = [];
-    const seen = new Set();
-    for (const node of nodes) {{
-      for (const key of Object.keys(node || {{}})) {{
-        if (!key.startsWith("__reactContainer") && !key.startsWith("__reactFiber") && !key.startsWith("__reactInternalInstance")) continue;
-        const value = node[key];
-        if (value && !seen.has(value)) {{
-          seen.add(value);
-          values.push(value);
-        }}
+  const reactRootValue = (value) => {{
+    let current = value;
+    let hops = 0;
+    try {{
+      while (current?.return && hops < 2048) {{
+        current = current.return;
+        hops += 1;
+      }}
+    }} catch {{}}
+    return current || value;
+  }};
+  const appendReactRootsFromNode = (node, values, seen) => {{
+    for (const key of Object.keys(node || {{}})) {{
+      if (!key.startsWith("__reactContainer") && !key.startsWith("__reactFiber") && !key.startsWith("__reactInternalInstance")) continue;
+      const value = reactRootValue(node[key]);
+      if (value && !seen.has(value)) {{
+        seen.add(value);
+        values.push(value);
       }}
     }}
-    return values;
   }};
-  const patchReactAppServerClients = () => {{
-    const queue = reactRoots().map((value) => ({{ value, depth: 0 }}));
-    const seen = new Set();
-    let cursor = 0;
-    let patched = 0;
-    while (cursor < queue.length && seen.size < 140000) {{
-      const {{ value, depth }} = queue[cursor++];
-      if (!value || (typeof value !== "object" && typeof value !== "function") || seen.has(value)) continue;
-      seen.add(value);
-
-      if (looksLikeAppServerRequestClient(value) && patchRequestClient(value)) patched += 1;
-      const nestedClient = value?.requestClient;
-      if (looksLikeAppServerRequestClient(nestedClient) && patchRequestClient(nestedClient)) {{
-        patched += 1;
-        if (!state.historyQueryRefreshPromise && typeof value?.threadStore?.refreshRecentConversations === "function") {{
-          state.historyQueryRefreshPromise = Promise.resolve().then(() =>
-            value.threadStore.refreshRecentConversations({{ mode: "expanded" }})
-          ).then(() => {{
-            state.historyQueryRefreshCompleted = true;
-          }}).catch((error) => {{
-            state.historyQueryRefreshPromise = null;
-            state.historyQueryRefreshCompleted = false;
-            recordFailure(error);
-            throw error;
-          }});
+  const initialReactNodes = () => [
+    document.getElementById("root") || document.body,
+    document.documentElement,
+  ].filter(Boolean);
+  const drainPendingReactNodes = () => {{
+    const pending = Array.from(state.pendingReactNodes || []);
+    state.pendingReactNodes.clear();
+    return pending;
+  }};
+  const scheduleHistoryLineageHydration = (manager) => {{
+    if (!state.historyQueryRefreshCompleted
+        || state.historyLineageHydrationPromise
+        || state.historyLineageHydrationCompleted
+        || typeof manager?.getCachedConversations !== "function"
+        || typeof manager?.getConversation !== "function"
+        || typeof manager?.updateConversationState !== "function"
+        || typeof manager?.setConversation !== "function"
+        || typeof manager?.resumeConversationForUnavailableOwner !== "function") return;
+    const wallNow = Date.now();
+    if (wallNow < (state.historyLineageHydrationRetryAt || 0)) return;
+    state.historyLineageHydrationRetryAt = wallNow + 30000;
+    state.historyLineageHydrationPromise = Promise.resolve()
+      .then(() => rehydrateStaleHistoryLineages(manager))
+      .then((result) => {{
+        state.historyLineageHydration = result;
+        for (const failure of result.failed || []) recordFailure(failure.error);
+        state.historyLineageHydrationCompleted = (result.deferred || []).length === 0 && (result.failed || []).length === 0;
+        if (state.historyLineageHydrationCompleted) state.historyManagerCandidates.clear();
+        return result;
+      }})
+      .catch((error) => {{
+        state.historyLineageHydration = {{ repaired: [], deferred: [], failed: [{{ error: String(error?.message || error) }}] }};
+        recordFailure(error);
+      }})
+      .finally(() => {{ state.historyLineageHydrationPromise = null; }});
+  }};
+  const yieldReactDiscovery = () => new Promise((resolve) => {{
+    if (typeof globalThis.requestIdleCallback === "function") {{
+      globalThis.requestIdleCallback(() => resolve(), {{ timeout: 50 }});
+    }} else {{
+      setTimeout(resolve, 0);
+    }}
+  }});
+  const monotonicNow = () => typeof performance?.now === "function" ? performance.now() : Date.now();
+  const patchReactAppServerClients = async (startingNodes) => {{
+    if (state.reactDiscoveryPromise) return await state.reactDiscoveryPromise;
+    state.reactDiscoveryPromise = (async () => {{
+      const roots = [];
+      const rootSeen = new Set();
+      const nodeQueue = startingNodes.filter(Boolean);
+      let nodeCursor = 0;
+      while (nodeCursor < nodeQueue.length) {{
+        const sliceDeadline = monotonicNow() + 4;
+        let sliceCount = 0;
+        while (nodeCursor < nodeQueue.length && sliceCount < 800 && monotonicNow() < sliceDeadline) {{
+          sliceCount += 1;
+          const node = nodeQueue[nodeCursor++];
+          appendReactRootsFromNode(node, roots, rootSeen);
+          try {{
+            for (const child of Array.from(node?.childNodes || [])) nodeQueue.push(child);
+          }} catch {{}}
         }}
-        if (state.historyQueryRefreshCompleted
-            && !state.historyLineageHydrationPromise
-            && typeof value?.getCachedConversations === "function"
-            && typeof value?.getConversation === "function"
-            && typeof value?.updateConversationState === "function"
-            && typeof value?.setConversation === "function"
-            && typeof value?.resumeConversationForUnavailableOwner === "function") {{
-          state.historyLineageHydrationPromise = Promise.resolve()
-            .then(() => rehydrateStaleHistoryLineages(value))
-            .then((result) => {{
-              state.historyLineageHydration = result;
-              for (const failure of result.failed || []) recordFailure(failure.error);
-              return result;
-            }})
-            .catch((error) => {{
-              state.historyLineageHydration = {{ repaired: [], deferred: [], failed: [{{ error: String(error?.message || error) }}] }};
-              recordFailure(error);
-            }})
-            .finally(() => {{ state.historyLineageHydrationPromise = null; }});
-        }}
+        if (nodeCursor < nodeQueue.length) await yieldReactDiscovery();
       }}
 
-      if (depth >= 14) continue;
-      let descriptors = {{}};
-      try {{ descriptors = Object.getOwnPropertyDescriptors(value); }} catch {{}}
-      for (const [key, descriptor] of Object.entries(descriptors)) {{
-        if (!["window", "ownerDocument", "parentNode", "parentElement", "nextSibling", "previousSibling"].includes(key) && "value" in descriptor) {{
-          const child = descriptor.value;
-          if (child && ((typeof child === "object" && !(typeof Node !== "undefined" && child instanceof Node)) || typeof child === "function")) {{
-            queue.push({{ value: child, depth: depth + 1 }});
+      const queue = roots.map((value) => ({{ value, depth: 0 }}));
+      const seen = new Set();
+      let cursor = 0;
+      let patched = 0;
+      while (cursor < queue.length && seen.size < 140000) {{
+        const sliceDeadline = monotonicNow() + 4;
+        let sliceCount = 0;
+        while (cursor < queue.length && seen.size < 140000 && sliceCount < 800 && monotonicNow() < sliceDeadline) {{
+          sliceCount += 1;
+          const {{ value, depth }} = queue[cursor++];
+          if (!value || (typeof value !== "object" && typeof value !== "function") || seen.has(value)) continue;
+          seen.add(value);
+
+          if (looksLikeAppServerRequestClient(value) && patchRequestClient(value)) patched += 1;
+          const nestedClient = value?.requestClient;
+          if (looksLikeAppServerRequestClient(nestedClient) && patchRequestClient(nestedClient)) {{
+            patched += 1;
+            if (state.historyManagerCandidates.size >= 8 && !state.historyManagerCandidates.has(value)) state.historyManagerCandidates.clear();
+            state.historyManagerCandidates.add(value);
+            if (!state.historyQueryRefreshPromise && !state.historyQueryRefreshCompleted && typeof value?.threadStore?.refreshRecentConversations === "function") {{
+              state.historyQueryRefreshPromise = Promise.resolve().then(() =>
+                value.threadStore.refreshRecentConversations({{ mode: "expanded" }})
+              ).then(() => {{
+                state.historyQueryRefreshCompleted = true;
+              }}).catch((error) => {{
+                state.historyQueryRefreshPromise = null;
+                state.historyQueryRefreshCompleted = false;
+                recordFailure(error);
+                throw error;
+              }});
+            }}
+            scheduleHistoryLineageHydration(value);
+          }}
+
+          if (depth >= 14) continue;
+          let descriptors = {{}};
+          try {{ descriptors = Object.getOwnPropertyDescriptors(value); }} catch {{}}
+          for (const [key, descriptor] of Object.entries(descriptors)) {{
+            if (!["window", "ownerDocument", "parentNode", "parentElement", "nextSibling", "previousSibling"].includes(key) && "value" in descriptor) {{
+              const child = descriptor.value;
+              if (child && ((typeof child === "object" && !(typeof Node !== "undefined" && child instanceof Node)) || typeof child === "function")) {{
+                queue.push({{ value: child, depth: depth + 1 }});
+              }}
+            }}
+          }}
+        }}
+        if (cursor < queue.length && seen.size < 140000) await yieldReactDiscovery();
+      }}
+      state.reactRequestClientPatched = state.reactRequestClientPatched || patched > 0;
+      state.historyQueryPatch = {{
+        patched: Boolean(state.reactRequestClientPatched),
+        clientCount: patched,
+        refreshRequested: Boolean(state.historyQueryRefreshCompleted),
+        lineageHydration: state.historyLineageHydration || null,
+      }};
+      return patched;
+    }})().finally(() => {{ state.reactDiscoveryPromise = null; }});
+    return await state.reactDiscoveryPromise;
+  }};
+  const installReactRootObserver = () => {{
+    if (state.reactRootObserver || typeof MutationObserver !== "function") return;
+    const target = document.documentElement || document.body;
+    if (!target) return;
+    state.reactRootObserver = new MutationObserver((records) => {{
+      for (const record of records) {{
+        for (const node of record.addedNodes || []) {{
+          if (!node || (typeof node !== "object" && typeof node !== "function")) continue;
+          state.pendingReactNodes.add(node);
+          if (state.pendingReactNodes.size > 128) {{
+            state.pendingReactNodes.clear();
+            state.pendingReactNodes.add(document.getElementById("root") || document.body);
           }}
         }}
       }}
-    }}
-    state.reactRequestClientPatched = patched > 0;
-    state.historyQueryPatch = {{
-      patched: patched > 0,
-      clientCount: patched,
-      refreshRequested: Boolean(state.historyQueryRefreshCompleted),
-      lineageHydration: state.historyLineageHydration || null,
-    }};
-    return patched;
+    }});
+    state.reactRootObserver.observe(target, {{ childList: true, subtree: true }});
   }};
   const installAppServerPatch = async () => {{
     let patched = 0;
-    if (state.appServerPatchVersion !== appServerRequestPatchVersion) {{
+    let modulePatched = 0;
+    const wallNow = Date.now();
+    if (!state.appServerModuleRetryAt || wallNow >= state.appServerModuleRetryAt) {{
       try {{
         const module = await loadAppModule("app-server-manager-signals-");
-        for (const candidate of Object.values(module).filter((item) => item && typeof item === "object")) {{
-          if (patchRequestClient(candidate)) patched += 1;
-          if (typeof candidate.sendRequest !== "function" && typeof candidate.get === "function") {{
-            try {{ if (patchRequestClient(candidate.get())) patched += 1; }} catch {{}}
-          }}
-        }}
+        modulePatched = patchAppServerModuleClients(module);
+        patched += modulePatched;
+        state.appServerModuleRetryAt = 0;
       }} catch (error) {{
         recordFailure(error);
+        state.appServerModuleRetryAt = wallNow + 30000;
       }}
     }}
-    patched += patchReactAppServerClients();
+    installReactRootObserver();
+    const fullScanDue = !state.reactInitialDiscoveryCompleted
+      || (modulePatched === 0 && wallNow - (state.lastReactFullScanAt || 0) >= 30000);
+    const incrementalScanDue = modulePatched === 0
+      && state.pendingReactNodes.size > 0
+      && wallNow - (state.lastReactIncrementalScanAt || 0) >= 5000;
+    if (fullScanDue) {{
+      state.pendingReactNodes.clear();
+      state.lastReactFullScanAt = wallNow;
+      patched += await patchReactAppServerClients(initialReactNodes());
+      state.reactInitialDiscoveryCompleted = true;
+    }} else if (incrementalScanDue) {{
+      state.lastReactIncrementalScanAt = wallNow;
+      patched += await patchReactAppServerClients(drainPendingReactNodes());
+    }} else if (modulePatched > 0) {{
+      state.pendingReactNodes.clear();
+    }}
     if (state.historyQueryRefreshPromise) {{
       try {{
         await state.historyQueryRefreshPromise;
       }} catch {{}}
     }}
-    // The first traversal starts the native thread-list refresh. Traverse once more after it
-    // settles so stale rollout paths are repaired during this explicit action instead of waiting
-    // for the background interval. The hydration promise itself uses Codex's resume pipeline.
-    if (state.historyQueryRefreshCompleted) patched += patchReactAppServerClients();
+    for (const manager of state.historyManagerCandidates) scheduleHistoryLineageHydration(manager);
     if (state.historyLineageHydrationPromise) {{
       try {{
         await state.historyLineageHydrationPromise;
@@ -1596,11 +1722,15 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }}
   }};
   const run = async () => {{
-    installMessagePatch();
-    await installAppServerPatch();
-    void triggerLocalThreadCatalogSync();
-    patchStatsig();
-    patchReactState();
+    if (state.runPromise) return await state.runPromise;
+    state.runPromise = (async () => {{
+      installMessagePatch();
+      await installAppServerPatch();
+      void triggerLocalThreadCatalogSync();
+      patchStatsig();
+      patchReactState();
+    }})().finally(() => {{ state.runPromise = null; }});
+    return await state.runPromise;
   }};
   await run();
   if (!state.interval) state.interval = setInterval(() => {{ void run(); }}, 1500);
@@ -3427,11 +3557,13 @@ JSON.stringify({
         assert!(script.contains("!state.requestIds.has(requestId)"));
         assert!(script.contains("__ccSwitchCodexAppCompatibilityV9"));
         assert!(script.contains("appServerRequestPatchVersion = \"9\""));
-        assert!(script.contains("rehydrateStaleHistoryLineages(value)"));
+        assert!(script.contains("rehydrateStaleHistoryLineages(manager)"));
         assert!(
             script.contains("state.reactRequestClientPatchVersion = appServerRequestPatchVersion")
         );
-        assert!(script.contains("state.appServerPatchVersion !== appServerRequestPatchVersion"));
+        assert!(
+            !script.contains("if (state.appServerPatchVersion !== appServerRequestPatchVersion)")
+        );
         assert!(!script.contains(
             "if (state.reactRequestClientPatchVersion === appServerRequestPatchVersion) return"
         ));
@@ -3458,11 +3590,88 @@ JSON.stringify({
         assert!(script.contains("modelProviders: []"));
         assert!(script.contains("getCompatibleThreadSortKey"));
         assert!(script.contains("document.getElementById(\"root\")"));
-        assert!(script.contains("document.querySelectorAll(\"*\")"));
+        assert!(!script.contains("document.querySelectorAll(\"*\")"));
         assert!(script.contains("module?.appServices?.localThreadCatalog"));
         assert!(script.contains("fetch(url)"));
         assert!(script.contains("await state.historyQueryRefreshPromise"));
         assert!(script.contains("state.historyQueryRefreshCompleted = true"));
+    }
+
+    /// The renderer heartbeat must not synchronously walk every DOM node and the
+    /// complete React object graph. New app-server clients are discovered from
+    /// the cached module on every heartbeat; React traversal is an incremental,
+    /// idle-time fallback with one in-flight job and an observer-backed dirty set.
+    #[test]
+    fn codex_app_compatibility_heartbeat_does_not_repeat_full_react_scan() {
+        let script = build_model_picker_unlock_script(&CodexModelCatalogProjection::empty());
+
+        assert!(script.contains("const rendererSchedulerVersion = \"2\""));
+        assert!(script.contains("clearInterval(state.interval)"));
+        assert!(script.contains("const patchAppServerModuleClients"));
+        assert!(script.contains("state.reactDiscoveryPromise"));
+        assert!(script.contains("requestIdleCallback"));
+        assert!(script.contains("const sliceDeadline = monotonicNow() + 4"));
+        assert!(script.contains("sliceCount < 800"));
+        assert!(script.contains("state.lastReactFullScanAt || 0) >= 30000"));
+        assert!(script.contains("state.lastReactIncrementalScanAt || 0) >= 5000"));
+        assert!(script.contains("new MutationObserver"));
+        assert!(script.contains("modulePatched = patchAppServerModuleClients(module)"));
+        assert!(!script.contains("document.querySelectorAll(\"*\")"));
+        assert!(
+            !script.contains("if (state.appServerPatchVersion !== appServerRequestPatchVersion)")
+        );
+        assert!(!script.contains("patched += patchReactAppServerClients();"));
+        assert!(!script.contains(
+            "if (state.historyQueryRefreshCompleted) patched += patchReactAppServerClients()"
+        ));
+    }
+
+    #[test]
+    fn app_server_module_discovery_patches_a_replaced_signal_client() {
+        let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
+        let script = format!(
+            r#"
+const patched = [];
+const patchRequestClient = (client) => {{
+  if (!client || typeof client.sendRequest !== "function") return false;
+  patched.push(client.id);
+  return true;
+}};
+{}
+let current = {{ id: "first", sendRequest() {{}} }};
+const module = {{ signal: {{ get: () => current }} }};
+const firstCount = patchAppServerModuleClients(module);
+current = {{ id: "second", sendRequest() {{}} }};
+const secondCount = patchAppServerModuleClients(module);
+JSON.stringify({{ firstCount, secondCount, patched }});
+"#,
+            app_server_module_client_discovery_core_script()
+        );
+
+        context.with(|ctx| {
+            let json_text: String = ctx.eval(script).expect("execute module discovery core");
+            let result: Value =
+                serde_json::from_str(&json_text).expect("parse module discovery result");
+            assert_eq!(result["firstCount"], 1);
+            assert_eq!(result["secondCount"], 1);
+            assert_eq!(result["patched"], json!(["first", "second"]));
+        });
+    }
+
+    #[test]
+    fn codex_app_compatibility_script_is_valid_javascript() {
+        let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
+        let script = build_model_picker_unlock_script(&CodexModelCatalogProjection::empty());
+        let encoded = serde_json::to_string(&script).expect("encode renderer script");
+
+        context.with(|ctx| {
+            let parsed: bool = ctx
+                .eval(format!("new Function({encoded}); true"))
+                .expect("parse renderer compatibility script");
+            assert!(parsed);
+        });
     }
 
     /// 验证 CDP 返回值能准确区分“脚本已安装”和“原生历史同步已请求”。
