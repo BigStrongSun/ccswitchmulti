@@ -371,6 +371,9 @@ export function codexProviderModelsRequiringProtocolProbe(
 
 export function codexProtocolLabErrorCode(error: unknown): string | undefined {
   const detail = errorText(error).toLowerCase();
+  if (detail.includes("codex_provider_set_manual_intent_required")) {
+    return "manual_intent_required";
+  }
   if (/\b(?:401|403)\b/.test(detail)) return "authentication_unavailable";
   if (/\b429\b/.test(detail)) return "rate_limited";
   if (/\b521\b/.test(detail) || /\b5\d\d\b/.test(detail)) {

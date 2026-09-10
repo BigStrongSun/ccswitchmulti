@@ -75,6 +75,7 @@ interface ModelProgress {
 interface CodexProtocolProbeProgressDialogProps {
   open: boolean;
   running: boolean;
+  actionRequired?: boolean;
   expectedModels?: string[];
   expectedTargets?: CodexProviderProtocolProbeTarget[];
   events: CodexProviderScopedProtocolProbeProgressEvent[];
@@ -597,6 +598,7 @@ function runtimeMappingRows(
 export function CodexProtocolProbeProgressDialog({
   open,
   running,
+  actionRequired = false,
   expectedModels = [],
   expectedTargets = [],
   events,
@@ -672,6 +674,7 @@ export function CodexProtocolProbeProgressDialog({
   ).length;
   const hasMissingResults =
     !running &&
+    !actionRequired &&
     missingResultCount > 0 &&
     (Boolean(error) ||
       batchSummaries.length > 0 ||
@@ -701,6 +704,10 @@ export function CodexProtocolProbeProgressDialog({
           <DialogDescription>
             {running
               ? `正在验证模型 ${completed}/${models.length || "…"}。模型采用有限并发，Responses 与 Chat 同时检查；工具续轮按顺序验证。`
+              : actionRequired
+                ? completed > 0
+                  ? `探测已完成 ${completed} 个模型；配置未应用。`
+                  : "未执行新的探测；配置未应用。"
               : hasMissingResults
                 ? `探测未完成：${missingResultCount} 个模型没有结果。`
                 : batchSummaries.length > 0 || completed > 0
@@ -759,14 +766,22 @@ export function CodexProtocolProbeProgressDialog({
               )}
             </div>
           )}
-          {error && (
+          {actionRequired ? (
+            <div
+              className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200"
+              role="alert"
+            >
+              当前是手动协议模式，但尚未选择 Responses 或 Chat
+              Completions。关闭可跳过本次应用，选择协议后可直接保存，无需重复探测。
+            </div>
+          ) : error ? (
             <div
               className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
               role="alert"
             >
               探测中断：{error}
             </div>
-          )}
+          ) : null}
           {models.length === 0 && !error && (
             <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
               正在准备模型和探测请求…

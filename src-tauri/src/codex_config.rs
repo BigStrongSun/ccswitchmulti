@@ -1686,8 +1686,8 @@ fn sort_codex_catalog_specs_for_picker(
 /// CC Switch 接管后会把路由目录写进 models_cache.json（etag 标记为 CC_SWITCH 拥有），
 /// 官方原始档位在 backup 文件里。此处与 enrich_codex_catalog_with_official_metadata
 /// 保持同一选择逻辑：缓存被 CC Switch 拥有时优先读 backup。
-/// backup 缺失或为空时再读取 Codex CLI 的 bundled 官方目录；这是新模型也能自动
-/// 获得官方服务档/推理档的来源，不依赖维护模型名单。
+/// CCSM 自带的官方基线只补齐发行时已知但旧 Codex CLI 缺少的模型；本机官方缓存
+/// 覆盖该基线，当前 Codex CLI 的 bundled 目录最后覆盖，因此更新来源始终优先。
 /// 任何读取/解析失败都返回 None（静默降级，不阻断投影）。
 ///
 /// P2：公开给 reasoning resolver 作为 official 来源（仅未知平台生效）。
@@ -1699,23 +1699,38 @@ pub fn codex_official_models_cache() -> Option<Vec<Value>> {
     official_models_with_bundled_fallback(
         existing_cache.as_ref(),
         backup_cache.as_ref(),
+        load_codex_packaged_official_models().as_deref(),
         load_codex_bundled_models().as_deref(),
     )
+}
+
+pub(crate) fn load_codex_packaged_official_models() -> Option<Vec<Value>> {
+    serde_json::from_str::<Value>(include_str!(
+        "resources/codex_official_models_fallback.json"
+    ))
+    .ok()?
+    .get("models")?
+    .as_array()
+    .cloned()
 }
 
 fn official_models_with_bundled_fallback(
     existing_cache: Option<&Value>,
     backup_cache: Option<&Value>,
+    packaged_models: Option<&[Value]>,
     bundled_models: Option<&[Value]>,
 ) -> Option<Vec<Value>> {
     let official_cache = match existing_cache {
         Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => backup_cache.or(Some(cache)),
         _ => existing_cache,
     };
-    let mut models = official_cache
+    let cached_models = official_cache
         .and_then(|cache| cache.get("models"))
         .and_then(Value::as_array)
         .cloned()
+        .unwrap_or_default();
+    let mut models = packaged_models
+        .map(|models| models.to_vec())
         .unwrap_or_default();
     let mut model_indexes = HashMap::new();
     for (index, model) in models.iter().enumerate() {
@@ -1723,16 +1738,19 @@ fn official_models_with_bundled_fallback(
             model_indexes.insert(model_id, index);
         }
     }
-    if let Some(bundled_models) = bundled_models {
-        for bundled in bundled_models {
-            let Some(model_id) = codex_model_stable_id(bundled) else {
+    for overlay_models in [Some(cached_models.as_slice()), bundled_models]
+        .into_iter()
+        .flatten()
+    {
+        for overlay in overlay_models {
+            let Some(model_id) = codex_model_stable_id(overlay) else {
                 continue;
             };
             if let Some(index) = model_indexes.get(&model_id).copied() {
-                models[index] = bundled.clone();
+                models[index] = overlay.clone();
             } else {
                 model_indexes.insert(model_id, models.len());
-                models.push(bundled.clone());
+                models.push(overlay.clone());
             }
         }
     }
@@ -16488,6 +16506,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
         let models = official_models_with_bundled_fallback(
             Some(&owned_cache),
             Some(&empty_backup),
+            None,
             bundled.as_array().map(Vec::as_slice),
         )
         .expect("bundled official models must be used when the local backup is empty");
@@ -16518,6 +16537,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
         let models = official_models_with_bundled_fallback(
             Some(&owned_cache),
             Some(&backup),
+            None,
             bundled.as_array().map(Vec::as_slice),
         )
         .expect("bundled models must overlay a stale backup");
@@ -16530,6 +16550,60 @@ model_catalog_json = "cc-switch-model-catalog.json"
             models[0].get("service_tiers"),
             Some(&json!([{ "id": "new_tier" }])),
             "the current bundled official entry must override the stale backup field"
+        );
+    }
+
+    #[test]
+    fn packaged_official_catalog_keeps_astra_available_without_new_codex_cli() {
+        let models = load_codex_packaged_official_models()
+            .expect("CCSM must ship an official fallback catalog");
+        let astra = models
+            .iter()
+            .find(|model| codex_model_stable_id(model).as_deref() == Some("gpt-6-astra"))
+            .expect("packaged official catalog must include Astra");
+        let efforts = astra["supported_reasoning_levels"]
+            .as_array()
+            .expect("Astra reasoning levels")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            efforts,
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(
+            astra.get("default_reasoning_level").and_then(Value::as_str),
+            Some("low")
+        );
+    }
+
+    #[test]
+    fn packaged_official_catalog_never_overwrites_a_newer_cached_model() {
+        let cache = json!({
+            "models": [{
+                "slug": "gpt-6-astra",
+                "default_reasoning_level": "high",
+                "source_marker": "newer-cache"
+            }]
+        });
+        let packaged = json!([{
+            "slug": "gpt-6-astra",
+            "default_reasoning_level": "low",
+            "source_marker": "packaged-fallback"
+        }]);
+
+        let models = official_models_with_bundled_fallback(
+            Some(&cache),
+            None,
+            packaged.as_array().map(Vec::as_slice),
+            None,
+        )
+        .expect("merged official models");
+
+        assert_eq!(
+            models[0].get("source_marker").and_then(Value::as_str),
+            Some("newer-cache")
         );
     }
 

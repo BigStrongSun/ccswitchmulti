@@ -99,7 +99,9 @@ export function useCodexProviderSetSave() {
     workflow.state.phase === "awaiting_probe_consent" ||
     workflow.state.phase === "stale_retry";
   const probeOpen =
-    workflow.state.phase === "probing" || workflow.state.phase === "failed";
+    workflow.state.phase === "probing" ||
+    workflow.state.phase === "failed" ||
+    workflow.state.phase === "action_required";
   const preview =
     workflow.state.phase === "blocked"
       ? (workflow.state.preparePreview as CodexProviderSetPreview | null)
@@ -143,6 +145,7 @@ export function useCodexProviderSetSave() {
       <CodexProtocolProbeProgressDialog
         open={probeOpen}
         running={workflow.state.phase === "probing"}
+        actionRequired={workflow.state.phase === "action_required"}
         expectedModels={expectedModels}
         events={workflow.state.progress}
         outcome={workflow.probeOutcome}

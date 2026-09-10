@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-09-10 Provider Set 应用前置条件与 Astra 离线目录根修
+
+- `codex_provider_set_manual_intent_required` 在本次截图中是 Provider Set 的手动协议写入保护，不是上游模型探测错误。前端对“manual 但没有明确 Responses/Chat”的草稿判定为无需探测后直接 prepare；后端正确拒绝写入，但通用工作流把 prepare/commit 前置条件压成 `failed`，探测对话框遂虚构“探测中断、没有结果”。
+- 工作流新增 `action_required` 终态：后端 fail-closed 规则不放宽，配置不会写入；已有 `probeOutcome`、progress 与 receiptIds 保留并继续展示，没有新探测时明确显示“未执行新的探测；配置未应用”。关闭即跳过本次应用；用户选择明确协议后可复用证据保存，不需要重复付费探测。
+- Astra 并非 CCSM 完全不支持。在线 OAuth 目录解析、reasoning resolver 和前端同步已有动态能力链；真正缺口是 OAuth 在线失败时的 picker 只读本机 cache，而配置侧再依赖设备上的 `codex debug models --bundled`。本机 Codex 0.147.0 bundled 不含 `gpt-6-astra`，因此同一个 Release 会因用户设备 Codex/cache 版本不同而丢模型。
+- CCSM 现在随包携带最小官方 fallback catalog，含 OpenAI 当前 Codex `gpt-6-astra` 条目：默认 `low`，支持 `low/medium/high/xhigh/max/ultra`、图像输入和 Codex 窗口/transport 字段。合并优先级是 packaged baseline < 本机官方 cache < 当前 Codex bundled，旧 CLI 缺项时补齐，同时不覆盖更新来源；OAuth 离线 picker 与配置投影复用同一来源链。
+- 外部事实用 Codex 内置 Web 与 Matrix WebSearch 独立核对。OpenAI 官方模型文档和 `openai/codex` 当前 `models.json` 都确认 Astra 存在；Matrix 搜索无结果，但直接打开官方 raw `models.json` 得到同一条目。CCSM 错误根因仍以本地源码、0.147.0 bundled 输出和 RED→GREEN 为准。
+- TDD 红灯分别稳定得到工作流 `failed` 而非 `action_required`、对话框错误文案以及缺少 packaged catalog 的 Rust 编译错误；实现后前端聚焦 114/114、Rust packaged 2/2、official merge 2/2、OAuth model parser 9/9、typecheck、rustfmt、diff 和严格 UTF-8 均通过。未安装、停止或重启 CCSM/Codex，未操作 `127.0.0.1:15721`。
+
 ## 2026-09-10 CCSwitchMulti v3.20.2-1 正式发布
 
 - `v3.20.1-3..v3.20.2-1` 共 17 个提交，正式发布 commit 为 `413edf99d62e3a3152f4612fcd296c6063a02e7a`；本地/远端 `main`、发布分支和 annotated tag peel 在发布时均精确指向该提交，tag object 为 `4a1ff5592f229336edfa805f3d3b0f073759dd3d`。数据库 schema 继续为 v22。

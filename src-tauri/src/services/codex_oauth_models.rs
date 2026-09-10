@@ -7,16 +7,12 @@ use crate::proxy::providers::CODEX_OAUTH_ORIGINATOR;
 use crate::services::model_fetch::FetchedModel;
 use serde_json::Value;
 use std::error::Error;
-use std::fs;
-use std::path::PathBuf;
 use std::time::Duration;
 
 const CODEX_OAUTH_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 const CODEX_OAUTH_FETCH_TIMEOUT_SECS: u64 = 15;
 const ERROR_BODY_MAX_CHARS: usize = 512;
 const CODEX_OAUTH_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
-const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
 
 /// 使用 ChatGPT OAuth access token 在线读取官方 Codex 模型列表。
 ///
@@ -103,52 +99,14 @@ fn format_codex_oauth_request_error(error: reqwest::Error) -> String {
     format!("Request failed: {error}; kind={kind}; {proxy_hint}; source={source_chain}")
 }
 
-/// 读取 Codex 本地模型缓存，作为 OAuth 在线获取失败时的离线兜底。
+/// 读取 Codex 官方模型缓存链，作为 OAuth 在线获取失败时的离线兜底。
 ///
-/// CCSwitchMulti 接管时会把原始 `models_cache.json` 备份到
-/// `models_cache.cc-switch-backup.json`，因此这里优先读取备份，避免把
-/// MultiRouter 合并进去的第三方模型误当作官方 Codex 模型。若没有任何可用缓存，
-/// 返回空列表而不是伪造静态模型。
+/// 与配置投影共用同一个来源：CCSM packaged 基线、本机官方 cache、当前 Codex
+/// bundled 目录。最后仍按官方模型 ID 过滤，避免把 MultiRouter 合并进去的第三方
+/// 模型写回 official route。
 pub fn fetch_cached_models_from_disk() -> Result<Vec<FetchedModel>, String> {
-    let mut parse_errors = Vec::new();
-    for path in codex_oauth_model_cache_candidates() {
-        if !path.exists() {
-            continue;
-        }
-        let raw = match fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(error) => {
-                parse_errors.push(format!("Failed to read {}: {error}", path.display()));
-                continue;
-            }
-        };
-        let value: Value = match serde_json::from_str(&raw) {
-            Ok(value) => value,
-            Err(error) => {
-                parse_errors.push(format!("Failed to parse {}: {error}", path.display()));
-                continue;
-            }
-        };
-        let models = parse_cached_models(value);
-        if !models.is_empty() {
-            return Ok(models);
-        }
-    }
-
-    if parse_errors.is_empty() {
-        Ok(Vec::new())
-    } else {
-        Err(parse_errors.join("; "))
-    }
-}
-
-/// 返回本地官方模型缓存候选路径；备份优先，当前缓存作为兜底。
-fn codex_oauth_model_cache_candidates() -> Vec<PathBuf> {
-    let codex_dir = crate::codex_config::get_codex_config_dir();
-    vec![
-        codex_dir.join(CODEX_MODELS_CACHE_BACKUP_FILENAME),
-        codex_dir.join(CODEX_MODELS_CACHE_FILENAME),
-    ]
+    let models = crate::codex_config::codex_official_models_cache().unwrap_or_default();
+    Ok(parse_cached_models(serde_json::json!({ "models": models })))
 }
 
 /// 从 Codex 缓存结构里解析官方模型，并剔除 MultiRouter 合并进去的第三方模型。

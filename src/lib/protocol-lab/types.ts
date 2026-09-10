@@ -8,6 +8,7 @@ export type ProtocolLabPhase =
   | "preparing"
   | "committing"
   | "blocked"
+  | "action_required"
   | "stale_retry"
   | "committed"
   | "committed_projection_warning"
@@ -70,6 +71,7 @@ export type ProtocolLabEvent<
       projectionErrorCode?: string | null;
     }
   | { type: "dependency_changed" }
+  | { type: "action_required"; errorCode: string; detail: string }
   | { type: "stale_retry_started" }
   | { type: "failed"; errorCode?: string; detail: string }
   | { type: "retry_requested" }
