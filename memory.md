@@ -5661,9 +5661,15 @@ supported in one streaming turn`。
 - 最终 Rust 使用隔离目录 `C:\Users\sunda\AppData\Local\Temp\ccsm-v3.20.1-1-localappdata-110da36f` 和 `--test-threads=1`。Library 为 4047 passed、0 failed、6 ignored；12 个 integration binaries 共 125/125 通过。前端全量不因 Rust-only 断言修正重复执行；剩余候选门禁只运行静态检查、renderer/sidecar/Tauri release 构建与产物校验。
 - 静态门禁中 TypeScript、Prettier、`cargo check --all-targets`、rustfmt、diff 和 renderer production build 均通过。探索性扩大到 `cargo clippy --all-targets -- -D warnings` 时出现 30 条 Rust 1.95 lint，其中 2 条属于 production、28 条属于历史测试代码；仓库 CI 实际只运行 default-target Clippy。Production 两条分别改用 `contains(&id)` 与 `then_some`，Provider 契约聚焦测试 1/1 及 CI 原样严格 Clippy 随后通过。28 条 test-only 风格项未用 `allow` 掩盖，也未作为跨模块清洁重构混入发布候选。
 - `pnpm release:local` 从 clean commit `2f6dbb87df0708c2e21defa7774cc5b326a8a932` 成功完成 sidecar、主程序 release、NSIS、签名与原子导出。Sidecar 为 2,277,888 bytes / SHA-256 `839EAF944EC4E491353195C237F3F0E51C05AFD1ACDD93F74D0D9190FC573A0B`；NSIS 为 13,615,350 bytes / `6C50102CBF754811AC8A59D74F7F0B03550B66AA1B0C4ACFAE0DCBB3D201A512`；portable ZIP 为 16,095,636 bytes / `26FEC584101BF1A20663E092AAE246027EF8A1B13FA2801798604327854184EB`；raw EXE 为 43,657,728 bytes / `2704A043DDF80E916615E6B25F479200C6AD614CE5623248D1A05E0DA0EBF99B`，PE file/product version 均为 `3.20.1-1`。导出清单 16/16 重算匹配，metadata commit/version 正确，428 字节签名与 `latest.json` 完全一致；本机无独立 minisign verifier 且 Tauri CLI 2.10.1 不提供 verify 子命令，密码学公钥验签留给 GitHub updater workflow，不把本地一致性检查夸大成独立验签。
-
 ## 2026-09-10 renderer app-server client 发现性能与新 PR 合流
 
 - Codex renderer 兼容脚本的周期性高占用根因是每 1.5 秒同步执行一次全 DOM 枚举和最多 14 万对象的 React 图遍历；历史刷新完成后同一轮还会再次完整遍历。该路径现改为“每轮从缓存模块 getter 轻量取得当前 client + React 兼容兜底”：DOM 与对象遍历都按 4 ms/800 项分片，只允许一个在途任务，模块失败的全量兜底退避 30 秒，MutationObserver 只排队新增节点且增量兜底至少间隔 5 秒。
 - 新 scheduler version 会清除旧 interval 并断开旧 observer，避免在已注入页面里新旧轮询并存。初次扫描发现的 history manager 有界缓存，刷新完成后直接执行 lineage hydration，不再为了进入第二阶段重扫 React；延迟或失败重试也限制为 30 秒一次。
 - 新 PR #91 (`4b43a379`) 和 #92 (`f4ac7ef0`) 已经审计并以 exact head 合入隔离候选。前者复用 OpenCode Go 最终出站身份策略修复直接深探测，后者从持久化 route 的真实目标 Provider 保留 reasoning 声明且只复制显式 alias。集中门禁为 workspace 81/81、Codex Desktop 46/46、OpenCode Go 8/8、runner 35/35，并通过 TypeScript、renderer production build、Rust check、CI 同口径严格 Clippy、rustfmt、Prettier、diff 与 UTF-8/no-BOM/no-U+FFFD；renderer 新回归已完成 RED→GREEN。详见 `memory-2026-09-10-renderer-discovery-pr91-pr92.md`。
+
+## 2026-09-10 Codex 无 OAuth 官方目录与 cache 来源根修
+
+- `v3.20.2-2` 的离线名称过滤是在补偿来源污染：owned `models_cache.json` 无 backup 时会被重新当作官方来源，旧同步还可能把混合目录写成仍带 `cc-switch-model-catalog` etag 的 poisoned backup。过滤会误删未来官方命名，直接关闭又会把 Qwen/DeepSeek 灌进 official route。
+- 根修改为来源判定：任何 CCSM-owned current/backup 都不进入官方链；历史 poisoned backup 在同步时重建并清 etag，退出时丢弃而不恢复。模型名称前缀过滤已删除。
+- 无 CCSM OAuth 时，备用入口会刷新 OpenAI/Codex 公共 `models.json`，经 10 秒/8 MiB/HTTP/JSON/非空校验后剥离远程指令字段并原子写入独立 `codex-official-models-cache.json`；网络失败仍落回 packaged、可信 local cache/backup 和 bundled。
+- 合并优先级为 packaged < public cache < trusted local cache/backup < current CLI bundled。公共源补未来 ID，本机运行时来源覆盖同 ID 元数据；UI 改称“备用官方目录”。完整根因和验证见 `memory-2026-09-10-codex-public-catalog-provenance.md`。

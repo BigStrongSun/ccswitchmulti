@@ -100,6 +100,7 @@ vi.mock("@/lib/api/auth", () => ({
 }));
 
 vi.mock("@/lib/api/model-fetch", () => ({
+  fetchCodexOfficialFallbackModels: vi.fn(),
   fetchCodexOauthModels: vi.fn(),
   fetchModelsForConfig: vi.fn(),
 }));
