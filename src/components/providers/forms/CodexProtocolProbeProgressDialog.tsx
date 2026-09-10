@@ -708,11 +708,11 @@ export function CodexProtocolProbeProgressDialog({
                 ? completed > 0
                   ? `探测已完成 ${completed} 个模型；配置未应用。`
                   : "未执行新的探测；配置未应用。"
-              : hasMissingResults
-                ? `探测未完成：${missingResultCount} 个模型没有结果。`
-                : batchSummaries.length > 0 || completed > 0
-                  ? `已完成 ${completionSummary.total} 个模型：Verified ${completionSummary.verified}，Partial ${completionSummary.partial}，Failed ${completionSummary.failed}。`
-                  : "探测已结束。"}
+                : hasMissingResults
+                  ? `探测未完成：${missingResultCount} 个模型没有结果。`
+                  : batchSummaries.length > 0 || completed > 0
+                    ? `已完成 ${completionSummary.total} 个模型：Verified ${completionSummary.verified}，Partial ${completionSummary.partial}，Failed ${completionSummary.failed}。`
+                    : "探测已结束。"}
           </DialogDescription>
         </DialogHeader>
 
