@@ -60,6 +60,7 @@ pub(crate) const CODEX_MANAGED_REQUEST_MAX_RETRIES: u64 = 2;
 pub(crate) const CODEX_MANAGED_STREAM_MAX_RETRIES: u64 = 10;
 const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
 const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
+const CODEX_PUBLIC_OFFICIAL_MODELS_CACHE_FILENAME: &str = "codex-official-models-cache.json";
 const CC_SWITCH_CODEX_MODELS_CACHE_ETAG: &str = "cc-switch-model-catalog";
 
 #[cfg(target_os = "windows")]
@@ -1685,9 +1686,9 @@ fn sort_codex_catalog_specs_for_picker(
 ///
 /// CC Switch 接管后会把路由目录写进 models_cache.json（etag 标记为 CC_SWITCH 拥有），
 /// 官方原始档位在 backup 文件里。此处与 enrich_codex_catalog_with_official_metadata
-/// 保持同一选择逻辑：缓存被 CC Switch 拥有时优先读 backup。
-/// CCSM 自带的官方基线只补齐发行时已知但旧 Codex CLI 缺少的模型；本机官方缓存
-/// 覆盖该基线，当前 Codex CLI 的 bundled 目录最后覆盖，因此更新来源始终优先。
+/// 保持同一选择逻辑：当前 cache 或 backup 带 CCSM 所有权标记时都不能作为官方来源。
+/// 合并顺序为 CCSM 随包基线、OpenAI/Codex 公共目录缓存、本机可信官方 cache/backup、
+/// 当前 Codex CLI bundled；后面的本机运行时来源覆盖同 ID，公共目录仍可补充未来模型。
 /// 任何读取/解析失败都返回 None（静默降级，不阻断投影）。
 ///
 /// P2：公开给 reasoning resolver 作为 official 来源（仅未知平台生效）。
@@ -1696,10 +1697,12 @@ pub fn codex_official_models_cache() -> Option<Vec<Value>> {
     let backup_path = get_codex_models_cache_backup_path();
     let existing_cache = read_json_file_if_exists(&cache_path).ok().flatten();
     let backup_cache = read_json_file_if_exists(&backup_path).ok().flatten();
+    let public_models = load_codex_public_official_models_cache();
     official_models_with_bundled_fallback(
         existing_cache.as_ref(),
         backup_cache.as_ref(),
         load_codex_packaged_official_models().as_deref(),
+        public_models.as_deref(),
         load_codex_bundled_models().as_deref(),
     )
 }
@@ -1718,10 +1721,12 @@ fn official_models_with_bundled_fallback(
     existing_cache: Option<&Value>,
     backup_cache: Option<&Value>,
     packaged_models: Option<&[Value]>,
+    public_models: Option<&[Value]>,
     bundled_models: Option<&[Value]>,
 ) -> Option<Vec<Value>> {
+    let trusted_backup = backup_cache.filter(|cache| !codex_models_cache_is_cc_switch_owned(cache));
     let official_cache = match existing_cache {
-        Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => backup_cache.or(Some(cache)),
+        Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => trusted_backup,
         _ => existing_cache,
     };
     let cached_models = official_cache
@@ -1738,9 +1743,13 @@ fn official_models_with_bundled_fallback(
             model_indexes.insert(model_id, index);
         }
     }
-    for overlay_models in [Some(cached_models.as_slice()), bundled_models]
-        .into_iter()
-        .flatten()
+    for overlay_models in [
+        public_models,
+        Some(cached_models.as_slice()),
+        bundled_models,
+    ]
+    .into_iter()
+    .flatten()
     {
         for overlay in overlay_models {
             let Some(model_id) = codex_model_stable_id(overlay) else {
@@ -1755,6 +1764,30 @@ fn official_models_with_bundled_fallback(
         }
     }
     (!models.is_empty()).then_some(models)
+}
+
+fn codex_public_official_models_cache_path() -> PathBuf {
+    crate::config::get_app_config_dir().join(CODEX_PUBLIC_OFFICIAL_MODELS_CACHE_FILENAME)
+}
+
+fn load_codex_public_official_models_cache() -> Option<Vec<Value>> {
+    read_json_file_if_exists(&codex_public_official_models_cache_path())
+        .ok()
+        .flatten()?
+        .get("models")?
+        .as_array()
+        .cloned()
+}
+
+pub(crate) fn store_codex_public_official_models_cache(models: &[Value]) -> Result<(), AppError> {
+    write_json_file(
+        &codex_public_official_models_cache_path(),
+        &json!({
+            "source": "https://github.com/openai/codex",
+            "fetched_at": current_utc_rfc3339_nanos(),
+            "models": models,
+        }),
+    )
 }
 
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
@@ -6060,12 +6093,17 @@ fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(),
 
     if let Some(cache) = existing_cache.as_ref() {
         if codex_models_cache_is_cc_switch_owned(cache) {
-            let backup_models_empty = read_json_file_if_exists(&backup_path)?
-                .and_then(|backup| backup.get("models").cloned())
-                .and_then(|models| models.as_array().cloned())
-                .is_none_or(|models| models.is_empty());
-            if backup_models_empty && !official_models.is_empty() {
+            let backup = read_json_file_if_exists(&backup_path)?;
+            let backup_needs_rebuild = backup.as_ref().is_none_or(|backup| {
+                codex_models_cache_is_cc_switch_owned(backup)
+                    || backup
+                        .get("models")
+                        .and_then(Value::as_array)
+                        .is_none_or(Vec::is_empty)
+            });
+            if backup_needs_rebuild && !official_models.is_empty() {
                 let mut restored = cache.clone();
+                restored["etag"] = Value::Null;
                 restored["models"] = Value::Array(official_models.clone());
                 write_json_file(&backup_path, &restored)?;
             }
@@ -6135,7 +6173,12 @@ fn restore_codex_models_cache_if_cc_switch_owned() -> Result<(), AppError> {
         return Ok(());
     }
 
-    if backup_path.exists() {
+    if let Some(backup) = read_json_file_if_exists(&backup_path)? {
+        if codex_models_cache_is_cc_switch_owned(&backup) {
+            delete_file(&cache_path)?;
+            delete_file(&backup_path)?;
+            return Ok(());
+        }
         let backup = fs::read(&backup_path).map_err(|e| AppError::io(&backup_path, e))?;
         atomic_write(&cache_path, &backup)?;
         delete_file(&backup_path).ok();
@@ -16507,6 +16550,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
             Some(&owned_cache),
             Some(&empty_backup),
             None,
+            None,
             bundled.as_array().map(Vec::as_slice),
         )
         .expect("bundled official models must be used when the local backup is empty");
@@ -16518,6 +16562,61 @@ model_catalog_json = "cc-switch-model-catalog.json"
             models[0].get("service_tiers"),
             Some(&json!([{ "id": "priority", "name": "Fast" }]))
         );
+    }
+
+    #[test]
+    fn official_models_never_reuse_cc_switch_owned_cache_without_backup() {
+        let owned_cache = json!({
+            "etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG,
+            "models": [
+                {"slug": "qwen3.8", "provider": "qwen"},
+                {"slug": "deepseek-v4-pro", "provider": "deepseek"}
+            ]
+        });
+        let packaged = json!([{"slug": "gpt-6-astra"}]);
+
+        let models = official_models_with_bundled_fallback(
+            Some(&owned_cache),
+            None,
+            packaged.as_array().map(Vec::as_slice),
+            None,
+            None,
+        )
+        .expect("packaged official baseline");
+        let ids = models
+            .iter()
+            .filter_map(codex_model_stable_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["gpt-6-astra"]);
+    }
+
+    #[test]
+    fn official_models_reject_cc_switch_owned_backup_from_older_releases() {
+        let owned_cache = json!({
+            "etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG,
+            "models": [{"slug": "qwen3.8"}]
+        });
+        let poisoned_backup = json!({
+            "etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG,
+            "models": [{"slug": "deepseek-v4-pro"}]
+        });
+        let packaged = json!([{"slug": "gpt-6-astra"}]);
+
+        let models = official_models_with_bundled_fallback(
+            Some(&owned_cache),
+            Some(&poisoned_backup),
+            packaged.as_array().map(Vec::as_slice),
+            None,
+            None,
+        )
+        .expect("packaged official baseline");
+        let ids = models
+            .iter()
+            .filter_map(codex_model_stable_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["gpt-6-astra"]);
     }
 
     #[test]
@@ -16537,6 +16636,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
         let models = official_models_with_bundled_fallback(
             Some(&owned_cache),
             Some(&backup),
+            None,
             None,
             bundled.as_array().map(Vec::as_slice),
         )
@@ -16598,12 +16698,43 @@ model_catalog_json = "cc-switch-model-catalog.json"
             None,
             packaged.as_array().map(Vec::as_slice),
             None,
+            None,
         )
         .expect("merged official models");
 
         assert_eq!(
             models[0].get("source_marker").and_then(Value::as_str),
             Some("newer-cache")
+        );
+    }
+
+    #[test]
+    fn public_official_catalog_adds_future_ids_without_overriding_local_bundled_metadata() {
+        let public = json!([
+            {"slug": "aurora-code", "source_marker": "public"},
+            {"slug": "gpt-6-astra", "source_marker": "public"}
+        ]);
+        let bundled = json!([
+            {"slug": "gpt-6-astra", "source_marker": "bundled"}
+        ]);
+
+        let models = official_models_with_bundled_fallback(
+            None,
+            None,
+            None,
+            public.as_array().map(Vec::as_slice),
+            bundled.as_array().map(Vec::as_slice),
+        )
+        .expect("merged official models");
+        let ids = models
+            .iter()
+            .filter_map(codex_model_stable_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["aurora-code", "gpt-6-astra"]);
+        assert_eq!(
+            models[1].get("source_marker").and_then(Value::as_str),
+            Some("bundled")
         );
     }
 
@@ -17027,6 +17158,58 @@ model_catalog_json = "cc-switch-model-catalog.json"
             .filter_map(|model| model.get("slug").and_then(|slug| slug.as_str()))
             .collect::<Vec<_>>();
         assert_eq!(slugs, vec!["gpt-5.5"]);
+    }
+
+    #[test]
+    #[serial]
+    fn cache_sync_rebuilds_cc_switch_owned_backup_from_trusted_official_sources() {
+        let _home = TestHomeGuard::new();
+        let owned = json!({
+            "client_version": "0.153.0",
+            "etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG,
+            "models": [{"slug": "qwen3.8"}]
+        });
+        write_json_file(&get_codex_models_cache_path(), &owned).expect("write owned cache");
+        write_json_file(&get_codex_models_cache_backup_path(), &owned)
+            .expect("write poisoned backup");
+
+        sync_codex_models_cache_with_cc_switch_catalog(&json!({
+            "models": [{"model": "gpt-6-astra"}]
+        }))
+        .expect("sync cache");
+
+        let backup: Value =
+            read_json_file(&get_codex_models_cache_backup_path()).expect("read rebuilt backup");
+        assert_ne!(
+            backup.get("etag").and_then(Value::as_str),
+            Some(CC_SWITCH_CODEX_MODELS_CACHE_ETAG)
+        );
+        let ids = backup["models"]
+            .as_array()
+            .expect("backup models")
+            .iter()
+            .filter_map(codex_model_stable_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["gpt-6-astra"]);
+    }
+
+    #[test]
+    #[serial]
+    fn removing_model_catalog_discards_cc_switch_owned_backup_from_older_releases() {
+        let _home = TestHomeGuard::new();
+        let owned = json!({
+            "client_version": "0.153.0",
+            "etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG,
+            "models": [{"slug": "qwen3.8"}]
+        });
+        write_json_file(&get_codex_models_cache_path(), &owned).expect("write owned cache");
+        write_json_file(&get_codex_models_cache_backup_path(), &owned)
+            .expect("write poisoned backup");
+
+        restore_codex_models_cache_if_cc_switch_owned().expect("restore cache");
+
+        assert!(!get_codex_models_cache_path().exists());
+        assert!(!get_codex_models_cache_backup_path().exists());
     }
 
     #[test]

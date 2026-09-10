@@ -77,7 +77,7 @@ import type {
 } from "@/lib/api/providers";
 import { authApi, type CodexAccountPoolPolicy } from "@/lib/api/auth";
 import {
-  fetchCodexOauthCachedModels,
+  fetchCodexOfficialFallbackModels,
   fetchCodexOauthModels,
   fetchModelsForConfig,
   type FetchedModel,
@@ -528,7 +528,7 @@ type ProviderModelRefreshResult =
       status: "updated";
       models: FetchedModel[];
       nextProvider: Provider;
-      usedCodexCache?: boolean;
+      usedCodexFallback?: boolean;
       onlineErrorMessage?: string;
     };
 
@@ -693,12 +693,12 @@ export function workspaceErrorMessage(error: unknown): string {
     : "操作失败，请检查当前配置或查看日志中的详细原因";
 }
 
-/// 读取 provider 模型列表；官方 OAuth 在线失败时回退到本地 Codex 模型缓存。
+/// 读取 provider 模型列表；官方 OAuth 不可用时回退到无需 OAuth 的可信官方目录。
 async function fetchProviderModelsWithFallback(
   fetchConfig: ProviderModelFetchConfig,
 ): Promise<{
   models: FetchedModel[];
-  usedCodexCache: boolean;
+  usedCodexFallback: boolean;
   onlineErrorMessage?: string;
 }> {
   if (!fetchConfig.useCodexOAuth) {
@@ -717,21 +717,21 @@ async function fetchProviderModelsWithFallback(
             }
           : undefined,
       ),
-      usedCodexCache: false,
+      usedCodexFallback: false,
     };
   }
 
   try {
     return {
       models: await fetchCodexOauthModels(fetchConfig.codexOAuthAccountId),
-      usedCodexCache: false,
+      usedCodexFallback: false,
     };
   } catch (error) {
     const onlineErrorMessage = workspaceErrorMessage(error);
-    const cachedModels = await fetchCodexOauthCachedModels();
+    const fallbackModels = await fetchCodexOfficialFallbackModels();
     return {
-      models: cachedModels,
-      usedCodexCache: cachedModels.length > 0,
+      models: fallbackModels,
+      usedCodexFallback: fallbackModels.length > 0,
       onlineErrorMessage,
     };
   }
@@ -3000,7 +3000,7 @@ export function CodexRouterWorkspacePage({
       // 将模型目录读取、provider catalog 写回、受影响路由方案重建视为一个事务；
       // 任何阶段卡住都必须让刷新卡片落到终态，不能只保护最前面的网络请求。
       const refreshTask = (async (): Promise<ProviderModelRefreshResult> => {
-        const { models, usedCodexCache, onlineErrorMessage } =
+        const { models, usedCodexFallback, onlineErrorMessage } =
           await fetchProviderModelsWithFallback(fetchConfig);
         if (!isCurrentAttempt()) {
           return { status: "stale" };
@@ -3009,7 +3009,7 @@ export function CodexRouterWorkspacePage({
           return {
             status: "empty",
             message: onlineErrorMessage
-              ? `OAuth 在线模型列表获取失败：${onlineErrorMessage}；本地缓存没有可恢复的官方模型目录。`
+              ? `OAuth 在线模型列表获取失败：${onlineErrorMessage}；备用官方目录也没有可用模型。`
               : "获取模型列表失败：远端返回空列表，请检查当前供应商配置。",
           };
         }
@@ -3019,8 +3019,8 @@ export function CodexRouterWorkspacePage({
           ...current,
           [provider.id]: {
             status: "loading",
-            message: usedCodexCache
-              ? `OAuth 在线读取失败，已从本地 Codex 模型缓存读取 ${models.length} 个模型，正在写回本地配置...`
+            message: usedCodexFallback
+              ? `OAuth 在线读取失败，已从备用官方目录读取 ${models.length} 个模型，正在写回本地配置...`
               : `已读取 ${models.length} 个模型，正在写回本地配置...`,
             modelCount: models.length,
           },
@@ -3035,7 +3035,7 @@ export function CodexRouterWorkspacePage({
           status: "updated",
           models,
           nextProvider,
-          usedCodexCache,
+          usedCodexFallback,
           onlineErrorMessage,
         };
       })();
@@ -3075,8 +3075,8 @@ export function CodexRouterWorkspacePage({
             ...current,
             [provider.id]: {
               status: "success",
-              message: result.usedCodexCache
-                ? `OAuth 在线读取失败，已使用本地 Codex 模型缓存更新 ${
+              message: result.usedCodexFallback
+                ? `OAuth 在线读取失败，已使用备用官方目录更新 ${
                     readCodexModelCatalog(result.nextProvider).models.length
                   } 个模型。在线错误：${result.onlineErrorMessage}`
                 : `已读取并更新 ${

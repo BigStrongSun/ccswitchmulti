@@ -224,13 +224,13 @@ pub async fn get_codex_oauth_models(
     crate::services::codex_oauth_models::fetch_models_with_token(&token, &workspace_id).await
 }
 
-/// 读取本地 Codex 官方模型缓存。
+/// 获取无需 CCSM OAuth 的 Codex 官方备用模型目录。
 ///
-/// 该命令不触发 OAuth refresh，也不访问网络，只用于 MultiRouter 向导在
-/// `chatgpt.com/backend-api/codex/models` 网络层失败时保留最近一次官方模型目录。
+/// 优先刷新 OpenAI/Codex 公共 catalog；失败时读取独立公共缓存、本机可信官方
+/// cache/backup、当前 Codex bundled catalog 与 CCSM 随包基线。
 #[tauri::command]
-pub fn get_codex_oauth_cached_models() -> Result<Vec<FetchedModel>, String> {
-    crate::services::codex_oauth_models::fetch_cached_models_from_disk()
+pub async fn get_codex_official_fallback_models() -> Result<Vec<FetchedModel>, String> {
+    crate::services::codex_oauth_models::fetch_official_fallback_models().await
 }
 
 #[cfg(test)]

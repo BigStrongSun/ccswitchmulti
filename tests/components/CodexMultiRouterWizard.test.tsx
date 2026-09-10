@@ -14,7 +14,7 @@ import {
   type CodexProviderProtocolPreflightOutcome,
 } from "@/lib/api/protocol-compatibility";
 import {
-  fetchCodexOauthCachedModels,
+  fetchCodexOfficialFallbackModels,
   fetchCodexOauthModels,
   fetchModelsForConfig,
 } from "@/lib/api/model-fetch";
@@ -42,7 +42,7 @@ vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => ({
 }));
 
 vi.mock("@/lib/api/model-fetch", () => ({
-  fetchCodexOauthCachedModels: vi.fn(),
+  fetchCodexOfficialFallbackModels: vi.fn(),
   fetchCodexOauthModels: vi.fn(),
   fetchModelsForConfig: vi.fn(),
 }));
@@ -132,7 +132,7 @@ function verifiedPreflight(
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
-  vi.mocked(fetchCodexOauthCachedModels).mockResolvedValue([]);
+  vi.mocked(fetchCodexOfficialFallbackModels).mockResolvedValue([]);
   vi.mocked(preflightCodexProviderProtocolCompatibility).mockImplementation(
     async (source) => verifiedPreflight(source),
   );
@@ -894,13 +894,13 @@ describe("CodexMultiRouterWizard", () => {
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
   });
 
-  it("uses local Codex cache when OAuth model request fails for an empty official source", async () => {
+  it("uses the official fallback catalog when OAuth is unavailable for an empty official source", async () => {
     vi.mocked(fetchCodexOauthModels).mockRejectedValueOnce(
       new Error("error sending request for url"),
     );
-    vi.mocked(fetchCodexOauthCachedModels).mockResolvedValueOnce([
-      { id: "gpt-5.5", ownedBy: "Codex", contextWindow: 256000 },
-      { id: "gpt-5.6-luna", ownedBy: "Codex", contextWindow: 256000 },
+    vi.mocked(fetchCodexOfficialFallbackModels).mockResolvedValueOnce([
+      { id: "aurora-code", ownedBy: "Codex", contextWindow: 256000 },
+      { id: "gpt-6-astra", ownedBy: "Codex", contextWindow: 256000 },
     ]);
     const officialProvider = provider({
       id: "codex-official",
@@ -925,14 +925,14 @@ describe("CodexMultiRouterWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: "自动获取模型列表" }));
 
     expect(
-      await screen.findByText(/已使用本地 Codex 模型缓存载入草稿 2 个模型/),
+      await screen.findByText(/已使用备用官方目录载入草稿 2 个模型/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/OAuth 在线模型列表获取失败，已使用本地缓存/),
+      screen.getByText(/OAuth 在线模型列表获取失败，已使用备用官方目录/),
     ).toBeInTheDocument();
     expect(providersApi.update).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "选择模型" }));
-    expect(screen.getByLabelText("保留 gpt-5.6-luna")).toBeInTheDocument();
+    expect(screen.getByLabelText("保留 aurora-code")).toBeInTheDocument();
   });
 
   it("excludes an unchecked provider from the generated MultiRouter plan", async () => {

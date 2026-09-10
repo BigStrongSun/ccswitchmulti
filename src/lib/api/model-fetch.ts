@@ -133,12 +133,14 @@ export async function fetchXaiOauthModels(
 }
 
 /**
- * 读取本地 Codex 官方模型缓存
+ * 获取无需 CCSM OAuth 的官方 Codex 备用模型目录
  *
- * 只作为 ChatGPT OAuth 在线模型接口失败后的离线兜底，不触发登录态刷新或网络请求。
+ * 优先刷新 OpenAI/Codex 公共目录，失败时读取本地可信官方 cache、bundled 与随包基线。
  */
-export async function fetchCodexOauthCachedModels(): Promise<FetchedModel[]> {
-  return invoke("get_codex_oauth_cached_models");
+export async function fetchCodexOfficialFallbackModels(): Promise<
+  FetchedModel[]
+> {
+  return invoke("get_codex_official_fallback_models");
 }
 
 /**

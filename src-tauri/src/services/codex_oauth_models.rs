@@ -10,7 +10,11 @@ use std::error::Error;
 use std::time::Duration;
 
 const CODEX_OAUTH_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
+const CODEX_PUBLIC_MODELS_URL: &str =
+    "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json";
 const CODEX_OAUTH_FETCH_TIMEOUT_SECS: u64 = 15;
+const CODEX_PUBLIC_MODELS_FETCH_TIMEOUT_SECS: u64 = 10;
+const CODEX_PUBLIC_MODELS_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const ERROR_BODY_MAX_CHARS: usize = 512;
 const CODEX_OAUTH_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -32,7 +36,7 @@ pub async fn fetch_models_with_token(
         .timeout(Duration::from_secs(CODEX_OAUTH_FETCH_TIMEOUT_SECS))
         .send()
         .await
-        .map_err(format_codex_oauth_request_error)?;
+        .map_err(format_model_catalog_request_error)?;
 
     let status = response.status();
     if !status.is_success() {
@@ -53,7 +57,7 @@ pub async fn fetch_models_with_token(
 /// `reqwest::Error` 的默认文本经常只显示 `error sending request for url`，
 /// 不足以区分超时、连接、TLS 或代理问题。这里展开错误链和 CCSM 全局代理状态，
 /// 但不包含任何 token、账号明文或请求头。
-fn format_codex_oauth_request_error(error: reqwest::Error) -> String {
+fn format_model_catalog_request_error(error: reqwest::Error) -> String {
     let mut hints = Vec::new();
     if error.is_timeout() {
         hints.push("timeout");
@@ -99,39 +103,118 @@ fn format_codex_oauth_request_error(error: reqwest::Error) -> String {
     format!("Request failed: {error}; kind={kind}; {proxy_hint}; source={source_chain}")
 }
 
-/// 读取 Codex 官方模型缓存链，作为 OAuth 在线获取失败时的离线兜底。
+/// 读取本地 Codex 官方模型来源链，作为公共目录也不可用时的最终兜底。
 ///
-/// 与配置投影共用同一个来源：CCSM packaged 基线、本机官方 cache、当前 Codex
-/// bundled 目录。最后仍按官方模型 ID 过滤，避免把 MultiRouter 合并进去的第三方
-/// 模型写回 official route。
+/// 与配置投影共用同一个可信来源链：CCSM packaged 基线、本机未被 CCSM 接管的
+/// 官方 cache/backup、当前 Codex bundled 目录。CCSM-owned 混合 cache 在来源选择
+/// 阶段已被排除，因此这里不能再按模型名称猜测官方身份。
 pub fn fetch_cached_models_from_disk() -> Result<Vec<FetchedModel>, String> {
     let models = crate::codex_config::codex_official_models_cache().unwrap_or_default();
     Ok(parse_cached_models(serde_json::json!({ "models": models })))
 }
 
-/// 从 Codex 缓存结构里解析官方模型，并剔除 MultiRouter 合并进去的第三方模型。
-fn parse_cached_models(value: Value) -> Vec<FetchedModel> {
-    parse_models(value)
-        .into_iter()
-        .filter(|model| is_likely_codex_oauth_model_id(&model.id))
-        .collect()
+/// 无需 CCSM OAuth 的官方目录入口：优先刷新 OpenAI/Codex 公共 catalog，失败时
+/// 使用上面的本地可信来源链。公共内容在写入独立缓存前会移除指令字段。
+pub async fn fetch_official_fallback_models() -> Result<Vec<FetchedModel>, String> {
+    fetch_official_fallback_models_from_url(CODEX_PUBLIC_MODELS_URL).await
 }
 
-/// 判断缓存条目是否像官方 Codex/ChatGPT 模型。
-///
-/// 该函数只用于离线 fallback，宁可漏掉不认识的新第三方条目，也不能把 Qwen、
-/// DeepSeek 等用户自定义模型灌进 official route。在线接口成功时不走这层过滤。
-fn is_likely_codex_oauth_model_id(model_id: &str) -> bool {
-    let id = model_id.trim().to_ascii_lowercase();
-    if id.starts_with("gpt-") || id.starts_with("codex-") || id.starts_with("chatgpt-") {
-        return true;
+async fn fetch_official_fallback_models_from_url(
+    public_models_url: &str,
+) -> Result<Vec<FetchedModel>, String> {
+    match fetch_public_official_catalog_from_url(public_models_url).await {
+        Ok(models) => {
+            let parsed = parse_cached_models(serde_json::json!({ "models": models }));
+            match crate::codex_config::store_codex_public_official_models_cache(&models) {
+                Ok(()) => {
+                    let merged = fetch_cached_models_from_disk()?;
+                    if !merged.is_empty() {
+                        return Ok(merged);
+                    }
+                }
+                Err(error) => {
+                    log::warn!("failed to cache OpenAI public Codex model catalog: {error}");
+                    if !parsed.is_empty() {
+                        return Ok(parsed);
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            log::warn!("failed to refresh OpenAI public Codex model catalog: {error}");
+        }
     }
-    ["o1", "o3", "o4", "o5"].iter().any(|prefix| {
-        id == *prefix
-            || id
-                .strip_prefix(prefix)
-                .is_some_and(|suffix| suffix.starts_with('-'))
-    })
+
+    fetch_cached_models_from_disk()
+}
+
+async fn fetch_public_official_catalog_from_url(url: &str) -> Result<Vec<Value>, String> {
+    let response = crate::proxy::http_client::get()
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(
+            reqwest::header::USER_AGENT,
+            concat!("CCSwitchMulti/", env!("CARGO_PKG_VERSION")),
+        )
+        .timeout(Duration::from_secs(CODEX_PUBLIC_MODELS_FETCH_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(format_model_catalog_request_error)?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = truncate_body(response.text().await.unwrap_or_default());
+        return Err(format!("HTTP {status}: {body}"));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > CODEX_PUBLIC_MODELS_MAX_BYTES)
+    {
+        return Err("OpenAI public Codex model catalog exceeds 8 MiB".to_string());
+    }
+
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Failed to read public model catalog: {error}"))?;
+    if body.len() as u64 > CODEX_PUBLIC_MODELS_MAX_BYTES {
+        return Err("OpenAI public Codex model catalog exceeds 8 MiB".to_string());
+    }
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|error| format!("Failed to parse public model catalog: {error}"))?;
+    let models = value
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "OpenAI public Codex model catalog has no models array".to_string())?;
+    let sanitized = models
+        .iter()
+        .filter_map(sanitize_public_official_model)
+        .collect::<Vec<_>>();
+    if parse_cached_models(serde_json::json!({ "models": sanitized })).is_empty() {
+        return Err("OpenAI public Codex model catalog has no usable models".to_string());
+    }
+    Ok(sanitized)
+}
+
+fn sanitize_public_official_model(model: &Value) -> Option<Value> {
+    let mut model = model.as_object()?.clone();
+    for field in [
+        "model_messages",
+        "modelMessages",
+        "base_instructions",
+        "baseInstructions",
+        "instructions",
+        "instructions_template",
+        "instructionsTemplate",
+    ] {
+        model.remove(field);
+    }
+    Some(Value::Object(model))
+}
+
+/// 解析已经过来源隔离的官方模型目录。
+fn parse_cached_models(value: Value) -> Vec<FetchedModel> {
+    parse_models(value)
 }
 
 /// 解析 ChatGPT Codex 模型列表响应，兼容数组、`data`、`items` 和 map 形态。
@@ -376,7 +459,28 @@ fn truncate_body(body: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{routing::get, Json, Router};
     use serde_json::json;
+
+    async fn spawn_public_catalog_server(body: Value) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind public catalog fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let app = Router::new().route(
+            "/models.json",
+            get(move || {
+                let body = body.clone();
+                async move { Json(body) }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve public catalog fixture");
+        });
+        (format!("http://{address}/models.json"), task)
+    }
 
     #[test]
     fn parse_codex_oauth_models_accepts_openai_style_data() {
@@ -541,26 +645,40 @@ mod tests {
     }
 
     #[test]
-    fn parse_cached_models_keeps_official_codex_models_only() {
+    fn parse_trusted_cached_models_does_not_guess_official_identity_from_the_model_name() {
         let models = parse_cached_models(json!({
             "models": [
-                { "slug": "gpt-5.5", "owned_by": "openai" },
-                { "slug": "gpt-5.6-luna", "provider": "Codex" },
-                { "slug": "codex-auto-review", "provider": "Codex" },
-                { "slug": "o4-mini", "provider": "OpenAI" },
-                { "slug": "deepseek-chat", "provider": "deepseek" },
-                { "slug": "qwen3-coder", "provider": "qwen" }
+                { "slug": "gpt-6-astra", "owned_by": "openai" },
+                { "slug": "aurora-code", "provider": "Codex" }
             ]
         }));
 
         assert_eq!(
             models.into_iter().map(|model| model.id).collect::<Vec<_>>(),
-            vec![
-                "codex-auto-review".to_string(),
-                "gpt-5.5".to_string(),
-                "gpt-5.6-luna".to_string(),
-                "o4-mini".to_string()
-            ]
+            vec!["aurora-code".to_string(), "gpt-6-astra".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn public_official_catalog_supports_future_names_without_importing_instructions() {
+        let (url, server) = spawn_public_catalog_server(json!({
+            "models": [{
+                "slug": "aurora-code",
+                "display_name": "Aurora Code",
+                "supported_in_api": true,
+                "model_messages": {"instructions_template": "remote instructions"},
+                "base_instructions": "remote base instructions"
+            }]
+        }))
+        .await;
+
+        let models = fetch_public_official_catalog_from_url(&url)
+            .await
+            .expect("fetch public official catalog");
+        server.abort();
+
+        assert_eq!(models[0]["slug"], json!("aurora-code"));
+        assert!(models[0].get("model_messages").is_none());
+        assert!(models[0].get("base_instructions").is_none());
     }
 }
