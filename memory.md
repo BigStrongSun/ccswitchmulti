@@ -7,7 +7,8 @@
 - Astra 并非 CCSM 完全不支持。在线 OAuth 目录解析、reasoning resolver 和前端同步已有动态能力链；真正缺口是 OAuth 在线失败时的 picker 只读本机 cache，而配置侧再依赖设备上的 `codex debug models --bundled`。本机 Codex 0.147.0 bundled 不含 `gpt-6-astra`，因此同一个 Release 会因用户设备 Codex/cache 版本不同而丢模型。
 - CCSM 现在随包携带最小官方 fallback catalog，含 OpenAI 当前 Codex `gpt-6-astra` 条目：默认 `low`，支持 `low/medium/high/xhigh/max/ultra`、图像输入和 Codex 窗口/transport 字段。合并优先级是 packaged baseline < 本机官方 cache < 当前 Codex bundled，旧 CLI 缺项时补齐，同时不覆盖更新来源；OAuth 离线 picker 与配置投影复用同一来源链。
 - 外部事实用 Codex 内置 Web 与 Matrix WebSearch 独立核对。OpenAI 官方模型文档和 `openai/codex` 当前 `models.json` 都确认 Astra 存在；Matrix 搜索无结果，但直接打开官方 raw `models.json` 得到同一条目。CCSM 错误根因仍以本地源码、0.147.0 bundled 输出和 RED→GREEN 为准。
-- TDD 红灯分别稳定得到工作流 `failed` 而非 `action_required`、对话框错误文案以及缺少 packaged catalog 的 Rust 编译错误；实现后前端聚焦 114/114、Rust packaged 2/2、official merge 2/2、OAuth model parser 9/9、typecheck、rustfmt、diff 和严格 UTF-8 均通过。未安装、停止或重启 CCSM/Codex，未操作 `127.0.0.1:15721`。
+- TDD 红灯分别稳定得到工作流 `failed` 而非 `action_required`、对话框错误文案以及缺少 packaged catalog 的 Rust 编译错误；实现后前端聚焦 114/114、全量前端 188 文件 1559/1559、Rust library 4083 passed/7 ignored、全部独立 Rust 集成目标、Rust packaged 2/2、official merge 2/2、OAuth model parser 9/9、Pester 30/30、`cargo check --all-targets`、CI 同口径 Clippy、typecheck、renderer build、Prettier、rustfmt、diff 和 19 个 release delta 文本的严格 UTF-8 校验均通过。
+- 溯源：功能提交 `dcb0291f`，no-FF 合入 `main` 为 `8ac3e419`，`v3.20.2-2` 发布准备为 `a9bf7944`，Prettier 收尾为 `5cca3b8`；后续发布状态以 `fork/main`、tag 和 GitHub Release 实际产物为准。未安装、停止或重启 CCSM/Codex，未操作 `127.0.0.1:15721`。
 
 ## 2026-09-10 CCSwitchMulti v3.20.2-1 正式发布
 

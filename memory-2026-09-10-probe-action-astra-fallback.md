@@ -31,6 +31,15 @@ API 产品页显示的 1,050,000 总上下文与 Codex picker 的 context/max �
 - RED: `useProtocolLabWorkflow` 收到 manual intent 错误后为 `failed`；Dialog 显示探测失败；Rust 找不到 packaged catalog loader。
 - GREEN: Protocol Lab/adapter/dialog/Router workspace 前端 114/114。
 - GREEN: packaged catalog 2/2，官方 merge 2/2，OAuth model parser 9/9。
-- `pnpm typecheck`、`cargo fmt --check`、`git diff --check`、修改文本 UTF-8 无 BOM/U+FFFD 通过。
+- GREEN: 全量前端 188 个文件、1559 项测试通过；全量 Rust library 4083 项通过、7 项忽略；`src-tauri/tests/*.rs` 独立集成目标全部通过。
+- `pnpm typecheck`、`pnpm format:check`、`pnpm build:renderer`、`cargo check --all-targets`、CI 同口径 `cargo clippy -- -D warnings`、`cargo fmt --check`、`git diff --check` 均通过。
+- 相对 `v3.20.2-1` 的 19 个文本变更文件均通过 UTF-8 严格解码，且无 BOM、无 U+FFFD。
+
+## 提交与发布准备
+
+- 功能提交：`dcb0291f`（分支 `bigstrongsun/fix-probe-action-astra-fallback`）。
+- 合入 `main`：`8ac3e419`（no-FF merge）。
+- `v3.20.2-2` 版本与发布说明：`a9bf7944`；Prettier 格式收尾：`5cca3b8`。
+- 当前待把发布分支 `bigstrongsun/release-v3.20.2-2` 合回 `main`，再推送 `fork`、创建并推送 annotated tag `v3.20.2-2`，以触发 GitHub Release 工作流。
 
 本轮源代码验证没有安装、替换或重启本机应用，也没有触碰真实 Provider、历史、SQLite、代理监听或 `127.0.0.1:15721`。
