@@ -192,6 +192,10 @@ export const proxyApi = {
     return invoke("update_proxy_config_for_app", { config });
   },
 
+  async setCodexCapacityRetryEnabled(enabled: boolean): Promise<void> {
+    return invoke("set_codex_capacity_retry_enabled", { enabled });
+  },
+
   // ========== 计费默认配置 API ==========
 
   // 获取默认成本倍率

@@ -2833,6 +2833,12 @@
       "reorderFailed": "Failed to update order",
       "toggleFailed": "Failed to update status"
     },
+    "capacityRetry": {
+      "label": "Auto-resume model capacity errors",
+      "description": "Automatically retries model-capacity and server-overload failures only before any text, reasoning delta, or tool call is emitted, preventing duplicate execution.",
+      "saved": "Capacity error auto-resume setting saved",
+      "saveFailed": "Failed to save capacity error auto-resume setting: {{error}}"
+    },
     "autoFailover": {
       "info": "When the failover queue has multiple providers, the system will try them in priority order when requests fail. When a provider reaches the consecutive failure threshold, the circuit breaker will open and skip it temporarily.",
       "configSaved": "Auto failover config saved",

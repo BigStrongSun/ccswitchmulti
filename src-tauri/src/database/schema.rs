@@ -128,6 +128,7 @@ impl Database {
             proxy_enabled INTEGER NOT NULL DEFAULT 0, listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
             listen_port INTEGER NOT NULL DEFAULT 15721, enable_logging INTEGER NOT NULL DEFAULT 1,
             enabled INTEGER NOT NULL DEFAULT 0, auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
+            capacity_retry_enabled INTEGER NOT NULL DEFAULT 0,
             max_retries INTEGER NOT NULL DEFAULT 3, streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
             streaming_idle_timeout INTEGER NOT NULL DEFAULT 120, non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
             circuit_failure_threshold INTEGER NOT NULL DEFAULT 4, circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
@@ -154,11 +155,11 @@ impl Database {
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
             conn.execute(
-                "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
+                "INSERT OR IGNORE INTO proxy_config (app_type, capacity_retry_enabled, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests)
-                VALUES ('codex', 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
+                VALUES ('codex', 1, 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
                 [],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -583,6 +584,11 @@ impl Database {
                         log::info!("迁移数据库从 v21 到 v22（添加 Pi 会话用量持久去重账本）");
                         Self::migrate_v21_to_v22(conn)?;
                         Self::set_user_version(conn, 22)?;
+                    }
+                    22 => {
+                        log::info!("迁移数据库从 v22 到 v23（新增 Codex 容量错误自动续跑开关）");
+                        Self::migrate_v22_to_v23(conn)?;
+                        Self::set_user_version(conn, 23)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1358,6 +1364,24 @@ impl Database {
              ON session_usage_dedup(data_source, semantic_id, has_entry_id);",
         )
         .map_err(|error| AppError::Database(format!("创建 Pi 会话用量去重账本失败: {error}")))?;
+        Ok(())
+    }
+
+    fn migrate_v22_to_v23(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "proxy_config")? {
+            return Ok(());
+        }
+        Self::add_column_if_missing(
+            conn,
+            "proxy_config",
+            "capacity_retry_enabled",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute(
+            "UPDATE proxy_config SET capacity_retry_enabled = 1 WHERE app_type = 'codex'",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -3887,6 +3911,35 @@ impl Database {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn v22_capacity_retry_migration_enables_only_codex() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE proxy_config (app_type TEXT PRIMARY KEY);
+             INSERT INTO proxy_config (app_type) VALUES ('claude'), ('codex'), ('gemini');",
+        )?;
+        Database::set_user_version(&conn, 22)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        let rows = conn
+            .prepare("SELECT app_type, capacity_retry_enabled FROM proxy_config ORDER BY app_type")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            rows,
+            vec![
+                ("claude".to_string(), 0),
+                ("codex".to_string(), 1),
+                ("gemini".to_string(), 0),
+            ]
+        );
+        Ok(())
+    }
 
     /// 验证 v12 数据库升级后具备完整 v13 列，并且重复执行保持幂等。
     #[test]

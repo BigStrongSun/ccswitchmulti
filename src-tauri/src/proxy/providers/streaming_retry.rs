@@ -46,6 +46,9 @@ use std::time::Duration;
 /// 与官方 Codex CLI 的 `stream_max_retries` 默认值对齐。
 pub(crate) const RESPONSES_STREAM_MAX_RETRIES: u32 = 5;
 
+/// 容量类失败通常是短暂的集群压力，使用独立预算，避免挤占传输中断重试。
+pub(crate) const CAPACITY_STREAM_MAX_RETRIES: u32 = 10;
+
 /// 重连等待与正常流转静默期间向下游发 keepalive 的间隔。
 ///
 /// 退避（≤3.2s）+ 重连（≤60s）+ 等待重连后首个事件（≤60s）三段串联可超过
@@ -97,7 +100,7 @@ impl StreamReconnector {
         }
     }
 
-    async fn connect(&self) -> Result<ProxyResponse, ProxyError> {
+    pub(crate) async fn connect(&self) -> Result<ProxyResponse, ProxyError> {
         let diagnostic = crate::proxy::error_journal::Context::new(
             "responses_reconnect",
             &http::HeaderMap::new(),
@@ -120,6 +123,180 @@ impl StreamReconnector {
         result
             .inspect_err(|error| diagnostic.failed(error))
             .map(|response| diagnostic.observe(response))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodexUpstreamSseProtocol {
+    ChatCompletions,
+    AnthropicMessages,
+}
+
+fn upstream_sse_block_is_error(block: &[u8]) -> bool {
+    let event = raw_responses_sse_event_name(block);
+    let payload = raw_responses_sse_payload(block);
+    matches!(
+        event.as_deref(),
+        Some("error" | "response.error" | "response.failed")
+    ) || payload
+        .as_ref()
+        .is_some_and(|value| value.get("error").is_some())
+}
+
+fn chat_sse_payload_is_semantic(payload: &Value) -> bool {
+    payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                let delta = choice.get("delta").unwrap_or(&Value::Null);
+                let has_text = ["content", "refusal", "reasoning", "reasoning_content"]
+                    .iter()
+                    .any(|key| {
+                        delta
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.is_empty())
+                    });
+                let has_tools = delta
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(|calls| !calls.is_empty());
+                let has_reasoning_details = delta
+                    .get("reasoning_details")
+                    .is_some_and(|value| !value.is_null());
+                has_text
+                    || has_tools
+                    || has_reasoning_details
+                    || choice
+                        .get("finish_reason")
+                        .is_some_and(|value| !value.is_null())
+            })
+        })
+}
+
+fn upstream_sse_block_is_semantic(block: &[u8], protocol: CodexUpstreamSseProtocol) -> bool {
+    if raw_sse_block_is_comment(block) || upstream_sse_block_is_error(block) {
+        return false;
+    }
+    let event = raw_responses_sse_event_name(block);
+    let payload = raw_responses_sse_payload(block);
+    match protocol {
+        CodexUpstreamSseProtocol::ChatCompletions => {
+            payload.as_ref().is_some_and(chat_sse_payload_is_semantic)
+        }
+        CodexUpstreamSseProtocol::AnthropicMessages => {
+            !matches!(event.as_deref(), None | Some("message_start" | "ping"))
+        }
+    }
+}
+
+/// 在 Chat/Anthropic 转换器之前吸收明确容量终态并重连同一 Provider。
+///
+/// 只有协议脚手架已经出现时才允许重放；一旦原始上游流出现正文、reasoning 或
+/// 工具调用相关事件便永久关闭重放。转换器保持同一个状态机，因此重连后的重复
+/// message_start/role 脚手架不会再次对 Codex 产生 response.created。
+pub(crate) fn create_capacity_resilient_upstream_sse_stream(
+    initial: ByteStream,
+    reconnector: Option<StreamReconnector>,
+    enabled: bool,
+    protocol: CodexUpstreamSseProtocol,
+    log_context: Option<StreamLogContext>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    async_stream::stream! {
+        let mut current = Some(initial);
+        let mut semantic_output_seen = false;
+        let mut capacity_attempt = 0u32;
+
+        'attempts: loop {
+            let Some(mut stream) = current.take() else { break };
+            let mut buffer = BytesMut::new();
+            let mut swallowed_capacity_block: Option<Bytes> = None;
+
+            while let Some(item) = stream.next().await {
+                let chunk = match item {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        yield Err(error);
+                        break 'attempts;
+                    }
+                };
+                buffer.extend_from_slice(&chunk);
+                while let Some(block) = take_raw_sse_block(&mut buffer) {
+                    let capacity_failure = enabled
+                        && !semantic_output_seen
+                        && upstream_sse_block_is_error(&block)
+                        && raw_responses_sse_payload(&block)
+                            .as_ref()
+                            .is_some_and(|payload| is_capacity_error_payload(payload, None));
+                    if capacity_failure {
+                        swallowed_capacity_block = Some(block);
+                        break;
+                    }
+                    semantic_output_seen |= upstream_sse_block_is_semantic(&block, protocol);
+                    yield Ok(block);
+                }
+                if swallowed_capacity_block.is_some() {
+                    break;
+                }
+            }
+
+            let Some(capacity_block) = swallowed_capacity_block else {
+                if !buffer.is_empty() {
+                    yield Ok(buffer.freeze());
+                }
+                break;
+            };
+            let Some(reconnector) = reconnector.as_ref() else {
+                yield Ok(capacity_block);
+                break;
+            };
+            if capacity_attempt >= CAPACITY_STREAM_MAX_RETRIES {
+                yield Ok(capacity_block);
+                break;
+            }
+
+            capacity_attempt += 1;
+            if let Some(context) = log_context.as_ref() {
+                crate::proxy::codex_router_log::append_event(
+                    "capacity_retry",
+                    &[
+                        ("stage", format!("{:?}", protocol)),
+                        ("session", context.session_id.clone()),
+                        ("model", context.model.clone()),
+                        ("provider", context.provider_id.clone()),
+                        ("attempt", capacity_attempt.to_string()),
+                    ],
+                );
+            }
+            tokio::time::sleep(backoff_delay(capacity_attempt)).await;
+            match reconnector.connect().await {
+                Ok(response) if response.status().is_success() => {
+                    current = Some(Box::pin(response.bytes_stream()));
+                    continue 'attempts;
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.bytes_with_limit(1024 * 1024).await.ok();
+                    let text = body.as_ref().and_then(|body| std::str::from_utf8(body).ok());
+                    if is_capacity_error_response(status, text) {
+                        current = Some(Box::pin(futures::stream::once(async move {
+                            Ok(capacity_block)
+                        })));
+                        continue 'attempts;
+                    }
+                    yield Err(std::io::Error::other(format!(
+                        "capacity retry received non-retryable HTTP {}",
+                        status.as_u16()
+                    )));
+                    break;
+                }
+                Err(error) => {
+                    yield Err(std::io::Error::other(format!("capacity retry failed: {error}")));
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -176,6 +353,114 @@ fn raw_responses_sse_payload(block: &[u8]) -> Option<Value> {
         return None;
     }
     serde_json::from_str(&data).ok()
+}
+
+/// 判断上游错误是否明确属于模型容量/服务器过载，而不是额度、认证或一般参数错误。
+///
+/// 类型码是强信号；文案只接受明确的容量语义。泛化的 `please try again later`
+/// 只有与 overload 类型或 5xx HTTP 状态组合时才成立，避免把业务错误误重放。
+pub(crate) fn is_capacity_error_payload(payload: &Value, status: Option<http::StatusCode>) -> bool {
+    let error = payload
+        .pointer("/response/error")
+        .or_else(|| payload.get("error"))
+        .unwrap_or(payload);
+    let error_type = error
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("code").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("message").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let overload_type = [
+        "server_is_overloaded",
+        "slow_down",
+        "overloaded_error",
+        "model_at_capacity",
+        "capacity_exceeded",
+    ]
+    .iter()
+    .any(|marker| error_type.contains(marker));
+    let explicit_capacity_message = [
+        "selected model is at capacity",
+        "model is at capacity",
+        "servers are currently overloaded",
+        "currently experiencing high demand",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker));
+    let retry_later_with_server_signal = message.contains("please try again later")
+        && (overload_type || status.is_some_and(|status| status.is_server_error()));
+
+    overload_type || explicit_capacity_message || retry_later_with_server_signal
+}
+
+pub(crate) fn is_capacity_error_response(status: http::StatusCode, body: Option<&str>) -> bool {
+    let server_load_status = matches!(
+        status,
+        http::StatusCode::BAD_GATEWAY
+            | http::StatusCode::SERVICE_UNAVAILABLE
+            | http::StatusCode::GATEWAY_TIMEOUT
+    );
+    let Some(body) = body.filter(|body| !body.trim().is_empty()) else {
+        return server_load_status;
+    };
+    let payload =
+        serde_json::from_str::<Value>(body).unwrap_or_else(|_| json!({ "message": body }));
+    if is_capacity_error_payload(&payload, Some(status)) {
+        return true;
+    }
+
+    server_load_status && !is_explicit_non_replayable_error_payload(&payload)
+}
+
+fn is_explicit_non_replayable_error_payload(payload: &Value) -> bool {
+    let error = payload
+        .pointer("/response/error")
+        .or_else(|| payload.get("error"))
+        .unwrap_or(payload);
+    let kind = error
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("code").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("message").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    [
+        "quota",
+        "billing",
+        "authentication",
+        "unauthorized",
+        "forbidden",
+        "permission",
+        "policy",
+        "invalid_request",
+        "invalid_parameter",
+        "unsupported_parameter",
+    ]
+    .iter()
+    .any(|marker| kind.contains(marker))
+        || [
+            "quota exhausted",
+            "insufficient quota",
+            "invalid token",
+            "authentication failed",
+            "request blocked by policy",
+            "unsupported parameter",
+        ]
+        .iter()
+        .any(|marker| message.contains(marker))
 }
 
 struct NativeResponsesSseErrorDiagnostic {
@@ -420,7 +705,7 @@ pub fn create_resilient_responses_sse_stream(
     initial: ByteStream,
     reconnector: Option<StreamReconnector>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
-    create_resilient_responses_sse_stream_with_context(initial, reconnector, None)
+    create_resilient_responses_sse_stream_with_context(initial, reconnector, None, true)
 }
 
 /// 原生 Responses SSE 透传的可观测版本：在不记录正文的前提下，把中途
@@ -429,9 +714,11 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
     initial: ByteStream,
     reconnector: Option<StreamReconnector>,
     log_context: Option<StreamLogContext>,
+    capacity_retry_enabled: bool,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
-        let mut attempt = 0;
+        let mut transport_attempt = 0;
+        let mut capacity_attempt = 0;
         let mut created_forwarded = false;
         let mut response_id: Option<String> = None;
         let mut semantic_output_forwarded = false;
@@ -443,6 +730,7 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
             let mut buffer = BytesMut::new();
             let mut silence = Duration::ZERO;
 
+            let mut retrying_capacity = false;
             let mut reason = 'stream: loop {
                 let item = match tokio::time::timeout(KEEPALIVE_INTERVAL, stream.next()).await {
                     Ok(item) => {
@@ -524,7 +812,11 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                         }
                         (Some(_), Some(disposition)) => {
                             if let Some(context) = log_context.as_ref() {
-                                log_native_responses_sse_error(context, &block, attempt);
+                                log_native_responses_sse_error(
+                                    context,
+                                    &block,
+                                    transport_attempt + capacity_attempt,
+                                );
                             }
                             match disposition {
                                 NativeResponsesTerminalDisposition::Completed
@@ -532,6 +824,15 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                                     yield Ok(block);
                                 }
                                 NativeResponsesTerminalDisposition::Failed => {
+                                    if capacity_retry_enabled
+                                        && !semantic_output_forwarded
+                                        && payload.as_ref().is_some_and(|payload| {
+                                            is_capacity_error_payload(payload, None)
+                                        })
+                                    {
+                                        retrying_capacity = true;
+                                        break 'stream "upstream reported model capacity pressure".into();
+                                    }
                                     yield Ok(native_responses_client_failure(block, response_id.as_deref()));
                                 }
                                 NativeResponsesTerminalDisposition::ProtocolError {
@@ -573,26 +874,46 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                     ));
                     break 'attempts;
                 };
-                if attempt >= RESPONSES_STREAM_MAX_RETRIES {
-                    let message = "上游响应流在输出正文前反复中断，自动重连已耗尽，请检查网络或代理后重试";
+                let attempt = if retrying_capacity {
+                    &mut capacity_attempt
+                } else {
+                    &mut transport_attempt
+                };
+                let retry_limit = if retrying_capacity {
+                    CAPACITY_STREAM_MAX_RETRIES
+                } else {
+                    RESPONSES_STREAM_MAX_RETRIES
+                };
+                if *attempt >= retry_limit {
+                    let message = if retrying_capacity {
+                        "上游模型持续处于容量压力，自动续跑次数已耗尽，请稍后重试"
+                    } else {
+                        "上游响应流在输出正文前反复中断，自动重连已耗尽，请检查网络或代理后重试"
+                    };
                     log::error!(
                         "[Codex/Responses] stream failed after {attempt} reconnect attempt(s): {reason}; client_message={message}"
                     );
                     yield Ok(native_responses_failed_terminal_sse(
                         response_id.as_deref(),
-                        "stream_error",
+                        if retrying_capacity { "capacity_retry_exhausted" } else { "stream_error" },
                         message,
                     ));
                     break 'attempts;
                 }
-                attempt += 1;
-                log::warn!(
-                    "[Codex/Responses] upstream stream dropped before semantic output ({reason}); reconnecting (attempt {attempt}/{RESPONSES_STREAM_MAX_RETRIES})"
-                );
+                *attempt += 1;
+                if retrying_capacity {
+                    log::warn!(
+                        "[Codex/Responses] upstream capacity pressure before semantic output; reconnecting (attempt {attempt}/{CAPACITY_STREAM_MAX_RETRIES})"
+                    );
+                } else {
+                    log::warn!(
+                        "[Codex/Responses] upstream stream dropped before semantic output ({reason}); reconnecting (attempt {attempt}/{RESPONSES_STREAM_MAX_RETRIES})"
+                    );
+                }
                 if created_forwarded {
                     yield Ok(Bytes::from_static(b": ping\n\n"));
                 }
-                tokio::time::sleep(backoff_delay(attempt)).await;
+                tokio::time::sleep(backoff_delay(*attempt)).await;
                 match reconnector.connect().await {
                     Ok(response) if response.status().is_success() => {
                         current = Some(Box::pin(response.bytes_stream()));
@@ -1011,6 +1332,19 @@ mod tests {
         )
     }
 
+    fn capacity_failed(error_type: &str, message: &str) -> String {
+        sse(
+            "response.failed",
+            json!({
+                "type":"response.failed",
+                "response":{
+                    "status":"failed",
+                    "error":{"type":error_type,"message":message}
+                }
+            }),
+        )
+    }
+
     fn ok_chunks(parts: &[&str]) -> ByteStream {
         let items: Vec<Result<Bytes, std::io::Error>> = parts
             .iter()
@@ -1151,6 +1485,209 @@ mod tests {
         assert_eq!(out.matches("event: response.created").count(), 1);
         assert!(out.contains("hello"));
         assert!(out.contains("event: response.completed"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_failure_after_created_reconnects_when_enabled() {
+        let retry_body = [created(), text_delta("recovered"), completed()].concat();
+        let (reconnector, calls) =
+            scripted_reconnector(vec![Ok(streamed_response(&[retry_body.as_str()]))]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(out.matches("event: response.created").count(), 1);
+        assert!(out.contains("recovered"));
+        assert!(!out.contains("server_is_overloaded"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_failure_does_not_reconnect_after_semantic_output() {
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            text_delta("already visible").as_str(),
+            capacity_failed("model_at_capacity", "Model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(out.contains("already visible"));
+        assert!(out.contains("model_at_capacity"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_failure_does_not_reconnect_when_disabled() {
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            capacity_failed("overloaded_error", "Our servers are currently overloaded").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            false,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(out.contains("overloaded_error"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_to_responses_capacity_failure_reconnects_before_content() {
+        let retry = concat!(
+            "data: {\"id\":\"chat_2\",\"model\":\"qwen3.8\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"id\":\"chat_2\",\"model\":\"qwen3.8\",\"choices\":[{\"delta\":{\"content\":\"recovered chat\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (reconnector, calls) = scripted_reconnector(vec![Ok(streamed_response(&[retry]))]);
+        let initial = ok_chunks(&[
+            "data: {\"id\":\"chat_1\",\"model\":\"qwen3.8\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "event: error\ndata: {\"error\":{\"type\":\"capacity_exceeded\",\"message\":\"Currently experiencing high demand\"}}\n\n",
+        ]);
+        let upstream = create_capacity_resilient_upstream_sse_stream(
+            initial,
+            Some(reconnector),
+            true,
+            CodexUpstreamSseProtocol::ChatCompletions,
+            None,
+        );
+        let converted =
+            super::super::streaming_codex_chat::create_responses_sse_stream_from_chat(upstream);
+        let out = collect(converted).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(out.matches("event: response.created").count(), 1);
+        assert!(out.contains("recovered chat"));
+        assert!(!out.contains("capacity_exceeded"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn anthropic_to_responses_capacity_failure_reconnects_after_message_start() {
+        let retry = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"model\":\"claude\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"recovered anthropic\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let (reconnector, calls) = scripted_reconnector(vec![Ok(streamed_response(&[retry]))]);
+        let initial = ok_chunks(&[
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude\"}}\n\n",
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Our servers are currently overloaded\"}}\n\n",
+        ]);
+        let upstream = create_capacity_resilient_upstream_sse_stream(
+            initial,
+            Some(reconnector),
+            true,
+            CodexUpstreamSseProtocol::AnthropicMessages,
+            None,
+        );
+        let converted =
+            super::super::streaming_codex_anthropic::create_responses_sse_stream_from_anthropic(
+                upstream,
+            );
+        let out = collect(converted).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(out.matches("event: response.created").count(), 1);
+        assert!(out.contains("recovered anthropic"));
+        assert!(!out.contains("overloaded_error"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn converted_stream_capacity_failure_after_text_is_not_replayed() {
+        let cases = [
+            (
+                CodexUpstreamSseProtocol::ChatCompletions,
+                concat!(
+                    "data: {\"id\":\"chat_1\",\"choices\":[{\"delta\":{\"content\":\"visible\"}}]}\n\n",
+                    "event: error\ndata: {\"error\":{\"type\":\"model_at_capacity\",\"message\":\"Model is at capacity\"}}\n\n"
+                ),
+            ),
+            (
+                CodexUpstreamSseProtocol::AnthropicMessages,
+                concat!(
+                    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"visible\"}}\n\n",
+                    "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"}}\n\n"
+                ),
+            ),
+        ];
+        for (protocol, input) in cases {
+            let (reconnector, calls) = scripted_reconnector(vec![]);
+            let out = collect(create_capacity_resilient_upstream_sse_stream(
+                ok_chunks(&[input]),
+                Some(reconnector),
+                true,
+                protocol,
+                None,
+            ))
+            .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "protocol={protocol:?}");
+            assert!(out.contains("visible"));
+            assert!(out.contains("overloaded") || out.contains("model_at_capacity"));
+        }
+    }
+
+    #[test]
+    fn capacity_classifier_rejects_quota_auth_and_bare_retry_later() {
+        for payload in [
+            json!({"error":{"type":"insufficient_quota","message":"quota exhausted"}}),
+            json!({"error":{"type":"authentication_error","message":"invalid token"}}),
+            json!({"error":{"type":"invalid_request_error","message":"Please try again later"}}),
+        ] {
+            assert!(!is_capacity_error_payload(&payload, None), "{payload}");
+        }
+        assert!(is_capacity_error_payload(
+            &json!({"error":{"type":"server_error","message":"Please try again later"}}),
+            Some(http::StatusCode::SERVICE_UNAVAILABLE),
+        ));
+    }
+
+    #[test]
+    fn capacity_classifier_accepts_bodyless_server_load_statuses() {
+        for status in [
+            http::StatusCode::BAD_GATEWAY,
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            http::StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(is_capacity_error_response(status, None), "status={status}");
+        }
+        assert!(!is_capacity_error_response(
+            http::StatusCode::TOO_MANY_REQUESTS,
+            None,
+        ));
+        for body in [
+            r#"{"error":{"type":"insufficient_quota","message":"quota exhausted"}}"#,
+            r#"{"error":{"type":"authentication_error","message":"invalid token"}}"#,
+            r#"{"error":{"type":"invalid_request_error","message":"unsupported parameter"}}"#,
+            r#"{"error":{"type":"policy_violation","message":"request blocked"}}"#,
+        ] {
+            assert!(!is_capacity_error_response(
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                Some(body),
+            ));
+        }
     }
 
     #[tokio::test(start_paused = true)]

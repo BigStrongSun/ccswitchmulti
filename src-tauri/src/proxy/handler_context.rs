@@ -297,6 +297,7 @@ impl RequestContext {
             self.optimizer_config.clone(),
             self.copilot_optimizer_config.clone(),
             max_retries,
+            self.app_config.capacity_retry_enabled,
         )
     }
 
@@ -462,6 +463,7 @@ mod tests {
             app_type: "codex".to_string(),
             enabled: true,
             auto_failover_enabled: false,
+            capacity_retry_enabled: true,
             max_retries: 6,
             streaming_first_byte_timeout: 90,
             streaming_idle_timeout: 180,

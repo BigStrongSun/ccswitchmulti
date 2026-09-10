@@ -1802,6 +1802,7 @@ pub fn run() {
             commands::update_global_proxy_config,
             commands::get_proxy_config_for_app,
             commands::update_proxy_config_for_app,
+            commands::set_codex_capacity_retry_enabled,
             commands::get_default_cost_multiplier,
             commands::set_default_cost_multiplier,
             commands::get_pricing_model_source,

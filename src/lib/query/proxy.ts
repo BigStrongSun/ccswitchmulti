@@ -139,3 +139,30 @@ export function useUpdateAppProxyConfig() {
     },
   });
 }
+
+export function useSetCapacityRetryEnabled() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: ({ enabled }: { enabled: boolean }) =>
+      proxyApi.setCodexCapacityRetryEnabled(enabled),
+    onSuccess: () => {
+      toast.success(
+        t("proxy.capacityRetry.saved", "容量错误自动续跑设置已保存"),
+        {
+          closeButton: true,
+        },
+      );
+      queryClient.invalidateQueries({ queryKey: proxyKeys.appConfig("codex") });
+    },
+    onError: (error: Error) => {
+      toast.error(
+        t("proxy.capacityRetry.saveFailed", {
+          defaultValue: `保存容量错误自动续跑设置失败: ${error.message}`,
+          error: error.message,
+        }),
+      );
+    },
+  });
+}

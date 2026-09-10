@@ -269,6 +269,8 @@ pub struct RequestForwarder {
     non_streaming_timeout: std::time::Duration,
     /// 流式请求响应头等待超时（秒）
     streaming_first_byte_timeout: std::time::Duration,
+    /// Codex 容量/过载错误同 Provider 自动续跑开关；与多 Provider 故障转移独立。
+    capacity_retry_enabled: bool,
     /// 单个客户端请求最多尝试的 provider 数。
     ///
     /// 由 `AppProxyConfig.max_retries` (UI: "请求失败时的重试次数, 0-10") 派生：
@@ -733,6 +735,7 @@ impl RequestForwarder {
         optimizer_config: OptimizerConfig,
         copilot_optimizer_config: CopilotOptimizerConfig,
         max_retries: u32,
+        capacity_retry_enabled: bool,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
         // saturating_add 防止 u32::MAX + 1 溢出。
@@ -757,6 +760,7 @@ impl RequestForwarder {
             streaming_first_byte_timeout: std::time::Duration::from_secs(
                 streaming_first_byte_timeout,
             ),
+            capacity_retry_enabled,
             max_attempts,
         }
     }
@@ -3898,7 +3902,12 @@ impl RequestForwarder {
             })
         };
         let mut response = if matches!(app_type, AppType::Codex) {
-            send_codex_request_with_rate_limit_retry(adapter.name(), send_once).await
+            send_codex_request_with_rate_limit_retry(
+                adapter.name(),
+                self.capacity_retry_enabled,
+                send_once,
+            )
+            .await
         } else {
             send_once().await
         }
@@ -5366,11 +5375,13 @@ impl RequestForwarder {
             ));
         };
 
-        if let Some(message) = retryable_error_from_primed_sse_chunk(&first) {
-            return Err(ProxyError::UpstreamError {
-                status: 503,
-                body: Some(message),
-            });
+        if let Some(error) = retryable_error_from_primed_sse_chunk(&first) {
+            if !(self.capacity_retry_enabled && error.is_capacity) {
+                return Err(ProxyError::UpstreamError {
+                    status: 503,
+                    body: Some(error.message),
+                });
+            }
         }
 
         let replay = futures::stream::once(async move { Ok(first) }).chain(stream);
@@ -5654,7 +5665,12 @@ fn summarize_proxy_error(error: &ProxyError) -> String {
 /// 或 `event: response.failed`。如果此时直接把响应头交给 Codex，后续已经无法在同一个
 /// HTTP 请求里切换到下一条路由；在首包阶段把它还原为 503，才能复用现有 failover/retry
 /// 机制。普通 `response.created` / delta 事件必须原样放行。
-fn retryable_error_from_primed_sse_chunk(first: &Bytes) -> Option<String> {
+struct PrimedSseError {
+    message: String,
+    is_capacity: bool,
+}
+
+fn retryable_error_from_primed_sse_chunk(first: &Bytes) -> Option<PrimedSseError> {
     let text = std::str::from_utf8(first).ok()?;
     for block in text.split("\n\n") {
         let mut event_name: Option<&str> = None;
@@ -5691,7 +5707,13 @@ fn retryable_error_from_primed_sse_chunk(first: &Bytes) -> Option<String> {
         });
 
         if event_is_error || payload_is_error {
-            return Some(extract_sse_error_message(parsed.as_ref()).unwrap_or(data));
+            let is_capacity = parsed.as_ref().is_some_and(|payload| {
+                super::providers::streaming_retry::is_capacity_error_payload(payload, None)
+            });
+            return Some(PrimedSseError {
+                message: extract_sse_error_message(parsed.as_ref()).unwrap_or(data),
+                is_capacity,
+            });
         }
     }
 
@@ -7052,6 +7074,7 @@ where
 /// 避免在同一账号上等待和空转。
 async fn send_codex_request_with_rate_limit_retry<F, Fut>(
     app_tag: &str,
+    capacity_retry_enabled: bool,
     mut send: F,
 ) -> Result<ProxyResponse, ProxyError>
 where
@@ -7060,10 +7083,19 @@ where
 {
     let mut retry_count = 0usize;
     let mut total_delay = Duration::ZERO;
+    let mut capacity_retry_count = 0usize;
+    let mut capacity_total_delay = Duration::ZERO;
 
     loop {
         let response = send().await?;
-        if response.status() != http::StatusCode::TOO_MANY_REQUESTS {
+        let status = response.status();
+        if !matches!(
+            status,
+            http::StatusCode::TOO_MANY_REQUESTS
+                | http::StatusCode::BAD_GATEWAY
+                | http::StatusCode::SERVICE_UNAVAILABLE
+                | http::StatusCode::GATEWAY_TIMEOUT
+        ) {
             return Ok(response);
         }
 
@@ -7071,6 +7103,57 @@ where
         let retry_after = parse_retry_after_delay(&response_headers);
         let body_text = read_decoded_error_body(response).await?;
         let terminal_quota = is_terminal_codex_quota_429(body_text.as_deref());
+        let capacity = super::providers::streaming_retry::is_capacity_error_response(
+            status,
+            body_text.as_deref(),
+        );
+
+        if capacity {
+            if !capacity_retry_enabled
+                || terminal_quota
+                || capacity_retry_count
+                    >= super::providers::streaming_retry::CAPACITY_STREAM_MAX_RETRIES as usize
+            {
+                return Ok(rebuild_consumed_error_response(
+                    status,
+                    &mut response_headers,
+                    body_text,
+                ));
+            }
+            let requested_delay =
+                retry_after.unwrap_or_else(|| codex_rate_limit_backoff(capacity_retry_count));
+            let remaining_budget =
+                CODEX_RATE_LIMIT_TOTAL_DELAY_BUDGET.saturating_sub(capacity_total_delay);
+            if remaining_budget.is_zero() {
+                return Ok(rebuild_consumed_error_response(
+                    status,
+                    &mut response_headers,
+                    body_text,
+                ));
+            }
+            let delay = requested_delay
+                .min(CODEX_RATE_LIMIT_MAX_SINGLE_DELAY)
+                .min(remaining_budget);
+            capacity_retry_count += 1;
+            log::warn!(
+                "[{app_tag}] Codex upstream capacity pressure (HTTP {}); replaying same request {}/{} after {}ms",
+                status.as_u16(),
+                capacity_retry_count,
+                super::providers::streaming_retry::CAPACITY_STREAM_MAX_RETRIES,
+                delay.as_millis(),
+            );
+            tokio::time::sleep(delay).await;
+            capacity_total_delay += delay;
+            continue;
+        }
+
+        if status != http::StatusCode::TOO_MANY_REQUESTS {
+            return Ok(rebuild_consumed_error_response(
+                status,
+                &mut response_headers,
+                body_text,
+            ));
+        }
 
         if terminal_quota || retry_count >= CODEX_RATE_LIMIT_RETRY_LIMIT {
             return Ok(rebuild_consumed_error_response(
@@ -8891,6 +8974,7 @@ mod tests {
             codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
             non_streaming_timeout,
             streaming_first_byte_timeout,
+            capacity_retry_enabled: true,
             max_attempts: 1,
         }
     }
@@ -9335,6 +9419,7 @@ mod tests {
             codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
             non_streaming_timeout: Duration::ZERO,
             streaming_first_byte_timeout: Duration::ZERO,
+            capacity_retry_enabled: true,
             max_attempts: 1,
         };
 
@@ -9397,6 +9482,7 @@ mod tests {
             codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
             non_streaming_timeout: Duration::ZERO,
             streaming_first_byte_timeout: Duration::ZERO,
+            capacity_retry_enabled: true,
             max_attempts: 1,
         };
         let mut router = test_provider_with_type(None);
@@ -9504,6 +9590,7 @@ mod tests {
             codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
             non_streaming_timeout: Duration::ZERO,
             streaming_first_byte_timeout: Duration::ZERO,
+            capacity_retry_enabled: true,
             max_attempts: 1,
         };
 
@@ -9592,6 +9679,7 @@ mod tests {
             codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
             non_streaming_timeout: Duration::ZERO,
             streaming_first_byte_timeout: Duration::ZERO,
+            capacity_retry_enabled: true,
             max_attempts: 1,
         };
 
@@ -10497,7 +10585,8 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_first_sse_error_event_is_retryable_before_response_is_returned() {
-        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.capacity_retry_enabled = false;
         let response = ProxyResponse::streamed(
             StatusCode::OK,
             HeaderMap::new(),
@@ -10523,6 +10612,35 @@ mod tests {
                 body: Some(message),
             } if message.contains("high demand")
         ));
+    }
+
+    #[tokio::test]
+    async fn streaming_first_capacity_failure_is_replayed_to_capacity_retry_when_enabled() {
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        let first = Bytes::from_static(
+            b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-capacity\"}}\n\nevent: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp-capacity\",\"status\":\"failed\",\"error\":{\"type\":\"server_is_overloaded\",\"message\":\"Please try again later\"}}}\n\n",
+        );
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::once({
+                let first = first.clone();
+                async move { Ok::<Bytes, std::io::Error>(first) }
+            }),
+        );
+
+        let prepared = forwarder
+            .prepare_success_response_for_failover(response, true)
+            .await
+            .expect("capacity retry must receive the original SSE terminal event");
+
+        assert_eq!(
+            prepared
+                .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+                .await
+                .unwrap(),
+            first
+        );
     }
 
     #[tokio::test]
@@ -12642,6 +12760,7 @@ mod tests {
             codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
             non_streaming_timeout: Duration::ZERO,
             streaming_first_byte_timeout: Duration::ZERO,
+            capacity_retry_enabled: true,
             max_attempts: 1,
         };
 
@@ -13049,7 +13168,7 @@ mod tests {
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let attempts_for_send = attempts.clone();
 
-        let result = send_codex_request_with_rate_limit_retry("test", || {
+        let result = send_codex_request_with_rate_limit_retry("test", true, || {
             let attempts = attempts_for_send.clone();
             async move {
                 let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -13082,7 +13201,7 @@ mod tests {
         let attempts_for_send = attempts.clone();
         let started_at = tokio::time::Instant::now();
 
-        let result = send_codex_request_with_rate_limit_retry("test", || {
+        let result = send_codex_request_with_rate_limit_retry("test", true, || {
             let attempts = attempts_for_send.clone();
             async move {
                 let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -13117,7 +13236,7 @@ mod tests {
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let attempts_for_send = attempts.clone();
 
-        let result = send_codex_request_with_rate_limit_retry("test", || {
+        let result = send_codex_request_with_rate_limit_retry("test", true, || {
             let attempts = attempts_for_send.clone();
             async move {
                 attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -13136,6 +13255,58 @@ mod tests {
             result.unwrap().status(),
             http::StatusCode::TOO_MANY_REQUESTS
         );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn codex_capacity_retry_recovers_from_explicit_503_when_enabled() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = send_codex_request_with_rate_limit_retry("test", true, || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Ok(ProxyResponse::buffered(
+                        http::StatusCode::SERVICE_UNAVAILABLE,
+                        http::HeaderMap::new(),
+                        Bytes::from_static(br#"{"error":{"type":"model_at_capacity","message":"Selected model is at capacity"}}"#),
+                    ))
+                } else {
+                    Ok(ProxyResponse::buffered(
+                        http::StatusCode::OK,
+                        http::HeaderMap::new(),
+                        Bytes::new(),
+                    ))
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn codex_capacity_retry_does_not_replay_503_when_disabled() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = send_codex_request_with_rate_limit_retry("test", false, || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(ProxyResponse::buffered(
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    http::HeaderMap::new(),
+                    Bytes::from_static(br#"{"error":{"type":"server_is_overloaded","message":"Please try again later"}}"#),
+                ))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result.status(), http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

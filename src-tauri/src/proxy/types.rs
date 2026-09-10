@@ -196,6 +196,9 @@ pub struct AppProxyConfig {
     pub enabled: bool,
     /// 该 app 自动故障转移开关
     pub auto_failover_enabled: bool,
+    /// Codex 模型容量/服务器过载错误自动续跑开关
+    #[serde(default)]
+    pub capacity_retry_enabled: bool,
     /// 最大重试次数
     pub max_retries: u32,
     /// 流式首字超时（秒）

@@ -252,7 +252,7 @@ impl Database {
         let result = {
             let conn = lock_conn!(self.conn);
             conn.query_row(
-                "SELECT app_type, enabled, auto_failover_enabled,
+                "SELECT app_type, enabled, auto_failover_enabled, capacity_retry_enabled,
                         max_retries, streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                         circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                         circuit_error_rate_threshold, circuit_min_requests
@@ -263,15 +263,16 @@ impl Database {
                         app_type: row.get(0)?,
                         enabled: row.get::<_, i32>(1)? != 0,
                         auto_failover_enabled: row.get::<_, i32>(2)? != 0,
-                        max_retries: row.get::<_, i32>(3)? as u32,
-                        streaming_first_byte_timeout: row.get::<_, i32>(4)? as u32,
-                        streaming_idle_timeout: row.get::<_, i32>(5)? as u32,
-                        non_streaming_timeout: row.get::<_, i32>(6)? as u32,
-                        circuit_failure_threshold: row.get::<_, i32>(7)? as u32,
-                        circuit_success_threshold: row.get::<_, i32>(8)? as u32,
-                        circuit_timeout_seconds: row.get::<_, i32>(9)? as u32,
-                        circuit_error_rate_threshold: row.get(10)?,
-                        circuit_min_requests: row.get::<_, i32>(11)? as u32,
+                        capacity_retry_enabled: row.get::<_, i32>(3)? != 0,
+                        max_retries: row.get::<_, i32>(4)? as u32,
+                        streaming_first_byte_timeout: row.get::<_, i32>(5)? as u32,
+                        streaming_idle_timeout: row.get::<_, i32>(6)? as u32,
+                        non_streaming_timeout: row.get::<_, i32>(7)? as u32,
+                        circuit_failure_threshold: row.get::<_, i32>(8)? as u32,
+                        circuit_success_threshold: row.get::<_, i32>(9)? as u32,
+                        circuit_timeout_seconds: row.get::<_, i32>(10)? as u32,
+                        circuit_error_rate_threshold: row.get(11)?,
+                        circuit_min_requests: row.get::<_, i32>(12)? as u32,
                     })
                 },
             )
@@ -287,6 +288,7 @@ impl Database {
                     app_type: app_type_owned,
                     enabled: false,
                     auto_failover_enabled: false,
+                    capacity_retry_enabled: app_type == "codex",
                     max_retries: 3,
                     streaming_first_byte_timeout: 60,
                     streaming_idle_timeout: 120,
@@ -313,6 +315,7 @@ impl Database {
             "UPDATE proxy_config SET
                 enabled = ?2,
                 auto_failover_enabled = ?3,
+                capacity_retry_enabled = ?13,
                 max_retries = ?4,
                 streaming_first_byte_timeout = ?5,
                 streaming_idle_timeout = ?6,
@@ -337,10 +340,27 @@ impl Database {
                 config.circuit_timeout_seconds as i32,
                 config.circuit_error_rate_threshold,
                 config.circuit_min_requests as i32,
+                if config.capacity_retry_enabled { 1 } else { 0 },
             ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        Ok(())
+    }
+
+    /// 精确更新容量续跑开关，避免覆盖 UI 中尚未保存的其它代理表单字段。
+    pub async fn set_capacity_retry_enabled(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), AppError> {
+        self.ensure_proxy_config_row_exists(app_type)?;
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "UPDATE proxy_config SET capacity_retry_enabled = ?2, updated_at = datetime('now') WHERE app_type = ?1",
+            rusqlite::params![app_type, if enabled { 1 } else { 0 }],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -365,13 +385,14 @@ impl Database {
 
         conn.execute(
             "INSERT OR IGNORE INTO proxy_config (
-                app_type, max_retries,
+                app_type, capacity_retry_enabled, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests
-            ) VALUES (?1, ?2, ?3, ?4, 600, ?5, ?6, ?7, ?8, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 600, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 app_type,
+                if app_type == "codex" { 1 } else { 0 },
                 retries,
                 fb_timeout,
                 idle_timeout,
@@ -409,11 +430,11 @@ impl Database {
         // codex: 默认配置
         conn.execute(
             "INSERT OR IGNORE INTO proxy_config (
-                app_type, max_retries,
+                app_type, capacity_retry_enabled, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests
-            ) VALUES ('codex', 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
+            ) VALUES ('codex', 1, 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -937,6 +958,27 @@ impl Database {
 mod tests {
     use crate::database::Database;
     use crate::error::AppError;
+
+    #[tokio::test]
+    async fn codex_capacity_retry_defaults_on_and_precise_toggle_preserves_other_fields(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let before = db.get_proxy_config_for_app("codex").await?;
+        assert!(before.capacity_retry_enabled);
+
+        db.set_capacity_retry_enabled("codex", false).await?;
+
+        let after = db.get_proxy_config_for_app("codex").await?;
+        assert!(!after.capacity_retry_enabled);
+        assert_eq!(after.auto_failover_enabled, before.auto_failover_enabled);
+        assert_eq!(after.max_retries, before.max_retries);
+        assert!(
+            !db.get_proxy_config_for_app("claude")
+                .await?
+                .capacity_retry_enabled
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_default_cost_multiplier_round_trip() -> Result<(), AppError> {
