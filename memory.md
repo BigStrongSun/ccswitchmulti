@@ -5673,3 +5673,11 @@ supported in one streaming turn`。
 - 根修改为来源判定：任何 CCSM-owned current/backup 都不进入官方链；历史 poisoned backup 在同步时重建并清 etag，退出时丢弃而不恢复。模型名称前缀过滤已删除。
 - 无 CCSM OAuth 时，备用入口会刷新 OpenAI/Codex 公共 `models.json`，经 10 秒/8 MiB/HTTP/JSON/非空校验后剥离远程指令字段并原子写入独立 `codex-official-models-cache.json`；网络失败仍落回 packaged、可信 local cache/backup 和 bundled。
 - 合并优先级为 packaged < public cache < trusted local cache/backup < current CLI bundled。公共源补未来 ID，本机运行时来源覆盖同 ID 元数据；UI 改称“备用官方目录”。完整根因和验证见 `memory-2026-09-10-codex-public-catalog-provenance.md`。
+
+## 2026-09-11 v3.20.2-3 合并与发布闭环
+
+- 功能分支 `bigstrongsun/fix-codex-official-catalog-provenance` 以 no-FF 合入 `main`：功能合并提交 `60d0b549`，版本准备提交 `07417ec9`；annotated tag `v3.20.2-3` 的 object 为 `704ebaa7`，peel 精确指向 `07417ec9`。
+- `main` CI `34491408674` 的 Frontend、Windows、macOS、Ubuntu 四个 job 全部 success；Release run `34493600086` 的五平台构建、GitHub Release 发布与 `latest.json` 汇总全部 success。正式 Release 为 Latest、非 draft、非 prerelease。
+- 公开验收目录为 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.20.2-3-github-verify-20260911`：19/19 资产大小与 GitHub digest 一致，19/19 本地 SHA-256 匹配；`latest.json` 为 `3.20.2-3`，六个平台齐全，6/6 signature 与对应 `.sig` 一致。
+- `latest.json`、Windows x86_64 Setup、Windows x86_64 Portable 的 SHA-256 分别为 `2cc0ac1fe770be6bf261786b84dd036ab1ca42b4f8e3a22004ca86e4ff7b292d`、`885ca04c75deb6f0efa1f40c31b9120806243ce46739e65a6fdc28423d6c69cf`、`82afda7c0934cd1c1d6c17aff74c4bcca52b5f5d1455df154ddd1a8238e24a9c`。
+- 发布后没有发现 `v3.20.2-3` 对应的 `Sync release to R2` run，因此不得宣称 R2 已同步。完整证据见 `docs/audits/2026-09-11-v3.20.2-3-release-execution.md`。
