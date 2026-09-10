@@ -6320,7 +6320,7 @@ fn is_opencode_go_upstream_url(url: &str) -> bool {
 /// Normalize the identity required by OpenCode Go at the final outbound boundary.
 /// Preserve an explicit Go session header. If a protocol conversion removed it, derive it only
 /// from a stable client-provided session; the per-request fallback UUID is never sent upstream.
-fn apply_opencode_go_identity(
+pub(crate) fn apply_opencode_go_identity(
     headers: &mut http::HeaderMap,
     url: &str,
     session_id: &str,

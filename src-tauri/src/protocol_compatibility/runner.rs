@@ -1057,6 +1057,28 @@ async fn send_case(
     continuation: Option<(&CapturedToolCall, &CapturedProbeExchange)>,
     options: CodexRequestOptions,
 ) -> Result<CapturedProbeExchange, ProbeCaptureError> {
+    let request = prepare_case_request(
+        candidate,
+        client,
+        transport,
+        case,
+        nonce,
+        continuation,
+        options,
+    )?;
+    capture_transport_probe(request, RESPONSE_TIMEOUT).await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_case_request(
+    candidate: &ProbeCandidate,
+    client: &Client,
+    transport: TransportKind,
+    case: ProbeCase,
+    nonce: &str,
+    continuation: Option<(&CapturedToolCall, &CapturedProbeExchange)>,
+    options: CodexRequestOptions,
+) -> Result<reqwest::RequestBuilder, ProbeCaptureError> {
     let logical = match continuation {
         Some((tool_call, exchange)) => build_continuation_request(
             &candidate.upstream_model,
@@ -1067,14 +1089,119 @@ async fn send_case(
         ),
         None => build_logical_probe_request(case, &candidate.upstream_model, nonce),
     };
-    let prepared = candidate
+    let mut prepared = candidate
         .prepare_request_with_options(transport, logical, options)
         .map_err(|_| ProbeCaptureError::InvalidPayload)?;
-    let request = client
+    // This direct probe bypasses the runtime forwarder. Reuse its Go identity policy
+    // after provider overrides, with one stable identity per independent branch.
+    // The nonce is allocated once per candidate run, not once per HTTP request.
+    let branch = match transport {
+        TransportKind::OpenAiResponses => "responses",
+        TransportKind::OpenAiChat => "chat",
+    };
+    crate::proxy::apply_opencode_go_identity(
+        &mut prepared.headers,
+        &prepared.url,
+        &format!("ccsm-probe-{nonce}-{branch}"),
+        true,
+    );
+    Ok(client
         .post(prepared.url)
         .headers(prepared.headers)
-        .json(&prepared.body);
-    capture_transport_probe(request, RESPONSE_TIMEOUT).await
+        .json(&prepared.body))
+}
+
+#[cfg(test)]
+mod opencode_go_probe_tests {
+    use super::*;
+
+    fn request(
+        base_url: &str,
+        transport: TransportKind,
+        case: ProbeCase,
+        nonce: &str,
+    ) -> reqwest::Request {
+        let candidate = ProbeCandidate::new(
+            None::<String>,
+            None::<String>,
+            "deepseek-flash",
+            "deepseek-flash",
+            transport,
+            base_url,
+            "bearer",
+        )
+        .unwrap()
+        .with_bearer_token("fixture-secret")
+        .unwrap();
+        prepare_case_request(
+            &candidate,
+            &Client::new(),
+            transport,
+            case,
+            nonce,
+            None,
+            CodexRequestOptions::default(),
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    #[test]
+    fn opencode_go_probe_requests_share_identity_within_each_branch() {
+        let url = "https://opencode.ai/zen/go/v1";
+        for transport in [TransportKind::OpenAiChat, TransportKind::OpenAiResponses] {
+            let baseline = request(url, transport, ProbeCase::BaselineJson, "run-a");
+            let identity = baseline.headers().get("x-opencode-session").unwrap();
+            for case in [
+                ProbeCase::BaselineSse,
+                ProbeCase::ForcedToolSse,
+                ProbeCase::ForcedToolRequiredSse,
+            ] {
+                let next = request(url, transport, case, "run-a");
+                assert_eq!(next.headers().get("x-opencode-session"), Some(identity));
+                assert_eq!(
+                    next.headers()["user-agent"],
+                    concat!("CCSwitchMulti/", env!("CARGO_PKG_VERSION"))
+                );
+            }
+            let new_run = request(url, transport, ProbeCase::BaselineJson, "run-b");
+            assert_ne!(new_run.headers().get("x-opencode-session"), Some(identity));
+        }
+        let chat = request(
+            url,
+            TransportKind::OpenAiChat,
+            ProbeCase::BaselineJson,
+            "run-a",
+        );
+        let responses = request(
+            url,
+            TransportKind::OpenAiResponses,
+            ProbeCase::BaselineJson,
+            "run-a",
+        );
+        assert_ne!(
+            chat.headers()["x-opencode-session"],
+            responses.headers()["x-opencode-session"]
+        );
+    }
+
+    #[test]
+    fn opencode_go_probe_identity_does_not_leak_to_other_endpoints() {
+        for url in [
+            "https://example.com/v1",
+            "https://opencode.ai/zen/v1",
+            "https://opencode.ai.example.com/zen/go/v1",
+        ] {
+            let request = request(
+                url,
+                TransportKind::OpenAiChat,
+                ProbeCase::BaselineJson,
+                "run-a",
+            );
+            assert!(!request.headers().contains_key("x-opencode-session"));
+        }
+    }
 }
 
 fn probe_request_options(
