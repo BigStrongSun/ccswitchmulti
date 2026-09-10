@@ -1,12 +1,21 @@
 # CC Switch Repository Memory
 
+## 2026-09-10 CCSwitchMulti v3.20.2-1 正式发布
+
+- `v3.20.1-3..v3.20.2-1` 共 17 个提交，正式发布 commit 为 `413edf99d62e3a3152f4612fcd296c6063a02e7a`；本地/远端 `main`、发布分支和 annotated tag peel 在发布时均精确指向该提交，tag object 为 `4a1ff5592f229336edfa805f3d3b0f073759dd3d`。数据库 schema 继续为 v22。
+- 本版交付官方 3.20.2 可靠性语义迁移、Trace 错误链/有界响应读取/UI 状态修正、分页历史写前 fail-closed 预检与旧 Provider 迁移损坏的证据约束恢复。Codex duplicate ordinal 分配缺陷仍交由官方；发布不会自动修复真实历史，也没有修改或部署 Codex。
+- 本地最终门禁为前端 188 files / 1557 tests、Rust 4081 passed / 7 ignored，TypeScript、Prettier、严格 Clippy/check/rustfmt 均通过；release Pester 35/35，覆盖外部 Windows PowerShell 5.1 成功路径和真实 exit-code-7 拒绝。最终 release 从精确 `413edf99` 重建，16/16 SHA256SUMS 匹配；raw/stable/portable EXE SHA-256 为 `876F80AE...7051`，Setup 为 `E6881E51...C39F`，PE 版本 `3.20.2-1`，Authenticode 仍为 `NotSigned`。
+- CI run `34352913430` 的 Frontend、Windows、Ubuntu、macOS 全部 success；Release run `34426568037` 的五个平台构建、Publish GitHub Release 与 Assemble `latest.json` 全部 success。正式 Release `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.20.2-1` 是 Latest、非 draft/prerelease，共 19 个资产，正文包含仓库发布说明。
+- 19 个公开资产下载到 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.20.2-1-github-verify-20260910` 后逐项验证，size 与 GitHub API SHA-256 digest 全部匹配。`latest.json` SHA-256 为 `15A6AFBB803B520B34999F727C7A19A55E8BB1407ED6F27EEFC9160729493999`，版本正确，恰有六个平台，所有 URL 指向本 tag，6/6 signature 与对应 `.sig` 精确一致；macOS 两架构按设计共享 universal updater 包。
+- 本 tag 没有 `Sync release to R2` run；最近一次 prior manual run `34195649823` 明确因 R2 secrets 未配置而跳过镜像同步，因此不声明 R2 已更新。本轮没有安装、停止或重启本机 CCSM/Codex，没有操作 `127.0.0.1:15721`，也没有修改真实 rollout/SQLite 或执行历史恢复。完整记录见 `docs/audits/2026-09-10-v3.20.2-1-release-execution.md`。
+
 ## 2026-09-09 分页历史完整性修正（隔离源码，未安装）
 
 - Provider 历史迁移不再原地改写分页历史；迁移、恢复、可见性修复统一预检 JSONL 与 SQLite，整个混合批次在首次写入前拒绝。压缩或无法确认格式的历史也拒绝，保留 legacy 支持。
 - fork 只校验活动段任务身份；祖先允许不同 ID，但 `history_base` 字节截止位置必须在记录边界，否则继续 blocked，不能显示成已修复。
 - 详见 `memory-2026-09-09-history-integrity-fix.md`。本轮未安装、重启或修复真实历史；Codex 自身序号分配问题在另一个隔离源码仓库修正。
 - CCSM 后续补齐了旧 Provider 迁移损坏的严格证据恢复：按迁移前备份逐记录映射游标与 `history_base` 字节引用，只接受 Provider 字段差异；SQLite 使用事务 CAS，JSONL 保持长度与 mtime，失败回滚，恢复备份目录拒绝覆盖。真实数据只读预检为 442 个受影响 rollout、440 个迁移游标、16 个父段引用、7 个 blocked，未应用修复。最终分页历史 23/23、广域 `codex_` 1517 passed/1 ignored、前端 17/17 和 typecheck 通过；Codex ordinal 缺陷交给官方，本次不修改或部署 Codex。
-- `v3.20.2-1` 候选首次使用隔离 Cargo target 的真实 post-commit release 时，3.1 GiB target 已被 `cargo clean` 删除，但 Windows PowerShell 5.1 在全局 `ErrorActionPreference=Stop` 下把 Cargo 写到 stderr 的正常 `Removed ...` 进度提升为 `NativeCommandError`，误记为 cleanup failed。根修仅在 native 命令合流期间局部使用 Continue，随后仍严格检查真实退出码并恢复原偏好；独立 PowerShell 5.1 子进程回归先稳定 exit 1，再修复为 exit 0，完整 release Pester 为 34/34。
+- `v3.20.2-1` 候选首次使用隔离 Cargo target 的真实 post-commit release 时，3.1 GiB target 已被 `cargo clean` 删除，但 Windows PowerShell 5.1 在全局 `ErrorActionPreference=Stop` 下把 Cargo 写到 stderr 的正常 `Removed ...` 进度提升为 `NativeCommandError`，误记为 cleanup failed。根修仅在 native 命令合流期间局部使用 Continue，随后仍严格检查真实退出码并恢复原偏好；独立 PowerShell 5.1 子进程回归先稳定 exit 1，再修复为 exit 0，补充真实非零退出码拒绝后完整 release Pester 为 35/35。
 
 ## 2026-09-09 3.20.2、Trace 与 Qwen 修复同步到 fork/main
 
