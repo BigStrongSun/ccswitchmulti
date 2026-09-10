@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { providersApi } from "@/lib/api";
+import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import {
   fetchCodexOauthModels,
   fetchModelsForConfig,
@@ -367,6 +368,89 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it.each(["deepseek-flash", "deepseek-flash-opencode-go"])(
+    "preserves declared reasoning for saved route %s when another provider has the same model",
+    async (visibleModel) => {
+      const reasoning = {
+        schemaVersion: 2 as const,
+        supportStatus: "confirmed_supported" as const,
+        controlKind: "graded" as const,
+        supportedEfforts: ["low", "high", "max"],
+        defaultEffort: "max",
+        disableAllowed: false,
+        upstream: {
+          format: "string",
+          parameter: "reasoning_effort",
+          effortMap: { low: "low", high: "high", max: "max" },
+        },
+        source: "user",
+      };
+      const source: Provider = {
+        id: "opencode-go",
+        name: "OpenCode Go 原生",
+        settingsConfig: {
+          modelCatalog: { models: [{ model: "deepseek-flash", reasoning }] },
+        },
+      };
+      const duplicate: Provider = {
+        ...source,
+        id: "deepseek",
+        name: "DeepSeek",
+        settingsConfig: {
+          modelCatalog: { models: [{ model: "deepseek-flash" }] },
+        },
+      };
+      const plan: Provider = {
+        id: "codex-multirouter",
+        name: "Codex MultiRouter",
+        settingsConfig: {
+          codexRouting: {
+            schemaVersion: 2,
+            enabled: true,
+            subagentVersion: "v2",
+            routes: [
+              {
+                id: "go-route",
+                enabled: true,
+                targetProviderId: source.id,
+                modelSelection: { mode: "include", models: [visibleModel] },
+                ...(visibleModel !== "deepseek-flash"
+                  ? { aliases: { [visibleModel]: "deepseek-flash" } }
+                  : {}),
+              },
+            ],
+            subagentV2: { schemaVersion: 2, profiles: {} },
+          },
+        },
+      };
+      renderWorkspace(
+        React.createElement(CodexRouterWorkspacePage, {
+          providers: [duplicate, source, plan],
+          activeProviderId: plan.id,
+          isProxyRunning: true,
+          isCodexTakeoverActive: true,
+          initialProviderId: plan.id,
+          initialTab: "subagents",
+          onEditProvider: vi.fn(),
+          onDeletePlan: vi.fn(),
+          onCreateProvider: vi.fn(),
+        }),
+      );
+      await waitFor(() => {
+        expect(
+          codexSubagentV2Api.getReasoningCapabilities,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            modelCatalog: expect.objectContaining({
+              models: expect.arrayContaining([
+                expect.objectContaining({ model: visibleModel, reasoning }),
+              ]),
+            }),
+          }),
+        );
+      });
+    },
+  );
   it("explains safe metadata refresh refusal without implying a network failure", () => {
     expect(
       workspaceErrorMessage("codex_provider_set_probe_required"),
