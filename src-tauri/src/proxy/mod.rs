@@ -15,6 +15,7 @@ pub mod error_mapper;
 pub mod external_openai_api;
 pub(crate) mod failover_switch;
 mod forwarder;
+pub(crate) use forwarder::apply_opencode_go_identity;
 pub mod gemini_url;
 pub mod handler_config;
 pub mod handler_context;
