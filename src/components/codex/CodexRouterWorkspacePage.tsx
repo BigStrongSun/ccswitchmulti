@@ -2103,6 +2103,24 @@ export function buildModelCatalogForRoutes(
     const targetCatalogModels = targetProvider
       ? readCodexModelCatalog(targetProvider).models
       : [];
+    // Saved routes use their persisted names, not the wizard's temporary
+    // collision aliases. Resolve only aliases explicitly saved on this route.
+    for (const [visible, upstream] of Object.entries(
+      route.aliases ?? route.upstream?.modelMap ?? {},
+    )) {
+      if (targetCatalogModels.some((entry) => entry.model === visible))
+        continue;
+      const source = targetCatalogModels.find(
+        (entry) => entry.model === upstream,
+      );
+      if (source) {
+        targetCatalogModels.push({
+          ...source,
+          model: visible,
+          upstreamModel: upstream,
+        });
+      }
+    }
     const routableCatalogModels =
       route.modelSelection?.mode === "all"
         ? targetCatalogModels.filter(
@@ -3133,8 +3151,8 @@ export function CodexRouterWorkspacePage({
     null;
   const selectedRouting = selectedPlan ? readCodexRouting(selectedPlan) : null;
   const selectedProjectedCatalog = useMemo(
-    () => projectCodexModelCatalog(selectedPlan, routableProvidersById),
-    [selectedPlan, routableProvidersById],
+    () => projectCodexModelCatalog(selectedPlan, providersById),
+    [selectedPlan, providersById],
   );
   const selectedPlanRouteEntries = selectedPlan
     ? routeEntries.filter(({ provider }) => provider.id === selectedPlan.id)
