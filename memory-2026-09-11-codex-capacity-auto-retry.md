@@ -35,3 +35,11 @@
 - 隔离 worktree：`.worktrees/codex-capacity-auto-retry`；分支：`bigstrongsun/codex-capacity-auto-retry`；基线：`07417ec9`（v3.20.2-3）。
 - 本轮只实现、验证和本地提交；未合入 main、未 push、未发布、未安装，也未停止或重启本机 CCSM/Codex。
 - HTTP bodyless 502/503/504 被视为响应提交前的服务端/网关瞬态压力；若第三方网关用这些状态包装未结构化的永久业务错误，CCSM 无法可靠区分，只能在 10 次与总退避时间预算内有界重试。
+
+## v22 真实升级启动失败与根修
+
+- 首次从 `main@b648199e` 本地构建的 `3.20.2-3` 安装候选在真实 v22 数据库启动时弹出 `table proxy_config has no column named capacity_retry_enabled`。数据库保持 v22，用户随后恢复既有发布版；不能把 migration 单元测试通过等同于完整启动顺序通过。
+- 根因是 `Database::init()` 先执行 `create_tables_on_conn()`，后执行 `apply_schema_migrations_on_conn()`。旧 v22 `proxy_config` 已有 `app_type`，所以当前 seed 分支会运行；但 Codex seed 直接引用尚未由 v22→v23 migration 添加的新列，启动在进入 migration 前失败。
+- TDD 新回归按真实顺序执行 current table creation/seed 再执行 migration，并保留旧 Codex `max_retries=9`。旧实现精确 RED 为缺少 `capacity_retry_enabled`；最小修复让 Codex seed 按表的实际列能力选择 SQL，旧表不引用新列，正式 migration 随后添加列并设 Codex 为 1；fresh schema 仍直接 seed 为 1。
+- 根修集中门禁：启动顺序回归 1/1、容量相关 15/15、数据库 schema 12/12、`cargo check --all-targets`、CI 同口径 `cargo clippy --lib -- -D warnings`、rustfmt、diff 与严格 UTF-8 校验通过。
+- 首次安全替换事务在停止旧进程后的 run-marker 所有权检查失败，回滚验证又因 listener/health 超时报告 `RollbackFailed`；事务证据保存在 `%LOCALAPPDATA%\CCSwitchMultiTransactionBackups\ccsm-20260911-014024-24649599a9ac47cbb8f9d54e4fbb4c6a`。在迁移根修重新构建并完成真实安装验收前，不再使用该候选。

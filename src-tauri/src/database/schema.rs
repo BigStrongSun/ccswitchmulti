@@ -154,15 +154,25 @@ impl Database {
                 [],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
-            conn.execute(
+            let codex_seed_sql = if Self::has_column(
+                conn,
+                "proxy_config",
+                "capacity_retry_enabled",
+            )? {
                 "INSERT OR IGNORE INTO proxy_config (app_type, capacity_retry_enabled, max_retries,
-                streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
-                circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
-                circuit_error_rate_threshold, circuit_min_requests)
-                VALUES ('codex', 1, 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
-                [],
-            )
-            .map_err(|e| AppError::Database(e.to_string()))?;
+                     streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
+                     circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
+                     circuit_error_rate_threshold, circuit_min_requests)
+                     VALUES ('codex', 1, 3, 60, 120, 600, 4, 2, 60, 0.6, 10)"
+            } else {
+                "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
+                     streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
+                     circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
+                     circuit_error_rate_threshold, circuit_min_requests)
+                     VALUES ('codex', 3, 60, 120, 600, 4, 2, 60, 0.6, 10)"
+            };
+            conn.execute(codex_seed_sql, [])
+                .map_err(|e| AppError::Database(e.to_string()))?;
             conn.execute(
                 "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
@@ -3911,6 +3921,51 @@ impl Database {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn startup_sequence_migrates_v22_proxy_config_before_capacity_seed() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE proxy_config (
+                app_type TEXT PRIMARY KEY,
+                proxy_enabled INTEGER NOT NULL DEFAULT 0,
+                listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
+                listen_port INTEGER NOT NULL DEFAULT 15721,
+                enable_logging INTEGER NOT NULL DEFAULT 1,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
+                max_retries INTEGER NOT NULL DEFAULT 3,
+                streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
+                streaming_idle_timeout INTEGER NOT NULL DEFAULT 120,
+                non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
+                circuit_failure_threshold INTEGER NOT NULL DEFAULT 4,
+                circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
+                circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60,
+                circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
+                circuit_min_requests INTEGER NOT NULL DEFAULT 10,
+                default_cost_multiplier TEXT NOT NULL DEFAULT '1',
+                pricing_model_source TEXT NOT NULL DEFAULT 'response',
+                live_takeover_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             INSERT INTO proxy_config (app_type, max_retries) VALUES ('codex', 9);
+             PRAGMA user_version = 22;",
+        )?;
+
+        Database::create_tables_on_conn(&conn)?;
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        let (enabled, max_retries): (i32, i32) = conn.query_row(
+            "SELECT capacity_retry_enabled, max_retries FROM proxy_config WHERE app_type = 'codex'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(enabled, 1);
+        assert_eq!(max_retries, 9);
+        Ok(())
+    }
 
     #[test]
     fn v22_capacity_retry_migration_enables_only_codex() -> Result<(), AppError> {

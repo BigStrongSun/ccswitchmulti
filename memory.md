@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-11 Codex 容量重试 v22 启动迁移根修
+
+- `main@b648199e` 的首个本地 `3.20.2-3` 安装候选在真实 v22 数据库启动时失败：`Database::init()` 先执行 current seed，Codex seed 引用尚未由 v22→v23 migration 添加的 `capacity_retry_enabled`，因此 migration 单测虽通过，完整启动顺序仍会报缺列。
+- 根修让 Codex seed 按旧表实际列能力选择 SQL：v22 表先执行不含新列的兼容 seed，再由正式 migration 添加列并把 Codex 设为开启；fresh schema 仍直接 seed 开启。回归必须按 `create_tables_on_conn()` → `apply_schema_migrations_on_conn()` 的生产顺序运行，并证明旧 `max_retries` 不被覆盖。
+- 失败候选不得继续安装；首次事务还因 stale run-marker 身份不匹配进入回滚，证据目录为 `%LOCALAPPDATA%\CCSwitchMultiTransactionBackups\ccsm-20260911-014024-24649599a9ac47cbb8f9d54e4fbb4c6a`。重新构建前必须提交根修，重新安装后分别验证版本/hash、15721 health、DB v23、Codex 开关值与真实路由。
+
 ## 2026-09-10 Provider Set 应用前置条件与 Astra 离线目录根修
 
 - `codex_provider_set_manual_intent_required` 在本次截图中是 Provider Set 的手动协议写入保护，不是上游模型探测错误。前端对“manual 但没有明确 Responses/Chat”的草稿判定为无需探测后直接 prepare；后端正确拒绝写入，但通用工作流把 prepare/commit 前置条件压成 `failed`，探测对话框遂虚构“探测中断、没有结果”。
