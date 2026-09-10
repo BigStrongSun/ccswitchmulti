@@ -38,10 +38,11 @@ use super::{
         },
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_retry::{
+            create_capacity_resilient_upstream_sse_stream,
             create_resilient_anthropic_sse_stream_from_responses,
             create_resilient_anthropic_sse_stream_from_responses_with_web_search_options,
-            create_resilient_responses_sse_stream_with_context, StreamLogContext,
-            StreamReconnector,
+            create_resilient_responses_sse_stream_with_context, CodexUpstreamSseProtocol,
+            StreamLogContext, StreamReconnector,
         },
         transform, transform_codex_anthropic, transform_codex_chat,
         transform_codex_responses_namespace, transform_codex_responses_xai_sanitize,
@@ -3029,7 +3030,10 @@ async fn handle_responses_for_app(
 
     if super::providers::should_convert_codex_responses_to_anthropic(&ctx.provider, &endpoint) {
         return handle_codex_anthropic_to_responses_transform(
-            response,
+            CodexTransformUpstream {
+                response,
+                stream_reconnect,
+            },
             &ctx,
             &state,
             is_stream,
@@ -3072,7 +3076,10 @@ async fn handle_responses_for_app(
 
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
         return handle_codex_chat_to_responses_transform(
-            response,
+            CodexTransformUpstream {
+                response,
+                stream_reconnect,
+            },
             &ctx,
             &state,
             is_stream,
@@ -3123,6 +3130,7 @@ async fn handle_responses_for_app(
                         .unwrap_or_else(|| ctx.request_model.clone()),
                     provider_id: ctx.provider.id.clone(),
                 }),
+                ctx.app_config.capacity_retry_enabled,
             ),
         )
     } else {
@@ -3284,13 +3292,17 @@ async fn handle_responses_compact_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
+    let stream_reconnect = result.stream_reconnect.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
 
     if super::providers::should_convert_codex_responses_to_anthropic(&ctx.provider, &endpoint) {
         return handle_codex_anthropic_to_responses_transform(
-            response,
+            CodexTransformUpstream {
+                response,
+                stream_reconnect,
+            },
             &ctx,
             &state,
             is_stream,
@@ -3333,7 +3345,10 @@ async fn handle_responses_compact_for_app(
 
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
         return handle_codex_chat_to_responses_transform(
-            response,
+            CodexTransformUpstream {
+                response,
+                stream_reconnect,
+            },
             &ctx,
             &state,
             is_stream,
@@ -3625,8 +3640,13 @@ fn observe_codex_chat_json_profile(
     observe_and_expire_protocol_profile(db, &target, &profile, &observed, now);
 }
 
-async fn handle_codex_chat_to_responses_transform(
+struct CodexTransformUpstream {
     response: super::hyper_client::ProxyResponse,
+    stream_reconnect: Option<StreamReconnector>,
+}
+
+async fn handle_codex_chat_to_responses_transform(
+    upstream: CodexTransformUpstream,
     ctx: &RequestContext,
     state: &ProxyState,
     is_stream: bool,
@@ -3634,6 +3654,10 @@ async fn handle_codex_chat_to_responses_transform(
     connection_guard: Option<ActiveConnectionGuard>,
     tool_context: transform_codex_chat::CodexToolContext,
 ) -> Result<axum::response::Response, ProxyError> {
+    let CodexTransformUpstream {
+        response,
+        stream_reconnect,
+    } = upstream;
     let status = response.status();
     let hosted_tool_loop_response = response.headers().contains_key(HOSTED_TOOL_LOOP_HEADER);
     let hosted_tool_stream_response = response
@@ -3830,7 +3854,18 @@ async fn handle_codex_chat_to_responses_transform(
     let projection_now = chrono::Utc::now().timestamp();
 
     if (is_stream || response.is_sse()) && !hosted_tool_loop_response {
-        let stream = response.bytes_stream();
+        let log_context = StreamLogContext {
+            session_id: ctx.session_id.clone(),
+            model: upstream_model.to_string(),
+            provider_id: ctx.provider.id.clone(),
+        };
+        let stream = create_capacity_resilient_upstream_sse_stream(
+            Box::pin(response.bytes_stream()),
+            stream_reconnect,
+            ctx.app_config.capacity_retry_enabled,
+            CodexUpstreamSseProtocol::ChatCompletions,
+            Some(log_context.clone()),
+        );
         let sse_stream = create_codex_chat_sse_stream_from_verified_profile(
             stream,
             tool_context,
@@ -3839,6 +3874,12 @@ async fn handle_codex_chat_to_responses_transform(
             upstream_model,
             state.db.clone(),
             projection_now,
+        );
+        let sse_stream = create_resilient_responses_sse_stream_with_context(
+            Box::pin(sse_stream),
+            None,
+            Some(log_context),
+            false,
         );
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
 
@@ -4083,13 +4124,17 @@ async fn handle_codex_chat_to_responses_transform(
 /// Anthropic's `{"error":{type,message}}`). It does not involve codex_chat_history
 /// (tool ids round-trip natively through Anthropic).
 async fn handle_codex_anthropic_to_responses_transform(
-    response: super::hyper_client::ProxyResponse,
+    upstream: CodexTransformUpstream,
     ctx: &RequestContext,
     state: &ProxyState,
     is_stream: bool,
     connection_guard: Option<ActiveConnectionGuard>,
     codex_tool_context: transform_codex_chat::CodexToolContext,
 ) -> Result<axum::response::Response, ProxyError> {
+    let CodexTransformUpstream {
+        response,
+        stream_reconnect,
+    } = upstream;
     let status = response.status();
 
     if !status.is_success() {
@@ -4100,9 +4145,29 @@ async fn handle_codex_anthropic_to_responses_transform(
     // explicit JSON media type. Explicit JSON is buffered below so 2xx error
     // envelopes and gateways that ignore stream:true can be converted faithfully.
     if response.is_sse() || (is_stream && !response.is_json()) {
-        let stream = response.bytes_stream();
+        let log_context = StreamLogContext {
+            session_id: ctx.session_id.clone(),
+            model: ctx
+                .outbound_model
+                .clone()
+                .unwrap_or_else(|| ctx.request_model.clone()),
+            provider_id: ctx.provider.id.clone(),
+        };
+        let stream = create_capacity_resilient_upstream_sse_stream(
+            Box::pin(response.bytes_stream()),
+            stream_reconnect,
+            ctx.app_config.capacity_retry_enabled,
+            CodexUpstreamSseProtocol::AnthropicMessages,
+            Some(log_context.clone()),
+        );
         let sse_stream =
             create_responses_sse_stream_from_anthropic_with_context(stream, codex_tool_context);
+        let sse_stream = create_resilient_responses_sse_stream_with_context(
+            Box::pin(sse_stream),
+            None,
+            Some(log_context),
+            false,
+        );
         return build_codex_anthropic_sse_response(
             sse_stream,
             ctx,

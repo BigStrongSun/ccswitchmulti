@@ -2576,6 +2576,19 @@ pub async fn update_proxy_config_for_app(
         .await
 }
 
+/// 精确切换 Codex 容量错误自动续跑；不覆盖同一页面尚未保存的其它字段。
+#[tauri::command]
+pub async fn set_codex_capacity_retry_enabled(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    state
+        .db
+        .set_capacity_retry_enabled("codex", enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 async fn get_default_cost_multiplier_internal(
     state: &AppState,
     app_type: &str,

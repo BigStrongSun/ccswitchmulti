@@ -3,10 +3,15 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Save, Loader2, Info } from "lucide-react";
 import { toast } from "sonner";
-import { useAppProxyConfig, useUpdateAppProxyConfig } from "@/lib/query/proxy";
+import {
+  useAppProxyConfig,
+  useSetCapacityRetryEnabled,
+  useUpdateAppProxyConfig,
+} from "@/lib/query/proxy";
 
 export interface AutoFailoverConfigPanelProps {
   appType: string;
@@ -20,6 +25,7 @@ export function AutoFailoverConfigPanel({
   const { t } = useTranslation();
   const { data: config, isLoading, error } = useAppProxyConfig(appType);
   const updateConfig = useUpdateAppProxyConfig();
+  const setCapacityRetry = useSetCapacityRetryEnabled();
 
   // 使用字符串状态以支持完全清空数字输入框
   const [formData, setFormData] = useState({
@@ -163,6 +169,7 @@ export function AutoFailoverConfigPanel({
         appType,
         enabled: config.enabled,
         autoFailoverEnabled: formData.autoFailoverEnabled,
+        capacityRetryEnabled: config.capacityRetryEnabled,
         maxRetries: raw.maxRetries,
         streamingFirstByteTimeout: raw.streamingFirstByteTimeout,
         streamingIdleTimeout: raw.streamingIdleTimeout,
@@ -220,6 +227,30 @@ export function AutoFailoverConfigPanel({
           <Alert variant="destructive">
             <AlertDescription>{String(error)}</AlertDescription>
           </Alert>
+        )}
+
+        {appType === "codex" && config && (
+          <div className="flex items-start justify-between gap-4 rounded-lg border border-sky-500/30 bg-sky-500/5 p-4">
+            <div className="space-y-1">
+              <Label htmlFor="codex-capacity-retry">
+                {t("proxy.capacityRetry.label", "模型容量错误自动续跑")}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t(
+                  "proxy.capacityRetry.description",
+                  "遇到模型满载或服务器过载时自动重试；仅在尚未产生正文、推理增量或工具调用时重放，避免重复执行。",
+                )}
+              </p>
+            </div>
+            <Switch
+              id="codex-capacity-retry"
+              checked={config.capacityRetryEnabled}
+              onCheckedChange={(enabled) =>
+                setCapacityRetry.mutateAsync({ enabled })
+              }
+              disabled={disabled || setCapacityRetry.isPending}
+            />
+          </div>
         )}
 
         <Alert className="border-blue-500/40 bg-blue-500/10">

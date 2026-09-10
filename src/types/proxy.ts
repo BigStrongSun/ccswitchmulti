@@ -437,6 +437,7 @@ export interface AppProxyConfig {
   appType: string;
   enabled: boolean;
   autoFailoverEnabled: boolean;
+  capacityRetryEnabled: boolean;
   maxRetries: number;
   streamingFirstByteTimeout: number;
   streamingIdleTimeout: number;
