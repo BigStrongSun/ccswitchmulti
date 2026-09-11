@@ -8,6 +8,7 @@ import {
   Minus,
   Play,
   Plus,
+  ShieldCheck,
   Terminal,
   Trash2,
   Zap,
@@ -45,6 +46,8 @@ interface ProviderActionsProps {
   isRemovalProtected?: boolean;
   isStateChangeProtected?: boolean;
   onSetAsDefault?: () => void;
+  showOfficialAuthSettings?: boolean;
+  onOfficialAuthSettings?: () => void;
 }
 
 // 主按钮的呈现状态。title 用于 disabled 态向用户解释为何不可点击；
@@ -85,6 +88,8 @@ export function ProviderActions({
   isRemovalProtected = isDefaultModel,
   isStateChangeProtected = false,
   onSetAsDefault,
+  showOfficialAuthSettings = false,
+  onOfficialAuthSettings,
 }: ProviderActionsProps) {
   const { t } = useTranslation();
   const iconButtonClass = "h-8 w-8 p-1";
@@ -263,6 +268,21 @@ export function ProviderActions({
 
   return (
     <div className="flex items-center gap-1.5">
+      {showOfficialAuthSettings && onOfficialAuthSettings ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          aria-label="认证设置"
+          onClick={onOfficialAuthSettings}
+          className="opacity-100 gap-1.5 whitespace-nowrap"
+        >
+          <ShieldCheck className="h-4 w-4" />
+          {t("codexOfficialAuth.settingsAction", {
+            defaultValue: "认证设置",
+          })}
+        </Button>
+      ) : null}
       {(appId === "openclaw" || appId === "hermes") &&
         isInConfig &&
         onSetAsDefault &&

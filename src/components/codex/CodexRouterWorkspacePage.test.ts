@@ -874,6 +874,49 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(savedRoute).not.toHaveProperty("capabilities");
   });
 
+  it("keeps official route matching editable while authentication is inherited", async () => {
+    const official: Provider = {
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.6-sol" }] },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([official], [official]),
+      official,
+    );
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [official, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "编辑匹配规则" }));
+
+    expect(
+      screen.getByLabelText("匹配前缀：OpenAI Official"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("可见别名映射：OpenAI Official"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("认证策略：OpenAI Official"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/认证继承自 OpenAI Official/)).toBeInTheDocument();
+  });
+
   it("lets a fixed route switch back to automatic Provider following immediately", async () => {
     const deepseek: Provider = {
       id: "codex-deepseek-vision",
@@ -4128,7 +4171,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       name: "Daily MultiRouter",
       notes: "primary plan",
       enabled: false,
-      officialAuth: { mode: "desktop_current_login" },
       hostedTools: {
         webSearch: false,
         imageGeneration: true,
@@ -4174,7 +4216,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     const updated = applyMultiRouterSettingsDraft(plan, {
       name: plan.name,
       enabled: true,
-      officialAuth: { mode: "desktop_current_login" },
       hostedTools: {
         webSearch: false,
         imageGeneration: false,
@@ -4203,7 +4244,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
   });
 
-  it("changes only official routes when a legacy Router adopts an auth policy", () => {
+  it("preserves legacy authentication fields when saving unrelated Router settings", () => {
     const plan: Provider = {
       id: "legacy-router",
       name: "Legacy Router",
@@ -4242,7 +4283,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     const updated = applyMultiRouterSettingsDraft(plan, {
       name: plan.name,
       enabled: true,
-      officialAuth: { mode: "account_pool" },
       hostedTools: {
         webSearch: true,
         imageGeneration: false,
@@ -4250,9 +4290,11 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
     const routing = readCodexRouting(updated)!;
 
-    expect(routing.officialAuth).toEqual({ mode: "account_pool" });
+    expect(routing.officialAuth).toBeUndefined();
     expect(routing.routes?.[0].upstream?.auth).toEqual({
-      source: "account_pool",
+      source: "managed_codex_oauth",
+      authProvider: "codex_oauth",
+      accountId: "acct-old",
     });
     expect(routing.routes?.[1].upstream?.auth).toEqual({
       source: "provider_config",

@@ -86,9 +86,9 @@ export function codexPoolFacadeRestartMessage(
     translate?.("codexOauth.facadeRestartNotice", {
       facade,
       defaultValue:
-        "当前 MultiRouter 已切换为{{facade}}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。",
+        "当前 Codex 认证门面已切换为{{facade}}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。",
     }) ??
-    `当前 MultiRouter 已切换为${facade}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。`
+    `当前 Codex 认证门面已切换为${facade}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。`
   );
 }
 
@@ -164,14 +164,14 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
     queryKey: poolQueryKey,
     queryFn: authApi.getCodexAccountPoolPolicy,
   });
-  const { data: activeCodexProvider = null } = useQuery({
+  const { data: activeCodexContext } = useQuery({
     queryKey: ["current-codex-provider-for-auth-center"],
     queryFn: async () => {
       const [currentId, providers] = await Promise.all([
         providersApi.getCurrent("codex"),
         providersApi.getAll("codex"),
       ]);
-      return providers[currentId] ?? null;
+      return { activeProvider: providers[currentId] ?? null, providers };
     },
   });
   const { data: poolQuota = [], isFetching: isRefreshingPoolQuota } = useQuery({
@@ -235,8 +235,11 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
         return t("codexOauth.routeProvider", "供应商自身凭据");
     }
   };
-  const activeRouteAuth = activeCodexProvider
-    ? summarizeActiveCodexRouteAuth(activeCodexProvider)
+  const activeRouteAuth = activeCodexContext?.activeProvider
+    ? summarizeActiveCodexRouteAuth(
+        activeCodexContext.activeProvider,
+        activeCodexContext.providers,
+      )
     : [];
 
   const updatePool = (
@@ -353,7 +356,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           <div className="text-xs text-muted-foreground">
             {t("codexOauth.activeRouteIdentity", "当前 Codex 路由认证来源")}
           </div>
-          {activeCodexProvider ? (
+          {activeCodexContext?.activeProvider ? (
             <div className="mt-1 space-y-1">
               {activeRouteAuth.map((route) => (
                 <div key={route.routeId} className="text-xs">
@@ -555,7 +558,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
             </span>
             {t(
               "codexOauth.poolScope",
-              "。仅影响明确选择“OAuth 账号池”的 MultiRouter。",
+              "。账号池由 OpenAI Official 使用，无需启用 MultiRouter；MultiRouter 中的官方模型会继承同一设置。",
             )}
           </div>
           {poolFacadeNotice && (

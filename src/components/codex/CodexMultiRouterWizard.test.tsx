@@ -117,6 +117,19 @@ function renderWizard(
 }
 
 describe("CodexMultiRouterWizard", () => {
+  it("keeps official authentication out of the routing review step", () => {
+    const official: Provider = {
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: { modelCatalog: { models: [{ model: "gpt-5.6" }] } },
+    };
+    renderWizard([official]);
+    fireEvent.click(screen.getByRole("button", { name: "路由确认" }));
+    expect(screen.queryByText("官方 ChatGPT 认证方式")).not.toBeInTheDocument();
+    expect(screen.getByText(/OpenAI Official 的认证设置/)).toBeVisible();
+  });
+
   it.each(["关闭", "打开状态页完成验收"])(
     "dismisses the acceptance overlay through %s without claiming acceptance",
     async (button) => {

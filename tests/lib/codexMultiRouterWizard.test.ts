@@ -732,10 +732,7 @@ describe("codexMultiRouterWizard helpers", () => {
 
     const [route] = buildWizardRoutesFromSources([official]);
     expect(route.modelSelection).toEqual({ mode: "all" });
-    expect(route.authPolicy).toEqual({
-      source: "managed_codex_oauth",
-      accountId: "acct_123",
-    });
+    expect(route.authPolicy).toEqual({ source: "provider_config" });
   });
 
   it("uses the current Codex login for the built-in official seed", () => {
@@ -751,10 +748,10 @@ describe("codexMultiRouterWizard helpers", () => {
     });
 
     const [route] = buildWizardRoutesFromSources([official]);
-    expect(route.authPolicy).toEqual({ source: "native_codex_auth" });
+    expect(route.authPolicy).toEqual({ source: "provider_config" });
   });
 
-  it("persists an explicit account-pool choice on the Router and official route", () => {
+  it("does not persist an account-pool choice on the Router or official route", () => {
     const official = provider({
       id: "codex-official",
       name: "OpenAI Official",
@@ -769,16 +766,15 @@ describe("codexMultiRouterWizard helpers", () => {
       [official],
       [official],
       null,
-      { officialAuth: { mode: "account_pool" } },
     );
 
     expect(plan.settingsConfig.codexRouting.schemaVersion).toBe(2);
     expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
-      source: "account_pool",
+      source: "provider_config",
     });
   });
 
-  it("persists the setup wizard CCSM OAuth choice as canonical schema v2 auth policy", () => {
+  it("keeps fixed OAuth ownership out of the setup wizard route", () => {
     const official = provider({
       id: "codex-official",
       name: "OpenAI Official",
@@ -793,17 +789,10 @@ describe("codexMultiRouterWizard helpers", () => {
       [official],
       [official],
       null,
-      {
-        officialAuth: {
-          mode: "managed_oauth",
-          accountId: "acct-wizard",
-        },
-      },
     );
 
     expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
-      source: "managed_codex_oauth",
-      accountId: "acct-wizard",
+      source: "provider_config",
     });
   });
 
@@ -840,7 +829,7 @@ describe("codexMultiRouterWizard helpers", () => {
     ).toEqual({ mode: "account_pool" });
   });
 
-  it("keeps a schema v2 OAuth account when the edit wizard saves without changing auth", () => {
+  it("replaces schema v2 Router-owned OAuth with a Provider reference when editing", () => {
     const official = provider({
       id: "codex-official",
       name: "OpenAI Official",
@@ -879,12 +868,11 @@ describe("codexMultiRouterWizard helpers", () => {
     );
 
     expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
-      source: "managed_codex_oauth",
-      accountId: "acct-saved",
+      source: "provider_config",
     });
   });
 
-  it("infers and preserves a legacy Router's exact CCSM OAuth account", () => {
+  it("infers legacy auth for migration but does not copy it into a rebuilt Router", () => {
     const official = provider({
       id: "codex-official",
       name: "OpenAI Official",
@@ -929,8 +917,7 @@ describe("codexMultiRouterWizard helpers", () => {
     );
     expect(plan.settingsConfig.codexRouting).not.toHaveProperty("officialAuth");
     expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
-      source: "managed_codex_oauth",
-      accountId: "acct-legacy",
+      source: "provider_config",
     });
   });
 

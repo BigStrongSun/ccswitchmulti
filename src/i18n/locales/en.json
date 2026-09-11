@@ -1315,13 +1315,31 @@
     "poolRefreshing": "Refreshing account quotas…",
     "poolRefreshHint": "Quotas refresh every 5 minutes; the last trusted status is retained if a query fails.",
     "poolFacadePreview": "Account pool facade: ",
-    "poolScope": ". Only affects MultiRouters explicitly configured to use the OAuth account pool.",
+    "poolScope": ". The pool is used by OpenAI Official without requiring MultiRouter; official models in MultiRouter inherit the same setting.",
     "poolSaveFailed": "Failed to save account switching policy: {{error}}",
     "poolDiscard": "Discard changes",
     "poolSave": "Save account pool settings",
     "facadeNativeMixed": "Desktop / mixed authentication",
     "facadeManaged": "CCSM managed authentication",
-    "facadeRestartNotice": "The current MultiRouter now uses {{facade}}. Fully quit and restart Codex; existing tasks do not hot-reload the new authentication facade."
+    "facadeRestartNotice": "The current Codex authentication facade now uses {{facade}}. Fully quit and restart Codex; existing tasks do not hot-reload the new authentication facade."
+  },
+  "codexOfficialAuth": {
+    "title": "OpenAI Official authentication",
+    "description": "This is the single authentication setting for official models. Direct OpenAI Official use and official MultiRouter routes inherit the same setting.",
+    "settingsAction": "Authentication settings",
+    "modeLabel": "Official authentication mode",
+    "desktopOption": "Current Codex Desktop login",
+    "managedOption": "Fixed CCSM OAuth account",
+    "poolOption": "OAuth account pool",
+    "managedAccountLabel": "Fixed CCSM OAuth account",
+    "selectAccount": "Select a signed-in account",
+    "reauthMarker": " (sign in again)",
+    "defaultMarker": " (default)",
+    "accountUnavailable": "The selected CCSM OAuth account is missing or requires sign-in",
+    "authCenterHint": "Manage sign-in, reauthentication, and pool membership in Authentication Center. Only a token-free account reference is saved here.",
+    "poolHint": "OpenAI Official can use the account pool without MultiRouter. Official models in MultiRouter inherit the same setting. Order, reserve quota, and cooldown policy remain in Authentication Center.",
+    "openAuthCenter": "Open Authentication Center",
+    "conflict": "Legacy MultiRouter official authentication settings conflict: {{routers}}. Choose the intended mode and save OpenAI Official; legacy settings remain until the choice is explicit."
   },
   "oauthDelete": {
     "allTitle": "Remove all {{provider}} accounts?",

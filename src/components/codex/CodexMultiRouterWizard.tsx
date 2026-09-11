@@ -22,23 +22,10 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { Provider } from "@/types";
-import type {
-  CodexCatalogModel,
-  CodexOfficialAuthConfig,
-  CodexOfficialAuthMode,
-  CodexRoutingRouteV2,
-} from "@/types";
+import type { CodexCatalogModel, CodexRoutingRouteV2, Provider } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -74,7 +61,6 @@ import {
   CODEX_MULTI_ROUTER_DEFAULT_NAME,
   CODEX_MULTI_ROUTER_DEFAULT_ID,
   CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY,
-  DEFAULT_CODEX_OFFICIAL_AUTH,
   buildCodexMultiRouterWizardPlan,
   initialWizardCatalogModelOrder,
   initialWizardSelectedSourceIds,
@@ -88,7 +74,6 @@ import {
   getWizardModelFetchConfig,
   isWizardCatalogOnlyModelSource,
   isWizardCodexOAuthSource,
-  inferCodexOfficialAuth,
   inferWizardApiFormat,
   isCodexMultiRouterPlan,
   mergeFetchedModelsIntoWizardProvider,
@@ -849,7 +834,6 @@ export function CodexMultiRouterWizard({
   );
   const batchProtocolLab = useProtocolLabWorkflow(batchProtocolLabAdapter);
   const {
-    accounts: codexOauthAccounts,
     hasAnyAccount: hasCodexOauthAccount,
     isLoadingStatus: isCodexOauthStatusLoading,
   } = useCodexOauth();
@@ -862,8 +846,6 @@ export function CodexMultiRouterWizard({
   const [draftPlanName, setDraftPlanName] = useState(
     CODEX_MULTI_ROUTER_DEFAULT_NAME,
   );
-  const [draftOfficialAuth, setDraftOfficialAuth] =
-    useState<CodexOfficialAuthConfig>(DEFAULT_CODEX_OFFICIAL_AUTH);
   const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   const [imageGenerationEnabled, setImageGenerationEnabled] = useState(true);
   const [catalogModelOrder, setCatalogModelOrder] = useState<string[] | null>(
@@ -1156,10 +1138,6 @@ export function CodexMultiRouterWizard({
     );
     setSelectedSourceIds(initialSourceIds);
     setDraftPlanName(existingPlan?.name ?? CODEX_MULTI_ROUTER_DEFAULT_NAME);
-    setDraftOfficialAuth(
-      inferCodexOfficialAuth(existingPlan?.settingsConfig?.codexRouting) ??
-        DEFAULT_CODEX_OFFICIAL_AUTH,
-    );
     const hostedTools = existingPlan
       ? readHostedToolsConfig(existingPlan)
       : DEFAULT_HOSTED_TOOLS_CONFIG;
@@ -2072,7 +2050,6 @@ export function CodexMultiRouterWizard({
         planName: draftPlanName,
         catalogModelOrder: activeCatalogModelOrder,
         spawnAgentModels: activeSpawnAgentModels,
-        officialAuth: draftOfficialAuth,
         hostedTools: {
           webSearch: { enabled: webSearchEnabled },
           imageGeneration: { enabled: imageGenerationEnabled },
@@ -2350,7 +2327,6 @@ export function CodexMultiRouterWizard({
       planName: draftPlanName,
       catalogModelOrder: activeCatalogModelOrder,
       spawnAgentModels: activeSpawnAgentModels,
-      officialAuth: draftOfficialAuth,
     },
   );
   const planPreview = planPreviewResult.plan;
@@ -3329,83 +3305,14 @@ export function CodexMultiRouterWizard({
 
               {currentStep.key === "routing-review" && (
                 <div className="space-y-3">
-                  <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">
-                        官方 ChatGPT 认证方式
-                      </label>
-                      <Select
-                        value={draftOfficialAuth.mode}
-                        onValueChange={(value) =>
-                          setDraftOfficialAuth({
-                            mode: value as CodexOfficialAuthMode,
-                          })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="desktop_current_login">
-                            Codex Desktop 当前登录
-                          </SelectItem>
-                          <SelectItem value="managed_oauth">
-                            CCSM OAuth
-                          </SelectItem>
-                          <SelectItem value="account_pool">
-                            OAuth 账号池
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
+                  <div className="grid gap-3 rounded-lg border bg-muted/30 p-4">
+                    <div className="text-sm font-medium">
+                      MultiRouter 只配置模型路由
                     </div>
-                    {draftOfficialAuth.mode === "managed_oauth" ? (
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">
-                          CCSM OAuth 账号
-                        </label>
-                        <Select
-                          value={draftOfficialAuth.accountId ?? "__default__"}
-                          onValueChange={(value) =>
-                            setDraftOfficialAuth({
-                              mode: "managed_oauth",
-                              ...(value !== "__default__"
-                                ? { accountId: value }
-                                : {}),
-                            })
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="__default__">
-                              CCSM 默认账号
-                            </SelectItem>
-                            {draftOfficialAuth.accountId &&
-                            !codexOauthAccounts.some(
-                              (account) =>
-                                account.id === draftOfficialAuth.accountId,
-                            ) ? (
-                              <SelectItem value={draftOfficialAuth.accountId}>
-                                已保存账号 ({draftOfficialAuth.accountId})
-                              </SelectItem>
-                            ) : null}
-                            {codexOauthAccounts.map((account) => (
-                              <SelectItem key={account.id} value={account.id}>
-                                {account.login}
-                                {account.is_default ? "（默认）" : ""}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    ) : null}
-                    <div className="text-xs leading-5 text-muted-foreground md:col-span-2">
-                      {draftOfficialAuth.mode === "account_pool"
-                        ? "这个 MultiRouter 会按设置 > OAuth 中已启用账号池的顺序、保留额度和冷却状态选择账号。"
-                        : draftOfficialAuth.mode === "managed_oauth"
-                          ? "官方 route 使用 CCSM 保存的 OAuth 账号。"
-                          : "官方 route 复用 Codex Desktop 当前登录。三种方式都通过 CCSM 的 HTTP Responses 接管链路，WebSocket 不参与选路。"}
+                    <div className="text-xs leading-5 text-muted-foreground">
+                      官方 route 使用 OpenAI Official 的认证设置；固定 OAuth
+                      账号和账号池都不依赖 MultiRouter。请从 OpenAI Official
+                      卡片的“认证设置”修改认证方式。
                     </div>
                     {existingPlan &&
                     existingPlan.settingsConfig?.codexRouting?.schemaVersion !==

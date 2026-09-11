@@ -481,16 +481,6 @@ export interface CodexRoutingAuth extends CodexRoutingAuthPolicy {
   authProvider?: "codex_oauth";
 }
 
-export type CodexOfficialAuthMode =
-  | "desktop_current_login"
-  | "managed_oauth"
-  | "account_pool";
-
-export interface CodexOfficialAuthConfig {
-  mode: CodexOfficialAuthMode;
-  accountId?: string;
-}
-
 export interface CodexRoutingCapabilities {
   inputModalities?: Array<"text" | "image">;
   textOnly?: boolean;

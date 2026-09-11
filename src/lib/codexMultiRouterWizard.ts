@@ -55,7 +55,6 @@ export interface WizardPlanBuildOptions {
   catalogModelOrder?: string[];
   spawnAgentModels?: string[];
   subagentVersion?: CodexSubagentVersion;
-  officialAuth?: CodexOfficialAuthConfig;
   hostedTools?: HostedToolsConfig;
 }
 
@@ -160,40 +159,6 @@ export function isWizardCodexOAuthSource(provider: Provider): boolean {
 // 判断模型源是否是官方/OAuth 路径；这些 provider 必须通过 ChatGPT 专用接口获取目录。
 function isOfficialCodexSource(provider: Provider): boolean {
   return isWizardCodexOAuthSource(provider);
-}
-
-// The built-in official seed represents Codex's currently signed-in account.
-// Explicit managed-account metadata keeps using CCSM's OAuth manager instead.
-function isWizardNativeCodexAuthSource(provider: Provider): boolean {
-  if (provider.id !== "codex-official" || provider.category !== "official") {
-    return false;
-  }
-  const config = provider.settingsConfig ?? {};
-  const meta = provider.meta ?? {};
-  const legacyMeta = meta as typeof meta & {
-    auth_binding?: { source?: string; accountId?: string; account_id?: string };
-  };
-  const binding = (meta.authBinding ?? legacyMeta.auth_binding) as
-    | { source?: string; accountId?: string; account_id?: string }
-    | undefined;
-  const source = String(
-    binding?.source ?? config.auth?.source ?? "",
-  ).toLowerCase();
-  const accountId =
-    binding?.accountId ??
-    binding?.account_id ??
-    readWizardCodexOAuthAccountId(provider);
-  const authMode = String(config.auth?.auth_mode ?? "").toLowerCase();
-  const providerType = String(
-    meta.providerType ?? config.providerType ?? "",
-  ).toLowerCase();
-  return (
-    !accountId &&
-    authMode !== "chatgpt" &&
-    !providerType.includes("codex_oauth") &&
-    source !== "managed_account" &&
-    source !== "managed_codex_oauth"
-  );
 }
 
 // 读取 Codex provider 的真实持久化模型目录；缺失或结构异常时返回空目录，不能伪造 OAuth 模型权限。
@@ -1010,7 +975,6 @@ export function collectWizardRouteAliasSelectionIssues(
 // 为模型源生成 provider 分组 route；只引用 targetProviderId，不复制第三方 bearer 密钥。
 export function buildWizardRoutesFromSources(
   providers: Provider[],
-  officialAuth?: CodexOfficialAuthConfig,
   existingRoutes: CodexRoutingRouteV2[] = [],
 ): CodexRoutingRouteV2[] {
   return providers.map((provider) => {
@@ -1034,9 +998,6 @@ export function buildWizardRoutesFromSources(
       }
       aliases[visible] = target;
     }
-    const oauthAccountId = isWizardCodexOAuthSource(provider)
-      ? readWizardCodexOAuthAccountId(provider)
-      : undefined;
     return {
       id: `router-${provider.id}`,
       label: provider.name,
@@ -1051,17 +1012,7 @@ export function buildWizardRoutesFromSources(
             canonicalModels.has(canonical.trim()),
         ),
       ),
-      authPolicy:
-        officialAuth && isWizardCodexOAuthSource(provider)
-          ? codexOfficialAuthRouteBinding(officialAuth)
-          : isWizardNativeCodexAuthSource(provider)
-            ? { source: "native_codex_auth" }
-            : isWizardCodexOAuthSource(provider)
-              ? {
-                  source: "managed_codex_oauth",
-                  ...(oauthAccountId ? { accountId: oauthAccountId } : {}),
-                }
-              : { source: "provider_config" },
+      authPolicy: { source: "provider_config" },
     };
   });
 }
@@ -1396,16 +1347,11 @@ export function buildCodexMultiRouterWizardPlan(
       ?.schemaVersion === 2
       ? (existingRouting as unknown as CodexRoutingConfigV2)
       : undefined;
-  const officialAuth =
-    options.officialAuth ??
-    inferCodexOfficialAuth(existingRouting) ??
-    DEFAULT_CODEX_OFFICIAL_AUTH;
   const hostedTools =
     options.hostedTools ??
     normalizeHostedToolsConfig(existingPlan?.settingsConfig?.hostedTools);
   const routes: CodexRoutingRouteV2[] = buildWizardRoutesFromSources(
     resolvedSources,
-    officialAuth,
     existingRoutingV2?.routes ?? [],
   ).map((route) => {
     if (!options.catalogModelOrder) return route;

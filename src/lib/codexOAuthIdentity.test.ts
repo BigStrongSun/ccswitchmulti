@@ -68,4 +68,58 @@ describe("summarizeActiveCodexRouteAuth", () => {
       },
     ]);
   });
+
+  it("reports canonical Official authentication from Provider state for direct and routed use", () => {
+    const official = {
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {},
+      meta: {
+        codexOfficialAuth: {
+          mode: "managed_oauth",
+          accountId: "managed-johnson",
+        },
+      },
+    } as Provider;
+    const router = {
+      id: "router",
+      name: "Codex MultiRouter",
+      settingsConfig: {
+        codexRouting: {
+          routes: [
+            {
+              id: "official",
+              label: "OpenAI Official",
+              enabled: true,
+              targetProviderId: "codex-official",
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    } as Provider;
+
+    expect(summarizeActiveCodexRouteAuth(official)).toEqual([
+      {
+        routeId: "codex-official",
+        routeLabel: "OpenAI Official",
+        source: "managed_codex_oauth",
+        accountId: "managed-johnson",
+      },
+    ]);
+    expect(
+      summarizeActiveCodexRouteAuth(router, {
+        "codex-official": official,
+        router,
+      }),
+    ).toEqual([
+      {
+        routeId: "official",
+        routeLabel: "OpenAI Official",
+        source: "managed_codex_oauth",
+        accountId: "managed-johnson",
+      },
+    ]);
+  });
 });

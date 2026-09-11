@@ -41,6 +41,12 @@ export interface CodexOfficialRestoreOutcome {
   };
 }
 
+export interface CodexOfficialAuthMigrationStatus {
+  state: "migrated" | "already_current" | "conflict";
+  inheritedAuth?: import("@/types").CodexOfficialAuthConfig;
+  conflictingRouterIds: string[];
+}
+
 export interface ProviderDeleteOutcome {
   deletedProviderId: string;
   affectedPlanIds: string[];
@@ -201,6 +207,9 @@ export function normalizeProvidersPayload(
 }
 
 export const providersApi = {
+  async migrateCodexOfficialAuthOwnership(): Promise<CodexOfficialAuthMigrationStatus> {
+    return await invoke("migrate_codex_official_auth_ownership");
+  },
   async getCodexEditorProviders(): Promise<Record<string, Provider>> {
     return normalizeProvidersPayload(
       await invoke("get_codex_editor_providers"),

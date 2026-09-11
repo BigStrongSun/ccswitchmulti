@@ -24,7 +24,6 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useTranslation } from "react-i18next";
 import {
   Activity,
   AlertTriangle,
@@ -75,7 +74,7 @@ import type {
   CodexMultiRouterMigrationPreview,
   CodexRoutingProjectionStatus,
 } from "@/lib/api/providers";
-import { authApi, type CodexAccountPoolPolicy } from "@/lib/api/auth";
+import type { CodexAccountPoolPolicy } from "@/lib/api/auth";
 import {
   fetchCodexOfficialFallbackModels,
   fetchCodexOauthModels,
@@ -85,9 +84,6 @@ import {
 import type { CodexGuardianStatus } from "@/types/proxy";
 import { proxyApi } from "@/lib/api/proxy";
 import {
-  codexOfficialAuthRouteBinding,
-  DEFAULT_CODEX_OFFICIAL_AUTH,
-  inferCodexOfficialAuth,
   isWizardCodexOAuthSource,
   readWizardCodexOAuthAccountId,
   resolveWizardModelNameCollisions,
@@ -125,14 +121,11 @@ import {
   isCodexCatalogOnlyPlanModelFetch,
 } from "@/utils/codexPlanModelFetch";
 import { normalizeCodexSubagentVersion } from "@/utils/codexSubagentVersion";
-import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
 import { HostedToolsSwitchPanel } from "./HostedToolsSwitchPanel";
 import { CodexSubagentProfileEditor } from "./CodexSubagentProfileEditor";
 import { CodexEgressTimezoneStatusCard } from "./CodexEgressTimezoneStatusCard";
 import type {
   CodexOfficialAuthConfig,
-  CodexOfficialAuthMode,
-  CodexRoutingConfig,
   CodexRoutingAuth,
   CodexRoutingAuthPolicy,
   CodexRoutingConfigV2,
@@ -465,7 +458,6 @@ type MultiRouterSettingsDraft = {
   name: string;
   notes?: string;
   enabled: boolean;
-  officialAuth: CodexOfficialAuthConfig;
   hostedTools: {
     webSearch: boolean;
     imageGeneration: boolean;
@@ -1017,15 +1009,6 @@ function codexRouteUsesOfficialAuthentication(route: CodexRoute): boolean {
     return true;
   }
   return routeTargetProviderId(route) === "codex-official";
-}
-
-function readRouterOfficialAuth(
-  routing: CodexRouting | null | undefined,
-): CodexOfficialAuthConfig {
-  return (
-    inferCodexOfficialAuth(routing as CodexRoutingConfig | undefined) ??
-    DEFAULT_CODEX_OFFICIAL_AUTH
-  );
 }
 
 /// 汇总当前 MultiRouter 的运行态；只有当前方案已发布为 Codex provider 且代理/接管/入口/规则齐全才算运行中。
@@ -1661,14 +1644,11 @@ function enrichRouteMatchFromProvider(
 function createRouteFromProvider(
   provider: Provider,
   usedIds: Set<string>,
-  officialAuth: CodexOfficialAuthConfig,
 ): CodexRoute {
   const modelIds = collectProviderModelIds(provider);
   const prefixes = inferProviderPrefixes(provider, modelIds);
   const modelMap = buildRouteModelMapFromProvider(provider);
-  const authPolicy = isWizardCodexOAuthSource(provider)
-    ? codexOfficialAuthRouteBinding(officialAuth)
-    : { source: "provider_config" as const };
+  const authPolicy = { source: "provider_config" as const };
   return {
     id: uniqueRouteId(`router-${provider.id}`, usedIds),
     label: provider.name,
@@ -1695,9 +1675,6 @@ function buildRouteCandidates(
   modelSources: Provider[],
 ): RouteCandidate[] {
   const routableModelSources = resolveWizardModelNameCollisions(modelSources);
-  const officialAuth = readRouterOfficialAuth(
-    selectedPlan ? readCodexRouting(selectedPlan) : null,
-  );
   const usedIds = new Set<string>();
   const candidates: RouteCandidate[] = [];
   const existingRoutes = selectedPlan
@@ -1749,7 +1726,7 @@ function buildRouteCandidates(
   );
   for (const provider of routableModelSources) {
     if (existingProviderIds.has(provider.id)) continue;
-    const route = createRouteFromProvider(provider, usedIds, officialAuth);
+    const route = createRouteFromProvider(provider, usedIds);
     candidates.push({
       id: route.id!,
       route,
@@ -2240,41 +2217,10 @@ export function applyMultiRouterSettingsDraft(
   draft: MultiRouterSettingsDraft,
 ): Provider {
   const currentRouting = readCodexRouting(plan) ?? {};
-  const officialBinding = codexOfficialAuthRouteBinding(draft.officialAuth);
-  const nextRouting: CodexRouting =
-    currentRouting.schemaVersion === 2
-      ? {
-          ...currentRouting,
-          enabled: draft.enabled,
-          routes: (currentRouting.routes ?? []).map((route) =>
-            codexRouteUsesOfficialAuthentication(route)
-              ? {
-                  ...route,
-                  authPolicy: officialBinding,
-                  upstream: {
-                    ...route.upstream,
-                    auth: officialBinding,
-                  },
-                }
-              : route,
-          ),
-        }
-      : {
-          ...currentRouting,
-          enabled: draft.enabled,
-          officialAuth: draft.officialAuth,
-          routes: (currentRouting.routes ?? []).map((route) =>
-            codexRouteUsesOfficialAuthentication(route)
-              ? {
-                  ...route,
-                  upstream: {
-                    ...route.upstream,
-                    auth: officialBinding,
-                  },
-                }
-              : route,
-          ),
-        };
+  const nextRouting: CodexRouting = {
+    ...currentRouting,
+    enabled: draft.enabled,
+  };
   delete nextRouting.defaultRouteId;
 
   return {
@@ -5179,19 +5125,14 @@ function MultiRouterSettingsPanel({
   onClose: () => void;
   isSaving: boolean;
 }) {
-  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const selectedRouting = readCodexRouting(selectedPlan) ?? {};
-  const { accounts: codexOauthAccounts, defaultAccountId } = useCodexOauth();
-  const initialOfficialAuth = readRouterOfficialAuth(selectedRouting);
+  const hasLegacyOfficialAuth =
+    Boolean(selectedRouting.officialAuth) ||
+    (selectedRouting.routes ?? []).some(codexRouteUsesOfficialAuthentication);
   const [name, setName] = useState(selectedPlan.name);
   const [notes, setNotes] = useState(selectedPlan.notes ?? "");
   const [enabled, setEnabled] = useState(selectedRouting.enabled !== false);
-  const [officialAuthMode, setOfficialAuthMode] =
-    useState<CodexOfficialAuthMode>(initialOfficialAuth.mode);
-  const [officialAccountId, setOfficialAccountId] = useState(
-    initialOfficialAuth.accountId ?? "",
-  );
   const initialHostedTools = readHostedToolsConfig(selectedPlan);
   const [webSearchEnabled, setWebSearchEnabled] = useState(
     initialHostedTools.webSearch.enabled,
@@ -5199,11 +5140,6 @@ function MultiRouterSettingsPanel({
   const [imageGenerationEnabled, setImageGenerationEnabled] = useState(
     initialHostedTools.imageGeneration.enabled,
   );
-  const [restartNotice, setRestartNotice] = useState<string | null>(null);
-  const { data: accountPoolPolicy } = useQuery({
-    queryKey: ["codex-account-pool-policy"],
-    queryFn: authApi.getCodexAccountPoolPolicy,
-  });
   const { data: globalProxyConfig, error: globalProxyConfigError } = useQuery<
     GlobalProxyConfig,
     Error
@@ -5225,9 +5161,6 @@ function MultiRouterSettingsPanel({
     setName(selectedPlan.name);
     setNotes(selectedPlan.notes ?? "");
     setEnabled(routing.enabled !== false);
-    const officialAuth = readRouterOfficialAuth(routing);
-    setOfficialAuthMode(officialAuth.mode);
-    setOfficialAccountId(officialAuth.accountId ?? "");
     const hostedTools = readHostedToolsConfig(selectedPlan);
     setWebSearchEnabled(hostedTools.webSearch.enabled);
     setImageGenerationEnabled(hostedTools.imageGeneration.enabled);
@@ -5283,43 +5216,15 @@ function MultiRouterSettingsPanel({
       return;
     }
 
-    const nextOfficialAuth: CodexOfficialAuthConfig = {
-      mode: officialAuthMode,
-      ...(officialAuthMode === "managed_oauth" && officialAccountId
-        ? { accountId: officialAccountId }
-        : {}),
-    };
-    const previousFacade = resolveCodexRouterAuthFacadeLabel(
-      initialOfficialAuth,
-      accountPoolPolicy,
-      t,
-    );
-    const nextFacade = resolveCodexRouterAuthFacadeLabel(
-      nextOfficialAuth,
-      accountPoolPolicy,
-      t,
-    );
     await onSave(selectedPlan, {
       name,
       notes,
       enabled,
-      officialAuth: nextOfficialAuth,
       hostedTools: {
         webSearch: webSearchEnabled,
         imageGeneration: imageGenerationEnabled,
       },
     });
-    setRestartNotice(
-      previousFacade !== nextFacade &&
-        nextFacade !==
-          t("codexRouterAuth.facadePending", { defaultValue: "待确认" })
-        ? t("codexRouterAuth.restartNotice", {
-            facade: nextFacade,
-            defaultValue:
-              "当前 MultiRouter 已切换为{{facade}}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。",
-          })
-        : null,
-    );
     setIsSavingListener(false);
   }
 
@@ -5458,136 +5363,20 @@ function MultiRouterSettingsPanel({
               </span>
             </div>
           )}
-          <div className="grid gap-3 rounded-lg border border-blue-200 bg-blue-50/70 p-3 dark:border-blue-700/40 dark:bg-blue-950/10">
-            <div>
-              <label className="text-xs font-semibold text-muted-foreground dark:text-slate-300">
-                {t("codexRouterAuth.label", {
-                  defaultValue: "官方 ChatGPT 认证方式",
-                })}
-              </label>
-              <select
-                value={officialAuthMode}
-                onChange={(event) =>
-                  setOfficialAuthMode(
-                    event.target.value as CodexOfficialAuthMode,
-                  )
-                }
-                className="mt-2 h-10 w-full rounded-md border border-blue-200 bg-background px-3 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/20 dark:border-blue-700/50 dark:bg-slate-950/80 dark:focus:ring-blue-500/30"
-                disabled={isSaving || isSavingListener}
-              >
-                <option value="desktop_current_login">
-                  {t("codexRouterAuth.desktopOption", {
-                    defaultValue: "Codex Desktop 当前登录",
-                  })}
-                </option>
-                <option value="managed_oauth">
-                  {t("codexRouterAuth.managedOption", {
-                    defaultValue: "CCSM OAuth",
-                  })}
-                </option>
-                <option value="account_pool">
-                  {t("codexRouterAuth.poolOption", {
-                    defaultValue: "OAuth 账号池",
-                  })}
-                </option>
-              </select>
-            </div>
-            {officialAuthMode === "managed_oauth" ? (
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground dark:text-slate-300">
-                  {t("codexRouterAuth.managedAccountLabel", {
-                    defaultValue: "CCSM OAuth 账号",
-                  })}
-                </label>
-                <select
-                  value={officialAccountId}
-                  onChange={(event) => setOfficialAccountId(event.target.value)}
-                  className="mt-2 h-10 w-full rounded-md border border-blue-200 bg-background px-3 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/20 dark:border-blue-700/50 dark:bg-slate-950/80 dark:focus:ring-blue-500/30"
-                  disabled={isSaving || isSavingListener}
-                >
-                  <option value="">
-                    {defaultAccountId
-                      ? t("codexRouterAuth.defaultAccountWithId", {
-                          accountId: defaultAccountId,
-                          defaultValue: "默认账号 ({{accountId}})",
-                        })
-                      : t("codexRouterAuth.defaultAccount", {
-                          defaultValue: "默认账号",
-                        })}
-                  </option>
-                  {officialAccountId &&
-                  !codexOauthAccounts.some(
-                    (account) => account.id === officialAccountId,
-                  ) ? (
-                    <option value={officialAccountId}>
-                      {t("codexRouterAuth.savedAccount", {
-                        accountId: officialAccountId,
-                        defaultValue: "已保存账号 ({{accountId}})",
-                      })}
-                    </option>
-                  ) : null}
-                  {codexOauthAccounts.map((account) => (
-                    <option key={account.id} value={account.id}>
-                      {account.login}
-                      {account.is_default
-                        ? t("codexRouterAuth.defaultMarker", {
-                            defaultValue: "（默认）",
-                          })
-                        : ""}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ) : null}
-            <p className="text-xs leading-5 text-muted-foreground dark:text-slate-500">
-              {officialAuthMode === "account_pool"
-                ? t("codexRouterAuth.poolHint", {
-                    defaultValue:
-                      "只对这个 MultiRouter 使用账号池；请在设置 > OAuth 中启用账号池并维护顺序、保留额度和可用账号。",
-                  })
-                : officialAuthMode === "managed_oauth"
-                  ? t("codexRouterAuth.managedHint", {
-                      defaultValue:
-                        "官方模型使用 CCSM 保存的 OAuth 登录，不读取 Desktop 当前登录令牌。",
-                    })
-                  : t("codexRouterAuth.desktopHint", {
-                      defaultValue:
-                        "官方模型复用 Codex Desktop 当前登录；请求仍经过 CCSM，并使用 HTTP Responses。",
-                    })}
-            </p>
-            <div className="rounded-md border border-blue-200 bg-background/80 px-3 py-2 text-xs leading-5 text-muted-foreground dark:border-blue-700/40 dark:bg-slate-950/50 dark:text-slate-300">
-              {t("codexRouterAuth.facadePreview", {
-                defaultValue: "生成的认证门面：",
-              })}
-              <span className="font-semibold text-foreground dark:text-slate-100">
-                {resolveCodexRouterAuthFacadeLabel(
-                  {
-                    mode: officialAuthMode,
-                    ...(officialAuthMode === "managed_oauth" &&
-                    officialAccountId
-                      ? { accountId: officialAccountId }
-                      : {}),
-                  },
-                  accountPoolPolicy,
-                  t,
-                )}
+          <div className="grid gap-2 rounded-lg border border-blue-200 bg-blue-50/70 p-3 text-xs leading-5 text-muted-foreground dark:border-blue-700/40 dark:bg-blue-950/10 dark:text-slate-300">
+            <span className="font-semibold text-foreground dark:text-slate-100">
+              官方认证由 OpenAI Official 管理
+            </span>
+            <span>
+              MultiRouter 只负责模型路由；官方 route 会继承 OpenAI Official
+              卡片中的认证设置，关闭 MultiRouter 也不影响该认证方式。
+            </span>
+            {hasLegacyOfficialAuth ? (
+              <span className="rounded-md border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
+                检测到该旧 Router 仍带官方认证字段。它只作为迁移输入保留，
+                本页保存不会改写；如存在多 Router 冲突，请从 OpenAI Official
+                的“认证设置”选择一次明确值。
               </span>
-            </div>
-            {restartNotice ? (
-              <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
-                {restartNotice}
-              </div>
-            ) : null}
-            {!selectedRouting.officialAuth &&
-            (selectedRouting.routes ?? []).some(
-              codexRouteUsesOfficialAuthentication,
-            ) ? (
-              <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
-                {t("codexRouterAuth.legacyNotice", {
-                  defaultValue:
-                    "这是升级前创建的方案。当前仍按原 route 认证绑定运行；保存本页后才会把上面的选择写成 Router 级策略。",
-                })}
-              </div>
             ) : null}
           </div>
           <div className="grid gap-3 rounded-lg border border-blue-200 bg-blue-50/70 p-3 dark:border-blue-700/40 dark:bg-blue-950/10 sm:grid-cols-[1fr_120px]">
@@ -5994,6 +5783,8 @@ function RouteCandidatePicker({
           const authPolicy = draft.route.authPolicy ?? {
             source: "provider_config" as const,
           };
+          const inheritsOfficialAuth =
+            routeTargetProviderId(draft.route) === "codex-official";
           return (
             <div
               key={candidate.id}
@@ -6220,76 +6011,86 @@ function RouteCandidatePicker({
                     </label>
                   </div>
 
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <label className="space-y-1 text-xs text-muted-foreground">
-                      <span>认证策略引用</span>
-                      <select
-                        aria-label={`认证策略：${targetLabel}`}
-                        value={authPolicy.source}
-                        onChange={(event) => {
-                          const source = event.target
-                            .value as CodexRoutingAuth["source"];
-                          updateRoutePolicyDraft(candidate.id, (current) => ({
-                            ...current,
-                            route: {
-                              ...current.route,
-                              authPolicy: {
-                                source,
-                                ...(source === "managed_codex_oauth" ||
-                                source === "managed_account" ||
-                                source === "account_pool"
-                                  ? {
-                                      accountId:
-                                        current.route.authPolicy?.accountId,
-                                    }
-                                  : {}),
-                              },
-                            },
-                          }));
-                        }}
-                        className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground"
-                      >
-                        <option value="provider_config">
-                          Provider 配置认证
-                        </option>
-                        <option value="native_codex_auth">
-                          Codex Desktop 当前登录
-                        </option>
-                        <option value="managed_codex_oauth">
-                          托管 Codex OAuth
-                        </option>
-                        <option value="account_pool">OAuth 账号池</option>
-                      </select>
-                    </label>
-                    {authPolicy.source === "managed_codex_oauth" ||
-                    authPolicy.source === "managed_account" ||
-                    authPolicy.source === "account_pool" ? (
+                  {inheritsOfficialAuth ? (
+                    <div className="rounded-md border border-blue-200 bg-blue-50/60 px-3 py-2 text-xs leading-5 text-muted-foreground dark:border-blue-800/60 dark:bg-blue-950/20">
+                      认证继承自 OpenAI Official；请从该 Provider
+                      卡片的“认证设置”修改。此处不会写入 Router 认证字段。
+                    </div>
+                  ) : (
+                    <div className="grid gap-2 sm:grid-cols-2">
                       <label className="space-y-1 text-xs text-muted-foreground">
-                        <span>账号/策略引用 ID（不保存 Token）</span>
-                        <input
-                          aria-label={`${
-                            authPolicy.source === "managed_codex_oauth"
-                              ? "托管 OAuth 账号 ID"
-                              : "账号池策略 ID"
-                          }：${targetLabel}`}
-                          value={authPolicy.accountId ?? ""}
-                          onChange={(event) =>
+                        <span>认证策略引用</span>
+                        <select
+                          aria-label={`认证策略：${targetLabel}`}
+                          value={authPolicy.source}
+                          onChange={(event) => {
+                            const source = event.target
+                              .value as CodexRoutingAuth["source"];
                             updateRoutePolicyDraft(candidate.id, (current) => ({
                               ...current,
                               route: {
                                 ...current.route,
                                 authPolicy: {
-                                  source: authPolicy.source,
-                                  accountId: event.target.value,
+                                  source,
+                                  ...(source === "managed_codex_oauth" ||
+                                  source === "managed_account" ||
+                                  source === "account_pool"
+                                    ? {
+                                        accountId:
+                                          current.route.authPolicy?.accountId,
+                                      }
+                                    : {}),
                                 },
                               },
-                            }))
-                          }
+                            }));
+                          }}
                           className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground"
-                        />
+                        >
+                          <option value="provider_config">
+                            Provider 配置认证
+                          </option>
+                          <option value="native_codex_auth">
+                            Codex Desktop 当前登录
+                          </option>
+                          <option value="managed_codex_oauth">
+                            托管 Codex OAuth
+                          </option>
+                          <option value="account_pool">OAuth 账号池</option>
+                        </select>
                       </label>
-                    ) : null}
-                  </div>
+                      {authPolicy.source === "managed_codex_oauth" ||
+                      authPolicy.source === "managed_account" ||
+                      authPolicy.source === "account_pool" ? (
+                        <label className="space-y-1 text-xs text-muted-foreground">
+                          <span>账号/策略引用 ID（不保存 Token）</span>
+                          <input
+                            aria-label={`${
+                              authPolicy.source === "managed_codex_oauth"
+                                ? "托管 OAuth 账号 ID"
+                                : "账号池策略 ID"
+                            }：${targetLabel}`}
+                            value={authPolicy.accountId ?? ""}
+                            onChange={(event) =>
+                              updateRoutePolicyDraft(
+                                candidate.id,
+                                (current) => ({
+                                  ...current,
+                                  route: {
+                                    ...current.route,
+                                    authPolicy: {
+                                      source: authPolicy.source,
+                                      accountId: event.target.value,
+                                    },
+                                  },
+                                }),
+                              )
+                            }
+                            className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground"
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+                  )}
                   <p className="text-xs leading-5 text-muted-foreground">
                     地址、API Key、协议、上下文和能力由目标
                     Provider/模型条目维护；这里仅保存无密钥 Route policy。

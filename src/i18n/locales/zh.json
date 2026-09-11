@@ -1320,13 +1320,31 @@
     "poolRefreshing": "正在刷新账号额度…",
     "poolRefreshHint": "额度每 5 分钟刷新；查询失败时保留上次可信状态。",
     "poolFacadePreview": "账号池门面预览：",
-    "poolScope": "。仅影响明确选择“OAuth 账号池”的 MultiRouter。",
+    "poolScope": "。账号池由 OpenAI Official 使用，无需启用 MultiRouter；MultiRouter 中的官方模型会继承同一设置。",
     "poolSaveFailed": "账号切换策略保存失败：{{error}}",
     "poolDiscard": "放弃更改",
     "poolSave": "保存账号池设置",
     "facadeNativeMixed": "Desktop / 混合认证",
     "facadeManaged": "CCSM 托管认证",
-    "facadeRestartNotice": "当前 MultiRouter 已切换为{{facade}}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。"
+    "facadeRestartNotice": "当前 Codex 认证门面已切换为{{facade}}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。"
+  },
+  "codexOfficialAuth": {
+    "title": "OpenAI Official 认证设置",
+    "description": "此处是官方模型认证的唯一配置入口。直接使用 OpenAI Official 与 MultiRouter 官方路由会继承同一设置。",
+    "settingsAction": "认证设置",
+    "modeLabel": "官方认证方式",
+    "desktopOption": "Codex Desktop 当前登录",
+    "managedOption": "CCSM OAuth 固定账号",
+    "poolOption": "OAuth 账号池",
+    "managedAccountLabel": "CCSM OAuth 固定账号",
+    "selectAccount": "请选择已登录账号",
+    "reauthMarker": "（需要重新登录）",
+    "defaultMarker": "（默认）",
+    "accountUnavailable": "所选 CCSM OAuth 账号不存在或需要重新登录",
+    "authCenterHint": "账号登录、重新认证和账号池成员策略在认证中心维护；这里仅保存不含 Token 的账号引用。",
+    "poolHint": "账号池可由 OpenAI Official 直接使用，无需启用 MultiRouter；MultiRouter 中的官方模型会继承同一设置。成员顺序、保留额度和冷却策略仍在认证中心维护。",
+    "openAuthCenter": "前往认证中心",
+    "conflict": "检测到旧 MultiRouter 的官方认证配置不一致：{{routers}}。请选择当前应采用的认证方式并保存 OpenAI Official；旧配置会保留到选择明确后再迁移。"
   },
   "oauthDelete": {
     "allTitle": "移除所有 {{provider}} 账号？",

@@ -1312,13 +1312,31 @@
     "poolRefreshing": "アカウントのクォータを更新中…",
     "poolRefreshHint": "クォータは 5 分ごとに更新され、取得に失敗した場合は最後に信頼できる状態を保持します。",
     "poolFacadePreview": "アカウントプールの認証構成: ",
-    "poolScope": "。OAuth アカウントプールを明示的に選択した MultiRouter のみに影響します。",
+    "poolScope": "。アカウントプールは MultiRouter なしで OpenAI Official から利用でき、MultiRouter 内の公式モデルも同じ設定を継承します。",
     "poolSaveFailed": "アカウント切り替えポリシーを保存できませんでした: {{error}}",
     "poolDiscard": "変更を破棄",
     "poolSave": "アカウントプール設定を保存",
     "facadeNativeMixed": "Desktop / 混合認証",
     "facadeManaged": "CCSM 管理認証",
-    "facadeRestartNotice": "現在の MultiRouter は {{facade}} に切り替わりました。Codex を完全に終了して再起動してください。既存のタスクは新しい認証構成をホットリロードしません。"
+    "facadeRestartNotice": "現在の Codex 認証構成は {{facade}} に切り替わりました。Codex を完全に終了して再起動してください。既存のタスクは新しい認証構成をホットリロードしません。"
+  },
+  "codexOfficialAuth": {
+    "title": "OpenAI Official 認証設定",
+    "description": "公式モデル認証の唯一の設定場所です。OpenAI Official の直接利用と MultiRouter の公式ルートは同じ設定を継承します。",
+    "settingsAction": "認証設定",
+    "modeLabel": "公式認証方式",
+    "desktopOption": "現在の Codex Desktop ログイン",
+    "managedOption": "固定 CCSM OAuth アカウント",
+    "poolOption": "OAuth アカウントプール",
+    "managedAccountLabel": "固定 CCSM OAuth アカウント",
+    "selectAccount": "ログイン済みアカウントを選択",
+    "reauthMarker": "（再ログインが必要）",
+    "defaultMarker": "（デフォルト）",
+    "accountUnavailable": "選択した CCSM OAuth アカウントが存在しないか、再ログインが必要です",
+    "authCenterHint": "ログイン、再認証、プールメンバー設定は認証センターで管理します。ここにはトークンを含まないアカウント参照だけを保存します。",
+    "poolHint": "OpenAI Official は MultiRouter なしでアカウントプールを利用できます。MultiRouter 内の公式モデルも同じ設定を継承します。順序、予約クォータ、クールダウンは認証センターで管理します。",
+    "openAuthCenter": "認証センターを開く",
+    "conflict": "旧 MultiRouter の公式認証設定が競合しています: {{routers}}。使用する方式を選択して OpenAI Official を保存してください。明示的に選択されるまで旧設定は保持されます。"
   },
   "oauthDelete": {
     "allTitle": "すべての {{provider}} アカウントを削除しますか？",

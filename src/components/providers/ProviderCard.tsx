@@ -323,6 +323,10 @@ export function ProviderCard({
       ?.role === "facade";
   const isUserCodexMultiRouter =
     codexHasRouting && !isGeneratedCodexProtocolFacade;
+  const isCanonicalCodexOfficial =
+    appId === "codex" &&
+    provider.id === "codex-official" &&
+    provider.category === "official";
   const codexAdaptationLabel =
     appId !== "codex" || isUserCodexMultiRouter || !adaptationSummary
       ? null
@@ -682,7 +686,14 @@ export function ProviderCard({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 flex-shrink-0 opacity-0 pointer-events-none group-hover:opacity-100 group-focus-within:opacity-100 group-hover:pointer-events-auto group-focus-within:pointer-events-auto transition-opacity duration-200">
+          <div
+            className={cn(
+              "flex items-center gap-1.5 flex-shrink-0 transition-opacity duration-200",
+              isCanonicalCodexOfficial || isUserCodexMultiRouter
+                ? "opacity-100 pointer-events-auto"
+                : "opacity-0 pointer-events-none group-hover:opacity-100 group-focus-within:opacity-100 group-hover:pointer-events-auto group-focus-within:pointer-events-auto",
+            )}
+          >
             <ProviderActions
               appId={appId}
               isCurrent={isCurrent}
@@ -694,6 +705,8 @@ export function ProviderCard({
               isOmo={isAnyOmo}
               onSwitch={() => onSwitch(provider)}
               onEdit={() => onEdit(provider)}
+              showOfficialAuthSettings={isCanonicalCodexOfficial}
+              onOfficialAuthSettings={() => onEdit(provider)}
               onDuplicate={() => onDuplicate(provider)}
               onTest={
                 // 连通检测对第三方/自定义/Copilot/Codex-OAuth 供应商开放（这些正是旧的

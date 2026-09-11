@@ -187,11 +187,25 @@ describe("Codex OAuth 账号池认证门面", () => {
     expect(
       codexPoolFacadeRestartMessage({
         applied: true,
+        facadeChanged: true,
+        codexRestartRequired: true,
+        facade: "native_mixed",
+      }),
+    ).not.toContain("当前 MultiRouter");
+    expect(
+      codexPoolFacadeRestartMessage({
+        applied: true,
         facadeChanged: false,
         codexRestartRequired: false,
         facade: "fully_managed",
       }),
     ).toBeNull();
+  });
+
+  it("说明 OpenAI Official 可独立使用账号池且 Router 仅继承设置", async () => {
+    renderSection();
+    expect(await screen.findByText(/无需启用 MultiRouter/)).toBeVisible();
+    expect(screen.getByText(/官方模型会继承同一设置/)).toBeVisible();
   });
 
   it("编辑账号池草稿不会并发持久化，点击保存只提交最终值一次", async () => {

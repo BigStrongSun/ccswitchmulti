@@ -80,6 +80,7 @@ import { AddProviderDialog } from "@/components/providers/AddProviderDialog";
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
+import { OPEN_SETTINGS_TAB_EVENT } from "@/lib/settingsNavigation";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { CCSWITCHMULTI_REPOSITORY_URL } from "@/config/productLinks";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
@@ -856,6 +857,18 @@ function App() {
   useEffect(() => {
     currentViewRef.current = currentView;
   }, [currentView]);
+
+  useEffect(() => {
+    const openSettingsTab = (event: Event) => {
+      const tab = (event as CustomEvent<{ tab?: string }>).detail?.tab;
+      setEditingProvider(null);
+      setSettingsDefaultTab(tab || "general");
+      setCurrentView("settings");
+    };
+    window.addEventListener(OPEN_SETTINGS_TAB_EVENT, openSettingsTab);
+    return () =>
+      window.removeEventListener(OPEN_SETTINGS_TAB_EVENT, openSettingsTab);
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {

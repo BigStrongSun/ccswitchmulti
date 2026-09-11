@@ -146,6 +146,12 @@ import { resolveManagedAccountId } from "@/lib/authBinding";
 import { useOpenClawLiveProviderIds } from "@/hooks/useOpenClaw";
 import { useHermesLiveProviderIds } from "@/hooks/useHermes";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { normalizeCodexOfficialAuth } from "@/lib/codexOfficialAuth";
+import {
+  CodexOfficialAuthSection,
+  validateCodexOfficialAuthSelection,
+} from "./CodexOfficialAuthSection";
+import { openSettingsTab } from "@/lib/settingsNavigation";
 
 type PresetEntry = {
   id: string;
@@ -433,6 +439,33 @@ function ProviderFormFull({
   const showCommonConfigNotice =
     settingsData != null && settingsData.commonConfigConfirmed !== true;
   const isDarkMode = useDarkMode();
+  const isCanonicalCodexOfficial =
+    appId === "codex" &&
+    providerId === "codex-official" &&
+    initialData?.category === "official";
+  const [codexOfficialAuth, setCodexOfficialAuth] = useState(() =>
+    normalizeCodexOfficialAuth(initialData?.meta?.codexOfficialAuth),
+  );
+  const { data: codexOfficialAuthMigration } = useQuery({
+    queryKey: ["codex-official-auth-ownership-migration"],
+    queryFn: providersApi.migrateCodexOfficialAuthOwnership,
+    enabled: isCanonicalCodexOfficial,
+    staleTime: Infinity,
+  });
+
+  useEffect(() => {
+    if (!isCanonicalCodexOfficial) return;
+    setCodexOfficialAuth(
+      normalizeCodexOfficialAuth(
+        codexOfficialAuthMigration?.inheritedAuth ??
+          initialData?.meta?.codexOfficialAuth,
+      ),
+    );
+  }, [
+    codexOfficialAuthMigration?.inheritedAuth,
+    initialData?.meta?.codexOfficialAuth,
+    isCanonicalCodexOfficial,
+  ]);
 
   const handleCommonConfigConfirm = async () => {
     try {
@@ -1456,6 +1489,20 @@ function ProviderFormFull({
       accounts.some(
         (account) => account.id === accountId && !account.requires_reauth,
       );
+    if (isCanonicalCodexOfficial) {
+      const officialAuthError = validateCodexOfficialAuthSelection(
+        codexOfficialAuth,
+        codexOauthAccounts,
+      );
+      if (officialAuthError) {
+        toast.error(
+          t("codexOfficialAuth.accountUnavailable", {
+            defaultValue: officialAuthError,
+          }),
+        );
+        return;
+      }
+    }
     if (
       isCopilotProvider &&
       !selectedAccountIsUsable(selectedGitHubAccountId, copilotAccounts)
@@ -1927,6 +1974,9 @@ function ProviderFormFull({
         (appId === "claude" || appId === "codex") && category !== "official"
           ? customUserAgent.trim() || undefined
           : undefined,
+      codexOfficialAuth: isCanonicalCodexOfficial
+        ? normalizeCodexOfficialAuth(codexOfficialAuth)
+        : undefined,
       localProxyRequestOverrides: shouldApplyLocalProxyRequestOverrides
         ? overridesResult.overrides
         : undefined,
@@ -2674,6 +2724,15 @@ function ProviderFormFull({
 
           {appId === "codex" && (
             <div ref={codexProviderDetailsRef}>
+              {isCanonicalCodexOfficial ? (
+                <CodexOfficialAuthSection
+                  value={codexOfficialAuth}
+                  accounts={codexOauthAccounts}
+                  migrationStatus={codexOfficialAuthMigration}
+                  onChange={setCodexOfficialAuth}
+                  onOpenAuthCenter={() => openSettingsTab("auth")}
+                />
+              ) : null}
               <CodexFormFields
                 providerId={providerId}
                 providerName={form.watch("name")}
