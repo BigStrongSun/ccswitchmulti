@@ -101,14 +101,52 @@ fn codex_route_auth_provider(route: &JsonValue) -> Option<&str> {
     })
 }
 
-/// 根据持久化 Router 配置和账号池策略判断本地认证门面。
-///
-/// route 是运行时认证所有权的最终事实；`officialAuth` 由保存流程物化到 route，
-/// 这里只用它区分新配置和缺少 auth source 的旧歧义配置，不用它覆盖 route。
-pub fn classify_codex_multirouter_auth_facade(
-    provider: &Provider,
+fn classify_codex_official_auth_facade(
+    auth: Option<&crate::provider::CodexOfficialAuthConfig>,
     pool_policy: Option<&CodexAccountPoolPolicy>,
 ) -> CodexMultiRouterAuthFacade {
+    match auth.map(|config| &config.mode) {
+        None | Some(CodexOfficialAuthMode::DesktopCurrentLogin) => {
+            CodexMultiRouterAuthFacade::NativeMixed
+        }
+        Some(CodexOfficialAuthMode::ManagedOauth) => CodexMultiRouterAuthFacade::FullyManaged,
+        Some(CodexOfficialAuthMode::AccountPool) => match pool_policy {
+            Some(policy) => {
+                if policy.enabled
+                    && policy
+                        .entries
+                        .iter()
+                        .any(|entry| entry.enabled && entry.account_id == NATIVE_CODEX_ACCOUNT_ID)
+                {
+                    CodexMultiRouterAuthFacade::NativeMixed
+                } else {
+                    CodexMultiRouterAuthFacade::FullyManaged
+                }
+            }
+            None => CodexMultiRouterAuthFacade::LegacyPreserved,
+        },
+    }
+}
+
+/// Classify the Codex Desktop authentication facade for either the canonical
+/// OpenAI Official Provider or a MultiRouter. The optional Provider map lets a
+/// Router read the latest Provider-owned official auth without rewriting its
+/// persisted routes.
+pub fn classify_codex_provider_auth_facade(
+    provider: &Provider,
+    providers_by_id: Option<&HashMap<String, Provider>>,
+    pool_policy: Option<&CodexAccountPoolPolicy>,
+) -> CodexMultiRouterAuthFacade {
+    if is_canonical_codex_official_provider(provider) {
+        return classify_codex_official_auth_facade(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.codex_official_auth.as_ref()),
+            pool_policy,
+        );
+    }
+
     let Some(routing) = provider.settings_config.get("codexRouting") else {
         return CodexMultiRouterAuthFacade::LegacyPreserved;
     };
@@ -136,6 +174,24 @@ pub fn classify_codex_multirouter_auth_facade(
             continue;
         }
         has_enabled_route = true;
+        let provider_owned_facade = codex_route_target_provider_id_from_route(route)
+            .and_then(|target_provider_id| providers_by_id?.get(target_provider_id))
+            .filter(|target_provider| is_canonical_codex_official_provider(target_provider))
+            .and_then(|target_provider| {
+                target_provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.codex_official_auth.as_ref())
+            })
+            .map(|auth| classify_codex_official_auth_facade(Some(auth), pool_policy));
+        if let Some(facade) = provider_owned_facade {
+            match facade {
+                CodexMultiRouterAuthFacade::NativeMixed => needs_native_auth = true,
+                CodexMultiRouterAuthFacade::FullyManaged => {}
+                CodexMultiRouterAuthFacade::LegacyPreserved => has_ambiguous_auth = true,
+            }
+            continue;
+        }
         let source = codex_route_auth_source(route);
         match source {
             Some("native_codex_auth") => needs_native_auth = true,
@@ -160,6 +216,16 @@ pub fn classify_codex_multirouter_auth_facade(
     } else {
         CodexMultiRouterAuthFacade::FullyManaged
     }
+}
+
+/// Backward-compatible Router-only entry point for callers that do not have a
+/// Provider snapshot. New service code should use
+/// [`classify_codex_provider_auth_facade`].
+pub fn classify_codex_multirouter_auth_facade(
+    provider: &Provider,
+    pool_policy: Option<&CodexAccountPoolPolicy>,
+) -> CodexMultiRouterAuthFacade {
+    classify_codex_provider_auth_facade(provider, None, pool_policy)
 }
 
 /// 判断 route 是否由 ChatGPT Codex 官方 backend 提供原生能力。
@@ -4253,6 +4319,78 @@ context_window = 500000
             classify_codex_multirouter_auth_facade(&router, None),
             CodexMultiRouterAuthFacade::LegacyPreserved,
             "without a pool snapshot the backend must not guess credential ownership"
+        );
+    }
+
+    #[test]
+    fn standalone_official_pool_facade_tracks_desktop_membership() {
+        let mut provider = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+            "OpenAI Official".to_string(),
+            json!({}),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        provider.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: CodexOfficialAuthMode::AccountPool,
+                account_id: None,
+            }),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            classify_codex_provider_auth_facade(&provider, None, Some(&pool_policy(true, true))),
+            CodexMultiRouterAuthFacade::NativeMixed
+        );
+        assert_eq!(
+            classify_codex_provider_auth_facade(&provider, None, Some(&pool_policy(true, false))),
+            CodexMultiRouterAuthFacade::FullyManaged
+        );
+    }
+
+    #[test]
+    fn multirouter_facade_reads_latest_official_provider_auth() {
+        let router = multirouter_with_routes(
+            json!([{
+                "id": "official",
+                "enabled": true,
+                "targetProviderId": "codex-official",
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+            None,
+        );
+        let mut official = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+            "OpenAI Official".to_string(),
+            json!({}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        official.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: CodexOfficialAuthMode::AccountPool,
+                account_id: None,
+            }),
+            ..Default::default()
+        });
+        let providers = HashMap::from([(official.id.clone(), official)]);
+
+        assert_eq!(
+            classify_codex_provider_auth_facade(
+                &router,
+                Some(&providers),
+                Some(&pool_policy(true, true))
+            ),
+            CodexMultiRouterAuthFacade::NativeMixed
+        );
+        assert_eq!(
+            classify_codex_provider_auth_facade(
+                &router,
+                Some(&providers),
+                Some(&pool_policy(true, false))
+            ),
+            CodexMultiRouterAuthFacade::FullyManaged
         );
     }
 

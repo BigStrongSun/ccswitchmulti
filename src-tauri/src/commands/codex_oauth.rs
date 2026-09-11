@@ -126,7 +126,7 @@ pub async fn set_codex_account_pool_policy(
 
     app_state
         .proxy_service
-        .reproject_current_codex_multirouter_for_pool_policy(&normalized)
+        .reproject_current_codex_auth_facade_for_pool_policy(&normalized)
         .map_err(|error| format!("账号池策略已保存，但当前 Codex Router 门面更新失败: {error}"))
 }
 
