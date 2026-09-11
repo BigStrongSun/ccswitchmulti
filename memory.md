@@ -5687,3 +5687,18 @@ supported in one streaming turn`。
 - 公开验收目录为 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-v3.20.2-3-github-verify-20260911`：19/19 资产大小与 GitHub digest 一致，19/19 本地 SHA-256 匹配；`latest.json` 为 `3.20.2-3`，六个平台齐全，6/6 signature 与对应 `.sig` 一致。
 - `latest.json`、Windows x86_64 Setup、Windows x86_64 Portable 的 SHA-256 分别为 `2cc0ac1fe770be6bf261786b84dd036ab1ca42b4f8e3a22004ca86e4ff7b292d`、`885ca04c75deb6f0efa1f40c31b9120806243ce46739e65a6fdc28423d6c69cf`、`82afda7c0934cd1c1d6c17aff74c4bcca52b5f5d1455df154ddd1a8238e24a9c`。
 - 发布后没有发现 `v3.20.2-3` 对应的 `Sync release to R2` run，因此不得宣称 R2 已同步。完整证据见 `docs/audits/2026-09-11-v3.20.2-3-release-execution.md`。
+
+## 2026-09-11 DeepSeek MFJS 嵌套 oneOf 根修
+
+- Codex 最新 `automation_update` schema 在根 union 分支中嵌套纯 `oneOf`，旧 MFJS 编译器先递归编译子 schema，导致根 object union 投影来不及执行并本地 422。根修在根 union 预处理阶段递归展开纯 union 分支，保留原编译/投影/strict 语义，不把重叠 oneOf 静默改成 anyOf。TDD 同路径 RED→GREEN；最终 library、聚焦测试、check、fmt 通过。完整根因与安装态边界见 `memory-2026-09-11-nested-oneof-mfjs-projection.md`。
+
+### 2026-09-11 二次根修：根 union 分支经 `$ref` 间接指向嵌套 union
+
+- 安装首修后同一路径仍 422；安装态进程/SHA 验证无漂移。真实 schema 根分支是 `$ref`，目标 definition 才是纯 union，首修只展开内联分支未命中。二次根修在根 union 预处理时解析根分支 `$ref` 再递归展开纯 union，保留循环与普通属性 ref 语义。TDD RED→GREEN，library/check/fmt 通过；需重建安装后复验。
+
+### 2026-09-11 live 复验：真实 automation_update schema 已走通运行态代理
+
+- 二次安装后用真实 `automation_update` `inputSchema` 对运行态 `127.0.0.1:15721/responses` 发最小 `deepseek-flash` 请求，路由命中 DeepSeek，本地/上游均 200 且返回 `"ok"`；编译后 union 属性已展开为 MFJS `anyOf`，二次安装后无同路径 422。运行态 PID 12684、SHA-256 `AE07665...139B`、来源 `a582a678`。
+# 2026-09-11 Codex 状态与修复进度/卡死检测根修
+
+- 刷新进度原先只有 `stage`，长操作无日志/心跳，历史修复无超时，前端无静默看门狗且迟到结果可覆盖失败。根修增加结构化日志、2 秒心跳、分页历史逐文件/迁移进度和 15 分钟修复超时；前端增加日志面板、最后活动/阶段耗时、30 秒无事件失败和 run id 迟到结果隔离。前端全量 1566/1566、Rust 串行 4113/0/7、typecheck/Prettier/rustfmt/check 通过。详见 `memory-2026-09-11-codex-status-repair-progress.md`。

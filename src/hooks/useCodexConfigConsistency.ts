@@ -7,6 +7,7 @@ import {
   type CodexRuntimeRefreshPreflight,
   type CodexRuntimeRefreshProgress,
   type CodexRuntimeRefreshResult,
+  type CodexRuntimeRefreshStage,
 } from "@/lib/api/codexConfigConsistency";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { proxyApi } from "@/lib/api/proxy";
@@ -21,6 +22,15 @@ export type CodexRuntimeRefreshPhase =
   | "completed"
   | "failed";
 
+export interface CodexRuntimeRefreshLogEntry {
+  sequence: number;
+  kind: "stage" | "log";
+  stage: CodexRuntimeRefreshStage;
+  code: string | null;
+  message: string | null;
+  emittedAtMs: number;
+}
+
 export interface CodexRuntimeRefreshWorkflow {
   phase: CodexRuntimeRefreshPhase;
   preflight: CodexRuntimeRefreshPreflight | null;
@@ -28,6 +38,9 @@ export interface CodexRuntimeRefreshWorkflow {
   result: CodexRuntimeRefreshResult | null;
   error: string | null;
   rendererRetryPending?: boolean;
+  logs: CodexRuntimeRefreshLogEntry[];
+  lastProgressAt: number | null;
+  stageStartedAt: number | null;
 }
 
 interface CodexConfigConsistencyState {
@@ -45,13 +58,21 @@ interface CodexConfigConsistencyState {
   cancelRuntimeRefresh: () => void;
 }
 
-const EMPTY_RUNTIME_REFRESH: CodexRuntimeRefreshWorkflow = {
-  phase: "idle",
-  preflight: null,
-  progress: null,
-  result: null,
-  error: null,
-};
+const CODEX_RUNTIME_REFRESH_STALL_TIMEOUT_MS = 30_000;
+const CODEX_RUNTIME_REFRESH_LOG_LIMIT = 200;
+
+function emptyRuntimeRefresh(): CodexRuntimeRefreshWorkflow {
+  return {
+    phase: "idle",
+    preflight: null,
+    progress: null,
+    result: null,
+    error: null,
+    logs: [],
+    lastProgressAt: null,
+    stageStartedAt: null,
+  };
+}
 
 export function useCodexConfigConsistency(): CodexConfigConsistencyState {
   const [report, setReport] = useState<CodexConfigConsistencyReport | null>(
@@ -59,12 +80,14 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
   );
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [refresh, setRefresh] = useState<CodexRuntimeRefreshWorkflow>(
-    EMPTY_RUNTIME_REFRESH,
-  );
+  const [refresh, setRefresh] =
+    useState<CodexRuntimeRefreshWorkflow>(emptyRuntimeRefresh);
   const seenFingerprintsRef = useRef(new Set<string>());
   const seenHistoryDamageRef = useRef(new Set<string>());
   const runtimeRefreshActiveRef = useRef(false);
+  const refreshRunIdRef = useRef(0);
+  const refreshStartedAtRef = useRef<number | null>(null);
+  const lastProgressAtRef = useRef<number | null>(null);
 
   const acceptReport = useCallback((next: CodexConfigConsistencyReport) => {
     if (runtimeRefreshActiveRef.current) return;
@@ -94,9 +117,72 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
     "codex-runtime-refresh-progress",
     (progress) => {
       if (!runtimeRefreshActiveRef.current) return;
-      setRefresh((current) => ({ ...current, progress }));
+      const receivedAt = Date.now();
+      lastProgressAtRef.current = receivedAt;
+      setRefresh((current) => {
+        if (
+          progress.sequence != null &&
+          current.progress?.sequence != null &&
+          progress.sequence <= current.progress.sequence
+        ) {
+          return current;
+        }
+        const kind = progress.kind ?? "stage";
+        const stageChanged = current.progress?.stage !== progress.stage;
+        const nextLogs =
+          kind === "log"
+            ? [
+                ...current.logs,
+                {
+                  sequence: progress.sequence ?? current.logs.length + 1,
+                  kind: "log" as const,
+                  stage: progress.stage,
+                  code: progress.code ?? null,
+                  message: progress.message ?? null,
+                  emittedAtMs:
+                    progress.emittedAtMs && progress.emittedAtMs > 0
+                      ? progress.emittedAtMs
+                      : receivedAt,
+                },
+              ].slice(-CODEX_RUNTIME_REFRESH_LOG_LIMIT)
+            : current.logs;
+        return {
+          ...current,
+          progress,
+          logs: nextLogs,
+          lastProgressAt: receivedAt,
+          stageStartedAt: stageChanged
+            ? receivedAt
+            : (current.stageStartedAt ?? receivedAt),
+        };
+      });
     },
   );
+
+  useEffect(() => {
+    if (refresh.phase !== "refreshing") return;
+    const interval = window.setInterval(() => {
+      const lastActivity =
+        lastProgressAtRef.current ?? refreshStartedAtRef.current;
+      if (lastActivity === null) return;
+      if (Date.now() - lastActivity <= CODEX_RUNTIME_REFRESH_STALL_TIMEOUT_MS) {
+        return;
+      }
+      refreshRunIdRef.current += 1;
+      runtimeRefreshActiveRef.current = false;
+      setRefresh((current) =>
+        current.phase === "refreshing"
+          ? {
+              ...current,
+              phase: "failed",
+              error:
+                "后台刷新超过 30 秒没有返回任何进度，任务可能已经卡死。请返回后重试；若提示任务仍在运行，请重启 CCSM。",
+            }
+          : current,
+      );
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [refresh.phase]);
 
   useEffect(() => {
     let active = true;
@@ -137,6 +223,9 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
           progress: null,
           result: null,
           error: null,
+          logs: [],
+          lastProgressAt: null,
+          stageStartedAt: null,
         });
       } catch (cause) {
         if (active) console.debug("[CodexConsistency] inspect failed", cause);
@@ -153,8 +242,9 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
   }, [acceptReport]);
 
   const close = useCallback(() => {
+    refreshRunIdRef.current += 1;
     runtimeRefreshActiveRef.current = false;
-    setRefresh(EMPTY_RUNTIME_REFRESH);
+    setRefresh(emptyRuntimeRefresh());
     setReport(null);
     setError(null);
   }, []);
@@ -226,6 +316,9 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
       progress: null,
       result: null,
       error: null,
+      logs: [],
+      lastProgressAt: null,
+      stageStartedAt: null,
     });
     try {
       const preflight = await codexConfigConsistencyApi.inspectRuntimeRefresh();
@@ -238,6 +331,9 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
           error: preflight.supported
             ? "未找到可用的 Codex Desktop 启动入口"
             : "当前平台暂不支持自动刷新 Codex 状态",
+          logs: [],
+          lastProgressAt: null,
+          stageStartedAt: null,
         });
         return;
       }
@@ -247,6 +343,9 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
         progress: null,
         result: null,
         error: null,
+        logs: [],
+        lastProgressAt: null,
+        stageStartedAt: null,
       });
     } catch (cause) {
       setRefresh({
@@ -255,6 +354,9 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
         progress: null,
         result: null,
         error: extractErrorMessage(cause) || "Codex 运行状态检查失败",
+        logs: [],
+        lastProgressAt: null,
+        stageStartedAt: null,
       });
     }
   }, []);
@@ -267,6 +369,9 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
       progress: null,
       result: null,
       error: null,
+      logs: [],
+      lastProgressAt: null,
+      stageStartedAt: null,
     });
     setError(null);
     try {
@@ -281,6 +386,9 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
         progress: null,
         result: null,
         error: null,
+        logs: [],
+        lastProgressAt: null,
+        stageStartedAt: null,
       });
     } catch (cause) {
       setRefresh({
@@ -289,6 +397,9 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
         progress: null,
         result: null,
         error: extractErrorMessage(cause) || "Codex 状态检查失败",
+        logs: [],
+        lastProgressAt: null,
+        stageStartedAt: null,
       });
     }
   }, []);
@@ -296,6 +407,11 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
   const confirmRuntimeRefresh = useCallback(async () => {
     const preflight = refresh.preflight;
     if (!preflight || refresh.phase !== "confirm") return;
+    const runId = refreshRunIdRef.current + 1;
+    refreshRunIdRef.current = runId;
+    const startedAt = Date.now();
+    refreshStartedAtRef.current = startedAt;
+    lastProgressAtRef.current = startedAt;
     runtimeRefreshActiveRef.current = true;
     setRefresh((current) => ({
       ...current,
@@ -303,11 +419,15 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
       progress: null,
       result: null,
       error: null,
+      logs: [],
+      lastProgressAt: startedAt,
+      stageStartedAt: null,
     }));
     try {
       const result = await codexConfigConsistencyApi.refreshRuntimeState(
         preflight.snapshotToken,
       );
+      if (refreshRunIdRef.current !== runId) return;
       setRefresh((current) => ({
         ...current,
         phase: "completed",
@@ -316,6 +436,7 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
         error: null,
       }));
     } catch (cause) {
+      if (refreshRunIdRef.current !== runId) return;
       setRefresh((current) => ({
         ...current,
         phase: "failed",
@@ -326,8 +447,9 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
 
   const cancelRuntimeRefresh = useCallback(() => {
     const completed = refresh.phase === "completed";
+    refreshRunIdRef.current += 1;
     runtimeRefreshActiveRef.current = false;
-    setRefresh(EMPTY_RUNTIME_REFRESH);
+    setRefresh(emptyRuntimeRefresh());
     if (completed) close();
   }, [close, refresh.phase]);
 
