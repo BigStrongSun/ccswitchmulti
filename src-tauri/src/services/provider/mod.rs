@@ -216,6 +216,126 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
 /// Provider business logic service
 pub struct ProviderService;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexOfficialAuthMigrationState {
+    Migrated,
+    AlreadyCurrent,
+    Conflict,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexOfficialAuthMigrationStatus {
+    pub state: CodexOfficialAuthMigrationState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherited_auth: Option<crate::provider::CodexOfficialAuthConfig>,
+    pub conflicting_router_ids: Vec<String>,
+}
+
+fn normalize_codex_official_auth_config(
+    mut config: crate::provider::CodexOfficialAuthConfig,
+) -> crate::provider::CodexOfficialAuthConfig {
+    if config.mode == crate::provider::CodexOfficialAuthMode::ManagedOauth {
+        config.account_id = config
+            .account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|account_id| !account_id.is_empty())
+            .map(ToString::to_string);
+    } else {
+        config.account_id = None;
+    }
+    config
+}
+
+fn parse_legacy_codex_official_auth(
+    value: &Value,
+) -> Option<crate::provider::CodexOfficialAuthConfig> {
+    serde_json::from_value(value.clone())
+        .ok()
+        .map(normalize_codex_official_auth_config)
+}
+
+fn legacy_codex_official_route_auth(
+    route: &Value,
+) -> Result<Option<crate::provider::CodexOfficialAuthConfig>, ()> {
+    let Some(source) = crate::proxy::providers::codex_route_auth_source(route) else {
+        return Ok(None);
+    };
+    let account_id = [
+        route.get("authPolicy"),
+        route.get("auth_policy"),
+        route
+            .get("upstream")
+            .and_then(|upstream| upstream.get("auth")),
+        route.get("auth"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|auth| {
+        auth.get("accountId")
+            .or_else(|| auth.get("account_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|account_id| !account_id.is_empty())
+            .map(ToString::to_string)
+    });
+    let mode = match source {
+        "provider_config" => return Ok(None),
+        "native_codex_auth" => crate::provider::CodexOfficialAuthMode::DesktopCurrentLogin,
+        "managed_codex_oauth" | "managed_account" => {
+            crate::provider::CodexOfficialAuthMode::ManagedOauth
+        }
+        "account_pool" => crate::provider::CodexOfficialAuthMode::AccountPool,
+        _ => return Err(()),
+    };
+    Ok(Some(normalize_codex_official_auth_config(
+        crate::provider::CodexOfficialAuthConfig { mode, account_id },
+    )))
+}
+
+fn route_targets_codex_official(route: &Value) -> bool {
+    crate::proxy::providers::codex_route_target_provider_id_from_route(route)
+        == Some(crate::database::CODEX_OFFICIAL_PROVIDER_ID)
+}
+
+fn strip_legacy_codex_official_auth(router: &mut Provider) -> bool {
+    let Some(routing) = router
+        .settings_config
+        .get_mut("codexRouting")
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    let has_official_route = routing
+        .get("routes")
+        .and_then(Value::as_array)
+        .is_some_and(|routes| routes.iter().any(route_targets_codex_official));
+    if !has_official_route {
+        return false;
+    }
+    let mut changed = routing.remove("officialAuth").is_some();
+    let Some(routes) = routing.get_mut("routes").and_then(Value::as_array_mut) else {
+        return changed;
+    };
+    for route in routes
+        .iter_mut()
+        .filter(|route| route_targets_codex_official(route))
+    {
+        let Some(route) = route.as_object_mut() else {
+            continue;
+        };
+        changed |= route.remove("authPolicy").is_some();
+        changed |= route.remove("auth_policy").is_some();
+        changed |= route.remove("auth").is_some();
+        if let Some(upstream) = route.get_mut("upstream").and_then(Value::as_object_mut) {
+            changed |= upstream.remove("auth").is_some();
+        }
+    }
+    changed
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct UniversalProviderSyncOutcome {
     pub changed: bool,
@@ -5400,6 +5520,161 @@ requires_openai_auth = true
 }
 
 impl ProviderService {
+    /// Move legacy Router-owned official authentication into the canonical
+    /// OpenAI Official Provider. Conflicts are reported without any write;
+    /// consistent changes are committed as one multi-Provider transaction.
+    pub fn migrate_codex_official_auth_ownership(
+        state: &AppState,
+    ) -> Result<CodexOfficialAuthMigrationStatus, AppError> {
+        let providers = state.db.get_all_providers(AppType::Codex.as_str())?;
+        let official = providers
+            .get(crate::database::CODEX_OFFICIAL_PROVIDER_ID)
+            .ok_or_else(|| AppError::InvalidInput("codex_official_provider_missing".to_string()))?;
+        let existing_auth = official
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_official_auth.clone())
+            .map(normalize_codex_official_auth_config);
+
+        let mut router_policies = Vec::<(String, crate::provider::CodexOfficialAuthConfig)>::new();
+        let mut conflicting_router_ids = Vec::<String>::new();
+        for router in providers.values() {
+            let Some(routing) = router.settings_config.get("codexRouting") else {
+                continue;
+            };
+            if routing
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .is_some_and(|enabled| !enabled)
+            {
+                continue;
+            }
+            let Some(routes) = routing.get("routes").and_then(Value::as_array) else {
+                continue;
+            };
+            let official_routes = routes
+                .iter()
+                .filter(|route| {
+                    route
+                        .get("enabled")
+                        .and_then(Value::as_bool)
+                        .is_none_or(|enabled| enabled)
+                        && route_targets_codex_official(route)
+                })
+                .collect::<Vec<_>>();
+            if official_routes.is_empty() {
+                continue;
+            }
+
+            let mut policies = Vec::new();
+            if let Some(value) = routing.get("officialAuth") {
+                if let Some(config) = parse_legacy_codex_official_auth(value) {
+                    policies.push(config);
+                } else {
+                    conflicting_router_ids.push(router.id.clone());
+                    continue;
+                }
+            }
+            let mut invalid = false;
+            for route in official_routes {
+                match legacy_codex_official_route_auth(route) {
+                    Ok(Some(config)) => policies.push(config),
+                    Ok(None) => {}
+                    Err(()) => invalid = true,
+                }
+            }
+            policies.dedup();
+            if invalid || policies.len() > 1 {
+                conflicting_router_ids.push(router.id.clone());
+            } else if let Some(policy) = policies.pop() {
+                router_policies.push((router.id.clone(), policy));
+            }
+        }
+
+        if existing_auth.is_none() {
+            let mut distinct = Vec::new();
+            for (_, policy) in &router_policies {
+                if !distinct.contains(policy) {
+                    distinct.push(policy.clone());
+                }
+            }
+            if distinct.len() > 1 {
+                conflicting_router_ids.extend(
+                    router_policies
+                        .iter()
+                        .map(|(router_id, _)| router_id.clone()),
+                );
+            }
+        }
+        conflicting_router_ids.sort();
+        conflicting_router_ids.dedup();
+        if !conflicting_router_ids.is_empty() && existing_auth.is_none() {
+            return Ok(CodexOfficialAuthMigrationStatus {
+                state: CodexOfficialAuthMigrationState::Conflict,
+                inherited_auth: None,
+                conflicting_router_ids,
+            });
+        }
+
+        let inherited_auth = existing_auth.unwrap_or_else(|| {
+            router_policies
+                .first()
+                .map(|(_, config)| config.clone())
+                .unwrap_or_default()
+        });
+        let mut mutations = Vec::new();
+        let mut official = official.clone();
+        let official_meta = official.meta.get_or_insert_with(Default::default);
+        if official_meta.codex_official_auth.as_ref() != Some(&inherited_auth) {
+            official_meta.codex_official_auth = Some(inherited_auth.clone());
+            mutations.push(ProviderSetDatabaseMutation {
+                app_type: AppType::Codex.as_str().to_string(),
+                provider_id: official.id.clone(),
+                provider: Some(official),
+            });
+        }
+        for provider in providers.values() {
+            let mut router = provider.clone();
+            if strip_legacy_codex_official_auth(&mut router) {
+                mutations.push(ProviderSetDatabaseMutation {
+                    app_type: AppType::Codex.as_str().to_string(),
+                    provider_id: router.id.clone(),
+                    provider: Some(router),
+                });
+            }
+        }
+
+        if mutations.is_empty() {
+            return Ok(CodexOfficialAuthMigrationStatus {
+                state: CodexOfficialAuthMigrationState::AlreadyCurrent,
+                inherited_auth: Some(inherited_auth),
+                conflicting_router_ids: Vec::new(),
+            });
+        }
+        let profile_owner_ids = mutations
+            .iter()
+            .map(|mutation| mutation.provider_id.clone())
+            .collect();
+        state
+            .db
+            .apply_provider_set_database_transaction(ProviderSetDatabaseTransaction {
+                mutations,
+                profile_owner_ids,
+                records: Vec::new(),
+                observations: Vec::new(),
+                replace_profile_provider_ids: HashSet::new(),
+                setting_keys_to_delete: Vec::new(),
+                universal_provider: None,
+                current_provider_after: None,
+                official_seed_current_after: None,
+            })?;
+        Ok(CodexOfficialAuthMigrationStatus {
+            state: CodexOfficialAuthMigrationState::Migrated,
+            inherited_auth: Some(inherited_auth),
+            conflicting_router_ids: Vec::new(),
+        })
+    }
+
     fn ensure_codex_provider_is_user_operable(
         app_type: &AppType,
         provider: &Provider,

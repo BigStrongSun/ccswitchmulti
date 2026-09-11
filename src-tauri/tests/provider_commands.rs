@@ -35,6 +35,148 @@ context_window = 500000
     )
 }
 
+fn codex_official_auth_migration_router(id: &str, source: &str) -> Provider {
+    Provider::with_id(
+        id.to_string(),
+        id.to_string(),
+        json!({
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "defaultRouteId": "official",
+                "officialAuth": {
+                    "mode": if source == "account_pool" {
+                        "account_pool"
+                    } else {
+                        "desktop_current_login"
+                    }
+                },
+                "routes": [{
+                    "id": "official",
+                    "enabled": true,
+                    "targetProviderId": "codex-official",
+                    "modelSelection": { "mode": "all" },
+                    "authPolicy": { "source": source }
+                }]
+            }
+        }),
+        None,
+    )
+}
+
+#[test]
+fn codex_official_auth_migration_consistent_legacy_router_auth_migrates() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .init_default_official_providers()
+        .expect("seed official provider");
+    for router in [
+        codex_official_auth_migration_router("router-a", "account_pool"),
+        codex_official_auth_migration_router("router-b", "account_pool"),
+    ] {
+        state
+            .db
+            .save_provider(AppType::Codex.as_str(), &router)
+            .expect("save legacy router");
+    }
+
+    let outcome = ProviderService::migrate_codex_official_auth_ownership(&state)
+        .expect("migrate consistent auth");
+
+    assert_eq!(serde_json::to_value(&outcome).unwrap()["state"], "migrated");
+    assert_eq!(
+        serde_json::to_value(&outcome).unwrap()["inheritedAuth"]["mode"],
+        "account_pool"
+    );
+    let providers = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("reload providers");
+    assert_eq!(
+        serde_json::to_value(
+            providers["codex-official"]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.codex_official_auth.as_ref())
+                .expect("official auth migrated")
+        )
+        .unwrap()["mode"],
+        "account_pool"
+    );
+    for router_id in ["router-a", "router-b"] {
+        let routing = &providers[router_id].settings_config["codexRouting"];
+        assert!(routing.get("officialAuth").is_none());
+        assert!(routing["routes"][0].get("authPolicy").is_none());
+    }
+
+    let before_second_run = serde_json::to_vec(&providers).unwrap();
+    let second =
+        ProviderService::migrate_codex_official_auth_ownership(&state).expect("repeat migration");
+    assert_eq!(
+        serde_json::to_value(&second).unwrap()["state"],
+        "already_current"
+    );
+    assert_eq!(
+        serde_json::to_vec(
+            &state
+                .db
+                .get_all_providers(AppType::Codex.as_str())
+                .expect("reload after repeated migration")
+        )
+        .unwrap(),
+        before_second_run,
+        "re-running the migration must not rewrite Providers"
+    );
+}
+
+#[test]
+fn codex_official_auth_migration_conflict_is_reported_without_mutation() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .init_default_official_providers()
+        .expect("seed official provider");
+    for router in [
+        codex_official_auth_migration_router("router-native", "native_codex_auth"),
+        codex_official_auth_migration_router("router-pool", "account_pool"),
+    ] {
+        state
+            .db
+            .save_provider(AppType::Codex.as_str(), &router)
+            .expect("save conflicting router");
+    }
+    let before = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("snapshot providers");
+
+    let outcome =
+        ProviderService::migrate_codex_official_auth_ownership(&state).expect("report conflict");
+
+    let serialized = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(serialized["state"], "conflict");
+    assert_eq!(
+        serialized["conflictingRouterIds"],
+        json!(["router-native", "router-pool"])
+    );
+    let after = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("reload providers");
+    assert_eq!(
+        serde_json::to_vec(&after).unwrap(),
+        serde_json::to_vec(&before).unwrap(),
+        "conflict reporting must be byte-equivalent at the Provider serialization boundary"
+    );
+}
+
 #[test]
 fn grokbuild_import_and_switch_write_live_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");

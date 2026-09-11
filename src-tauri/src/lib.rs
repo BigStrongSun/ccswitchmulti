@@ -1528,6 +1528,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_providers,
+            commands::migrate_codex_official_auth_ownership,
             commands::get_codex_editor_providers,
             commands::get_current_provider,
             commands::get_codex_logical_provider_for_editing,

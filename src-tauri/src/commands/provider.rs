@@ -42,6 +42,14 @@ pub fn get_providers(
 }
 
 #[tauri::command]
+pub fn migrate_codex_official_auth_ownership(
+    state: State<'_, AppState>,
+) -> Result<crate::services::provider::CodexOfficialAuthMigrationStatus, String> {
+    ProviderService::migrate_codex_official_auth_ownership(state.inner())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn get_current_provider(state: State<'_, AppState>, app: String) -> Result<String, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     ProviderService::current(state.inner(), app_type).map_err(|e| e.to_string())
