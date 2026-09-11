@@ -289,6 +289,7 @@ fn provider_requests_codex_account_pool(provider: &Provider) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn materialize_direct_codex_official_providers(
     app_type: &AppType,
     providers: &[Provider],
@@ -383,6 +384,17 @@ fn retryable_failure_affects_provider_health(provider: &Provider, error: &ProxyE
 }
 
 impl RequestForwarder {
+    fn codex_oauth_manager(&self) -> Option<Arc<RwLock<CodexOAuthManager>>> {
+        #[cfg(test)]
+        if let Some(manager) = self.codex_oauth_test_manager.as_ref() {
+            return Some(manager.clone());
+        }
+
+        self.app_handle
+            .as_ref()
+            .map(|app_handle| app_handle.state::<CodexOAuthState>().0.clone())
+    }
+
     async fn resolve_raw_codex_oauth_credentials(
         &self,
         provider: &Provider,
@@ -553,6 +565,69 @@ impl RequestForwarder {
         })
     }
 
+    /// Resolve one raw passthrough attempt before account-pool expansion.
+    ///
+    /// Unlike the JSON Responses path, raw OpenAI-compatible endpoints may be
+    /// image/audio/file APIs. Resolve only the single route explicitly matched
+    /// by the raw resolver; never expand the router's text fallback chain.
+    fn materialize_codex_raw_forward_attempt_provider(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+        body: &Value,
+    ) -> Result<Provider, ProxyError> {
+        if !matches!(app_type, AppType::Codex)
+            || provider
+                .settings_config
+                .get("codexResolvedRouteId")
+                .is_some()
+        {
+            return Ok(provider.clone());
+        }
+
+        let routed_provider = if codex_provider_has_v2_routing(provider) {
+            self.resolve_codex_v2_raw_route(provider, body, None)?
+                .map(super::providers::ResolvedCodexRoute::into_effective_provider)
+        } else if codex_provider_has_routing_config(provider) {
+            let route_provider = resolve_codex_raw_passthrough_route_provider(provider, body);
+            match route_provider {
+                Some(route_provider) => {
+                    if let Some(target_provider_id) =
+                        super::providers::codex_route_target_provider_id(&route_provider)
+                    {
+                        let target_provider = self
+                            .router
+                            .get_provider_by_id(target_provider_id, app_type.as_str())
+                            .map_err(|error| {
+                                ProxyError::ConfigError(format!(
+                                    "读取 Codex raw route 目标供应商 '{target_provider_id}' 失败: {error}"
+                                ))
+                            })?
+                            .ok_or_else(|| {
+                                ProxyError::ConfigError(format!(
+                                    "Codex raw route 引用了不存在的目标供应商 '{target_provider_id}'"
+                                ))
+                            })?;
+                        Some(
+                            super::providers::materialize_codex_routed_provider_from_target(
+                                &route_provider,
+                                &target_provider,
+                            ),
+                        )
+                    } else {
+                        Some(route_provider)
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        Ok(routed_provider
+            .unwrap_or_else(|| super::providers::materialize_codex_official_auth(provider, None)))
+    }
+
     fn load_codex_v2_target_providers(
         &self,
         provider: &Provider,
@@ -607,11 +682,10 @@ impl RequestForwarder {
         {
             return providers;
         }
-        let Some(app_handle) = &self.app_handle else {
+        let Some(manager) = self.codex_oauth_manager() else {
             return providers;
         };
-        let state = app_handle.state::<CodexOAuthState>();
-        let manager = state.0.read().await;
+        let manager = manager.read().await;
         let policy = manager.account_pool_policy().await;
         if !policy.enabled {
             log::warn!(
@@ -684,10 +758,7 @@ impl RequestForwarder {
                 }
             }
         }
-        let entries = state
-            .0
-            .read()
-            .await
+        let entries = manager
             .ordered_pool_entries(&self.session_id, native_authorization)
             .await;
         let mut expanded = Vec::new();
@@ -1075,7 +1146,22 @@ impl RequestForwarder {
         // `forward_raw` resolve only the explicitly matched route or official
         // Codex OAuth. Expanding the whole route chain here would let native
         // image/audio/file requests fail over to text-only DeepSeek/Qwen routes.
-        let attempt_providers = materialize_direct_codex_official_providers(app_type, &providers);
+        let mut attempt_providers = Vec::with_capacity(providers.len());
+        for provider in &providers {
+            match self.materialize_codex_raw_forward_attempt_provider(
+                app_type,
+                provider,
+                &route_body,
+            ) {
+                Ok(provider) => attempt_providers.push(provider),
+                Err(error) => {
+                    return Err(ForwardError {
+                        error,
+                        provider: Some(provider.clone()),
+                    });
+                }
+            }
+        }
         let attempt_providers = self
             .expand_codex_account_pool(app_type, &headers, attempt_providers)
             .await;
@@ -8972,6 +9058,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("OAuth pool test directory");
         let manager = CodexOAuthManager::new(temp.path().to_path_buf());
         manager
+            .seed_test_account("default-local-id", "default-access-token")
+            .await
+            .expect("seed default OAuth account outside the pool");
+        manager
             .seed_test_account("pool-local-id", "pool-access-token")
             .await
             .expect("seed pooled OAuth account");
@@ -8979,11 +9069,23 @@ mod tests {
             .set_account_pool_policy(
                 crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy {
                     enabled: true,
-                    entries: vec![CodexAccountPoolEntry {
-                        account_id: "pool-local-id".to_string(),
-                        enabled: true,
-                        reserve_percent: 0.0,
-                    }],
+                    entries: vec![
+                        CodexAccountPoolEntry {
+                            account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                            enabled: false,
+                            reserve_percent: 0.0,
+                        },
+                        CodexAccountPoolEntry {
+                            account_id: "default-local-id".to_string(),
+                            enabled: false,
+                            reserve_percent: 0.0,
+                        },
+                        CodexAccountPoolEntry {
+                            account_id: "pool-local-id".to_string(),
+                            enabled: true,
+                            reserve_percent: 0.0,
+                        },
+                    ],
                     desktop_account_id: None,
                     ..Default::default()
                 },
@@ -9018,6 +9120,121 @@ mod tests {
             .unwrap_or_else(|error| {
                 panic!(
                     "forward pooled managed OAuth compact request: {}",
+                    error.error
+                )
+            });
+
+        let (headers, captured_body) = capture.await.expect("capture task");
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer pool-access-token"));
+        assert!(headers.contains("chatgpt-account-id: pool-local-id"));
+        assert_eq!(captured_body, body);
+    }
+
+    #[tokio::test]
+    async fn raw_compact_multirouter_official_pool_resolves_route_before_pool_expansion() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind routed pooled raw compact upstream");
+        let upstream = format!(
+            "http://{}",
+            listener.local_addr().expect("upstream address")
+        );
+        let capture = tokio::spawn(capture_single_http_request(listener));
+
+        let temp = tempfile::tempdir().expect("routed OAuth pool test directory");
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager
+            .seed_test_account("default-local-id", "default-access-token")
+            .await
+            .expect("seed default OAuth account outside the routed pool");
+        manager
+            .seed_test_account("pool-local-id", "pool-access-token")
+            .await
+            .expect("seed routed pooled OAuth account");
+        manager
+            .set_account_pool_policy(
+                crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy {
+                    enabled: true,
+                    entries: vec![
+                        CodexAccountPoolEntry {
+                            account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                            enabled: false,
+                            reserve_percent: 0.0,
+                        },
+                        CodexAccountPoolEntry {
+                            account_id: "default-local-id".to_string(),
+                            enabled: false,
+                            reserve_percent: 0.0,
+                        },
+                        CodexAccountPoolEntry {
+                            account_id: "pool-local-id".to_string(),
+                            enabled: true,
+                            reserve_percent: 0.0,
+                        },
+                    ],
+                    desktop_account_id: None,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("enable routed managed-only account pool");
+
+        let mut official = test_codex_official_provider();
+        official.settings_config["codexTestBaseUrl"] = json!(upstream);
+        official.settings_config["base_url"] = json!(upstream);
+        official.settings_config["modelCatalog"] = json!({
+            "models": [{"model": "gpt-6-astra"}]
+        });
+        official.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::AccountPool,
+                account_id: None,
+            }),
+            ..Default::default()
+        });
+        let mut router = test_provider_with_type(None);
+        router.id = "codex-multirouter".to_string();
+        router.name = "Codex MultiRouter".to_string();
+        router.settings_config = json!({
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "routes": [{
+                    "id": "official",
+                    "enabled": true,
+                    "targetProviderId": "codex-official",
+                    "modelSelection": {
+                        "mode": "include",
+                        "models": ["gpt-6-astra"]
+                    }
+                }]
+            }
+        });
+        let body = Bytes::from_static(br#"{"model":"gpt-6-astra","input":[]}"#);
+        let mut forwarder = test_forwarder(Duration::from_secs(5), Duration::from_secs(5));
+        forwarder
+            .router
+            .database()
+            .save_provider("codex", &official)
+            .expect("save canonical official pool provider");
+        forwarder.codex_oauth_test_manager = Some(Arc::new(RwLock::new(manager)));
+
+        forwarder
+            .forward_raw_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses/compact",
+                json!({"model":"gpt-6-astra"}),
+                body.clone(),
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![router],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "forward routed pooled managed OAuth compact request: {}",
                     error.error
                 )
             });
