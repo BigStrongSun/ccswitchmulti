@@ -313,6 +313,16 @@ fn materialize_codex_account_pool_candidate(
     credential_generation: u64,
 ) -> Provider {
     let mut candidate = provider.clone();
+    if candidate
+        .settings_config
+        .get("codexRouterParentProviderId")
+        .is_none()
+    {
+        candidate.settings_config["codexRouterParentProviderId"] =
+            Value::String(provider.id.clone());
+        candidate.settings_config["codexRouterParentProviderName"] =
+            Value::String(provider.name.clone());
+    }
     candidate.settings_config["codexPoolCredentialGeneration"] = Value::from(credential_generation);
     if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
         candidate.settings_config["codexNativeAuthPassthrough"] = Value::Bool(true);
@@ -9142,6 +9152,7 @@ mod tests {
             )
             .await
             .expect("enable managed-only account pool");
+        manager.mark_pool_quota_checked("pool-local-id").await;
         let mut official = test_codex_official_provider();
         official.settings_config["codexTestBaseUrl"] = json!(upstream);
         official.meta = Some(ProviderMeta {
@@ -9153,9 +9164,10 @@ mod tests {
         });
         let body = Bytes::from_static(br#"{"model":"gpt-6-astra","input":[]}"#);
         let mut forwarder = test_forwarder(Duration::from_secs(5), Duration::from_secs(5));
+        forwarder.current_provider_id_at_start = official.id.clone();
         forwarder.codex_oauth_test_manager = Some(Arc::new(RwLock::new(manager)));
 
-        forwarder
+        let result = forwarder
             .forward_raw_with_retry(
                 &AppType::Codex,
                 http::Method::POST,
@@ -9173,6 +9185,26 @@ mod tests {
                     error.error
                 )
             });
+
+        let (persistent_provider_id, _) =
+            crate::proxy::providers::codex_route_persistent_provider(&result.provider);
+        assert_eq!(persistent_provider_id, "codex-official");
+        let status = forwarder.status.read().await;
+        assert_eq!(
+            status.current_provider_id.as_deref(),
+            Some("codex-official")
+        );
+        assert_eq!(status.failover_count, 0);
+        drop(status);
+        assert_eq!(
+            forwarder
+                .current_providers
+                .read()
+                .await
+                .get("codex")
+                .map(|(id, _)| id.as_str()),
+            Some("codex-official")
+        );
 
         let (headers, captured_body) = capture.await.expect("capture task");
         let headers = headers.to_ascii_lowercase();
@@ -9220,6 +9252,12 @@ mod tests {
             )
             .await
             .expect("enable native-only account pool");
+        let _ = manager
+            .ordered_pool_entries("", Some("Bearer desktop-access-token"))
+            .await;
+        manager
+            .mark_pool_quota_checked(NATIVE_CODEX_ACCOUNT_ID)
+            .await;
         let mut official = test_codex_official_provider();
         official.settings_config["codexTestBaseUrl"] = json!(upstream);
         official.meta = Some(ProviderMeta {
@@ -9240,9 +9278,10 @@ mod tests {
         );
         let body = Bytes::from_static(br#"{"model":"gpt-6-astra","input":[]}"#);
         let mut forwarder = test_forwarder(Duration::from_secs(5), Duration::from_secs(5));
+        forwarder.current_provider_id_at_start = official.id.clone();
         forwarder.codex_oauth_test_manager = Some(Arc::new(RwLock::new(manager)));
 
-        forwarder
+        let result = forwarder
             .forward_raw_with_retry(
                 &AppType::Codex,
                 http::Method::POST,
@@ -9257,6 +9296,17 @@ mod tests {
             .unwrap_or_else(|error| {
                 panic!("forward native pooled compact request: {}", error.error)
             });
+
+        let (persistent_provider_id, _) =
+            crate::proxy::providers::codex_route_persistent_provider(&result.provider);
+        assert_eq!(persistent_provider_id, "codex-official");
+        let status = forwarder.status.read().await;
+        assert_eq!(
+            status.current_provider_id.as_deref(),
+            Some("codex-official")
+        );
+        assert_eq!(status.failover_count, 0);
+        drop(status);
 
         let (headers, captured_body) = capture.await.expect("capture task");
         let headers = headers.to_ascii_lowercase();
@@ -9315,6 +9365,7 @@ mod tests {
             )
             .await
             .expect("enable routed managed-only account pool");
+        manager.mark_pool_quota_checked("pool-local-id").await;
 
         let mut official = test_codex_official_provider();
         official.settings_config["codexTestBaseUrl"] = json!(upstream);
