@@ -14,8 +14,8 @@ use crate::codex_multirouter::schema::{
     CodexRouteAuthPolicy, CodexRouteAuthSource, CodexRoutingConfigV2,
 };
 use crate::provider::{
-    AuthBinding, AuthBindingSource, CodexCacheConfig, CodexChatReasoningConfig, Provider,
-    ProviderMeta,
+    AuthBinding, AuthBindingSource, CodexCacheConfig, CodexChatReasoningConfig,
+    CodexOfficialAuthMode, Provider, ProviderMeta,
 };
 use crate::proxy::error::ProxyError;
 use crate::proxy::providers::codex_oauth_auth::{CodexAccountPoolPolicy, NATIVE_CODEX_ACCOUNT_ID};
@@ -778,7 +778,10 @@ fn build_resolved_codex_v2_route(
         upstream_model,
         api_format,
         api_format_source,
-        auth_owner: codex_v2_auth_owner(&route.auth_policy),
+        auth_owner: codex_v2_auth_owner(&effective_codex_v2_auth_policy(
+            target_provider,
+            &route.auth_policy,
+        )),
         dependency_fingerprint: compiled.dependency_fingerprint.clone(),
         matched_by,
         effective_provider,
@@ -888,7 +891,11 @@ fn materialize_codex_v2_provider(
         meta.api_format = Some(model.api_format.clone());
     }
 
-    apply_codex_v2_auth_policy(&route.auth_policy, &mut settings, &mut meta);
+    let auth_policy = effective_codex_v2_auth_policy(target_provider, &route.auth_policy);
+    if is_canonical_codex_official_provider(target_provider) {
+        reset_codex_official_auth_materialization(&mut settings, &mut meta);
+    }
+    apply_codex_v2_auth_policy(&auth_policy, &mut settings, &mut meta);
     materialized.settings_config = JsonValue::Object(settings);
     materialized.meta = Some(meta);
 
@@ -898,6 +905,99 @@ fn materialize_codex_v2_provider(
         materialized.settings_config["codexResolvedVisibleModel"] =
             JsonValue::String(request_model.to_string());
     }
+    materialized
+}
+
+fn is_canonical_codex_official_provider(provider: &Provider) -> bool {
+    provider.category.as_deref() == Some("official")
+        && provider.id == crate::database::CODEX_OFFICIAL_PROVIDER_ID
+}
+
+fn codex_official_auth_policy(
+    provider: &Provider,
+    legacy_fallback: Option<&CodexRouteAuthPolicy>,
+) -> CodexRouteAuthPolicy {
+    if let Some(config) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.codex_official_auth.as_ref())
+    {
+        let account_id = config
+            .account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|account_id| !account_id.is_empty())
+            .map(ToString::to_string);
+        return match config.mode {
+            CodexOfficialAuthMode::DesktopCurrentLogin => CodexRouteAuthPolicy {
+                source: CodexRouteAuthSource::NativeCodexAuth,
+                account_id: None,
+            },
+            CodexOfficialAuthMode::ManagedOauth => CodexRouteAuthPolicy {
+                source: CodexRouteAuthSource::ManagedCodexOauth,
+                account_id,
+            },
+            CodexOfficialAuthMode::AccountPool => CodexRouteAuthPolicy {
+                source: CodexRouteAuthSource::AccountPool,
+                account_id: None,
+            },
+        };
+    }
+
+    legacy_fallback
+        .filter(|policy| policy.source != CodexRouteAuthSource::ProviderConfig)
+        .cloned()
+        .unwrap_or(CodexRouteAuthPolicy {
+            source: CodexRouteAuthSource::NativeCodexAuth,
+            account_id: None,
+        })
+}
+
+fn effective_codex_v2_auth_policy(
+    target_provider: &Provider,
+    route_policy: &CodexRouteAuthPolicy,
+) -> CodexRouteAuthPolicy {
+    if is_canonical_codex_official_provider(target_provider) {
+        codex_official_auth_policy(target_provider, Some(route_policy))
+    } else {
+        route_policy.clone()
+    }
+}
+
+fn reset_codex_official_auth_materialization(
+    settings: &mut Map<String, JsonValue>,
+    meta: &mut ProviderMeta,
+) {
+    settings.remove(CODEX_NATIVE_AUTH_PASSTHROUGH);
+    settings.remove(CODEX_ACCOUNT_POOL_ENABLED);
+    meta.provider_type = None;
+    meta.auth_binding = None;
+}
+
+/// Materialize the secret-free authentication choice owned by the canonical
+/// `OpenAI Official` Provider. The optional fallback is read only for legacy
+/// explicit official-auth routes; a legacy `provider_config` route means no
+/// explicit choice and therefore falls back to the Desktop login.
+pub fn materialize_codex_official_auth(
+    provider: &Provider,
+    legacy_fallback: Option<&CodexRouteAuthPolicy>,
+) -> Provider {
+    if !is_canonical_codex_official_provider(provider) {
+        return provider.clone();
+    }
+
+    let policy = codex_official_auth_policy(provider, legacy_fallback);
+    let mut materialized = provider.clone();
+    let mut settings = materialized
+        .settings_config
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let mut meta = materialized.meta.clone().unwrap_or_default();
+    reset_codex_official_auth_materialization(&mut settings, &mut meta);
+    apply_codex_v2_auth_policy(&policy, &mut settings, &mut meta);
+    materialized.settings_config = JsonValue::Object(settings);
+    materialized.meta = Some(meta);
     materialized
 }
 
@@ -1154,6 +1254,29 @@ pub fn materialize_codex_routed_provider_from_target(
         // route 是本次请求的显式协议来源，必须覆盖目标 provider 的陈旧元数据。
         let meta = materialized.meta.get_or_insert_with(ProviderMeta::default);
         meta.api_format = Some(api_format.to_string());
+    }
+
+    // Legacy request-local routes may still carry their old materialized marker.
+    // Once the canonical target has Provider-owned state, that current state is
+    // authoritative without rewriting the persisted Router.
+    if is_canonical_codex_official_provider(target_provider)
+        && target_provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_official_auth.as_ref())
+            .is_some()
+    {
+        let policy = codex_official_auth_policy(target_provider, None);
+        let mut settings = materialized
+            .settings_config
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let mut meta = materialized.meta.clone().unwrap_or_default();
+        reset_codex_official_auth_materialization(&mut settings, &mut meta);
+        apply_codex_v2_auth_policy(&policy, &mut settings, &mut meta);
+        materialized.settings_config = JsonValue::Object(settings);
+        materialized.meta = Some(meta);
     }
     materialized
 }
@@ -6180,6 +6303,64 @@ wire_api = "anthropic"
         );
     }
 
+    #[test]
+    fn legacy_routed_official_provider_reads_provider_owned_auth() {
+        let router = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{
+                        "id": "official",
+                        "enabled": true,
+                        "targetProviderId": "codex-official",
+                        "match": { "models": ["gpt-5.6"] },
+                        "upstream": {
+                            "apiFormat": "openai_responses",
+                            "auth": { "source": "provider_config" }
+                        }
+                    }]
+                }
+            }),
+            None,
+        );
+        let route = &router.settings_config["codexRouting"]["routes"][0];
+        let routed = build_codex_route_probe_provider(&router, route, None);
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {}, "config": "" }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        official.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: CodexOfficialAuthMode::ManagedOauth,
+                account_id: Some("account-legacy".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        let effective = materialize_codex_routed_provider_from_target(&routed, &official);
+
+        assert_eq!(
+            effective
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.auth_binding.as_ref())
+                .and_then(|binding| binding.account_id.as_deref()),
+            Some("account-legacy")
+        );
+        assert_eq!(
+            effective
+                .settings_config
+                .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
+                .and_then(JsonValue::as_bool),
+            None
+        );
+    }
+
     // 官方客户端检测测试
     #[test]
     fn test_is_official_client_vscode() {
@@ -7511,6 +7692,88 @@ wire_api = "responses"
         assert_eq!(first.api_format_source, "provider");
         assert_eq!(second.api_format_source, "provider");
         assert_ne!(first.dependency_fingerprint, second.dependency_fingerprint);
+    }
+
+    #[test]
+    fn standalone_official_provider_materializes_account_pool_without_router() {
+        let mut provider = v2_target_provider(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+            "openai_responses",
+            json!([{"model": "gpt-5.6-sol"}]),
+        );
+        provider.category = Some("official".to_string());
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: CodexOfficialAuthMode::AccountPool,
+                account_id: None,
+            }),
+            ..Default::default()
+        });
+
+        let effective = materialize_codex_official_auth(&provider, None);
+
+        assert_eq!(
+            effective
+                .settings_config
+                .get(CODEX_ACCOUNT_POOL_ENABLED)
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert!(effective.settings_config.get("auth").is_none());
+        assert!(effective.settings_config.get("codexRouting").is_none());
+    }
+
+    #[test]
+    fn routed_official_provider_reads_latest_target_auth_without_route_rewrite() {
+        let router = v2_router(
+            json!([v2_route(
+                "official",
+                crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+                json!({"mode": "all"})
+            )]),
+            "official",
+        );
+        let mut target = v2_target_provider(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+            "openai_responses",
+            json!([{"model": "gpt-5.6-sol"}]),
+        );
+        target.category = Some("official".to_string());
+        target.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: CodexOfficialAuthMode::ManagedOauth,
+                account_id: Some("account-1".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        let resolved = resolve_codex_v2_routed_provider(
+            &router,
+            &json!({"model": "gpt-5.6-sol"}),
+            &v2_providers([target]),
+        )
+        .expect("compile official route")
+        .expect("official route");
+
+        assert_eq!(
+            resolved
+                .effective_provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.auth_binding.as_ref())
+                .and_then(|binding| binding.account_id.as_deref()),
+            Some("account-1")
+        );
+        assert_eq!(
+            resolved
+                .effective_provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref()),
+            Some("codex_oauth")
+        );
     }
 
     #[test]

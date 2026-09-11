@@ -287,6 +287,20 @@ fn provider_requests_codex_account_pool(provider: &Provider) -> bool {
         .unwrap_or(false)
 }
 
+fn materialize_direct_codex_official_providers(
+    app_type: &AppType,
+    providers: &[Provider],
+) -> Vec<Provider> {
+    if !matches!(app_type, AppType::Codex) {
+        return providers.to_vec();
+    }
+
+    providers
+        .iter()
+        .map(|provider| super::providers::materialize_codex_official_auth(provider, None))
+        .collect()
+}
+
 fn materialize_codex_account_pool_candidate(
     provider: &Provider,
     entry: &super::providers::codex_oauth_auth::CodexAccountPoolEntry,
@@ -412,7 +426,8 @@ impl RequestForwarder {
         }
         let Some(target_provider_id) = super::providers::codex_route_target_provider_id(provider)
         else {
-            let mut effective_provider = provider.clone();
+            let mut effective_provider =
+                super::providers::materialize_codex_official_auth(provider, None);
             let public_model = body
                 .get("model")
                 .and_then(Value::as_str)
@@ -555,7 +570,9 @@ impl RequestForwarder {
         let manager = state.0.read().await;
         let policy = manager.account_pool_policy().await;
         if !policy.enabled {
-            log::warn!("[CodexOAuthPool] 当前 Router 选择了 OAuth 账号池，但全局账号池未启用");
+            log::warn!(
+                "[CodexOAuthPool] 当前 OpenAI Official 认证选择了 OAuth 账号池，但全局账号池未启用"
+            );
             return providers;
         }
         let native_authorization = headers
@@ -1012,7 +1029,7 @@ impl RequestForwarder {
         // `forward_raw` resolve only the explicitly matched route or official
         // Codex OAuth. Expanding the whole route chain here would let native
         // image/audio/file requests fail over to text-only DeepSeek/Qwen routes.
-        let attempt_providers = providers.to_vec();
+        let attempt_providers = materialize_direct_codex_official_providers(app_type, &providers);
         let attempt_providers = self
             .expand_codex_account_pool(app_type, &headers, attempt_providers)
             .await;
@@ -8706,13 +8723,92 @@ mod tests {
     }
 
     #[test]
-    fn codex_account_pool_requires_an_explicit_router_marker() {
+    fn raw_official_provider_requires_materialization_before_account_pool() {
         let native = test_codex_official_provider();
         assert!(!provider_requests_codex_account_pool(&native));
 
         let mut pooled = test_codex_official_provider();
         pooled.settings_config[CODEX_ACCOUNT_POOL_ENABLED] = Value::Bool(true);
         assert!(provider_requests_codex_account_pool(&pooled));
+    }
+
+    #[test]
+    fn codex_account_pool_works_without_multirouter() {
+        let mut official = test_codex_official_provider();
+        official.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::AccountPool,
+                account_id: None,
+            }),
+            ..Default::default()
+        });
+
+        let materialized =
+            crate::proxy::providers::materialize_codex_official_auth(&official, None);
+        assert!(materialized.settings_config.get("codexRouting").is_none());
+        assert!(provider_requests_codex_account_pool(&materialized));
+
+        let entries = [
+            CodexAccountPoolEntry {
+                account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                enabled: true,
+                reserve_percent: 5.0,
+            },
+            CodexAccountPoolEntry {
+                account_id: "managed-account".to_string(),
+                enabled: true,
+                reserve_percent: 5.0,
+            },
+        ];
+        let candidates = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                materialize_codex_account_pool_candidate(&materialized, entry, index as u64 + 1)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            candidates
+                .iter()
+                .filter_map(|provider| provider.settings_config["codexPoolAccountId"].as_str())
+                .collect::<Vec<_>>(),
+            vec![NATIVE_CODEX_ACCOUNT_ID, "managed-account"]
+        );
+    }
+
+    #[test]
+    fn raw_codex_path_materializes_standalone_official_auth_before_forwarding() {
+        let mut official = test_codex_official_provider();
+        official.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::ManagedOauth,
+                account_id: Some("raw-account".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        let effective = materialize_direct_codex_official_providers(
+            &AppType::Codex,
+            std::slice::from_ref(&official),
+        );
+
+        assert_eq!(effective.len(), 1);
+        assert_eq!(
+            effective[0]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.auth_binding.as_ref())
+                .and_then(|binding| binding.account_id.as_deref()),
+            Some("raw-account")
+        );
+        assert_eq!(
+            effective[0]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref()),
+            Some("codex_oauth")
+        );
     }
 
     #[test]
