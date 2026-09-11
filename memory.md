@@ -5677,3 +5677,7 @@ supported in one streaming turn`。
 # 2026-09-11 DeepSeek MFJS 嵌套 oneOf 根修
 
 - Codex 最新 `automation_update` schema 在根 union 分支中嵌套纯 `oneOf`，旧 MFJS 编译器先递归编译子 schema，导致根 object union 投影来不及执行并本地 422。根修在根 union 预处理阶段递归展开纯 union 分支，保留原编译/投影/strict 语义，不把重叠 oneOf 静默改成 anyOf。TDD 同路径 RED→GREEN；最终 library、聚焦测试、check、fmt 通过。完整根因与安装态边界见 `memory-2026-09-11-nested-oneof-mfjs-projection.md`。
+
+### 2026-09-11 二次根修：根 union 分支经 `$ref` 间接指向嵌套 union
+
+- 安装首修后同一路径仍 422；安装态进程/SHA 验证无漂移。真实 schema 根分支是 `$ref`，目标 definition 才是纯 union，首修只展开内联分支未命中。二次根修在根 union 预处理时解析根分支 `$ref` 再递归展开纯 union，保留循环与普通属性 ref 语义。TDD RED→GREEN，library/check/fmt 通过；需重建安装后复验。

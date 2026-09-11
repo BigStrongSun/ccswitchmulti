@@ -127,6 +127,11 @@ impl<'a> MfjsCompiler<'a> {
             }
         }
         let mut original = self.original.clone();
+        let root_defs = original
+            .get("$defs")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
         let project_root_union = if let Some(root) = original.as_object_mut() {
             if root.contains_key("oneOf") && root.contains_key("anyOf") {
                 return Err(self.error(
@@ -142,7 +147,9 @@ impl<'a> MfjsCompiler<'a> {
             // every callable object branch, so remove only this redundant
             // outer type before compiling the union. Nested pure unions are
             // flattened first because the latest Codex `automation_update`
-            // schema places a `oneOf` directly inside a root union branch.
+            // schema reaches a `oneOf` through a root-union branch `$ref`.
+            // Resolve that ref only for this projection; ordinary property refs
+            // remain for the normal compiler.
             let has_root_union = root.contains_key("oneOf") || root.contains_key("anyOf");
             if has_root_union && root.get("type").and_then(Value::as_str) == Some("object") {
                 root.remove("type");
@@ -150,13 +157,13 @@ impl<'a> MfjsCompiler<'a> {
             if let Some(Value::Array(branches)) = root.remove("oneOf") {
                 root.insert(
                     "anyOf".to_string(),
-                    Value::Array(flatten_root_union_branches(branches)),
+                    Value::Array(flatten_root_union_branches(branches, &root_defs)),
                 );
                 true
             } else if let Some(Value::Array(branches)) = root.remove("anyOf") {
                 root.insert(
                     "anyOf".to_string(),
-                    Value::Array(flatten_root_union_branches(branches)),
+                    Value::Array(flatten_root_union_branches(branches, &root_defs)),
                 );
                 true
             } else {
@@ -976,36 +983,85 @@ fn union_additional_properties(objects: &[Map<String, Value>]) -> Option<Value> 
     }
 }
 
-fn flatten_root_union_branches(branches: Vec<Value>) -> Vec<Value> {
+fn flatten_root_union_branches(branches: Vec<Value>, defs: &Map<String, Value>) -> Vec<Value> {
+    let mut stack = Vec::new();
     branches
         .into_iter()
-        .flat_map(flatten_pure_union_branch)
+        .flat_map(|branch| flatten_pure_union_branch(branch, defs, &mut stack))
         .collect()
 }
 
-fn flatten_pure_union_branch(branch: Value) -> Vec<Value> {
-    let is_pure_union = branch.as_object().is_some_and(|object| {
+fn flatten_pure_union_branch(
+    branch: Value,
+    defs: &Map<String, Value>,
+    stack: &mut Vec<String>,
+) -> Vec<Value> {
+    let branch = if branch
+        .as_object()
+        .is_some_and(|object| object.len() == 1 && object.contains_key("$ref"))
+    {
+        match branch.get("$ref").and_then(Value::as_str) {
+            Some(reference) if reference.starts_with("#/$defs/") => {
+                if stack.iter().any(|seen| seen == reference) {
+                    branch
+                } else if let Some(key) = reference.strip_prefix("#/$defs/") {
+                    defs.get(key).cloned().unwrap_or(branch)
+                } else {
+                    branch
+                }
+            }
+            _ => branch,
+        }
+    } else {
+        branch
+    };
+    if !branch_is_pure_union(&branch) {
+        return vec![branch];
+    }
+    let mut object = match branch {
+        Value::Object(object) => object,
+        branch => return vec![branch],
+    };
+    let key = if object.get("oneOf").is_some() {
+        "oneOf"
+    } else {
+        "anyOf"
+    };
+    match object.remove(key) {
+        Some(Value::Array(children)) => {
+            let mut flattened = Vec::new();
+            for child in children {
+                if let Some(reference) = child_ref(&child) {
+                    if !stack.iter().any(|seen| seen == reference) {
+                        stack.push(reference.to_string());
+                        flattened.extend(flatten_pure_union_branch(child, defs, stack));
+                        stack.pop();
+                        continue;
+                    }
+                }
+                flattened.extend(flatten_pure_union_branch(child, defs, stack));
+            }
+            flattened
+        }
+        _ => vec![Value::Object(object)],
+    }
+}
+
+fn child_ref(branch: &Value) -> Option<&str> {
+    branch.as_object().and_then(|object| {
+        (object.len() == 1)
+            .then(|| object.get("$ref"))
+            .flatten()
+            .and_then(Value::as_str)
+    })
+}
+
+fn branch_is_pure_union(branch: &Value) -> bool {
+    branch.as_object().is_some_and(|object| {
         let only_union_keys = object.keys().all(|key| key == "oneOf" || key == "anyOf");
         let one_union_key = object.contains_key("oneOf") != object.contains_key("anyOf");
         only_union_keys && one_union_key
-    });
-    if !is_pure_union {
-        return vec![branch];
-    }
-    match branch {
-        Value::Object(mut object) => {
-            let key = if object.contains_key("oneOf") {
-                "oneOf"
-            } else {
-                "anyOf"
-            };
-            match object.remove(key) {
-                Some(Value::Array(children)) => flatten_root_union_branches(children),
-                _ => vec![Value::Object(object)],
-            }
-        }
-        _ => vec![branch],
-    }
+    })
 }
 
 fn one_of_branches_are_pairwise_disjoint(branches: &[Value]) -> bool {
