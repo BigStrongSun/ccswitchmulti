@@ -19,6 +19,12 @@
 - Regression coverage is green: the legacy GLM Chat shape now resolves to raw
   reasoning, the anti-summary safety test passes, and all 136 `codex` provider
   unit tests pass.
+- The fix was built and installed with the recovery-capable CCSM transaction.
+  The first attempt intentionally rolled back after detecting the NSIS-patched
+  executable hash; the second attempt used that observed installed hash and
+  succeeded. Final runtime proof: PID `58292`, listener `127.0.0.1:15721`,
+  `/health=200`, `/status.running=true`, `listener_role=takeover`, and zero
+  failed requests at the verification snapshot.
 
 ## Safe recovery boundary
 
