@@ -64,6 +64,12 @@ pub struct CodexModelCapabilitySummary {
     pub base_instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_ultra: Option<Value>,
+    /// Codex Desktop needs this transport-level declaration to decide whether
+    /// a reasoning item is a raw reasoning stream rather than a summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_summary: Option<String>,
     pub context_window_source: String,
     pub input_modalities_source: String,
     pub reasoning_source: String,
@@ -646,6 +652,9 @@ fn effective_capability_summary(
         provider_cache,
     );
 
+    let (reasoning_summary_format, default_reasoning_summary) =
+        effective_reasoning_summary_metadata(provider, model_entry);
+
     CodexModelCapabilitySummary {
         context_window,
         input_modalities: input_modalities.unwrap_or_default(),
@@ -659,11 +668,50 @@ fn effective_capability_summary(
             .map(ToString::to_string),
         codex_ultra: value_field(model_entry, &["codexUltra", "codex_ultra"])
             .map(sanitize_capability_value),
+        reasoning_summary_format,
+        default_reasoning_summary,
         context_window_source,
         input_modalities_source,
         reasoning_source,
         codex_cache_source,
     }
+}
+
+/// Preserve the Codex picker metadata that distinguishes native raw reasoning
+/// from a generated summary. Older DeepSeek provider rows predate these fields,
+/// but the official DeepSeek Responses endpoint is an authoritative source for
+/// the same declaration and is safe to recognize by exact host plus transport.
+fn effective_reasoning_summary_metadata(
+    provider: &Provider,
+    model_entry: &Value,
+) -> (Option<String>, Option<String>) {
+    let format = string_field(
+        model_entry,
+        &["reasoningSummaryFormat", "reasoning_summary_format"],
+    )
+    .map(ToString::to_string);
+    let default_summary = string_field(
+        model_entry,
+        &["defaultReasoningSummary", "default_reasoning_summary"],
+    )
+    .map(ToString::to_string);
+    if format.is_some() || default_summary.is_some() {
+        return (format, default_summary);
+    }
+
+    let model = string_field(model_entry, &["model", "id", "slug"])
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let official_deepseek_responses = effective_api_format(provider, model_entry).0
+        == "openai_responses"
+        && provider_connection_url(provider)
+            .is_some_and(|url| url.to_ascii_lowercase().contains("api.deepseek.com"))
+        && model.starts_with("deepseek");
+    if official_deepseek_responses {
+        return (Some("experimental".to_string()), Some("none".to_string()));
+    }
+
+    (None, None)
 }
 
 fn model_input_modalities(model_entry: &Value) -> Option<Vec<String>> {

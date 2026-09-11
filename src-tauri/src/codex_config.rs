@@ -1538,6 +1538,19 @@ fn codex_catalog_model_entry(
         entry_obj.insert("webSearchToolType".to_string(), json!("text"));
     }
     apply_codex_model_reasoning_capability(entry_obj, spec.reasoning.as_ref());
+    // DeepSeek's native Responses contract emits raw reasoning text and does
+    // not generate a summary. The router projection may only carry the public
+    // alias (for example `deepseek-flash`), so preserve the official picker
+    // metadata even when the legacy provider row lacks those optional fields.
+    if spec.model.to_ascii_lowercase().starts_with("deepseek") {
+        entry_obj.insert(
+            "reasoning_summary_format".to_string(),
+            json!("experimental"),
+        );
+        entry_obj.insert("reasoningSummaryFormat".to_string(), json!("experimental"));
+        entry_obj.insert("default_reasoning_summary".to_string(), json!("none"));
+        entry_obj.insert("defaultReasoningSummary".to_string(), json!("none"));
+    }
     project_codex_desktop_model_fields(entry_obj, spec);
 
     if profile != CodexCatalogToolProfile::ProxyChat {
@@ -8348,6 +8361,41 @@ wire_api = "responses"
                 .collect();
             assert_eq!(actual, expected, "case={name}");
         }
+    }
+
+    #[test]
+    fn router_catalog_marks_deepseek_alias_as_raw_reasoning() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{
+                    "model": "deepseek-flash",
+                    "displayName": "DeepSeek Flash",
+                    "contextWindow": 1000000,
+                    "inputModalities": ["text"]
+                }]
+            }
+        });
+        let config = r#"
+model_provider = "codex_model_router_v2"
+wire_api = "responses"
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+"#;
+
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("router catalog generation should not error")
+        .expect("deepseek catalog should be generated");
+        let model = &catalog["models"][0];
+        assert_eq!(model["reasoning_summary_format"], "experimental");
+        assert_eq!(model["default_reasoning_summary"], "none");
+        assert_eq!(model["reasoningSummaryFormat"], "experimental");
+        assert_eq!(model["defaultReasoningSummary"], "none");
     }
 
     #[test]

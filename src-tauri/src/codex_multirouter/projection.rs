@@ -447,6 +447,15 @@ fn projected_model_entry(model: &CompiledCodexModel, sort_index: Option<usize>) 
     if let Some(codex_ultra) = model.capability_summary.codex_ultra.clone() {
         entry.insert("codexUltra".to_string(), codex_ultra);
     }
+    if let Some(format) = model.capability_summary.reasoning_summary_format.clone() {
+        entry.insert("reasoningSummaryFormat".to_string(), Value::String(format));
+    }
+    if let Some(default_summary) = model.capability_summary.default_reasoning_summary.clone() {
+        entry.insert(
+            "defaultReasoningSummary".to_string(),
+            Value::String(default_summary),
+        );
+    }
     Value::Object(entry)
 }
 
@@ -1002,6 +1011,53 @@ mod tests {
         assert_eq!(models[0]["supportsParallelToolCalls"], true);
         assert_eq!(models[0]["baseInstructions"], "Use Qwen tools.");
         assert_eq!(models[0]["codexUltra"]["providerEffort"], "high");
+    }
+
+    #[test]
+    fn projected_models_preserve_raw_reasoning_renderer_metadata() {
+        let db = Database::memory().expect("memory db");
+        let router = router();
+        let mut target = Provider::with_id(
+            "qwen".to_string(),
+            "DeepSeek Responses".to_string(),
+            json!({
+                "config": "model_provider = \"deepseek\"\nmodel = \"deepseek-flash\"\n\n[model_providers.deepseek]\nbase_url = \"https://api.deepseek.com\"\nwire_api = \"responses\"\n",
+                "modelCatalog": {"models": [{
+                    "model": "deepseek-flash",
+                    "displayName": "DeepSeek Flash",
+                    "apiFormat": "openai_responses",
+                    "reasoning": {
+                        "schemaVersion": 2,
+                        "supportStatus": "confirmed_supported",
+                        "controlKind": "graded",
+                        "supportedEfforts": ["low", "high", "max"],
+                        "defaultEffort": "high",
+                        "disableAllowed": false,
+                        "upstream": {"format": "string", "parameter": "reasoning_effort"}
+                    }
+                }]}
+            }),
+            None,
+        );
+        target.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &router).expect("save router");
+        db.save_provider("codex", &target).expect("save target");
+
+        let artifact = build_projection_artifact(&db, "router").expect("projection artifact");
+        let models = artifact.projection_settings["modelCatalog"]["models"]
+            .as_array()
+            .expect("projected models");
+        assert_eq!(
+            models[0]["reasoningSummaryFormat"], "experimental",
+            "raw reasoning format must survive the router projection"
+        );
+        assert_eq!(
+            models[0]["defaultReasoningSummary"], "none",
+            "raw-only models must keep the no-summary default"
+        );
     }
 
     #[test]
