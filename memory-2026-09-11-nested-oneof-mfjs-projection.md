@@ -12,3 +12,9 @@
 - 对照 Codex 工具 schema 发现真实根 union 分支不是内联 `oneOf`，而是 `{"$ref":"#/$defs/..."}`；目标 definition 才是纯 union。首修只展开内联纯 union，因此在根 projection 前没有命中。
 - 新增 TDD 回归模拟这种根分支 `$ref -> 纯 union` 结构，先复现同路径 RED。根修改为在根 union 预处理时按 `$defs` 解析仅含 `$ref` 的分支，再递归展开纯 union；循环引用保留给普通编译器报错，普通属性 `$ref` 不提前展开。
 - 二次验证：新回归 GREEN，Rust library 4096 passed / 0 failed / 7 ignored（其中既有 CAS 并行扰动单独重跑通过），聚焦回归通过，`cargo check --all-targets` 和 rustfmt 通过。需再次本地 release + 事务安装后才能验证当前代理。
+
+## 2026-09-11 live 复验：真实 automation_update schema 已走通运行态代理
+
+- 二次安装后，用从 Codex 会话中抽取的真实 `automation_update` `inputSchema`（根 `oneOf` -> `$ref` -> `$defs` 纯 `oneOf`）向当前运行态 CCSM `127.0.0.1:15721/responses` 发最小请求，模型 `deepseek-flash`。请求按 Codex path 分类并命中 `router-98e3bdc6-710d-4236-b47b-7ce7e4884365`。
+- 结果：本地代理返回 HTTP 200，DeepSeek 上游 200，响应为 `"text":"ok"`；编译后的 `destination`/`executionEnvironment`/`kind`/`mode` 等属性已展开为 MFJS 可表达的 `anyOf`（`strict=false`）。日志中二次安装后未再出现该路径的 MFJS `oneOf` 422。
+- 运行态证据：PID 12684，`C:/Users/sunda/AppData/Local/CCSwitchMulti/cc-switch.exe` SHA-256 `AE07665C88C9CFE92F8454652DB7B30E36706EAD67D9ED8D39E9418C499A139B`，来源 `a582a678`。

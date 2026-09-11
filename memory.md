@@ -5681,3 +5681,7 @@ supported in one streaming turn`。
 ### 2026-09-11 二次根修：根 union 分支经 `$ref` 间接指向嵌套 union
 
 - 安装首修后同一路径仍 422；安装态进程/SHA 验证无漂移。真实 schema 根分支是 `$ref`，目标 definition 才是纯 union，首修只展开内联分支未命中。二次根修在根 union 预处理时解析根分支 `$ref` 再递归展开纯 union，保留循环与普通属性 ref 语义。TDD RED→GREEN，library/check/fmt 通过；需重建安装后复验。
+
+### 2026-09-11 live 复验：真实 automation_update schema 已走通运行态代理
+
+- 二次安装后用真实 `automation_update` `inputSchema` 对运行态 `127.0.0.1:15721/responses` 发最小 `deepseek-flash` 请求，路由命中 DeepSeek，本地/上游均 200 且返回 `"ok"`；编译后 union 属性已展开为 MFJS `anyOf`，二次安装后无同路径 422。运行态 PID 12684、SHA-256 `AE07665...139B`、来源 `a582a678`。
