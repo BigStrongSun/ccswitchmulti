@@ -5673,3 +5673,7 @@ supported in one streaming turn`。
 - 根修改为来源判定：任何 CCSM-owned current/backup 都不进入官方链；历史 poisoned backup 在同步时重建并清 etag，退出时丢弃而不恢复。模型名称前缀过滤已删除。
 - 无 CCSM OAuth 时，备用入口会刷新 OpenAI/Codex 公共 `models.json`，经 10 秒/8 MiB/HTTP/JSON/非空校验后剥离远程指令字段并原子写入独立 `codex-official-models-cache.json`；网络失败仍落回 packaged、可信 local cache/backup 和 bundled。
 - 合并优先级为 packaged < public cache < trusted local cache/backup < current CLI bundled。公共源补未来 ID，本机运行时来源覆盖同 ID 元数据；UI 改称“备用官方目录”。完整根因和验证见 `memory-2026-09-10-codex-public-catalog-provenance.md`。
+
+# 2026-09-11 DeepSeek MFJS 嵌套 oneOf 根修
+
+- Codex 最新 `automation_update` schema 在根 union 分支中嵌套纯 `oneOf`，旧 MFJS 编译器先递归编译子 schema，导致根 object union 投影来不及执行并本地 422。根修在根 union 预处理阶段递归展开纯 union 分支，保留原编译/投影/strict 语义，不把重叠 oneOf 静默改成 anyOf。TDD 同路径 RED→GREEN；最终 library、聚焦测试、check、fmt 通过。完整根因与安装态边界见 `memory-2026-09-11-nested-oneof-mfjs-projection.md`。

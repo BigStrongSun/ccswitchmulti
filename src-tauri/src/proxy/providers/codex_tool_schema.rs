@@ -140,16 +140,27 @@ impl<'a> MfjsCompiler<'a> {
             // `object ∩ null` branch if we compile the outer type first.
             // Root projection restores the object constraint after retaining
             // every callable object branch, so remove only this redundant
-            // outer type before compiling the union.
+            // outer type before compiling the union. Nested pure unions are
+            // flattened first because the latest Codex `automation_update`
+            // schema places a `oneOf` directly inside a root union branch.
             let has_root_union = root.contains_key("oneOf") || root.contains_key("anyOf");
             if has_root_union && root.get("type").and_then(Value::as_str) == Some("object") {
                 root.remove("type");
             }
-            if let Some(one_of) = root.remove("oneOf") {
-                root.insert("anyOf".to_string(), one_of);
+            if let Some(Value::Array(branches)) = root.remove("oneOf") {
+                root.insert(
+                    "anyOf".to_string(),
+                    Value::Array(flatten_root_union_branches(branches)),
+                );
+                true
+            } else if let Some(Value::Array(branches)) = root.remove("anyOf") {
+                root.insert(
+                    "anyOf".to_string(),
+                    Value::Array(flatten_root_union_branches(branches)),
+                );
                 true
             } else {
-                root.contains_key("anyOf")
+                false
             }
         } else {
             false
@@ -962,6 +973,38 @@ fn union_additional_properties(objects: &[Map<String, Value>]) -> Option<Value> 
         Some(Value::Bool(false))
     } else {
         Some(schema_union(schemas))
+    }
+}
+
+fn flatten_root_union_branches(branches: Vec<Value>) -> Vec<Value> {
+    branches
+        .into_iter()
+        .flat_map(flatten_pure_union_branch)
+        .collect()
+}
+
+fn flatten_pure_union_branch(branch: Value) -> Vec<Value> {
+    let is_pure_union = branch.as_object().is_some_and(|object| {
+        let only_union_keys = object.keys().all(|key| key == "oneOf" || key == "anyOf");
+        let one_union_key = object.contains_key("oneOf") != object.contains_key("anyOf");
+        only_union_keys && one_union_key
+    });
+    if !is_pure_union {
+        return vec![branch];
+    }
+    match branch {
+        Value::Object(mut object) => {
+            let key = if object.contains_key("oneOf") {
+                "oneOf"
+            } else {
+                "anyOf"
+            };
+            match object.remove(key) {
+                Some(Value::Array(children)) => flatten_root_union_branches(children),
+                _ => vec![Value::Object(object)],
+            }
+        }
+        _ => vec![branch],
     }
 }
 
