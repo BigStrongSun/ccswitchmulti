@@ -43,8 +43,15 @@ export type CodexRuntimeRefreshStage =
   | "verifying"
   | "completed";
 
+export type CodexRuntimeRefreshProgressKind = "stage" | "log" | "heartbeat";
+
 export interface CodexRuntimeRefreshProgress {
   stage: CodexRuntimeRefreshStage;
+  kind?: CodexRuntimeRefreshProgressKind;
+  sequence?: number;
+  emittedAtMs?: number;
+  code?: string | null;
+  message?: string | null;
 }
 
 export interface CodexRuntimeRefreshPreflight {

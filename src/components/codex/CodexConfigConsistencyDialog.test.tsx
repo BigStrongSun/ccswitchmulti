@@ -68,6 +68,10 @@ vi.mock("react-i18next", () => ({
         "codexConfigConsistency.refreshingTitle": "正在刷新 Codex 状态",
         "codexConfigConsistency.refreshingDescription":
           "请保持 CCSM 运行，Codex 将自动重新打开。",
+        "codexConfigConsistency.progressLogTitle": "修复进度日志",
+        "codexConfigConsistency.progressLastActivity": "最后活动",
+        "codexConfigConsistency.progressStageElapsed": "当前阶段已等待",
+        "codexConfigConsistency.seconds": "秒",
         "codexConfigConsistency.stageClosing": "关闭 Codex",
         "codexConfigConsistency.stageRepairingHistory": "恢复分页历史",
         "codexConfigConsistency.stageApplyingConfig": "应用 CCSM 配置",
@@ -389,6 +393,70 @@ describe("CodexConfigConsistencyDialog", () => {
     expect(within(dialog).getByText("应用 CCSM 配置")).toBeInTheDocument();
     expect(within(dialog).getByText("重新打开 Codex")).toBeInTheDocument();
     expect(within(dialog).getByText("验证新运行态")).toBeInTheDocument();
+  });
+
+  it("renders detailed repair progress logs and last activity while refreshing", () => {
+    const now = Date.now();
+    render(
+      <CodexConfigConsistencyDialog
+        report={report}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "refreshing",
+          preflight: {
+            supported: true,
+            canRefresh: true,
+            snapshotToken: "snapshot",
+            desktopProcessCount: 1,
+            appServerProcessCount: 1,
+            processCount: 2,
+            launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+            warning: null,
+            paginatedHistory: {
+              affectedRolloutCount: 2,
+              duplicateOrdinalCount: 3,
+              affectedBytes: 1_100_000_000,
+              blockedRolloutCount: 0,
+              blockedReason: null,
+            },
+          },
+          progress: { stage: "repairing_history" },
+          logs: [
+            {
+              sequence: 1,
+              kind: "log",
+              stage: "repairing_history",
+              code: "history_file_started",
+              message: "正在修复历史文件 1/2：abc",
+              emittedAtMs: now - 2000,
+            },
+            {
+              sequence: 2,
+              kind: "log",
+              stage: "repairing_history",
+              code: "history_file_finished",
+              message: "已修复历史文件 1/2：abc（跳过重复序号 3 个）",
+              emittedAtMs: now - 1000,
+            },
+          ],
+          lastProgressAt: now,
+          stageStartedAt: now - 5000,
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={vi.fn()}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("修复进度日志")).toBeInTheDocument();
+    expect(screen.getByText(/正在修复历史文件 1\/2/)).toBeInTheDocument();
+    expect(screen.getByText(/已修复历史文件 1\/2/)).toBeInTheDocument();
+    expect(screen.getByText(/最后活动/)).toBeInTheDocument();
   });
 
   it("keeps the exact failed stage visible for a retry", () => {

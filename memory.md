@@ -5699,3 +5699,6 @@ supported in one streaming turn`。
 ### 2026-09-11 live 复验：真实 automation_update schema 已走通运行态代理
 
 - 二次安装后用真实 `automation_update` `inputSchema` 对运行态 `127.0.0.1:15721/responses` 发最小 `deepseek-flash` 请求，路由命中 DeepSeek，本地/上游均 200 且返回 `"ok"`；编译后 union 属性已展开为 MFJS `anyOf`，二次安装后无同路径 422。运行态 PID 12684、SHA-256 `AE07665...139B`、来源 `a582a678`。
+# 2026-09-11 Codex 状态与修复进度/卡死检测根修
+
+- 刷新进度原先只有 `stage`，长操作无日志/心跳，历史修复无超时，前端无静默看门狗且迟到结果可覆盖失败。根修增加结构化日志、2 秒心跳、分页历史逐文件/迁移进度和 15 分钟修复超时；前端增加日志面板、最后活动/阶段耗时、30 秒无事件失败和 run id 迟到结果隔离。前端全量 1566/1566、Rust 串行 4113/0/7、typecheck/Prettier/rustfmt/check 通过。详见 `memory-2026-09-11-codex-status-repair-progress.md`。

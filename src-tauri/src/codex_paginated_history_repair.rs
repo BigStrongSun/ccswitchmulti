@@ -42,6 +42,45 @@ pub struct PaginatedHistoryRepairPreflight {
     pub blocked_reason: Option<String>,
 }
 
+/// 分页历史修复的可观测进度事件。
+///
+/// 该模块运行在阻塞任务中；调用方把事件转成 Tauri 进度事件，避免长时间修复时
+/// 前端只能看到“正在处理”而看不到具体文件和阶段。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PaginatedHistoryRepairProgress {
+    PlanScanStarted,
+    PlanReady {
+        repair_candidate_count: usize,
+        provider_cursor_repair_count: usize,
+        provider_history_base_repair_count: usize,
+        blocked_count: usize,
+    },
+    ProviderMigrationStarted {
+        cursor_count: usize,
+        history_base_count: usize,
+    },
+    ProviderMigrationFinished {
+        repaired_cursor_count: usize,
+        repaired_history_base_count: usize,
+    },
+    RepairFileStarted {
+        index: usize,
+        total: usize,
+        source_id: String,
+    },
+    RepairFileSkipped {
+        index: usize,
+        total: usize,
+        source_id: String,
+    },
+    RepairFileFinished {
+        index: usize,
+        total: usize,
+        source_id: String,
+        skipped_duplicate_count: usize,
+    },
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PaginatedHistoryRepairOutcome {
     pub repaired_rollout_count: usize,
@@ -1226,12 +1265,24 @@ pub(crate) fn inspect_paginated_history_repair() -> Result<PaginatedHistoryRepai
 }
 
 pub(crate) fn repair_paginated_history_after_codex_exit(
+    mut report: impl FnMut(PaginatedHistoryRepairProgress),
 ) -> Result<PaginatedHistoryRepairOutcome, String> {
+    report(PaginatedHistoryRepairProgress::PlanScanStarted);
     let plan = build_repair_plan()?;
+    report(PaginatedHistoryRepairProgress::PlanReady {
+        repair_candidate_count: plan.candidates.len(),
+        provider_cursor_repair_count: plan.provider_migration.cursor_repairs.len(),
+        provider_history_base_repair_count: plan.provider_migration.history_base_repairs.len(),
+        blocked_count: plan.blocked.len(),
+    });
     let mut outcome = PaginatedHistoryRepairOutcome::default();
     if !plan.provider_migration.cursor_repairs.is_empty()
         || !plan.provider_migration.history_base_repairs.is_empty()
     {
+        report(PaginatedHistoryRepairProgress::ProviderMigrationStarted {
+            cursor_count: plan.provider_migration.cursor_repairs.len(),
+            history_base_count: plan.provider_migration.history_base_repairs.len(),
+        });
         let backup_root = crate::config::get_app_config_dir()
             .join("backups")
             .join("codex-paginated-history-migration-recovery-v1")
@@ -1267,6 +1318,10 @@ pub(crate) fn repair_paginated_history_after_codex_exit(
             )
             .collect::<HashSet<_>>()
             .len();
+        report(PaginatedHistoryRepairProgress::ProviderMigrationFinished {
+            repaired_cursor_count: repaired.repaired_cursor_count,
+            repaired_history_base_count: repaired.repaired_history_base_count,
+        });
         for repair in &plan.provider_migration.cursor_repairs {
             let scan = scan_rollout_ordinals(&repair.rollout_path)?;
             outcome.targets.push(ProjectionCatchUpTarget {
@@ -1280,7 +1335,14 @@ pub(crate) fn repair_paginated_history_after_codex_exit(
             });
         }
     }
-    for candidate in plan.candidates {
+    let repair_candidate_count = plan.candidates.len();
+    for (index, candidate) in plan.candidates.into_iter().enumerate() {
+        let source_id = candidate.source_id.clone();
+        report(PaginatedHistoryRepairProgress::RepairFileStarted {
+            index: index + 1,
+            total: repair_candidate_count,
+            source_id: source_id.clone(),
+        });
         let scan = scan_rollout_ordinals(&candidate.path)?;
         let Some(repaired) = repair_verified_duplicate_projection_cursor(
             &candidate.projection_db,
@@ -1288,6 +1350,11 @@ pub(crate) fn repair_paginated_history_after_codex_exit(
             &candidate.path,
         )?
         else {
+            report(PaginatedHistoryRepairProgress::RepairFileSkipped {
+                index: index + 1,
+                total: repair_candidate_count,
+                source_id,
+            });
             continue;
         };
         log::info!(
@@ -1297,6 +1364,12 @@ pub(crate) fn repair_paginated_history_after_codex_exit(
             repaired.minimum_next_byte_offset,
             repaired.minimum_next_ordinal
         );
+        report(PaginatedHistoryRepairProgress::RepairFileFinished {
+            index: index + 1,
+            total: repair_candidate_count,
+            source_id: source_id.clone(),
+            skipped_duplicate_count: repaired.skipped_duplicate_count,
+        });
         outcome.repaired_rollout_count += 1;
         outcome.repaired_duplicate_count += repaired.skipped_duplicate_count;
         outcome.targets.push(ProjectionCatchUpTarget {

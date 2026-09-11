@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 import {
   AlertTriangle,
   CheckCircle2,
@@ -19,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import type { CodexConfigConsistencyReport } from "@/lib/api/codexConfigConsistency";
 import type {
+  CodexRuntimeRefreshLogEntry,
   CodexRuntimeRefreshPhase,
   CodexRuntimeRefreshWorkflow,
 } from "@/hooks/useCodexConfigConsistency";
@@ -30,7 +33,12 @@ type CodexRuntimeRefreshView = Pick<
   Partial<
     Pick<
       CodexRuntimeRefreshWorkflow,
-      "error" | "result" | "rendererRetryPending"
+      | "error"
+      | "result"
+      | "rendererRetryPending"
+      | "logs"
+      | "lastProgressAt"
+      | "stageStartedAt"
     >
   >;
 
@@ -57,6 +65,74 @@ const REFRESH_STAGE_ORDER = [
   "verifying",
 ] as const;
 
+function formatProgressTime(emittedAtMs: number): string {
+  return new Date(emittedAtMs).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function RefreshProgressLog({
+  logs,
+  lastProgressAt,
+  stageStartedAt,
+  now,
+}: {
+  logs?: CodexRuntimeRefreshLogEntry[];
+  lastProgressAt?: number | null;
+  stageStartedAt?: number | null;
+  now: number;
+}) {
+  const { t } = useTranslation();
+  const visibleLogs = logs ?? [];
+  const lastActivitySeconds =
+    lastProgressAt != null
+      ? Math.max(0, Math.round((now - lastProgressAt) / 1000))
+      : null;
+  const stageSeconds =
+    stageStartedAt != null
+      ? Math.max(0, Math.round((now - stageStartedAt) / 1000))
+      : null;
+  if (visibleLogs.length === 0 && lastActivitySeconds === null) return null;
+  return (
+    <div className="space-y-2 rounded-md border bg-muted/20 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-medium">
+          {t("codexConfigConsistency.progressLogTitle")}
+        </p>
+        {lastActivitySeconds !== null ? (
+          <p className="text-xs text-muted-foreground">
+            {t("codexConfigConsistency.progressLastActivity")}{" "}
+            {lastActivitySeconds} {t("codexConfigConsistency.seconds")}
+          </p>
+        ) : null}
+      </div>
+      {stageSeconds !== null ? (
+        <p className="text-xs text-muted-foreground">
+          {t("codexConfigConsistency.progressStageElapsed")} {stageSeconds}{" "}
+          {t("codexConfigConsistency.seconds")}
+        </p>
+      ) : null}
+      <div className="max-h-48 space-y-1 overflow-y-auto font-mono text-xs whitespace-pre-wrap break-words">
+        {visibleLogs.map((entry, index) => (
+          <div
+            key={`${entry.sequence}-${entry.emittedAtMs}-${index}`}
+            className={
+              entry.kind === "stage" ? "font-medium" : "text-muted-foreground"
+            }
+          >
+            <span className="mr-2 text-muted-foreground/70">
+              {formatProgressTime(entry.emittedAtMs)}
+            </span>
+            {entry.message || entry.code || entry.stage}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function refreshStageIndex(stage?: string): number {
   if (stage === "force_closing") return 0;
   if (stage === "completed") return REFRESH_STAGE_ORDER.length;
@@ -81,6 +157,14 @@ export function CodexConfigConsistencyDialog({
 }: CodexConfigConsistencyDialogProps) {
   const { t } = useTranslation();
   const refreshPhase: CodexRuntimeRefreshPhase = refresh.phase;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (refreshPhase !== "refreshing") return;
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [refreshPhase]);
+
   if (refreshPhase !== "idle") {
     const inspecting = refreshPhase === "inspecting";
     const showingStatus = refreshPhase === "status";
@@ -348,6 +432,12 @@ export function CodexConfigConsistencyDialog({
                     {t("codexConfigConsistency.forceClosingHint")}
                   </p>
                 ) : null}
+                <RefreshProgressLog
+                  logs={refresh.logs}
+                  lastProgressAt={refresh.lastProgressAt}
+                  stageStartedAt={refresh.stageStartedAt}
+                  now={now}
+                />
               </div>
             ) : null}
 
@@ -359,6 +449,12 @@ export function CodexConfigConsistencyDialog({
                     {t("codexConfigConsistency.paginatedHistoryReady")}
                   </p>
                 </div>
+                <RefreshProgressLog
+                  logs={refresh.logs}
+                  lastProgressAt={refresh.lastProgressAt}
+                  stageStartedAt={refresh.stageStartedAt}
+                  now={now}
+                />
                 {refresh.result?.rendererCompatibilityStatus === "warning" ? (
                   <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-amber-800 dark:text-amber-200">
                     <p className="font-medium">
@@ -417,6 +513,12 @@ export function CodexConfigConsistencyDialog({
                   {refresh.error ||
                     t("codexConfigConsistency.refreshUnknownError")}
                 </div>
+                <RefreshProgressLog
+                  logs={refresh.logs}
+                  lastProgressAt={refresh.lastProgressAt}
+                  stageStartedAt={refresh.stageStartedAt}
+                  now={now}
+                />
               </>
             ) : null}
           </div>

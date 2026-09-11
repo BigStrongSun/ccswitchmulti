@@ -5,9 +5,14 @@ use crate::store::AppState;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::path::PathBuf;
 #[cfg(target_os = "windows")]
 use std::process::Command;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 
@@ -27,6 +32,10 @@ const CODEX_HISTORY_REBUILD_TIMEOUT_CAP: Duration = Duration::from_secs(15 * 60)
 /// 否则会在补丁尚未挂载时误报 `codex_history_compatibility_not_ready`，
 /// 导致新版本地历史目录和全 Provider 查询被判定为未修复。
 const CODEX_RENDERER_PATCH_READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// 长操作心跳：后端在该间隔内至少上报一次，前端据此区分“仍在执行”和“任务/事件链已卡死”。
+const CODEX_RUNTIME_REFRESH_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+/// 分页历史修复的硬超时，避免底层文件/SQLite 卡住时命令永久不返回。
+const CODEX_HISTORY_REPAIR_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 fn runtime_verification_timeout(
     history_repair: Option<&paginated_history::PaginatedHistoryRepairOutcome>,
@@ -121,10 +130,190 @@ pub enum CodexRuntimeRefreshStage {
     Completed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexRuntimeRefreshProgressKind {
+    Stage,
+    Log,
+    Heartbeat,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexRuntimeRefreshProgress {
     pub stage: CodexRuntimeRefreshStage,
+    pub kind: CodexRuntimeRefreshProgressKind,
+    pub sequence: u64,
+    pub emitted_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl CodexRuntimeRefreshProgress {
+    fn stage(stage: CodexRuntimeRefreshStage) -> Self {
+        Self {
+            stage,
+            kind: CodexRuntimeRefreshProgressKind::Stage,
+            sequence: 0,
+            emitted_at_ms: 0,
+            code: None,
+            message: None,
+        }
+    }
+
+    fn log(stage: CodexRuntimeRefreshStage, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            stage,
+            kind: CodexRuntimeRefreshProgressKind::Log,
+            sequence: 0,
+            emitted_at_ms: 0,
+            code: Some(code.to_string()),
+            message: Some(message.into()),
+        }
+    }
+
+    fn heartbeat(stage: CodexRuntimeRefreshStage) -> Self {
+        Self {
+            stage,
+            kind: CodexRuntimeRefreshProgressKind::Heartbeat,
+            sequence: 0,
+            emitted_at_ms: 0,
+            code: None,
+            message: None,
+        }
+    }
+}
+
+fn progress_emitted_at_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
+}
+
+/// 跨 async 任务和 spawn_blocking 共享的 Tauri 事件发送器。
+///
+/// 序列号只由这里分配，保证前端可以丢弃乱序/迟到事件；`AppHandle` 和
+/// `Arc<AtomicU64>` 均为 Send + Sync，可安全克隆进分页历史修复的阻塞任务。
+#[derive(Clone)]
+struct RuntimeRefreshProgressEmitter {
+    app: AppHandle,
+    sequence: Arc<AtomicU64>,
+}
+
+impl RuntimeRefreshProgressEmitter {
+    fn new(app: AppHandle) -> Self {
+        Self {
+            app,
+            sequence: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn emit(&self, mut progress: CodexRuntimeRefreshProgress) {
+        progress.sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        progress.emitted_at_ms = progress_emitted_at_ms();
+        if let Err(error) = self.app.emit(CODEX_RUNTIME_REFRESH_EVENT, &progress) {
+            log::warn!("Codex runtime refresh progress event failed: {error}");
+        }
+    }
+}
+
+impl From<paginated_history::PaginatedHistoryRepairProgress> for CodexRuntimeRefreshProgress {
+    fn from(event: paginated_history::PaginatedHistoryRepairProgress) -> Self {
+        use paginated_history::PaginatedHistoryRepairProgress;
+        match event {
+            PaginatedHistoryRepairProgress::PlanScanStarted => CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::RepairingHistory,
+                "history_scan_started",
+                "正在扫描分页历史文件与投影游标",
+            ),
+            PaginatedHistoryRepairProgress::PlanReady {
+                repair_candidate_count,
+                provider_cursor_repair_count,
+                provider_history_base_repair_count,
+                blocked_count,
+            } => CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::RepairingHistory,
+                "history_plan_ready",
+                format!(
+                    "历史扫描完成：待修复文件 {repair_candidate_count} 个，迁移游标 {provider_cursor_repair_count} 个，父段引用 {provider_history_base_repair_count} 个，被阻止 {blocked_count} 个"
+                ),
+            ),
+            PaginatedHistoryRepairProgress::ProviderMigrationStarted {
+                cursor_count,
+                history_base_count,
+            } => CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::RepairingHistory,
+                "provider_migration_started",
+                format!("正在恢复 Provider 迁移游标 {cursor_count} 个、父段引用 {history_base_count} 个"),
+            ),
+            PaginatedHistoryRepairProgress::ProviderMigrationFinished {
+                repaired_cursor_count,
+                repaired_history_base_count,
+            } => CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::RepairingHistory,
+                "provider_migration_finished",
+                format!("Provider 迁移恢复完成：游标 {repaired_cursor_count} 个，父段引用 {repaired_history_base_count} 个"),
+            ),
+            PaginatedHistoryRepairProgress::RepairFileStarted {
+                index,
+                total,
+                source_id,
+            } => CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::RepairingHistory,
+                "history_file_started",
+                format!("正在修复历史文件 {index}/{total}：{source_id}"),
+            ),
+            PaginatedHistoryRepairProgress::RepairFileSkipped {
+                index,
+                total,
+                source_id,
+            } => CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::RepairingHistory,
+                "history_file_skipped",
+                format!("历史文件 {index}/{total} 无需修复：{source_id}"),
+            ),
+            PaginatedHistoryRepairProgress::RepairFileFinished {
+                index,
+                total,
+                source_id,
+                skipped_duplicate_count,
+            } => CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::RepairingHistory,
+                "history_file_finished",
+                format!("已修复历史文件 {index}/{total}：{source_id}（跳过重复序号 {skipped_duplicate_count} 个）"),
+            ),
+        }
+    }
+}
+
+/// 等待长操作完成，同时周期性地发出心跳。
+///
+/// 心跳只证明后端事件循环仍活着；具体步骤的进展由 `CodexRuntimeRefreshProgress::log`
+/// 事件提供。两者分离后，前端可以在“有进展但较慢”和“完全无事件/疑似卡死”之间做判断。
+async fn await_with_heartbeat<F, T>(
+    future: F,
+    stage: CodexRuntimeRefreshStage,
+    heartbeat_interval: Duration,
+    emit: &mut impl FnMut(CodexRuntimeRefreshProgress),
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    tokio::pin!(future);
+    let mut interval = tokio::time::interval(heartbeat_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // interval 的第一次 tick 立即返回；消费掉它，避免刚进入长操作就发心跳。
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            result = &mut future => return result,
+            _ = interval.tick() => emit(CodexRuntimeRefreshProgress::heartbeat(stage)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -206,38 +395,153 @@ where
     O: CodexRuntimeRefreshOperations,
     F: FnMut(CodexRuntimeRefreshProgress),
 {
+    emit(CodexRuntimeRefreshProgress::stage(
+        CodexRuntimeRefreshStage::Closing,
+    ));
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::Closing,
+        "refresh_prepare",
+        "正在检查 Codex 运行进程",
+    ));
     let targets = operations.current_targets().await?;
     if refresh_target_fingerprint(&targets) != expected_snapshot_token {
         return Err("runtime_changed_since_inspection".to_string());
     }
     let closed_process_count = targets.desktop_shells.len() + targets.app_servers.len();
 
-    emit(CodexRuntimeRefreshProgress {
-        stage: CodexRuntimeRefreshStage::Closing,
-    });
-    operations.request_graceful_close(&targets).await?;
-    let mut survivors = operations.wait_for_exit(&targets).await?;
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::Closing,
+        "refresh_started",
+        format!("开始刷新 Codex 状态：准备关闭 {closed_process_count} 个进程"),
+    ));
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::Closing,
+        "closing_requested",
+        "已向 Codex 桌面进程发送关闭请求",
+    ));
+    if let Err(error) = await_with_heartbeat(
+        operations.request_graceful_close(&targets),
+        CodexRuntimeRefreshStage::Closing,
+        CODEX_RUNTIME_REFRESH_HEARTBEAT_INTERVAL,
+        &mut emit,
+    )
+    .await
+    {
+        emit(CodexRuntimeRefreshProgress::log(
+            CodexRuntimeRefreshStage::Closing,
+            "closing_failed",
+            format!("发送关闭请求失败：{error}"),
+        ));
+        return Err(error);
+    }
+
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::Closing,
+        "waiting_for_exit",
+        "正在等待 Codex 进程退出",
+    ));
+    let mut survivors = match await_with_heartbeat(
+        operations.wait_for_exit(&targets),
+        CodexRuntimeRefreshStage::Closing,
+        CODEX_RUNTIME_REFRESH_HEARTBEAT_INTERVAL,
+        &mut emit,
+    )
+    .await
+    {
+        Ok(survivors) => survivors,
+        Err(error) => {
+            emit(CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::Closing,
+                "waiting_for_exit_failed",
+                format!("等待 Codex 进程退出失败：{error}"),
+            ));
+            return Err(error);
+        }
+    };
     let force_terminated = !survivors.is_empty();
     if force_terminated {
-        emit(CodexRuntimeRefreshProgress {
-            stage: CodexRuntimeRefreshStage::ForceClosing,
-        });
-        operations.force_terminate(&survivors).await?;
-        survivors = operations.wait_for_exit(&targets).await?;
+        emit(CodexRuntimeRefreshProgress::stage(
+            CodexRuntimeRefreshStage::ForceClosing,
+        ));
+        emit(CodexRuntimeRefreshProgress::log(
+            CodexRuntimeRefreshStage::ForceClosing,
+            "force_closing",
+            format!("有 {} 个进程未在时限内退出，正在强制结束", survivors.len()),
+        ));
+        if let Err(error) = await_with_heartbeat(
+            operations.force_terminate(&survivors),
+            CodexRuntimeRefreshStage::ForceClosing,
+            CODEX_RUNTIME_REFRESH_HEARTBEAT_INTERVAL,
+            &mut emit,
+        )
+        .await
+        {
+            emit(CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::ForceClosing,
+                "force_close_failed",
+                format!("强制结束进程失败：{error}"),
+            ));
+            return Err(error);
+        }
+        survivors = match await_with_heartbeat(
+            operations.wait_for_exit(&targets),
+            CodexRuntimeRefreshStage::ForceClosing,
+            CODEX_RUNTIME_REFRESH_HEARTBEAT_INTERVAL,
+            &mut emit,
+        )
+        .await
+        {
+            Ok(survivors) => survivors,
+            Err(error) => {
+                emit(CodexRuntimeRefreshProgress::log(
+                    CodexRuntimeRefreshStage::ForceClosing,
+                    "waiting_after_force_failed",
+                    format!("等待强制结束后失败：{error}"),
+                ));
+                return Err(error);
+            }
+        };
         if !survivors.is_empty() {
+            emit(CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::ForceClosing,
+                "force_close_incomplete",
+                format!("仍有 {} 个 Codex 进程未退出", survivors.len()),
+            ));
             return Err("codex_runtime_still_running_after_forced_close".to_string());
         }
     }
 
-    emit(CodexRuntimeRefreshProgress {
-        stage: CodexRuntimeRefreshStage::RepairingHistory,
-    });
-    let history_repair = match operations.repair_paginated_history().await {
+    emit(CodexRuntimeRefreshProgress::stage(
+        CodexRuntimeRefreshStage::RepairingHistory,
+    ));
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::RepairingHistory,
+        "history_repair_started",
+        "开始检查并修复分页历史",
+    ));
+    let history_repair = match await_with_heartbeat(
+        operations.repair_paginated_history(),
+        CodexRuntimeRefreshStage::RepairingHistory,
+        CODEX_RUNTIME_REFRESH_HEARTBEAT_INTERVAL,
+        &mut emit,
+    )
+    .await
+    {
         Ok(result) => result,
         Err(error) => {
-            emit(CodexRuntimeRefreshProgress {
-                stage: CodexRuntimeRefreshStage::Launching,
-            });
+            emit(CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::RepairingHistory,
+                "history_repair_failed",
+                format!("历史修复失败：{error}"),
+            ));
+            emit(CodexRuntimeRefreshProgress::stage(
+                CodexRuntimeRefreshStage::Launching,
+            ));
+            emit(CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::Launching,
+                "relaunch_after_history_failure_started",
+                "历史修复失败，正在尝试重新打开 Codex",
+            ));
             let relaunch = operations.launch_codex().await;
             return match relaunch {
                 Ok(()) => Err(error),
@@ -247,16 +551,49 @@ where
             };
         }
     };
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::RepairingHistory,
+        "history_repair_finished",
+        format!(
+            "历史修复完成：文件 {} 个，重复序号 {} 个，迁移游标 {} 个，父段引用 {} 个",
+            history_repair.repaired_rollout_count,
+            history_repair.repaired_duplicate_count,
+            history_repair.repaired_provider_migration_cursor_count,
+            history_repair.repaired_provider_migration_history_base_count,
+        ),
+    ));
 
-    emit(CodexRuntimeRefreshProgress {
-        stage: CodexRuntimeRefreshStage::ApplyingConfig,
-    });
-    let config_written_at_ms = match operations.apply_ccsm_config().await {
+    emit(CodexRuntimeRefreshProgress::stage(
+        CodexRuntimeRefreshStage::ApplyingConfig,
+    ));
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::ApplyingConfig,
+        "config_apply_started",
+        "正在重投影 CCSM 配置",
+    ));
+    let config_written_at_ms = match await_with_heartbeat(
+        operations.apply_ccsm_config(),
+        CodexRuntimeRefreshStage::ApplyingConfig,
+        CODEX_RUNTIME_REFRESH_HEARTBEAT_INTERVAL,
+        &mut emit,
+    )
+    .await
+    {
         Ok(timestamp) => timestamp,
         Err(error) => {
-            emit(CodexRuntimeRefreshProgress {
-                stage: CodexRuntimeRefreshStage::Launching,
-            });
+            emit(CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::ApplyingConfig,
+                "config_apply_failed",
+                format!("应用 CCSM 配置失败：{error}"),
+            ));
+            emit(CodexRuntimeRefreshProgress::stage(
+                CodexRuntimeRefreshStage::Launching,
+            ));
+            emit(CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::Launching,
+                "relaunch_after_config_failure_started",
+                "配置应用失败，正在尝试重新打开 Codex",
+            ));
             let relaunch = operations.launch_codex().await;
             return match relaunch {
                 Ok(()) => Err(error),
@@ -266,20 +603,68 @@ where
             };
         }
     };
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::ApplyingConfig,
+        "config_apply_finished",
+        "CCSM 配置已写入",
+    ));
 
-    emit(CodexRuntimeRefreshProgress {
-        stage: CodexRuntimeRefreshStage::Launching,
-    });
-    operations.launch_codex().await?;
-    emit(CodexRuntimeRefreshProgress {
-        stage: CodexRuntimeRefreshStage::Verifying,
-    });
-    let verification = operations
-        .verify_fresh_runtime(config_written_at_ms)
-        .await?;
-    emit(CodexRuntimeRefreshProgress {
-        stage: CodexRuntimeRefreshStage::Completed,
-    });
+    emit(CodexRuntimeRefreshProgress::stage(
+        CodexRuntimeRefreshStage::Launching,
+    ));
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::Launching,
+        "launch_started",
+        "正在重新启动 Codex",
+    ));
+    if let Err(error) = operations.launch_codex().await {
+        emit(CodexRuntimeRefreshProgress::log(
+            CodexRuntimeRefreshStage::Launching,
+            "launch_failed",
+            format!("启动 Codex 失败：{error}"),
+        ));
+        return Err(error);
+    }
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::Launching,
+        "launch_finished",
+        "Codex 启动请求已发送",
+    ));
+
+    emit(CodexRuntimeRefreshProgress::stage(
+        CodexRuntimeRefreshStage::Verifying,
+    ));
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::Verifying,
+        "verification_started",
+        "正在验证新的 Codex 运行状态",
+    ));
+    let verification = match await_with_heartbeat(
+        operations.verify_fresh_runtime(config_written_at_ms),
+        CodexRuntimeRefreshStage::Verifying,
+        CODEX_RUNTIME_REFRESH_HEARTBEAT_INTERVAL,
+        &mut emit,
+    )
+    .await
+    {
+        Ok(verification) => verification,
+        Err(error) => {
+            emit(CodexRuntimeRefreshProgress::log(
+                CodexRuntimeRefreshStage::Verifying,
+                "verification_failed",
+                format!("验证 Codex 运行状态失败：{error}"),
+            ));
+            return Err(error);
+        }
+    };
+    emit(CodexRuntimeRefreshProgress::log(
+        CodexRuntimeRefreshStage::Verifying,
+        "verification_finished",
+        "Codex 运行状态验证完成",
+    ));
+    emit(CodexRuntimeRefreshProgress::stage(
+        CodexRuntimeRefreshStage::Completed,
+    ));
 
     Ok(CodexRuntimeRefreshResult {
         outcome: verification.outcome,
@@ -731,6 +1116,7 @@ struct SystemCodexRuntimeRefreshOperations<'a> {
     state: &'a AppState,
     launch_target: CodexRuntimeLaunchTarget,
     history_repair_outcome: Option<paginated_history::PaginatedHistoryRepairOutcome>,
+    progress: RuntimeRefreshProgressEmitter,
 }
 
 impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
@@ -827,11 +1213,28 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
     async fn repair_paginated_history(
         &mut self,
     ) -> Result<paginated_history::PaginatedHistoryRepairOutcome, String> {
-        let outcome = tokio::task::spawn_blocking(
-            paginated_history::repair_paginated_history_after_codex_exit,
+        let progress = self.progress.clone();
+        let repair = tokio::time::timeout(
+            CODEX_HISTORY_REPAIR_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                paginated_history::repair_paginated_history_after_codex_exit(|event| {
+                    progress.emit(event.into());
+                })
+            }),
         )
-        .await
-        .map_err(|error| format!("paginated_history_repair_join_failed: {error}"))??;
+        .await;
+        let outcome = match repair {
+            Ok(join_result) => join_result
+                .map_err(|error| format!("paginated_history_repair_join_failed: {error}"))??,
+            Err(_) => {
+                self.progress.emit(CodexRuntimeRefreshProgress::log(
+                    CodexRuntimeRefreshStage::RepairingHistory,
+                    "history_repair_timed_out",
+                    "历史修复超过 15 分钟，已停止等待；后台文件任务可能仍在收尾",
+                ));
+                return Err("codex_paginated_history_repair_timed_out".to_string());
+            }
+        };
         self.history_repair_outcome = Some(outcome.clone());
         Ok(outcome)
     }
@@ -996,15 +1399,15 @@ pub async fn refresh_codex_runtime_state(
         .map_err(|_| "codex_runtime_refresh_already_running".to_string())?;
     let launch_target = resolve_launch_target()
         .ok_or_else(|| "codex_desktop_launch_target_not_found".to_string())?;
+    let progress = RuntimeRefreshProgressEmitter::new(app);
     let mut operations = SystemCodexRuntimeRefreshOperations {
         state: &state,
         launch_target,
         history_repair_outcome: None,
+        progress: progress.clone(),
     };
-    execute_refresh_transaction(&mut operations, &snapshot_token, |progress| {
-        if let Err(error) = app.emit(CODEX_RUNTIME_REFRESH_EVENT, &progress) {
-            log::warn!("Codex runtime refresh progress event failed: {error}");
-        }
+    execute_refresh_transaction(&mut operations, &snapshot_token, |event| {
+        progress.emit(event);
     })
     .await
 }
@@ -1012,6 +1415,27 @@ pub async fn refresh_codex_runtime_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn long_running_stage_emits_heartbeat_progress() {
+        let mut events = Vec::new();
+        await_with_heartbeat(
+            async {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                Ok::<_, String>(())
+            },
+            CodexRuntimeRefreshStage::RepairingHistory,
+            Duration::from_millis(10),
+            &mut |progress| events.push(progress),
+        )
+        .await
+        .expect("operation should finish");
+
+        assert!(events.iter().any(|progress| {
+            progress.kind == CodexRuntimeRefreshProgressKind::Heartbeat
+                && progress.stage == CodexRuntimeRefreshStage::RepairingHistory
+        }));
+    }
 
     #[test]
     fn timezone_injection_prefers_executable_over_aumid_launch() {
@@ -1435,9 +1859,15 @@ mod tests {
             ..Default::default()
         };
         let mut stages = Vec::new();
+        let mut logs = Vec::new();
 
         let result = execute_refresh_transaction(&mut operations, &token, |progress| {
-            stages.push(progress.stage)
+            if progress.kind == CodexRuntimeRefreshProgressKind::Stage {
+                stages.push(progress.stage);
+            }
+            if progress.kind == CodexRuntimeRefreshProgressKind::Log {
+                logs.push(progress.code.unwrap_or_default());
+            }
         })
         .await
         .expect("refresh should complete");
@@ -1471,6 +1901,9 @@ mod tests {
         );
         assert_eq!(result.repaired_history_rollout_count, 1);
         assert_eq!(result.repaired_history_duplicate_count, 3);
+        assert!(logs.iter().any(|code| code == "refresh_started"));
+        assert!(logs.iter().any(|code| code == "history_repair_finished"));
+        assert!(logs.iter().any(|code| code == "verification_finished"));
     }
 
     #[tokio::test]
