@@ -73,6 +73,9 @@ const UPSTREAM_TRANSPORT_RETRY_LIMIT: usize = 5;
 const CODEX_RATE_LIMIT_RETRY_LIMIT: usize = 5;
 const CODEX_RATE_LIMIT_MAX_SINGLE_DELAY: Duration = Duration::from_secs(60);
 const CODEX_RATE_LIMIT_TOTAL_DELAY_BUDGET: Duration = Duration::from_secs(180);
+const CODEX_RAW_ROUTE_RESOLUTION_ATTEMPTED: &str = "codexRawRouteResolutionAttempted";
+const CODEX_RAW_ROUTING_CONFIGURED: &str = "codexRawRoutingConfigured";
+const CODEX_RAW_ROUTE_MISSED: &str = "codexRawRouteMissed";
 
 #[expect(
     clippy::too_many_arguments,
@@ -581,14 +584,20 @@ impl RequestForwarder {
                 .settings_config
                 .get("codexResolvedRouteId")
                 .is_some()
+            || provider
+                .settings_config
+                .get(CODEX_RAW_ROUTE_RESOLUTION_ATTEMPTED)
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
         {
             return Ok(provider.clone());
         }
 
+        let routing_configured = codex_provider_has_routing_config(provider);
         let routed_provider = if codex_provider_has_v2_routing(provider) {
             self.resolve_codex_v2_raw_route(provider, body, None)?
                 .map(super::providers::ResolvedCodexRoute::into_effective_provider)
-        } else if codex_provider_has_routing_config(provider) {
+        } else if routing_configured {
             let route_provider = resolve_codex_raw_passthrough_route_provider(provider, body);
             match route_provider {
                 Some(route_provider) => {
@@ -624,8 +633,32 @@ impl RequestForwarder {
             None
         };
 
-        Ok(routed_provider
-            .unwrap_or_else(|| super::providers::materialize_codex_official_auth(provider, None)))
+        if routing_configured {
+            let route_missed = routed_provider.is_none();
+            let mut materialized = routed_provider.unwrap_or_else(|| provider.clone());
+            let settings = materialized
+                .settings_config
+                .as_object_mut()
+                .ok_or_else(|| {
+                    ProxyError::ConfigError(
+                        "Codex raw route materialization requires object settings".to_string(),
+                    )
+                })?;
+            settings.insert(
+                CODEX_RAW_ROUTE_RESOLUTION_ATTEMPTED.to_string(),
+                Value::Bool(true),
+            );
+            settings.insert(CODEX_RAW_ROUTING_CONFIGURED.to_string(), Value::Bool(true));
+            settings.insert(
+                CODEX_RAW_ROUTE_MISSED.to_string(),
+                Value::Bool(route_missed),
+            );
+            return Ok(materialized);
+        }
+
+        Ok(super::providers::materialize_codex_official_auth(
+            provider, None,
+        ))
     }
 
     fn load_codex_v2_target_providers(
@@ -4536,10 +4569,22 @@ impl RequestForwarder {
             .settings_config
             .get("codexResolvedRouteId")
             .is_some();
-        let codex_router_configured =
-            matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(provider);
+        let raw_route_resolution_attempted = provider
+            .settings_config
+            .get(CODEX_RAW_ROUTE_RESOLUTION_ATTEMPTED)
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let raw_route_resolution_complete =
+            provider_is_resolved_codex_route || raw_route_resolution_attempted;
+        let codex_router_configured = matches!(app_type, AppType::Codex)
+            && (codex_provider_has_routing_config(provider)
+                || provider
+                    .settings_config
+                    .get(CODEX_RAW_ROUTING_CONFIGURED)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false));
         let v2_routed_provider = if matches!(app_type, AppType::Codex)
-            && !provider_is_resolved_codex_route
+            && !raw_route_resolution_complete
             && codex_provider_has_v2_routing(provider)
         {
             self.resolve_codex_v2_raw_route(provider, route_body, None)?
@@ -4548,7 +4593,7 @@ impl RequestForwarder {
             None
         };
         let legacy_routed_provider = if matches!(app_type, AppType::Codex)
-            && !provider_is_resolved_codex_route
+            && !raw_route_resolution_complete
             && !codex_provider_has_v2_routing(provider)
         {
             resolve_codex_raw_passthrough_route_provider(provider, route_body)
@@ -4585,9 +4630,14 @@ impl RequestForwarder {
             None
         };
         let routed_provider = v2_routed_provider.or(legacy_routed_provider);
-        let codex_route_missed = codex_router_configured
-            && !provider_is_resolved_codex_route
-            && routed_provider.is_none();
+        let codex_route_missed = provider
+            .settings_config
+            .get(CODEX_RAW_ROUTE_MISSED)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || (codex_router_configured
+                && !raw_route_resolution_complete
+                && routed_provider.is_none());
         let provider = routed_provider.as_ref().unwrap_or(provider);
 
         if let Some(trace_id) = codex_trace_id.as_deref() {
@@ -9132,6 +9182,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_compact_official_pool_native_candidate_preserves_only_desktop_identity() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind native pooled raw compact upstream");
+        let upstream = format!(
+            "http://{}",
+            listener.local_addr().expect("upstream address")
+        );
+        let capture = tokio::spawn(capture_single_http_request(listener));
+
+        let temp = tempfile::tempdir().expect("native OAuth pool test directory");
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager
+            .seed_test_account("managed-default-id", "managed-default-token")
+            .await
+            .expect("seed managed default account outside the native pool");
+        manager
+            .set_account_pool_policy(
+                crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy {
+                    enabled: true,
+                    entries: vec![
+                        CodexAccountPoolEntry {
+                            account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                            enabled: true,
+                            reserve_percent: 0.0,
+                        },
+                        CodexAccountPoolEntry {
+                            account_id: "managed-default-id".to_string(),
+                            enabled: false,
+                            reserve_percent: 0.0,
+                        },
+                    ],
+                    desktop_account_id: Some("desktop-workspace-id".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("enable native-only account pool");
+        let mut official = test_codex_official_provider();
+        official.settings_config["codexTestBaseUrl"] = json!(upstream);
+        official.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::AccountPool,
+                account_id: None,
+            }),
+            ..Default::default()
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer desktop-access-token"),
+        );
+        headers.insert(
+            "chatgpt-account-id",
+            HeaderValue::from_static("desktop-workspace-id"),
+        );
+        let body = Bytes::from_static(br#"{"model":"gpt-6-astra","input":[]}"#);
+        let mut forwarder = test_forwarder(Duration::from_secs(5), Duration::from_secs(5));
+        forwarder.codex_oauth_test_manager = Some(Arc::new(RwLock::new(manager)));
+
+        forwarder
+            .forward_raw_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses/compact",
+                json!({"model":"gpt-6-astra"}),
+                body.clone(),
+                headers,
+                Extensions::new(),
+                vec![official],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("forward native pooled compact request: {}", error.error)
+            });
+
+        let (headers, captured_body) = capture.await.expect("capture task");
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer desktop-access-token"));
+        assert!(headers.contains("chatgpt-account-id: desktop-workspace-id"));
+        assert!(!headers.contains("managed-default-token"));
+        assert!(!headers.contains("managed-default-id"));
+        assert_eq!(captured_body, body);
+    }
+
+    #[tokio::test]
     async fn raw_compact_multirouter_official_pool_resolves_route_before_pool_expansion() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -9244,6 +9380,90 @@ mod tests {
         assert!(headers.contains("authorization: bearer pool-access-token"));
         assert!(headers.contains("chatgpt-account-id: pool-local-id"));
         assert_eq!(captured_body, body);
+    }
+
+    #[test]
+    fn raw_route_materialization_records_hit_and_miss_before_forwarding() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let mut official = test_codex_official_provider();
+        official.settings_config = json!({
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "modelCatalog": {"models": [{"model": "gpt-6-astra"}]}
+        });
+        official.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::AccountPool,
+                account_id: None,
+            }),
+            ..Default::default()
+        });
+        db.save_provider("codex", &official)
+            .expect("save official raw route target");
+        let forwarder = RequestForwarder {
+            router: Arc::new(ProviderRouter::new(db.clone())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            gemini_shadow: Arc::new(GeminiShadowStore::new()),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            app_handle: None,
+            codex_oauth_test_manager: None,
+            current_provider_id_at_start: String::new(),
+            session_id: String::new(),
+            session_client_provided: false,
+            preserve_codex_client_originator: false,
+            rectifier_config: RectifierConfig::default(),
+            optimizer_config: OptimizerConfig::default(),
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
+            non_streaming_timeout: Duration::ZERO,
+            streaming_first_byte_timeout: Duration::ZERO,
+            capacity_retry_enabled: true,
+            max_attempts: 1,
+        };
+        let mut router = test_provider_with_type(None);
+        router.id = "codex-multirouter".to_string();
+        router.settings_config = json!({
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "routes": [{
+                    "id": "official",
+                    "enabled": true,
+                    "targetProviderId": "codex-official",
+                    "modelSelection": {
+                        "mode": "include",
+                        "models": ["gpt-6-astra"]
+                    }
+                }]
+            }
+        });
+
+        let hit = forwarder
+            .materialize_codex_raw_forward_attempt_provider(
+                &AppType::Codex,
+                &router,
+                &json!({"model": "gpt-6-astra"}),
+            )
+            .expect("materialize matching raw route");
+        assert_eq!(hit.settings_config["codexResolvedRouteId"], "official");
+        assert_eq!(hit.settings_config["codexRawRoutingConfigured"], true);
+        assert_eq!(hit.settings_config["codexRawRouteMissed"], false);
+
+        let missed = forwarder
+            .materialize_codex_raw_forward_attempt_provider(
+                &AppType::Codex,
+                &router,
+                &json!({"model": "gpt-image-future"}),
+            )
+            .expect("materialize unmatched raw route");
+        assert_eq!(
+            missed.settings_config["codexRawRouteResolutionAttempted"],
+            true
+        );
+        assert_eq!(missed.settings_config["codexRawRoutingConfigured"], true);
+        assert_eq!(missed.settings_config["codexRawRouteMissed"], true);
     }
 
     #[test]
