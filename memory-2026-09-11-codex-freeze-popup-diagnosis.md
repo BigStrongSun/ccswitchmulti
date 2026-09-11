@@ -55,3 +55,49 @@
 2. relay Envoy 自查（上游超时/reset/熔断/TLS 握手），用户自有基础设施。
 3. MFJS 修复：重验 build→install 链（构建产物 vs 安装 exe 哈希），重装后用 deepseek-flash 真实请求验证 422 是否消失。
 4. 官方崩溃缺陷：按 09-09/09-10 既有决定交官方。
+
+## 第二轮修正与闭环（2026-09-11 ~17:40，官方模型「中途暂停不弹错」根因定稿）
+
+### 修正（对第一轮结论）
+1. **官方上游更正**：official 路由真实上游是 `https://chatgpt.com/backend-api/codex/responses`（17:00-17:25 窗口 request_prepared 316/316 命中；该窗口 6 条 upstream_send_error 全部 provider=router-codex-official::account::native_codex_auth）。`www.matrixminecraft.cn:24443` 只是 Qwen provider 端点，official 流量**不经过**该 relay。第一轮「relay 不稳是暂停主因」对官方模型**不成立**。
+2. **排除 at capacity**：今日台账（12,572 条）+ 全部 router log 中 `529 / at capacity / capacity / overload` **0 命中**。今日官方模型停止均非 capacity 错误。
+3. **真实根因 = TW 出口链路不稳**：OpenClash TUN → TW/TPE 节点（codexEgressTimezone=TW/TPE，egress 2407:cdc0）到 chatgpt.com 间歇性黑洞/reset。
+
+### 故障 4 形态（③④ 为第二轮新增签名）
+| 形态 | 签名 | CCSM 映射 | 时长 |
+|---|---|---|---|
+| ① SYN 黑洞 | tcp_connect_error os_error_10060 | 502 | ~137.5s |
+| ② TLS 中断/悬挂 | unexpected_EOF_during_handshake | 502 | ~120.6-122s |
+| ③ 快速 reset | connection_closed_before_message_completed (SendRequest) | 424 ResponsePending | 0.3-5s |
+| ④ SSE 流中途断 | SSE response.failed: upstream_error; HTTP success does not imply stream success | 502 ForwardFailed | 200 头正常打开后悬挂 5.3-157s 再断 |
+
+### 今日故障波次（全部 official 路由，全部恢复，0 turn 失败）
+- 16:25:45-16:30:15：~4.5min 断网（10060/EOF），全数在重试预算内恢复。
+- 17:00:17-17:07:16：波次，424×4 + 502(SSE)×10 交错（17:00:17 / 17:02:43×2 / 17:03:40×4 / 17:05:08×4 / 17:07:16）。
+- 17:13:48：三会话同秒 424（01a088fb 4231ms、01a084a0 2167ms）+ 502（01a089ba 10567ms）。
+- 17:32:42-17:33:06：502×8（三会话+01a08f92，流悬挂 137-157s 后断）→ 17:34:51 起全数 200 恢复；17:38:54 仍正常。
+- 17:00-17:25 验证：3 会话 316 请求终态 = 310×upstream_status 全 200 + 6×send_error 全部恢复；每个错误窗口后均紧跟 200（最慢 24s，最快 0.8s）。
+
+### 「停止不弹错」机制闭环（源码级）
+1. CCSM 映射正常：502/424 都真实生成并写入 DB 台账（error_mapper.rs:19 ForwardFailed→502；ResponsePending→424）；CCSM 层没有吞错。
+2. 客户端 transport 层（config.toml `request_max_retries=2`、`retry_5xx=true`，共 3 次尝试）：5xx（含 502，含 SSE 中途断）静默重试，**无任何用户通知**；单次可悬挂 120-157s → 用户体感「几分钟静默假死、零错误」。
+3. 客户端 turn 层（`stream_max_retries=10`）：424（非 5xx，transport 不重试）进此层；**release 构建隐藏第 1 次 WebSocket 重试通知**（`core/src/responses_retry.rs`：`report_error = retry_count > 1 || cfg!(debug_assertions) || !responses_websocket_enabled`）→ "Reconnecting... 1/10" 不显示；第 2 次起才显示，且 StreamError 是流内 inline 通知（`session/mod.rs:3187 notify_stream_error` → EventMsg::StreamError），不是错误弹窗。
+4. **rollout 不持久化 StreamError/Warning**（`rollout/src/policy.rs should_persist_event_msg` 对两者返回 false）→ rollout 里查不到 "Reconnecting" 是设计使然，不能作为「从未通知」的证据。t0 Electron 日志（21308 实例）实测 0 "Reconnecting"（不区分大小写的命中全是启动 websocket-reconnect 生命周期字段或模型输出文本）、0 "Falling back from WebSockets"（未发生 WS→HTTPS 降级）。
+5. 结论：今日 4 波故障全部在**第一次重试即恢复** → 通知要么落在隐藏区（WS 首重试）、要么根本没生成（transport 静默重试内恢复）→ 用户可见 = 纯暂停 + 零错误。若 transport 3 次或 turn 10 次重试耗尽，错误必现（RetryLimit/turn 失败）——今日未到达该边界。
+- 01a088fb rollout（105MB 全量）：0 个 stream_error/warning 事件类型（与第 4 点一致，设计性缺失）。
+- 账号 failover 观察：失败后 CCSM 从 4044e7ae（CodexOAuth）切到 native_codex_auth（auth_strategy=none，客户端自带鉴权）——multirouter 账号池行为。
+
+### 「at capacity 修复没完善」核实
+- 运行中的 CCSM（进程 54872，16:16:15 启动；exe LastWrite 16:15:00，43,817,984B，MFJS 分支 16:05 构建）**确实不含** capacity auto-retry：功能提交 9e831c57（09-11 00:43）只在 main/capacity 分支，16:15 从 MFJS 分支重装把功能丢掉了（exe 内 rg capacity_retry 无命中）。
+- 但该功能丢失与今日官方模型停止**无关**（今日根本没有 capacity 错误）。若将来真遇 529/at capacity，运行态将无自动恢复（旧行为）。
+- 如需保留 capacity 功能：把 9e831c57 合入 MFJS 分支后重新构建安装（需用户拍板，不擅自重装/切分支）。
+
+### 遗留小疑点
+- reqwest 主池 connect_timeout=30s（http_client.rs:220-228），但观测 137.5s 才报 tcp_connect_error——待查 16:05 构建时超时值（git log http_client.rs）或 TUN 层未应用超时。
+- DB 台账计数（257）与 router log（316）不完全对齐（子代理 session_id 归因/台账覆盖口径），两源对故障形态与恢复结论一致，不影响结论。
+
+### 建议方向（未实施，待用户拍板）
+1. 根因在出口链路：建议更换 OpenClash TW/TPE 节点，或做「official 路由直连 vs 换出口」对照，定位坏节点。
+2. CCSM 可加 egress 探针提前告警（chatgpt.com 可达性/延迟异常时通知，而不是等 turn 卡住）。
+3. capacity auto-retry：如需保留，合入 MFJS 分支后重新构建安装。
+4. 官方客户端的静默重试是设计行为（WS 首重试隐藏）；若希望可见性更高，只能等官方版本变化——调低 stream_max_retries 只会让失败更快冒泡成错误，不建议。
