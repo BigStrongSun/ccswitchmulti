@@ -5713,4 +5713,4 @@ supported in one streaming turn`。
 
 # 2026-09-11 Codex 状态与修复进度/卡死检测根修
 
-- 刷新进度原先只有 `stage`，长操作无日志/心跳，历史修复无超时，前端无静默看门狗且迟到结果可覆盖失败。根修增加结构化日志、2 秒心跳、分页历史逐文件/迁移进度和 15 分钟修复超时；前端增加日志面板、最后活动/阶段耗时、30 秒无事件失败和 run id 迟到结果隔离。前端全量 1566/1566、Rust 串行 4113/0/7、typecheck/Prettier/rustfmt/check 通过。详见 `memory-2026-09-11-codex-status-repair-progress.md`。
+- 刷新进度原先只有 `stage`，长操作无日志/心跳，历史修复无超时，前端无静默看门狗且迟到结果可覆盖失败。根修增加结构化日志、2 秒心跳、分页历史逐文件/迁移进度和 15 分钟修复超时；前端增加日志面板、最后活动/阶段耗时、30 秒无事件失败和 run id 迟到结果隔离。前端全量 1566/1566、Rust 串行 4113/0/7、typecheck/Prettier/rustfmt/check 通过；已构建并安装 3.20.2-4（来源 5558e553，PID 54680，SHA-256 80A537...48B8，health 200）。详见 `memory-2026-09-11-codex-status-repair-progress.md`。

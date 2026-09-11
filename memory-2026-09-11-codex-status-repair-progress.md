@@ -27,3 +27,10 @@
 - 前端全量：189 files / 1566 tests 通过；typecheck、Prettier 通过。
 - Rust：聚焦 `codex_runtime_refresh` 36/36、`paginated_history` 23/23；全量串行 4113 passed / 0 failed / 7 ignored；`cargo check --all-targets`、rustfmt 通过。
 - 已知 `codex_config_consistency::apply_ccsm_uses_compare_and_swap_and_creates_a_drift_backup` 在并行全量下受共享测试环境干扰，单独运行和串行全量均通过。
+
+## 运行态验证
+
+- 版本 `3.20.2-4`，构建来源 `5558e553607d009afbfcfc45bbe2c9d0c94bd2ff`（该提交包含 `dc90ae30` 的版本准备与 `4aa2b9e1` 的进度/卡死修复；后续仅为 docs 记录）。
+- 安装态：PID `54680`，`C:/Users/sunda/AppData/Local/CCSwitchMulti/cc-switch.exe` SHA-256 `80A537E61D66932CC949548BD84E159C800648B4C40CF93580871A91F22448B8`，ProductVersion `3.20.2-4`。
+- `127.0.0.1:15721` 由 PID 54680 监听，`/health` 返回 200；安装态二进制包含 `history_repair_timed_out`、`refresh_prepare` 等后端标记，发布构建的 `dist/assets/index-C71T3uE3.js` 包含 `修复进度日志`、`progressLastActivity`、`progressStageElapsed` 前端文案。
+- 事务备份：`C:/Users/sunda/AppData/Local/CCSwitchMultiTransactionBackups/ccsm-20260911-192238-c7aa51ce3a05447fa656cb7d08bf9f59`。
