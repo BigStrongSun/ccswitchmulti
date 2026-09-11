@@ -60,12 +60,19 @@ fn merge_namespace(merged: &mut Value, incoming: &Value) -> Option<()> {
     for tool in incoming_tools.as_array()? {
         let name = function_name(tool)?;
         if let Some(existing) = tools
-            .iter()
+            .iter_mut()
             .find(|entry| function_name(entry) == Some(name))
         {
-            if existing != tool {
+            let mut previous_definition = existing.clone();
+            let mut incoming_definition = tool.clone();
+            previous_definition.as_object_mut()?.remove("description");
+            incoming_definition.as_object_mut()?.remove("description");
+            if previous_definition != incoming_definition {
                 return None;
             }
+            // Plugin attribution can change between discoveries without changing
+            // the callable contract. Keep the latest description in that case.
+            *existing = tool.clone();
         } else {
             tools.push(tool.clone());
         }
@@ -183,6 +190,19 @@ mod tests {
             consolidate_namespaces(&mut body);
             assert_eq!(body, original);
         }
+    }
+
+    #[test]
+    fn function_description_changes_keep_latest_text_without_losing_tools() {
+        let mut first = namespace("mcp__codex_apps__github", &["get_repo"]);
+        first["tools"][0]["description"] = json!("Repository metadata. Plugins: Data, GitHub.");
+        let mut second = namespace("mcp__codex_apps__github", &["get_repo", "search"]);
+        second["tools"][0]["description"] = json!("Repository metadata. Plugin: GitHub.");
+        let mut body =
+            json!({"input":[output("a", vec![first]), output("b", vec![second.clone()])]});
+        consolidate_namespaces(&mut body);
+        assert_eq!(body["input"][0]["tools"], json!([second]));
+        assert_eq!(body["input"][1]["tools"], json!([]));
     }
 
     #[test]
