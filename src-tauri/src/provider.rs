@@ -406,6 +406,29 @@ pub struct AuthBinding {
     pub account_id: Option<String>,
 }
 
+/// `OpenAI Official` Provider 的非秘密认证所有权。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexOfficialAuthMode {
+    /// 复用 Codex Desktop 当前登录。
+    #[default]
+    DesktopCurrentLogin,
+    /// 使用 CCSM 托管的 ChatGPT OAuth 账号。
+    ManagedOauth,
+    /// 使用 CCSM OAuth 账号池。
+    AccountPool,
+}
+
+/// 只保存认证来源和可选的本地账号引用，不保存任何 Token。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexOfficialAuthConfig {
+    #[serde(default)]
+    pub mode: CodexOfficialAuthMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+}
+
 /// Claude Desktop 3P 写入模式。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -637,6 +660,9 @@ pub struct ProviderMeta {
     /// 新代码应只写入该字段；githubAccountId 仅保留兼容读取。
     #[serde(rename = "authBinding", skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<AuthBinding>,
+    /// OpenAI Official 的认证来源；实际凭据仍由 Desktop 或 CCSM OAuth 存储持有。
+    #[serde(rename = "codexOfficialAuth", skip_serializing_if = "Option::is_none")]
+    pub codex_official_auth: Option<CodexOfficialAuthConfig>,
     /// Claude 认证字段名（"ANTHROPIC_AUTH_TOKEN" 或 "ANTHROPIC_API_KEY"）
     #[serde(rename = "apiKeyField", skip_serializing_if = "Option::is_none")]
     pub api_key_field: Option<String>,
@@ -1198,8 +1224,9 @@ pub struct OpenCodeModelLimit {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeModelConfig, CodexModelConfig, GeminiModelConfig, LocalProxyRequestOverrides,
-        OpenCodeProviderConfig, Provider, ProviderManager, ProviderMeta, UniversalProvider,
+        ClaudeModelConfig, CodexModelConfig, CodexOfficialAuthConfig, CodexOfficialAuthMode,
+        GeminiModelConfig, LocalProxyRequestOverrides, OpenCodeProviderConfig, Provider,
+        ProviderManager, ProviderMeta, UniversalProvider,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1228,6 +1255,37 @@ mod tests {
         let value = serde_json::to_value(&meta).expect("serialize ProviderMeta");
 
         assert!(value.get("pricingModelSource").is_none());
+    }
+
+    #[test]
+    fn codex_official_auth_roundtrips_secret_free_provider_metadata() {
+        let meta = ProviderMeta {
+            codex_official_auth: Some(CodexOfficialAuthConfig {
+                mode: CodexOfficialAuthMode::ManagedOauth,
+                account_id: Some("account-1".to_string()),
+            }),
+            ..ProviderMeta::default()
+        };
+
+        let value = serde_json::to_value(&meta).expect("serialize ProviderMeta");
+        assert_eq!(value["codexOfficialAuth"]["mode"], "managed_oauth");
+        assert_eq!(value["codexOfficialAuth"]["accountId"], "account-1");
+        assert!(value.get("token").is_none());
+
+        let decoded: ProviderMeta =
+            serde_json::from_value(value).expect("deserialize ProviderMeta");
+        assert_eq!(decoded.codex_official_auth, meta.codex_official_auth);
+    }
+
+    #[test]
+    fn codex_official_auth_defaults_to_desktop_current_login() {
+        assert_eq!(
+            CodexOfficialAuthConfig::default(),
+            CodexOfficialAuthConfig {
+                mode: CodexOfficialAuthMode::DesktopCurrentLogin,
+                account_id: None,
+            }
+        );
     }
 
     #[test]

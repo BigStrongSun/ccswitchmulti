@@ -151,6 +151,16 @@ export interface AuthBinding {
   account_id?: string;
 }
 
+export type CodexOfficialAuthMode =
+  | "desktop_current_login"
+  | "managed_oauth"
+  | "account_pool";
+
+export interface CodexOfficialAuthConfig {
+  mode: CodexOfficialAuthMode;
+  accountId?: string;
+}
+
 export interface ClaudeDesktopModelRoute {
   model: string;
   labelOverride?: string;
@@ -249,6 +259,8 @@ export interface ProviderMeta {
   codexHistoryReplay?: CodexHistoryReplay;
   // 通用认证绑定
   authBinding?: AuthBinding;
+  // OpenAI Official 的非秘密认证所有权；Token 仍由 Desktop 或 CCSM OAuth 存储持有。
+  codexOfficialAuth?: CodexOfficialAuthConfig;
   // Claude 认证字段名
   apiKeyField?: ClaudeApiKeyField;
   // 是否将 base_url 视为完整 API 端点（代理直接使用此 URL，不拼接路径）
