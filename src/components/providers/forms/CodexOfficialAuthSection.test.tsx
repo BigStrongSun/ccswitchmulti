@@ -42,6 +42,7 @@ describe("CodexOfficialAuthSection", () => {
 
     const mode = screen.getByRole("combobox", { name: "官方认证方式" });
     expect(mode).toHaveValue("desktop_current_login");
+    expect(mode).toHaveFocus();
     expect(
       screen.getByRole("option", { name: "Codex Desktop 当前登录" }),
     ).toBeVisible();

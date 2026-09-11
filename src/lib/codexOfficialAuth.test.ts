@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Provider, ProviderMeta } from "@/types";
 import {
+  finalizeCodexOfficialAuthOwnershipAfterSave,
   readCodexOfficialAuth,
   writeCodexOfficialAuth,
 } from "./codexOfficialAuth";
@@ -16,6 +17,21 @@ function officialProvider(meta?: ProviderMeta): Provider {
 }
 
 describe("OpenAI Official provider authentication ownership", () => {
+  it("reruns a conflicted legacy migration after the Provider choice is saved", async () => {
+    const migrate = vi.fn().mockResolvedValue({
+      state: "migrated",
+      conflictingRouterIds: [],
+    });
+
+    await expect(
+      finalizeCodexOfficialAuthOwnershipAfterSave(
+        { state: "conflict", conflictingRouterIds: ["router-a"] },
+        migrate,
+      ),
+    ).resolves.toEqual({ state: "migrated", conflictingRouterIds: [] });
+    expect(migrate).toHaveBeenCalledTimes(1);
+  });
+
   it("defaults missing provider authentication to the Desktop login without mutating input", () => {
     const provider = officialProvider();
 

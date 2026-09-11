@@ -758,6 +758,23 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(route).not.toHaveProperty("capabilities");
   });
 
+  it("does not re-persist authentication policy for the canonical official route", () => {
+    const route = serializeCodexRouteV2(
+      {
+        id: "official-route",
+        enabled: true,
+        targetProviderId: "codex-official",
+        modelSelection: { mode: "all" },
+        matchPrefixes: ["gpt"],
+        authPolicy: { source: "provider_config" },
+      },
+      0,
+    );
+
+    expect(route).not.toHaveProperty("authPolicy");
+    expect(route.matchPrefixes).toEqual(["gpt"]);
+  });
+
   it("normalizes merged v2 routes that are missing modelSelection", () => {
     const plan = {
       id: "merged-router",

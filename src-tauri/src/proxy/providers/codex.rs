@@ -221,6 +221,7 @@ pub fn classify_codex_provider_auth_facade(
 /// Backward-compatible Router-only entry point for callers that do not have a
 /// Provider snapshot. New service code should use
 /// [`classify_codex_provider_auth_facade`].
+#[cfg(test)]
 pub fn classify_codex_multirouter_auth_facade(
     provider: &Provider,
     pool_policy: Option<&CodexAccountPoolPolicy>,
@@ -2341,6 +2342,50 @@ pub(crate) fn codex_route_target_provider_id_from_route(route: &JsonValue) -> Op
     .find(|value| !value.is_empty())
 }
 
+/// Remove the legacy Router-owned copies of OpenAI Official authentication.
+///
+/// The canonical Provider is the only persistent owner after migration. This
+/// helper is shared by explicit migration and Provider-save transactions so a
+/// conflict resolution cannot commit the new choice while leaving stale route
+/// policies behind.
+pub(crate) fn strip_legacy_codex_official_auth(router: &mut Provider) -> bool {
+    let Some(routing) = router
+        .settings_config
+        .get_mut("codexRouting")
+        .and_then(JsonValue::as_object_mut)
+    else {
+        return false;
+    };
+    let targets_official = |route: &JsonValue| {
+        codex_route_target_provider_id_from_route(route)
+            == Some(crate::database::CODEX_OFFICIAL_PROVIDER_ID)
+    };
+    let has_official_route = routing
+        .get("routes")
+        .and_then(JsonValue::as_array)
+        .is_some_and(|routes| routes.iter().any(targets_official));
+    if !has_official_route {
+        return false;
+    }
+
+    let mut changed = routing.remove("officialAuth").is_some();
+    let Some(routes) = routing.get_mut("routes").and_then(JsonValue::as_array_mut) else {
+        return changed;
+    };
+    for route in routes.iter_mut().filter(|route| targets_official(route)) {
+        let Some(route) = route.as_object_mut() else {
+            continue;
+        };
+        changed |= route.remove("authPolicy").is_some();
+        changed |= route.remove("auth_policy").is_some();
+        changed |= route.remove("auth").is_some();
+        if let Some(upstream) = route.get_mut("upstream").and_then(JsonValue::as_object_mut) {
+            changed |= upstream.remove("auth").is_some();
+        }
+    }
+    changed
+}
+
 /// 从 route 中读取显式模型覆盖；没有覆盖时应交给目标 provider 自己的 model 配置。
 fn explicit_codex_route_model_override<'a>(
     route: &'a JsonValue,
@@ -3867,6 +3912,15 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
+        #[cfg(test)]
+        if let Some(url) = provider
+            .settings_config
+            .get("codexTestBaseUrl")
+            .and_then(JsonValue::as_str)
+        {
+            return Ok(url.trim_end_matches('/').to_string());
+        }
+
         // Codex v2 路由到 ChatGPT OAuth 时仍然固定使用 CodexAdapter；
         // 这里补齐托管账号 provider 的 base_url 语义，避免走普通 OpenAI 兼容配置解析。
         if provider_is_managed_codex_oauth(provider) || is_codex_official_provider(provider) {

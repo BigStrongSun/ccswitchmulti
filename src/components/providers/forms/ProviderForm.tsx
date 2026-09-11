@@ -146,7 +146,10 @@ import { resolveManagedAccountId } from "@/lib/authBinding";
 import { useOpenClawLiveProviderIds } from "@/hooks/useOpenClaw";
 import { useHermesLiveProviderIds } from "@/hooks/useHermes";
 import { extractErrorMessage } from "@/utils/errorUtils";
-import { normalizeCodexOfficialAuth } from "@/lib/codexOfficialAuth";
+import {
+  finalizeCodexOfficialAuthOwnershipAfterSave,
+  normalizeCodexOfficialAuth,
+} from "@/lib/codexOfficialAuth";
 import {
   CodexOfficialAuthSection,
   validateCodexOfficialAuthSelection,
@@ -2053,6 +2056,17 @@ function ProviderFormFull({
     payload.meta = nextMeta;
 
     await onSubmit(payload);
+    if (isCanonicalCodexOfficial) {
+      const migrationStatus = await finalizeCodexOfficialAuthOwnershipAfterSave(
+        codexOfficialAuthMigration,
+        providersApi.migrateCodexOfficialAuthOwnership,
+      );
+      queryClient.setQueryData(
+        ["codex-official-auth-ownership-migration"],
+        migrationStatus,
+      );
+      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    }
   };
 
   const shouldShowSpeedTest =

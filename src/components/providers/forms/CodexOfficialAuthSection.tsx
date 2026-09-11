@@ -95,6 +95,7 @@ export function CodexOfficialAuthSection({
         </label>
         <select
           id="codex-official-auth-mode"
+          autoFocus
           aria-label={t("codexOfficialAuth.modeLabel", {
             defaultValue: "官方认证方式",
           })}

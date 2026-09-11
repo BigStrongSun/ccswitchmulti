@@ -300,42 +300,6 @@ fn route_targets_codex_official(route: &Value) -> bool {
         == Some(crate::database::CODEX_OFFICIAL_PROVIDER_ID)
 }
 
-fn strip_legacy_codex_official_auth(router: &mut Provider) -> bool {
-    let Some(routing) = router
-        .settings_config
-        .get_mut("codexRouting")
-        .and_then(Value::as_object_mut)
-    else {
-        return false;
-    };
-    let has_official_route = routing
-        .get("routes")
-        .and_then(Value::as_array)
-        .is_some_and(|routes| routes.iter().any(route_targets_codex_official));
-    if !has_official_route {
-        return false;
-    }
-    let mut changed = routing.remove("officialAuth").is_some();
-    let Some(routes) = routing.get_mut("routes").and_then(Value::as_array_mut) else {
-        return changed;
-    };
-    for route in routes
-        .iter_mut()
-        .filter(|route| route_targets_codex_official(route))
-    {
-        let Some(route) = route.as_object_mut() else {
-            continue;
-        };
-        changed |= route.remove("authPolicy").is_some();
-        changed |= route.remove("auth_policy").is_some();
-        changed |= route.remove("auth").is_some();
-        if let Some(upstream) = route.get_mut("upstream").and_then(Value::as_object_mut) {
-            changed |= upstream.remove("auth").is_some();
-        }
-    }
-    changed
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct UniversalProviderSyncOutcome {
     pub changed: bool,
@@ -5635,7 +5599,7 @@ impl ProviderService {
         }
         for provider in providers.values() {
             let mut router = provider.clone();
-            if strip_legacy_codex_official_auth(&mut router) {
+            if crate::proxy::providers::strip_legacy_codex_official_auth(&mut router) {
                 mutations.push(ProviderSetDatabaseMutation {
                     app_type: AppType::Codex.as_str().to_string(),
                     provider_id: router.id.clone(),
@@ -6099,6 +6063,17 @@ impl ProviderService {
             Self::ensure_codex_provider_is_user_operable(&app_type, existing_provider)?;
         }
         let mut provider = Self::prepare_provider_for_mutation(state, &app_type, provider)?;
+        let codex_official_auth_changed = app_type == AppType::Codex
+            && provider.id == crate::database::CODEX_OFFICIAL_PROVIDER_ID
+            && provider.category.as_deref() == Some("official")
+            && existing_provider
+                .as_ref()
+                .and_then(|existing| existing.meta.as_ref())
+                .and_then(|meta| meta.codex_official_auth.as_ref())
+                != provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.codex_official_auth.as_ref());
         let provider_id_changed = original_id != provider.id;
 
         if provider_id_changed {
@@ -6250,6 +6225,17 @@ impl ProviderService {
             protocol_profiles,
             protocol_observations,
         )?;
+
+        if codex_official_auth_changed {
+            state
+                .proxy_service
+                .reproject_current_codex_auth_facade_for_provider_change()
+                .map_err(|error| {
+                    AppError::Message(format!(
+                        "OpenAI Official 认证已保存，但当前 Codex 认证门面更新失败: {error}"
+                    ))
+                })?;
+        }
 
         if is_current && Self::is_codex_schema_v2_router(&app_type, &provider) {
             let status = crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
@@ -6489,7 +6475,22 @@ impl ProviderService {
             return Ok(());
         }
 
-        let outcome = if protocol_profiles.is_empty() && protocol_observations.is_empty() {
+        let persists_explicit_official_auth = provider.id
+            == crate::database::CODEX_OFFICIAL_PROVIDER_ID
+            && provider.category.as_deref() == Some("official")
+            && provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.codex_official_auth.as_ref())
+                .is_some();
+        let outcome = if persists_explicit_official_auth {
+            crate::codex_multirouter::mutation::apply_codex_official_auth_provider_mutation_with_protocol_state(
+                state.db.as_ref(),
+                provider.clone(),
+                protocol_profiles,
+                protocol_observations,
+            )?
+        } else if protocol_profiles.is_empty() && protocol_observations.is_empty() {
             crate::codex_multirouter::mutation::apply_codex_provider_mutation(
                 state.db.as_ref(),
                 provider.clone(),

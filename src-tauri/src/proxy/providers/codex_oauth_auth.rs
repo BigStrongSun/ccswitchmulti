@@ -1802,6 +1802,22 @@ impl CodexOAuthManager {
         Ok(account)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn seed_test_account(
+        &self,
+        account_id: &str,
+        access_token: &str,
+    ) -> Result<CodexManagedAccount, CodexOAuthError> {
+        self.add_account_internal(
+            account_id.to_string(),
+            "test-refresh-token".to_string(),
+            Some(format!("{account_id}@example.test")),
+            Some(access_token.to_string()),
+            Some(chrono::Utc::now().timestamp_millis() + 3_600_000),
+        )
+        .await
+    }
+
     fn fallback_default_account_id(accounts: &HashMap<String, CodexAccountData>) -> Option<String> {
         accounts
             .iter()

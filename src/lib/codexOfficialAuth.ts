@@ -3,6 +3,15 @@ import type {
   CodexOfficialAuthMode,
   Provider,
 } from "@/types";
+import type { CodexOfficialAuthMigrationStatus } from "@/lib/api/providers";
+
+export async function finalizeCodexOfficialAuthOwnershipAfterSave(
+  migrationStatus: CodexOfficialAuthMigrationStatus | undefined,
+  migrate: () => Promise<CodexOfficialAuthMigrationStatus>,
+): Promise<CodexOfficialAuthMigrationStatus | undefined> {
+  if (migrationStatus?.state !== "conflict") return migrationStatus;
+  return await migrate();
+}
 
 const DEFAULT_CODEX_OFFICIAL_AUTH: CodexOfficialAuthConfig = {
   mode: "desktop_current_login",

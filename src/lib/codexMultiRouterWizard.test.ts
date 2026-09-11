@@ -22,7 +22,7 @@ const deepseekSource: Provider = {
 };
 
 describe("buildCodexMultiRouterWizardPlan subagent version", () => {
-  it("writes provider_config for the canonical official route instead of Router-owned auth", () => {
+  it("keeps canonical official auth entirely out of the Router route", () => {
     const official: Provider = {
       id: "codex-official",
       name: "OpenAI Official",
@@ -38,9 +38,9 @@ describe("buildCodexMultiRouterWizardPlan subagent version", () => {
       [official],
       null,
     );
-    expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
-      source: "provider_config",
-    });
+    expect(
+      plan.settingsConfig.codexRouting.routes[0].authPolicy,
+    ).toBeUndefined();
     expect(plan.settingsConfig.codexRouting).not.toHaveProperty("officialAuth");
   });
 

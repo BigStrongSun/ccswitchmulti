@@ -732,7 +732,7 @@ describe("codexMultiRouterWizard helpers", () => {
 
     const [route] = buildWizardRoutesFromSources([official]);
     expect(route.modelSelection).toEqual({ mode: "all" });
-    expect(route.authPolicy).toEqual({ source: "provider_config" });
+    expect(route).not.toHaveProperty("authPolicy");
   });
 
   it("uses the current Codex login for the built-in official seed", () => {
@@ -748,7 +748,7 @@ describe("codexMultiRouterWizard helpers", () => {
     });
 
     const [route] = buildWizardRoutesFromSources([official]);
-    expect(route.authPolicy).toEqual({ source: "provider_config" });
+    expect(route).not.toHaveProperty("authPolicy");
   });
 
   it("does not persist an account-pool choice on the Router or official route", () => {
@@ -769,9 +769,9 @@ describe("codexMultiRouterWizard helpers", () => {
     );
 
     expect(plan.settingsConfig.codexRouting.schemaVersion).toBe(2);
-    expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
-      source: "provider_config",
-    });
+    expect(
+      plan.settingsConfig.codexRouting.routes[0].authPolicy,
+    ).toBeUndefined();
   });
 
   it("keeps fixed OAuth ownership out of the setup wizard route", () => {
@@ -791,9 +791,9 @@ describe("codexMultiRouterWizard helpers", () => {
       null,
     );
 
-    expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
-      source: "provider_config",
-    });
+    expect(
+      plan.settingsConfig.codexRouting.routes[0].authPolicy,
+    ).toBeUndefined();
   });
 
   it("restores the setup wizard auth choice from schema v2 authPolicy", () => {
@@ -867,9 +867,9 @@ describe("codexMultiRouterWizard helpers", () => {
       existingPlan,
     );
 
-    expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
-      source: "provider_config",
-    });
+    expect(
+      plan.settingsConfig.codexRouting.routes[0].authPolicy,
+    ).toBeUndefined();
   });
 
   it("infers legacy auth for migration but does not copy it into a rebuilt Router", () => {
@@ -916,9 +916,9 @@ describe("codexMultiRouterWizard helpers", () => {
       legacyPlan,
     );
     expect(plan.settingsConfig.codexRouting).not.toHaveProperty("officialAuth");
-    expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
-      source: "provider_config",
-    });
+    expect(
+      plan.settingsConfig.codexRouting.routes[0].authPolicy,
+    ).toBeUndefined();
   });
 
   it("uses the inference API Key as AgentPlan model-fetch fallback when AK/SK is missing", () => {

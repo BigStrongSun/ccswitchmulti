@@ -1012,7 +1012,9 @@ export function buildWizardRoutesFromSources(
             canonicalModels.has(canonical.trim()),
         ),
       ),
-      authPolicy: { source: "provider_config" },
+      ...(provider.id === "codex-official" && provider.category === "official"
+        ? {}
+        : { authPolicy: { source: "provider_config" as const } }),
     };
   });
 }

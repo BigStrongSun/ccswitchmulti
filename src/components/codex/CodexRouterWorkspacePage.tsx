@@ -1869,12 +1869,16 @@ export function serializeCodexRouteV2(
           visible !== canonical,
       ),
     ),
-    authPolicy: {
-      source: authPolicy.source,
-      ...(authPolicy.accountId?.trim()
-        ? { accountId: authPolicy.accountId.trim() }
-        : {}),
-    },
+    ...(targetProviderId === "codex-official"
+      ? {}
+      : {
+          authPolicy: {
+            source: authPolicy.source,
+            ...(authPolicy.accountId?.trim()
+              ? { accountId: authPolicy.accountId.trim() }
+              : {}),
+          },
+        }),
   };
 }
 

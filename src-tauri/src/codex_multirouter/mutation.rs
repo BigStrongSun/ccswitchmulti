@@ -236,6 +236,30 @@ pub fn apply_codex_provider_mutation_with_protocol_state(
     )
 }
 
+/// Persist an explicit Provider-owned OpenAI Official authentication choice
+/// and remove every legacy Router-owned copy in the same SQLite transaction.
+pub(crate) fn apply_codex_official_auth_provider_mutation_with_protocol_state(
+    db: &Database,
+    provider: Provider,
+    profiles: &[ProtocolCompatibilityRecord],
+    observations: &[ProtocolCompatibilityRecord],
+) -> Result<CodexProviderMutationOutcome, AppError> {
+    apply_codex_provider_mutation_with_profiles_and_publisher_and_auth_cleanup(
+        db,
+        provider,
+        profiles,
+        observations,
+        true,
+        |artifact| {
+            crate::codex_config::publish_codex_multirouter_projection_for_database(
+                db,
+                &artifact.projection_settings,
+            )
+            .map_err(|error| error.to_string())
+        },
+    )
+}
+
 pub fn apply_codex_provider_mutation_with_publisher<F>(
     db: &Database,
     provider: Provider,
@@ -681,12 +705,51 @@ fn apply_codex_provider_mutation_with_profiles_and_publisher<F>(
     provider: Provider,
     profiles: &[ProtocolCompatibilityRecord],
     observations: &[ProtocolCompatibilityRecord],
+    publish: F,
+) -> Result<CodexProviderMutationOutcome, AppError>
+where
+    F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
+{
+    apply_codex_provider_mutation_with_profiles_and_publisher_and_auth_cleanup(
+        db,
+        provider,
+        profiles,
+        observations,
+        false,
+        publish,
+    )
+}
+
+fn apply_codex_provider_mutation_with_profiles_and_publisher_and_auth_cleanup<F>(
+    db: &Database,
+    provider: Provider,
+    profiles: &[ProtocolCompatibilityRecord],
+    observations: &[ProtocolCompatibilityRecord],
+    cleanup_legacy_official_auth: bool,
     mut publish: F,
 ) -> Result<CodexProviderMutationOutcome, AppError>
 where
     F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
 {
-    let prepared = prepare_codex_provider_mutation(db, provider, profiles)?;
+    let mut prepared = prepare_codex_provider_mutation(db, provider, profiles)?;
+    if cleanup_legacy_official_auth {
+        for (_, mut router) in db.get_all_providers("codex")? {
+            if router.id == prepared.provider.id
+                || !crate::proxy::providers::strip_legacy_codex_official_auth(&mut router)
+            {
+                continue;
+            }
+            if let Some(existing) = prepared
+                .router_updates
+                .iter_mut()
+                .find(|existing| existing.id == router.id)
+            {
+                crate::proxy::providers::strip_legacy_codex_official_auth(existing);
+            } else {
+                prepared.router_updates.push(router);
+            }
+        }
+    }
     let mut mutations = Vec::with_capacity(1 + prepared.router_updates.len());
     prepared.append_provider_mutations(&mut mutations);
     db.apply_provider_set_with_protocol_state_and_setting_cleanup(

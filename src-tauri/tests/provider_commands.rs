@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use cc_switch_lib::{
     get_codex_auth_path, get_codex_config_path, import_default_config_test_hook, read_json_file,
     switch_provider_test_hook, write_codex_live_atomic, AppError, AppType, McpApps, McpServer,
-    MultiAppConfig, Provider, ProviderService,
+    MultiAppConfig, Provider, ProviderMeta, ProviderService,
 };
 
 #[path = "support.rs"]
@@ -174,6 +174,181 @@ fn codex_official_auth_migration_conflict_is_reported_without_mutation() {
         serde_json::to_vec(&after).unwrap(),
         serde_json::to_vec(&before).unwrap(),
         "conflict reporting must be byte-equivalent at the Provider serialization boundary"
+    );
+}
+
+#[test]
+fn codex_official_auth_update_reprojects_active_router_both_ways_and_preserves_auth_json() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .init_default_official_providers()
+        .expect("seed official provider");
+
+    let mut official = state
+        .db
+        .get_provider_by_id("codex-official", AppType::Codex.as_str())
+        .expect("read official provider")
+        .expect("official provider exists");
+    official.meta = Some(
+        serde_json::from_value::<ProviderMeta>(json!({
+            "codexOfficialAuth": { "mode": "managed_oauth", "accountId": "account-a" }
+        }))
+        .expect("managed official auth metadata"),
+    );
+    state
+        .db
+        .save_provider(AppType::Codex.as_str(), &official)
+        .expect("seed managed official auth");
+
+    let mut router = codex_official_auth_migration_router("router-active", "provider_config");
+    router.settings_config["codexRouting"]
+        .as_object_mut()
+        .expect("routing object")
+        .remove("officialAuth");
+    router.settings_config["codexRouting"]["routes"][0]
+        .as_object_mut()
+        .expect("route object")
+        .remove("authPolicy");
+    state
+        .db
+        .save_provider(AppType::Codex.as_str(), &router)
+        .expect("save active router");
+
+    let original_auth = json!({
+        "auth_mode": "chatgpt",
+        "tokens": { "access_token": "native-token", "account_id": "native-account" }
+    });
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), &router.id)
+        .expect("select active router");
+    write_codex_live_atomic(
+        &original_auth,
+        Some(
+            r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+name = "OpenAI"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "PROXY_MANAGED"
+supports_websockets = false
+"#,
+        ),
+    )
+    .expect("seed managed Router takeover");
+    assert!(std::fs::read_to_string(get_codex_config_path())
+        .expect("read managed live config")
+        .contains("experimental_bearer_token = \"PROXY_MANAGED\""));
+    let auth_before = std::fs::read(get_codex_auth_path()).expect("read auth before update");
+
+    official.meta = Some(
+        serde_json::from_value::<ProviderMeta>(json!({
+            "codexOfficialAuth": { "mode": "desktop_current_login" }
+        }))
+        .expect("desktop official auth metadata"),
+    );
+    ProviderService::update(&state, AppType::Codex, None, official.clone())
+        .expect("update official auth to Desktop");
+
+    let live =
+        std::fs::read_to_string(get_codex_config_path()).expect("read reprojected live config");
+    assert!(live.contains("requires_openai_auth = true"));
+    assert!(!live.contains("experimental_bearer_token = \"PROXY_MANAGED\""));
+    assert_eq!(
+        std::fs::read(get_codex_auth_path()).expect("read auth after update"),
+        auth_before,
+        "Provider-owned auth changes must not rewrite auth.json"
+    );
+
+    official.meta = Some(
+        serde_json::from_value::<ProviderMeta>(json!({
+            "codexOfficialAuth": { "mode": "managed_oauth", "accountId": "account-b" }
+        }))
+        .expect("managed official auth metadata"),
+    );
+    ProviderService::update(&state, AppType::Codex, None, official)
+        .expect("update official auth back to managed OAuth");
+
+    let live = std::fs::read_to_string(get_codex_config_path())
+        .expect("read managed reprojected live config");
+    assert!(live.contains("requires_openai_auth = true"));
+    assert!(live.contains("experimental_bearer_token = \"PROXY_MANAGED\""));
+    assert_eq!(
+        std::fs::read(get_codex_auth_path()).expect("read auth after managed update"),
+        auth_before,
+        "bidirectional Provider-owned auth changes must not rewrite auth.json"
+    );
+}
+
+#[test]
+fn codex_official_auth_conflict_resolution_saves_choice_and_cleans_legacy_routers_atomically() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .init_default_official_providers()
+        .expect("seed official provider");
+    for router in [
+        codex_official_auth_migration_router("router-native", "native_codex_auth"),
+        codex_official_auth_migration_router("router-pool", "account_pool"),
+    ] {
+        state
+            .db
+            .save_provider(AppType::Codex.as_str(), &router)
+            .expect("save conflicting legacy router");
+    }
+
+    let conflict = ProviderService::migrate_codex_official_auth_ownership(&state)
+        .expect("detect legacy conflict");
+    assert_eq!(serde_json::to_value(conflict).unwrap()["state"], "conflict");
+
+    let mut official = state
+        .db
+        .get_provider_by_id("codex-official", AppType::Codex.as_str())
+        .expect("read official provider")
+        .expect("official provider exists");
+    official.meta = Some(
+        serde_json::from_value::<ProviderMeta>(json!({
+            "codexOfficialAuth": { "mode": "account_pool" }
+        }))
+        .expect("pool official auth metadata"),
+    );
+    ProviderService::update(&state, AppType::Codex, None, official)
+        .expect("resolve conflict through official Provider save");
+
+    let providers = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read committed Provider transaction");
+    assert_eq!(
+        serde_json::to_value(
+            providers["codex-official"]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.codex_official_auth.as_ref())
+                .expect("official auth persisted")
+        )
+        .unwrap()["mode"],
+        "account_pool"
+    );
+    for router_id in ["router-native", "router-pool"] {
+        let routing = &providers[router_id].settings_config["codexRouting"];
+        assert!(routing.get("officialAuth").is_none());
+        assert!(routing["routes"][0].get("authPolicy").is_none());
+    }
+    let migration = ProviderService::migrate_codex_official_auth_ownership(&state)
+        .expect("verify resolved ownership");
+    assert_eq!(
+        serde_json::to_value(migration).unwrap()["state"],
+        "already_current"
     );
 }
 

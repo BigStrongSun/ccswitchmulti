@@ -245,6 +245,8 @@ pub struct RequestForwarder {
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
     app_handle: Option<tauri::AppHandle>,
+    #[cfg(test)]
+    codex_oauth_test_manager: Option<Arc<RwLock<CodexOAuthManager>>>,
     /// 请求开始时的"当前供应商 ID"（用于判断是否需要同步 UI/托盘）
     current_provider_id_at_start: String,
     /// 代理会话 ID（用于 Gemini Native shadow replay）
@@ -381,6 +383,48 @@ fn retryable_failure_affects_provider_health(provider: &Provider, error: &ProxyE
 }
 
 impl RequestForwarder {
+    async fn resolve_raw_codex_oauth_credentials(
+        &self,
+        provider: &Provider,
+    ) -> Result<(String, String), String> {
+        let account_id = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("codex_oauth"));
+
+        #[cfg(test)]
+        if let Some(manager) = self.codex_oauth_test_manager.as_ref() {
+            let manager = manager.read().await;
+            return match account_id.as_deref() {
+                Some(account_id) => manager
+                    .get_valid_token_and_workspace_for_account(account_id)
+                    .await
+                    .map_err(|error| error.to_string()),
+                None => manager
+                    .get_valid_token_and_workspace()
+                    .await
+                    .map_err(|error| error.to_string()),
+            };
+        }
+
+        let app_handle = self
+            .app_handle
+            .as_ref()
+            .ok_or_else(|| "Codex OAuth 认证不可用（无 AppHandle）".to_string())?;
+        let codex_state = app_handle.state::<CodexOAuthState>();
+        let manager = codex_state.0.read().await;
+        match account_id.as_deref() {
+            Some(account_id) => manager
+                .get_valid_token_and_workspace_for_account(account_id)
+                .await
+                .map_err(|error| error.to_string()),
+            None => manager
+                .get_valid_token_and_workspace()
+                .await
+                .map_err(|error| error.to_string()),
+        }
+    }
+
     /// 把 retry 层已经选中的 Codex route 物化为真实目标 provider。
     ///
     /// `resolve_codex_model_routed_providers` 会生成带 `codexResolvedRouteId` 和父路由
@@ -765,6 +809,8 @@ impl RequestForwarder {
             codex_chat_history,
             failover_manager,
             app_handle,
+            #[cfg(test)]
+            codex_oauth_test_manager: None,
             current_provider_id_at_start,
             session_id,
             session_client_provided,
@@ -4581,38 +4627,17 @@ impl RequestForwarder {
         }
         let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
             if auth.strategy == AuthStrategy::CodexOAuth {
-                if let Some(app_handle) = &self.app_handle {
-                    let codex_state = app_handle.state::<CodexOAuthState>();
-                    let codex_auth: tokio::sync::RwLockReadGuard<'_, CodexOAuthManager> =
-                        codex_state.0.read().await;
-                    let account_id = provider
-                        .meta
-                        .as_ref()
-                        .and_then(|m| m.managed_account_id_for("codex_oauth"));
-                    let credentials_result = match &account_id {
-                        Some(id) => {
-                            codex_auth
-                                .get_valid_token_and_workspace_for_account(id)
-                                .await
-                        }
-                        None => codex_auth.get_valid_token_and_workspace().await,
-                    };
-                    match credentials_result {
-                        Ok((token, workspace_id)) => {
-                            auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
-                            is_codex_oauth = true;
-                            codex_oauth_account_id = Some(workspace_id);
-                        }
-                        Err(err) => {
-                            return Err(ProxyError::AuthError(format!(
-                                "Codex OAuth 认证失败: {err}"
-                            )));
-                        }
+                match self.resolve_raw_codex_oauth_credentials(provider).await {
+                    Ok((token, workspace_id)) => {
+                        auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
+                        is_codex_oauth = true;
+                        codex_oauth_account_id = Some(workspace_id);
                     }
-                } else {
-                    return Err(ProxyError::AuthError(
-                        "Codex OAuth 认证不可用（无 AppHandle）".to_string(),
-                    ));
+                    Err(err) => {
+                        return Err(ProxyError::AuthError(format!(
+                            "Codex OAuth 认证失败: {err}"
+                        )));
+                    }
                 }
             }
             auth_strategy_for_log = format!("{:?}", auth.strategy);
@@ -8528,6 +8553,7 @@ mod tests {
     use futures::{SinkExt, StreamExt};
     use http::StatusCode;
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn test_provider_with_type(provider_type: Option<&str>) -> Provider {
         Provider {
@@ -8811,6 +8837,198 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn raw_compact_fixed_official_oauth_forwards_managed_identity_not_desktop_identity() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind raw compact upstream");
+        let upstream = format!(
+            "http://{}",
+            listener.local_addr().expect("upstream address")
+        );
+        let capture = tokio::spawn(capture_single_http_request(listener));
+
+        let temp = tempfile::tempdir().expect("OAuth test directory");
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager
+            .seed_test_account("managed-local-id", "managed-access-token")
+            .await
+            .expect("seed managed OAuth account");
+        let mut official = test_codex_official_provider();
+        official.settings_config["codexTestBaseUrl"] = json!(upstream);
+        official.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::ManagedOauth,
+                account_id: Some("managed-local-id".to_string()),
+            }),
+            ..Default::default()
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer desktop-access-token"),
+        );
+        headers.insert(
+            "chatgpt-account-id",
+            HeaderValue::from_static("desktop-workspace-id"),
+        );
+        let body = Bytes::from_static(br#"{"model":"gpt-6-astra","input":[]}"#);
+        let mut forwarder = test_forwarder(Duration::from_secs(5), Duration::from_secs(5));
+        forwarder.codex_oauth_test_manager = Some(Arc::new(RwLock::new(manager)));
+
+        forwarder
+            .forward_raw_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses/compact?conversation=1",
+                json!({"model":"gpt-6-astra"}),
+                body.clone(),
+                headers,
+                Extensions::new(),
+                vec![official],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "forward fixed managed OAuth compact request: {}",
+                    error.error
+                )
+            });
+
+        let (headers, captured_body) = capture.await.expect("capture task");
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer managed-access-token"));
+        assert!(headers.contains("chatgpt-account-id: managed-local-id"));
+        assert!(!headers.contains("desktop-access-token"));
+        assert!(!headers.contains("desktop-workspace-id"));
+        assert_eq!(captured_body, body);
+    }
+
+    #[tokio::test]
+    async fn raw_compact_desktop_official_forwards_only_the_desktop_identity() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Desktop raw compact upstream");
+        let upstream = format!(
+            "http://{}",
+            listener.local_addr().expect("upstream address")
+        );
+        let capture = tokio::spawn(capture_single_http_request(listener));
+
+        let mut official = test_codex_official_provider();
+        official.settings_config["codexTestBaseUrl"] = json!(upstream);
+        official.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::DesktopCurrentLogin,
+                account_id: None,
+            }),
+            ..Default::default()
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer desktop-access-token"),
+        );
+        headers.insert(
+            "chatgpt-account-id",
+            HeaderValue::from_static("desktop-workspace-id"),
+        );
+        let body = Bytes::from_static(br#"{"model":"gpt-6-astra","input":[]}"#);
+        let forwarder = test_forwarder(Duration::from_secs(5), Duration::from_secs(5));
+
+        forwarder
+            .forward_raw_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses/compact",
+                json!({"model":"gpt-6-astra"}),
+                body.clone(),
+                headers,
+                Extensions::new(),
+                vec![official],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("forward Desktop compact request: {}", error.error));
+
+        let (headers, captured_body) = capture.await.expect("capture task");
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer desktop-access-token"));
+        assert!(headers.contains("chatgpt-account-id: desktop-workspace-id"));
+        assert!(!headers.contains("proxy_managed"));
+        assert_eq!(captured_body, body);
+    }
+
+    #[tokio::test]
+    async fn raw_compact_official_pool_expands_and_forwards_real_managed_candidate() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind pooled raw compact upstream");
+        let upstream = format!(
+            "http://{}",
+            listener.local_addr().expect("upstream address")
+        );
+        let capture = tokio::spawn(capture_single_http_request(listener));
+
+        let temp = tempfile::tempdir().expect("OAuth pool test directory");
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager
+            .seed_test_account("pool-local-id", "pool-access-token")
+            .await
+            .expect("seed pooled OAuth account");
+        manager
+            .set_account_pool_policy(
+                crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy {
+                    enabled: true,
+                    entries: vec![CodexAccountPoolEntry {
+                        account_id: "pool-local-id".to_string(),
+                        enabled: true,
+                        reserve_percent: 0.0,
+                    }],
+                    desktop_account_id: None,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("enable managed-only account pool");
+        let mut official = test_codex_official_provider();
+        official.settings_config["codexTestBaseUrl"] = json!(upstream);
+        official.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::AccountPool,
+                account_id: None,
+            }),
+            ..Default::default()
+        });
+        let body = Bytes::from_static(br#"{"model":"gpt-6-astra","input":[]}"#);
+        let mut forwarder = test_forwarder(Duration::from_secs(5), Duration::from_secs(5));
+        forwarder.codex_oauth_test_manager = Some(Arc::new(RwLock::new(manager)));
+
+        forwarder
+            .forward_raw_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses/compact",
+                json!({"model":"gpt-6-astra"}),
+                body.clone(),
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![official],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "forward pooled managed OAuth compact request: {}",
+                    error.error
+                )
+            });
+
+        let (headers, captured_body) = capture.await.expect("capture task");
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer pool-access-token"));
+        assert!(headers.contains("chatgpt-account-id: pool-local-id"));
+        assert_eq!(captured_body, body);
+    }
+
     #[test]
     fn account_pool_auth_materialization_does_not_override_resolved_protocol() {
         let mut provider = test_provider_with_type(None);
@@ -9060,6 +9278,7 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
+            codex_oauth_test_manager: None,
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
@@ -9073,6 +9292,43 @@ mod tests {
             capacity_retry_enabled: true,
             max_attempts: 1,
         }
+    }
+
+    async fn capture_single_http_request(listener: tokio::net::TcpListener) -> (String, Vec<u8>) {
+        let (mut stream, _) = listener.accept().await.expect("accept HTTP request");
+        let mut received = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 4096];
+            let count = stream.read(&mut chunk).await.expect("read HTTP request");
+            if count == 0 {
+                break;
+            }
+            received.extend_from_slice(&chunk[..count]);
+            let Some(header_end) = received.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let header_text = String::from_utf8_lossy(&received[..header_end]);
+            let content_length = header_text
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                })
+                .unwrap_or(0);
+            if received.len() >= header_end + 4 + content_length {
+                let body = received[header_end + 4..header_end + 4 + content_length].to_vec();
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
+                    .await
+                    .expect("write HTTP response");
+                return (header_text.into_owned(), body);
+            }
+        }
+        panic!("HTTP request ended before the complete body arrived");
     }
 
     // 验证只有上游明确返回 Responses-Lite 不支持时，才触发剥头重试。
@@ -9505,6 +9761,7 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
+            codex_oauth_test_manager: None,
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
@@ -9568,6 +9825,7 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db.clone())),
             app_handle: None,
+            codex_oauth_test_manager: None,
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
@@ -9676,6 +9934,7 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
+            codex_oauth_test_manager: None,
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
@@ -9765,6 +10024,7 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
+            codex_oauth_test_manager: None,
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
@@ -12846,6 +13106,7 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
+            codex_oauth_test_manager: None,
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,

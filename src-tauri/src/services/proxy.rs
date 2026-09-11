@@ -322,6 +322,7 @@ impl ProxyService {
         settings: &mut Value,
         proxy_base_url: &str,
         provider: &Provider,
+        providers_by_id: Option<&HashMap<String, Provider>>,
         respect_system_proxy: bool,
     ) -> Result<(), String> {
         if !crate::proxy::providers::is_codex_official_provider(provider) {
@@ -340,10 +341,12 @@ impl ProxyService {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let projected = Self::apply_codex_proxy_toml_config_for_provider_with_system_proxy_policy(
+        let projected = Self::apply_codex_proxy_toml_config_with_context_and_system_proxy_policy(
             &config_text,
             proxy_base_url,
             Some(provider),
+            providers_by_id,
+            None,
             respect_system_proxy,
         )?;
         settings["config"] = json!(projected);
@@ -610,11 +613,13 @@ impl ProxyService {
             )?;
         }
         let (_, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let providers_by_id = self.codex_providers_by_id()?;
 
         Self::apply_codex_takeover_fields_for_provider(
             &mut effective_settings,
             &proxy_codex_base_url,
             provider,
+            Some(&providers_by_id),
             self.codex_respect_system_proxy_enabled(),
         )?;
 
@@ -2288,11 +2293,14 @@ impl ProxyService {
                 .get_current_provider_for_app(&AppType::Codex)
                 .ok()
                 .flatten();
+            let providers_by_id = self.codex_providers_by_id()?;
             let updated_config =
-                Self::apply_codex_proxy_toml_config_for_provider_with_system_proxy_policy(
+                Self::apply_codex_proxy_toml_config_with_context_and_system_proxy_policy(
                     config_str,
                     &proxy_codex_base_url,
                     codex_provider.as_ref(),
+                    Some(&providers_by_id),
+                    None,
                     self.codex_respect_system_proxy_enabled(),
                 )?;
             live_config["config"] = json!(updated_config);
@@ -2357,10 +2365,12 @@ impl ProxyService {
             AppType::Codex => {
                 let mut live_config = self.read_codex_live()?;
                 let codex_provider = self.require_current_provider_for_app(&AppType::Codex)?;
+                let providers_by_id = self.codex_providers_by_id()?;
                 Self::apply_codex_takeover_fields_for_provider(
                     &mut live_config,
                     &proxy_codex_base_url,
                     &codex_provider,
+                    Some(&providers_by_id),
                     self.codex_respect_system_proxy_enabled(),
                 )?;
 
@@ -2447,11 +2457,14 @@ impl ProxyService {
                         .get_current_provider_for_app(&AppType::Codex)
                         .ok()
                         .flatten();
+                    let providers_by_id = self.codex_providers_by_id()?;
                     let updated_config =
-                        Self::apply_codex_proxy_toml_config_for_provider_with_system_proxy_policy(
+                        Self::apply_codex_proxy_toml_config_with_context_and_system_proxy_policy(
                             config_str,
                             &proxy_codex_base_url,
                             codex_provider.as_ref(),
+                            Some(&providers_by_id),
+                            None,
                             self.codex_respect_system_proxy_enabled(),
                         )?;
                     live_config["config"] = json!(updated_config);
@@ -3761,6 +3774,28 @@ impl ProxyService {
         &self,
         pool_policy: &crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy,
     ) -> Result<CodexAuthFacadeReprojectionOutcome, String> {
+        self.reproject_current_codex_auth_facade_with_policy(Some(pool_policy), true)
+    }
+
+    /// Rebuild the current Codex authentication facade after the canonical
+    /// OpenAI Official Provider changes. This covers both direct takeover and
+    /// an active MultiRouter that references the Provider.
+    pub fn reproject_current_codex_auth_facade_for_provider_change(
+        &self,
+    ) -> Result<CodexAuthFacadeReprojectionOutcome, String> {
+        let pool_policy =
+            crate::proxy::providers::codex_oauth_auth::read_persisted_account_pool_policy(
+                &crate::config::get_app_config_dir(),
+            )
+            .map_err(|error| format!("读取 Codex OAuth 账号池策略失败: {error}"))?;
+        self.reproject_current_codex_auth_facade_with_policy(pool_policy.as_ref(), false)
+    }
+
+    fn reproject_current_codex_auth_facade_with_policy(
+        &self,
+        pool_policy: Option<&crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy>,
+        only_if_account_pool: bool,
+    ) -> Result<CodexAuthFacadeReprojectionOutcome, String> {
         let Some(provider) = self.get_current_provider_for_app(&AppType::Codex)? else {
             return Ok(CodexAuthFacadeReprojectionOutcome::default());
         };
@@ -3770,14 +3805,16 @@ impl ProxyService {
             .map_err(|error| format!("读取 Codex Provider 认证上下文失败: {error}"))?
             .into_iter()
             .collect::<HashMap<_, _>>();
-        if !Self::codex_provider_uses_account_pool(&provider, Some(&providers_by_id)) {
+        if only_if_account_pool
+            && !Self::codex_provider_uses_account_pool(&provider, Some(&providers_by_id))
+        {
             return Ok(CodexAuthFacadeReprojectionOutcome::default());
         }
 
         let target = crate::proxy::providers::classify_codex_provider_auth_facade(
             &provider,
             Some(&providers_by_id),
-            Some(pool_policy),
+            pool_policy,
         );
         let facade = match target {
             crate::proxy::providers::CodexMultiRouterAuthFacade::NativeMixed => {
@@ -3813,7 +3850,8 @@ impl ProxyService {
             config_text,
             &base_url,
             Some(&provider),
-            Some(pool_policy),
+            Some(&providers_by_id),
+            pool_policy,
             self.codex_respect_system_proxy_enabled(),
         )?;
         let mut updated_doc = updated
@@ -3844,6 +3882,13 @@ impl ProxyService {
     }
 
     // ==================== Live 配置读写辅助方法 ====================
+
+    fn codex_providers_by_id(&self) -> Result<HashMap<String, Provider>, String> {
+        self.db
+            .get_all_providers(AppType::Codex.as_str())
+            .map(|providers| providers.into_iter().collect())
+            .map_err(|error| format!("读取 Codex Provider 认证上下文失败: {error}"))
+    }
 
     fn codex_respect_system_proxy_enabled(&self) -> bool {
         self.db.get_codex_respect_system_proxy().unwrap_or(false)
@@ -3898,15 +3943,37 @@ impl ProxyService {
         )
     }
 
+    #[cfg(test)]
     fn apply_codex_proxy_toml_config_for_provider_with_system_proxy_policy(
         toml_str: &str,
         proxy_url: &str,
         provider: Option<&Provider>,
         respect_system_proxy: bool,
     ) -> Result<String, String> {
-        let pool_policy = if provider
-            .is_some_and(|provider| Self::codex_provider_uses_account_pool(provider, None))
-        {
+        Self::apply_codex_proxy_toml_config_with_context_and_system_proxy_policy(
+            toml_str,
+            proxy_url,
+            provider,
+            None,
+            None,
+            respect_system_proxy,
+        )
+    }
+
+    fn apply_codex_proxy_toml_config_with_context_and_system_proxy_policy(
+        toml_str: &str,
+        proxy_url: &str,
+        provider: Option<&Provider>,
+        providers_by_id: Option<&HashMap<String, Provider>>,
+        explicit_pool_policy: Option<
+            &crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy,
+        >,
+        respect_system_proxy: bool,
+    ) -> Result<String, String> {
+        let persisted_pool_policy = if explicit_pool_policy.is_none()
+            && provider.is_some_and(|provider| {
+                Self::codex_provider_uses_account_pool(provider, providers_by_id)
+            }) {
             match crate::proxy::providers::codex_oauth_auth::read_persisted_account_pool_policy(
                 &crate::config::get_app_config_dir(),
             ) {
@@ -3919,12 +3986,32 @@ impl ProxyService {
         } else {
             None
         };
+        let pool_policy = explicit_pool_policy.or(persisted_pool_policy.as_ref());
         Self::apply_codex_proxy_toml_config_with_pool_policy_and_system_proxy_policy(
             toml_str,
             proxy_url,
             provider,
-            pool_policy.as_ref(),
+            providers_by_id,
+            pool_policy,
             respect_system_proxy,
+        )
+    }
+
+    #[cfg(test)]
+    fn apply_codex_proxy_toml_config_with_provider_context(
+        toml_str: &str,
+        proxy_url: &str,
+        provider: Option<&Provider>,
+        providers_by_id: Option<&HashMap<String, Provider>>,
+        pool_policy: Option<&crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy>,
+    ) -> Result<String, String> {
+        Self::apply_codex_proxy_toml_config_with_context_and_system_proxy_policy(
+            toml_str,
+            proxy_url,
+            provider,
+            providers_by_id,
+            pool_policy,
+            true,
         )
     }
 
@@ -3939,6 +4026,7 @@ impl ProxyService {
             toml_str,
             proxy_url,
             provider,
+            None,
             pool_policy,
             true,
         )
@@ -3948,6 +4036,7 @@ impl ProxyService {
         toml_str: &str,
         proxy_url: &str,
         provider: Option<&Provider>,
+        providers_by_id: Option<&HashMap<String, Provider>>,
         pool_policy: Option<&crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy>,
         respect_system_proxy: bool,
     ) -> Result<String, String> {
@@ -3965,7 +4054,7 @@ impl ProxyService {
                 .map_err(|error| format!("解析 Codex 官方接管配置失败: {error}"))?;
             let classified = crate::proxy::providers::classify_codex_provider_auth_facade(
                 provider,
-                None,
+                providers_by_id,
                 pool_policy,
             );
             let facade = match classified {
@@ -4046,8 +4135,9 @@ impl ProxyService {
                 toml_edit::value(true);
             let classified = provider
                 .map(|provider| {
-                    crate::proxy::providers::classify_codex_multirouter_auth_facade(
+                    crate::proxy::providers::classify_codex_provider_auth_facade(
                         provider,
+                        providers_by_id,
                         pool_policy,
                     )
                 })
@@ -6324,6 +6414,7 @@ wire_api = "responses"
                 &mut config,
                 "http://127.0.0.1:15721/v1",
                 &provider,
+                None,
                 false,
             )
             .unwrap();
@@ -7993,6 +8084,53 @@ experimental_bearer_token = "PROXY_MANAGED"
             route["experimental_bearer_token"].as_str(),
             Some(PROXY_TOKEN_PLACEHOLDER)
         );
+    }
+
+    #[test]
+    fn codex_multirouter_takeover_reads_provider_owned_official_auth() {
+        let mut provider = codex_multirouter_provider("provider_config");
+        provider.settings_config["codexRouting"]["routes"][0]["targetProviderId"] =
+            json!(crate::database::CODEX_OFFICIAL_PROVIDER_ID);
+        provider.settings_config["codexRouting"]
+            .as_object_mut()
+            .expect("routing object")
+            .remove("officialAuth");
+        let mut official = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+            "OpenAI Official".to_string(),
+            json!({}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        official.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::DesktopCurrentLogin,
+                account_id: None,
+            }),
+            ..Default::default()
+        });
+        let providers = HashMap::from([(official.id.clone(), official)]);
+
+        let output = ProxyService::apply_codex_proxy_toml_config_with_provider_context(
+            r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+name = "Legacy Router"
+requires_openai_auth = true
+experimental_bearer_token = "PROXY_MANAGED"
+"#,
+            "http://127.0.0.1:5000/v1",
+            Some(&provider),
+            Some(&providers),
+            None,
+        )
+        .expect("project Provider-owned official auth");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+        let route = &parsed["model_providers"]
+            [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
+
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
+        assert!(route.get("experimental_bearer_token").is_none());
     }
 
     #[test]
