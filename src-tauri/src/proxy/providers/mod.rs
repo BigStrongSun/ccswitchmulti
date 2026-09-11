@@ -27,6 +27,7 @@ mod codex_request_tests;
 #[cfg(test)]
 mod codex_request_user_agent_tests;
 pub(crate) mod codex_responses_sse;
+mod codex_responses_tool_history;
 pub(crate) mod codex_terminal;
 mod codex_tool_schema;
 pub mod copilot_auth;

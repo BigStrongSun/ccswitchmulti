@@ -98,6 +98,96 @@ fn logical_request() -> Value {
     })
 }
 
+fn repeated_namespace_request() -> Value {
+    let function = |name: &str| {
+        json!({"type":"function", "name":name,
+        "parameters":{"type":"object", "properties":{}}, "strict":false})
+    };
+    let mut body = logical_request();
+    body["input"] = json!([
+        {"type":"tool_search_call", "call_id":"search_1", "status":"completed",
+            "execution":"client", "arguments":{"query":"first"}},
+        {"type":"tool_search_output", "call_id":"search_1", "status":"completed",
+            "execution":"client", "tools":[{"type":"namespace", "name":"mcp__hindsight",
+                "description":"Memory tools", "tools":[function("search")]}]},
+        {"type":"tool_search_call", "call_id":"search_2", "status":"completed",
+            "execution":"client", "arguments":{"query":"second"}},
+        {"type":"tool_search_output", "call_id":"search_2", "status":"completed",
+            "execution":"client", "tools":[{"type":"namespace", "name":"mcp__hindsight",
+                "description":"Memory tools", "tools":[function("search"), function("read")]}]},
+        {"role":"user", "content":"Reply OK"}
+    ]);
+    body
+}
+
+#[test]
+fn namespace_consolidation_is_shared_by_runtime_and_probe_preparation() {
+    for base_url in [
+        "https://opencode.ai/zen/go/v1",
+        "https://api.deepseek.com/v1",
+    ] {
+        let mut provider = third_party_provider("openai_responses");
+        provider.settings_config["base_url"] = json!(base_url);
+        let policy = CodexThirdPartyRequestPolicy::compile(&provider).unwrap();
+        let options = CodexRequestOptions::default();
+        let logical = repeated_namespace_request();
+        let runtime_protocol = policy
+            .prepare_protocol_body(CodexRequestTransport::Responses, logical.clone(), &options)
+            .unwrap();
+        assert_eq!(
+            runtime_protocol["input"][1]["tools"][0]["tools"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(runtime_protocol["input"][3]["tools"], json!([]));
+        assert_eq!(runtime_protocol["input"][3]["call_id"], "search_2");
+        assert_eq!(runtime_protocol["input"].as_array().unwrap().len(), 5);
+        let runtime = policy
+            .finalize_body(CodexRequestTransport::Responses, runtime_protocol, &options)
+            .unwrap();
+        let probe = policy
+            .prepare(CodexRequestTransport::Responses, logical, options)
+            .unwrap();
+        assert_eq!(runtime, probe.body);
+    }
+}
+
+#[test]
+fn namespace_consolidation_does_not_change_other_native_gateways() {
+    let policy =
+        CodexThirdPartyRequestPolicy::compile(&third_party_provider("openai_responses")).unwrap();
+    let logical = repeated_namespace_request();
+    let prepared = policy
+        .prepare_protocol_body(
+            CodexRequestTransport::Responses,
+            logical.clone(),
+            &CodexRequestOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(prepared["input"], logical["input"]);
+}
+
+#[test]
+fn namespace_consolidation_does_not_change_chat_conversion() {
+    let provider = third_party_provider("openai_chat");
+    let mut go = provider.clone();
+    go.settings_config["base_url"] = json!("https://opencode.ai/zen/go/v1");
+    let options = CodexRequestOptions::default();
+    let prepare = |provider: &Provider| {
+        CodexThirdPartyRequestPolicy::compile(provider)
+            .unwrap()
+            .prepare_protocol_body(
+                CodexRequestTransport::ChatCompletions,
+                repeated_namespace_request(),
+                &options,
+            )
+            .unwrap()
+    };
+    assert_eq!(prepare(&provider), prepare(&go));
+}
+
 fn realistic_codex_tool_request() -> Value {
     json!({
         "model": "visible-model",
