@@ -5699,6 +5699,18 @@ supported in one streaming turn`。
 ### 2026-09-11 live 复验：真实 automation_update schema 已走通运行态代理
 
 - 二次安装后用真实 `automation_update` `inputSchema` 对运行态 `127.0.0.1:15721/responses` 发最小 `deepseek-flash` 请求，路由命中 DeepSeek，本地/上游均 200 且返回 `"ok"`；编译后 union 属性已展开为 MFJS `anyOf`，二次安装后无同路径 422。运行态 PID 12684、SHA-256 `AE07665...139B`、来源 `a582a678`。
+
+## 2026-09-11 OpenAI Official Provider 认证所有权与独立 OAuth 路由根修
+
+- OpenAI Official Provider 现在是官方认证配置的唯一事实源：同一 Provider 内明确选择 Desktop 原生登录、固定 CCSM OAuth 账号或 OAuth 账号池。MultiRouter 只消费 Provider 已解析的认证策略并负责模型路由，不再拥有或隐藏一套平行 OAuth 配置；因此关闭 MultiRouter 后，direct Official route 仍可继续使用固定 OAuth 或账号池。
+- UI 入口移到 OpenAI Official Provider 的编辑表单和 Provider 卡片操作中；原先隐藏在 MultiRouter/不相关设置内的官方认证入口已移除。Provider 保存、投影和运行时 facade 都从同一 `officialAuth` 契约派生，旧 schema-v2 Router 认证会在来源唯一时迁移；存在歧义时 fail closed，不能猜测账号或覆盖 Desktop 身份。
+- raw 转发的根因是账号池展开早于 route 解析：请求仍拿着 facade/Router 身份时无法确定唯一 Official route，或者未知 image/audio/file endpoint 被错误套用文本 fallback。正确顺序现为“按 endpoint 解析唯一 route -> 记录 request-local hit/miss -> 仅对命中的 Official route 展开账号池 -> 转发”；未知非文本 endpoint 不展开文本 fallback，route miss 也不会二次编译。
+- 测试注入的 OAuth manager 现在真正参与 pool expansion。覆盖 Desktop、固定 managed OAuth、direct managed pool、direct Desktop pool 和 MultiRouter managed pool；pool 测试预置 quota checked，保证离线且不会访问真实 `wham/usage`。managed/native bearer 与 `chatgpt-account-id` 的替换/保留边界不变。
+- direct Official 的 synthetic pool candidate 继续以 synthetic account ID 作为 circuit attempt key，但补上 canonical parent `codex-official`；status、health、failover、hot-switch 和 current provider 因而持久归因回 Official Provider。已有 MultiRouter parent 不会被覆盖，也不会制造虚假 failover。
+- 功能提交为 `1ba0ef0c`、`9380062e`、`d4bd60e6`、`627270d8`、`ff626b95`、`5562b68f`、`92d5f0c1`、`066ff4e7`、`48f742ca`；`dc8e5acf` 合入当时的 `main@5558e553`。验收期间 `main` 又新增 DeepSeek raw reasoning 提交 `ef2c48da`，经无冲突审计后以 `dd687b3` 合入候选，两条历史均保留。
+- 集中验收结果：前端全量 192/192 files、1581/1581 tests；隔离 `LOCALAPPDATA` 的 Rust library 单线程 4131 passed、0 failed、7 ignored；raw compact 5/5、raw route marker 1/1；并发新增 DeepSeek 投影 16/16、最终目录 1/1。最终 typecheck、Prettier、`cargo check --all-targets --no-default-features`、CI 同口径严格 Clippy、rustfmt 和 `git diff --check` 全通过；独立审查无 Critical/Important/Minor，结论 Ready to merge。
+- 本轮只完成源码、测试、项目 memory 和本地 `main` 集成；没有构建安装包、安装、重启、发布或推送，也没有触碰 `127.0.0.1:15721`。安装态是否呈现新入口及关闭 MultiRouter 后的真实 OAuth 请求仍需后续独立构建/安装验收，不能用源码门禁代替运行态证明。
+
 # 2026-09-11 Codex 状态与修复进度/卡死检测根修
 
 - 刷新进度原先只有 `stage`，长操作无日志/心跳，历史修复无超时，前端无静默看门狗且迟到结果可覆盖失败。根修增加结构化日志、2 秒心跳、分页历史逐文件/迁移进度和 15 分钟修复超时；前端增加日志面板、最后活动/阶段耗时、30 秒无事件失败和 run id 迟到结果隔离。前端全量 1566/1566、Rust 串行 4113/0/7、typecheck/Prettier/rustfmt/check 通过。详见 `memory-2026-09-11-codex-status-repair-progress.md`。
