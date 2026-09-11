@@ -1278,14 +1278,32 @@ pub(crate) fn resolve_codex_chat_reasoning_projection(
         return manual_override.projection;
     }
     if provider.uses_manual_codex_protocol() {
-        return match provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.codex_reasoning_projection.as_deref())
-        {
-            Some("raw_reasoning_text") => ReasoningProjection::RawReasoningText,
-            _ => ReasoningProjection::None,
+        let Some(meta) = provider.meta.as_ref() else {
+            return ReasoningProjection::None;
         };
+
+        if let Some(projection) = meta.codex_reasoning_projection.as_deref() {
+            return match projection.trim().to_ascii_lowercase().as_str() {
+                "raw_reasoning_text" => ReasoningProjection::RawReasoningText,
+                _ => ReasoningProjection::None,
+            };
+        }
+
+        // A manual Chat provider may predate the explicit projection field.
+        // If its declared upstream response format is reasoning_content, the
+        // field is raw model text and is safe to project as raw reasoning.
+        // Summary projection remains fail-closed because it requires observed
+        // Responses protocol evidence, not a provider declaration alone.
+        if meta
+            .codex_chat_reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.output_format.as_deref())
+            .is_some_and(|format| format.trim().eq_ignore_ascii_case("reasoning_content"))
+        {
+            return ReasoningProjection::RawReasoningText;
+        }
+
+        return ReasoningProjection::None;
     }
 
     resolve_route_or_equivalent_provider_profile(provider, &target, db, |record| {
@@ -8207,6 +8225,41 @@ wire_api = "responses"
                 100,
             ),
             ReasoningProjection::None
+        );
+    }
+
+    #[test]
+    fn manual_chat_reasoning_content_defaults_to_raw_projection_when_projection_is_missing() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "manual-secret"},
+            "config": "model = \"glm-5.3-flash\"\nbase_url = \"https://open.bigmodel.cn/api/coding/paas/v4\"\nwire_api = \"chat\"\n"
+        }));
+        provider.meta = Some(ProviderMeta {
+            codex_protocol_mode: Some(crate::provider::CodexProtocolMode::Manual),
+            codex_chat_reasoning: Some(CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                supports_effort: Some(true),
+                thinking_param: Some("thinking".to_string()),
+                effort_param: Some("reasoning_effort".to_string()),
+                effort_value_mode: Some("deepseek".to_string()),
+                min_output_tokens: None,
+                default_output_tokens: None,
+                output_format: Some("reasoning_content".to_string()),
+                disable_contract: false,
+            }),
+            ..ProviderMeta::default()
+        });
+
+        assert_eq!(
+            resolve_codex_chat_reasoning_projection(
+                &provider,
+                "glm-5.3-flash",
+                "glm-5.3-flash",
+                &db,
+                100,
+            ),
+            ReasoningProjection::RawReasoningText
         );
     }
 

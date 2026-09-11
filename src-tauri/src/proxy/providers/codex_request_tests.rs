@@ -1055,6 +1055,164 @@ fn moonshot_schema_rejects_overlapping_one_of_instead_of_changing_exclusive_sema
 }
 
 #[test]
+fn moonshot_schema_projects_nested_root_union_branches_for_codex_dynamic_tools() {
+    let policy = CodexThirdPartyRequestPolicy::compile(&third_party_provider("openai_responses"))
+        .expect("compile third-party request policy");
+    let body = json!({
+        "model": "visible-model",
+        "input": "probe",
+        "tools": [{
+            "type": "function",
+            "name": "codex_app__automation_update",
+            "strict": true,
+            "parameters": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "mode": {"const": "view"},
+                            "id": {"type": "string"}
+                        },
+                        "required": ["mode", "id"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "mode": {"const": "create"},
+                                    "projectId": {"type": "string"}
+                                },
+                                "required": ["mode", "projectId"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "mode": {"const": "create"},
+                                    "targetThreadId": {"type": "string"}
+                                },
+                                "required": ["mode"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "mode": {"const": "delete"},
+                            "id": {"type": "string"}
+                        },
+                        "required": ["mode", "id"],
+                        "additionalProperties": false
+                    }
+                ]
+            }
+        }]
+    });
+
+    let prepared = policy
+        .prepare(
+            CodexRequestTransport::Responses,
+            body,
+            CodexRequestOptions {
+                tool_schema_dialect: Some(ToolSchemaDialect::MoonshotMfjs),
+                ..CodexRequestOptions::default()
+            },
+        )
+        .expect("nested callable root-union branches should project for MFJS");
+    let schema = &prepared.body["tools"][0]["parameters"];
+
+    assert_eq!(schema["type"], "object");
+    assert!(schema.get("oneOf").is_none());
+    assert!(schema.get("anyOf").is_none());
+    assert_eq!(schema["required"], json!(["mode"]));
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(schema["properties"]["id"]["type"], "string");
+    assert_eq!(schema["properties"]["projectId"]["type"], "string");
+    assert_eq!(schema["properties"]["targetThreadId"]["type"], "string");
+    assert_eq!(
+        schema["properties"]["mode"]["anyOf"]
+            .as_array()
+            .expect("all operation modes remain available")
+            .len(),
+        3
+    );
+    assert_eq!(prepared.body["tools"][0]["strict"], false);
+}
+
+#[test]
+fn moonshot_schema_flattens_root_union_branches_reachable_through_local_refs() {
+    let policy = CodexThirdPartyRequestPolicy::compile(&third_party_provider("openai_responses"))
+        .expect("compile third-party request policy");
+    let body = json!({
+        "model": "visible-model",
+        "input": "probe",
+        "tools": [{
+            "type": "function",
+            "name": "mcp__codex_app__automation_update",
+            "strict": true,
+            "parameters": {
+                "oneOf": [
+                    {"$ref": "#/$defs/create_or_heartbeat"},
+                    {"$ref": "#/$defs/view"}
+                ],
+                "$defs": {
+                    "view": {
+                        "type": "object",
+                        "properties": {"mode": {"const": "view"}},
+                        "required": ["mode"],
+                        "additionalProperties": false
+                    },
+                    "create_or_heartbeat": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {"mode": {"const": "create"}},
+                                "required": ["mode"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {"mode": {"const": "heartbeat"}},
+                                "required": ["mode"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            }
+        }]
+    });
+
+    let prepared = policy
+        .prepare(
+            CodexRequestTransport::Responses,
+            body,
+            CodexRequestOptions {
+                tool_schema_dialect: Some(ToolSchemaDialect::MoonshotMfjs),
+                ..CodexRequestOptions::default()
+            },
+        )
+        .expect("local-ref root-union branches should flatten for MFJS");
+    let schema = &prepared.body["tools"][0]["parameters"];
+
+    assert_eq!(schema["type"], "object");
+    assert!(schema.get("oneOf").is_none());
+    assert!(schema.get("anyOf").is_none());
+    assert_eq!(schema["required"], json!(["mode"]));
+    assert_eq!(
+        schema["properties"]["mode"]["anyOf"]
+            .as_array()
+            .expect("view/create/heartbeat modes remain available")
+            .len(),
+        3
+    );
+    assert_eq!(prepared.body["tools"][0]["strict"], false);
+}
+
+#[test]
 fn moonshot_schema_merges_supported_ref_and_any_of_constraints_without_losing_them() {
     let policy = CodexThirdPartyRequestPolicy::compile(&third_party_provider("openai_responses"))
         .expect("compile third-party request policy");
