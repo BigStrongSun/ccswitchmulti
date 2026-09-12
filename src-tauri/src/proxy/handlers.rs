@@ -3035,6 +3035,14 @@ async fn handle_responses_for_app(
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
+    let desktop_reasoning_mapping = desktop_reasoning
+        && super::providers::resolve_codex_native_responses_reasoning_projection(
+            &ctx.provider,
+            &ctx.request_model,
+            ctx.outbound_model.as_deref().unwrap_or(&ctx.request_model),
+            &state.db,
+            chrono::Utc::now().timestamp(),
+        ) == crate::protocol_compatibility::ReasoningProjection::RawReasoningText;
 
     if super::providers::should_convert_codex_responses_to_anthropic(&ctx.provider, &endpoint) {
         return handle_codex_anthropic_to_responses_transform(
@@ -3122,7 +3130,7 @@ async fn handle_responses_for_app(
     }
 
     let response = if should_wrap_native_codex_responses_stream(is_stream, &response)
-        || (desktop_reasoning && response.status().is_success() && response.is_sse())
+        || (desktop_reasoning_mapping && response.status().is_success() && response.is_sse())
     {
         let status = response.status();
         let response_headers = response.headers().clone();
@@ -3139,7 +3147,7 @@ async fn handle_responses_for_app(
             }),
             ctx.app_config.capacity_retry_enabled,
         );
-        let stream = if desktop_reasoning {
+        let stream = if desktop_reasoning_mapping {
             Box::pin(create_desktop_reasoning_mapping_stream(stream))
                 as std::pin::Pin<
                     Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send>,
@@ -3151,7 +3159,7 @@ async fn handle_responses_for_app(
                 >
         };
         super::hyper_client::ProxyResponse::streamed(status, response_headers, stream)
-    } else if desktop_reasoning && response.status().is_success() && response.is_json() {
+    } else if desktop_reasoning_mapping && response.status().is_success() && response.is_json() {
         let (mut response_headers, status, body_bytes) =
             read_decoded_body(response, ctx.tag, std::time::Duration::ZERO).await?;
         if let Ok(mut value) = serde_json::from_slice::<Value>(&body_bytes) {

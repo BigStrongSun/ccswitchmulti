@@ -11,9 +11,17 @@
 - `response.reasoning_text.delta`/`done` 在缺少先行 `output_item.added` 时补发 reasoning item 和 summary part added，再发 summary delta/done；已有 item 不重复补发。
 - CLI、TUI、外部 API、非 Desktop 请求继续保留原始 reasoning 语义；summary/opaque/encrypted-only 内容不伪造可读文本。
 
+## 探测绑定补全
+
+- Desktop 映射没有独立 UI 开关，默认由可信本机 Codex Desktop 请求自动触发，但前提是最终 provider/model 对应的协议探测允许该投影。
+- Chat -> Responses 路径使用已验证且未过期的 OpenAI Chat profile；原生 Responses 路径现在同样使用最终 provider/model 对应的 OpenAI Responses profile。
+- 原生 Responses 只有在 profile 的 `selected_transport=open_ai_responses`、`readiness=verified`、版本/有效期通过，且 reasoning 形状为 readable raw source 时，才把 raw reasoning 生命周期映射为 Desktop summary 生命周期。
+- 已有 native summary、opaque/no-reasoning、过期/partial/unverified profile，以及不同 endpoint/凭据/route 的记录均 fail closed；显式 manual override 仍是有意的人工例外。
+
 ## 验证与运行边界
 
 - RED：新增的 variant normalization 和 delta-first lifecycle 测试分别在旧实现下失败。
 - GREEN：`codex_reasoning_mapping` 6/6 通过；`cargo check --all-targets --no-default-features` 通过；`cargo fmt` 和 `git diff --check` 通过。
 - 源码提交：`699ad9be`；先前通用 Desktop 映射提交：`1a566dc1`。
+- 本轮补齐原生 Responses 的探测绑定，避免仅凭 `originator: Codex Desktop` 无条件重写任意 Responses 成功响应；新增 DeepSeek-style `native_responses` readable profile 测试。
 - 当前运行态仍是安装版旧 hash `4BDC3C...` 的 CCSM，PID 已自动恢复为 `4800`，端口 `127.0.0.1:15720`，`/health=200`。本轮没有再次杀进程或替换在线二进制，避免切断当前 Codex 链路；需要旁路/恢复事务后再做安装验收。

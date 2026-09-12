@@ -79,9 +79,9 @@ pub(crate) use codex::{
     is_codex_desktop_reasoning_client, is_codex_remote_compact_endpoint,
     is_codex_responses_endpoint, prepare_codex_native_responses_model,
     provider_uses_native_codex_auth, resolve_codex_chat_protocol_target,
-    resolve_codex_chat_reasoning_projection, resolve_codex_primary_route_from_settings,
-    resolve_codex_request_compatibility, strip_legacy_codex_official_auth,
-    CODEX_ACCOUNT_POOL_ENABLED,
+    resolve_codex_chat_reasoning_projection, resolve_codex_native_responses_reasoning_projection,
+    resolve_codex_primary_route_from_settings, resolve_codex_request_compatibility,
+    strip_legacy_codex_official_auth, CODEX_ACCOUNT_POOL_ENABLED,
 };
 pub use codex::{
     apply_codex_chat_upstream_model, apply_codex_upstream_model, build_codex_route_probe_provider,

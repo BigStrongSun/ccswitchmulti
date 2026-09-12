@@ -1506,6 +1506,58 @@ pub(crate) fn resolve_codex_chat_reasoning_projection(
     .unwrap_or(ReasoningProjection::None)
 }
 
+/// Resolves the reasoning shape observed for a native Responses upstream.
+///
+/// The Desktop adapter must not rewrite every successful Responses response:
+/// a native provider may already emit summary events, or may not expose a
+/// readable reasoning channel at all.  Only a current, verified Responses
+/// probe profile with a readable reasoning source is allowed to request the
+/// raw-text -> summary projection at the response edge.
+pub(crate) fn resolve_codex_native_responses_reasoning_projection(
+    provider: &Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: &Database,
+    now: i64,
+) -> ReasoningProjection {
+    let Some(target) = resolve_codex_protocol_target(
+        provider,
+        public_model,
+        upstream_model,
+        TransportKind::OpenAiResponses,
+    ) else {
+        return ReasoningProjection::None;
+    };
+
+    if let Ok(Some(manual_override)) = db.get_reasoning_manual_override(&target) {
+        return manual_override.projection;
+    }
+
+    if provider.uses_manual_codex_protocol() {
+        return provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_reasoning_projection.as_deref())
+            .map(
+                |projection| match projection.trim().to_ascii_lowercase().as_str() {
+                    "raw_reasoning_text" => ReasoningProjection::RawReasoningText,
+                    "reasoning_summary" => ReasoningProjection::ReasoningSummary,
+                    _ => ReasoningProjection::None,
+                },
+            )
+            .unwrap_or(ReasoningProjection::None);
+    }
+
+    resolve_route_or_equivalent_provider_profile(provider, &target, db, |record| {
+        record.probe_version == PROBE_PROFILE_VERSION
+            && record.expires_at >= now
+            && record.result.readiness == ProbeReadiness::Verified
+            && record.result.selected_transport == Some(TransportKind::OpenAiResponses)
+    })
+    .map(|record| record.automatic_reasoning_projection(now))
+    .unwrap_or(ReasoningProjection::None)
+}
+
 /// Whether this trusted local Codex request is rendered by the Desktop client.
 /// Desktop currently only surfaces summary-backed reasoning items in the main
 /// transcript, so CCSM may adapt third-party raw reasoning at the response edge.
@@ -1727,12 +1779,26 @@ pub(crate) fn resolve_codex_chat_protocol_target(
     public_model: &str,
     upstream_model: &str,
 ) -> Option<ProbeTargetKey> {
+    resolve_codex_protocol_target(
+        provider,
+        public_model,
+        upstream_model,
+        TransportKind::OpenAiChat,
+    )
+}
+
+fn resolve_codex_protocol_target(
+    provider: &Provider,
+    public_model: &str,
+    upstream_model: &str,
+    transport: TransportKind,
+) -> Option<ProbeTargetKey> {
     if public_model.trim().is_empty() || upstream_model.trim().is_empty() {
         return None;
     }
     compile_provider_probe_candidate_for_request(provider, public_model, upstream_model)
         .ok()?
-        .target_key(TransportKind::OpenAiChat)
+        .target_key(transport)
         .ok()
 }
 
@@ -8386,7 +8452,7 @@ wire_api = "responses"
         source: &str,
     ) -> ProbeTargetKey {
         use crate::protocol_compatibility::{
-            ProbeReadiness, ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
         };
 
         let target = compile_provider_probe_candidate_for_model(
@@ -8572,7 +8638,7 @@ wire_api = "responses"
     #[test]
     fn partial_detected_route_transport_does_not_override_the_request_protocol() {
         use crate::protocol_compatibility::{
-            ProbeReadiness, ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
         };
 
         let db = Database::memory().expect("memory database");
@@ -8973,6 +9039,90 @@ wire_api = "responses"
             target, result, 100, 200,
         ))
         .expect("save Responses compatibility profile");
+    }
+
+    #[test]
+    fn native_responses_reasoning_projection_requires_the_verified_responses_profile() {
+        use crate::protocol_compatibility::{
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
+        };
+
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"deepseek-reasoner\"\nbase_url = \"https://api.deepseek.com/v1\"\nwire_api = \"responses\"\n",
+            "base_url": "https://api.deepseek.com/v1"
+        }));
+        provider.id = "deepseek-provider".to_string();
+
+        assert_eq!(
+            resolve_codex_native_responses_reasoning_projection(
+                &provider,
+                "deepseek-reasoner",
+                "deepseek-reasoner",
+                &db,
+                150,
+            ),
+            ReasoningProjection::None,
+            "Desktop mapping must fail closed before a verified Responses probe exists"
+        );
+
+        let target = compile_provider_probe_candidate_for_model(
+            &provider,
+            "deepseek-reasoner".to_string(),
+            "deepseek-reasoner".to_string(),
+        )
+        .expect("compile Responses profile Provider policy")
+        .target_key(TransportKind::OpenAiResponses)
+        .expect("Responses profile target");
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": "open_ai_responses",
+            "readiness": "verified",
+            "branches": [{
+                "assessment": {
+                    "transport": "open_ai_responses",
+                    "baseline": "passed",
+                    "streaming": "passed",
+                    "forced_tool": "passed",
+                    "continuation": "passed"
+                },
+                "reasoning_shape": {
+                    "semantic": "readable",
+                    "source": "native_responses",
+                    "pre_tool_visible_content": "absent"
+                },
+                "evidence": []
+            }]
+        }))
+        .expect("verified Responses reasoning result");
+        db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
+            target, result, 100, 200,
+        ))
+        .expect("save Responses reasoning profile");
+
+        assert_eq!(
+            resolve_codex_native_responses_reasoning_projection(
+                &provider,
+                "deepseek-reasoner",
+                "deepseek-reasoner",
+                &db,
+                150,
+            ),
+            ReasoningProjection::RawReasoningText
+        );
+
+        provider.settings_config["base_url"] = json!("https://other.example/v1");
+        assert_eq!(
+            resolve_codex_native_responses_reasoning_projection(
+                &provider,
+                "deepseek-reasoner",
+                "deepseek-reasoner",
+                &db,
+                150,
+            ),
+            ReasoningProjection::None,
+            "a different endpoint must not reuse the Responses probe"
+        );
     }
 
     #[test]
