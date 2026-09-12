@@ -21,6 +21,7 @@ pub(crate) mod codex_multi_agent;
 pub mod codex_oauth_auth;
 pub(crate) mod codex_oauth_pool;
 pub(crate) mod codex_reasoning;
+pub(crate) mod codex_reasoning_mapping;
 pub(crate) mod codex_request;
 #[cfg(test)]
 mod codex_request_tests;
@@ -70,6 +71,18 @@ pub use claude::{
     ClaudeAdapter,
 };
 pub use codex::CodexAdapter;
+pub(crate) use codex::{
+    adapt_codex_reasoning_projection_for_desktop,
+    apply_detected_codex_transport_to_effective_provider, codex_provider_remote_compaction_enabled,
+    codex_route_auth_source, codex_route_supports_responses_compaction,
+    codex_route_target_provider_id_from_route, codex_route_uses_official_agent_backend,
+    is_codex_desktop_reasoning_client, is_codex_remote_compact_endpoint,
+    is_codex_responses_endpoint, prepare_codex_native_responses_model,
+    provider_uses_native_codex_auth, resolve_codex_chat_protocol_target,
+    resolve_codex_chat_reasoning_projection, resolve_codex_primary_route_from_settings,
+    resolve_codex_request_compatibility, strip_legacy_codex_official_auth,
+    CODEX_ACCOUNT_POOL_ENABLED,
+};
 pub use codex::{
     apply_codex_chat_upstream_model, apply_codex_upstream_model, build_codex_route_probe_provider,
     classify_codex_provider_auth_facade, codex_multirouter_needs_plaintext_v2_collaboration,
@@ -84,16 +97,6 @@ pub use codex::{
     resolve_codex_v2_raw_passthrough_provider, resolve_codex_v2_routed_provider,
     should_convert_codex_responses_to_anthropic, should_convert_codex_responses_to_chat,
     should_convert_codex_responses_to_messages, CodexMultiRouterAuthFacade, ResolvedCodexRoute,
-};
-pub(crate) use codex::{
-    apply_detected_codex_transport_to_effective_provider, codex_provider_remote_compaction_enabled,
-    codex_route_auth_source, codex_route_supports_responses_compaction,
-    codex_route_target_provider_id_from_route, codex_route_uses_official_agent_backend,
-    is_codex_remote_compact_endpoint, is_codex_responses_endpoint,
-    prepare_codex_native_responses_model, provider_uses_native_codex_auth,
-    resolve_codex_chat_protocol_target, resolve_codex_chat_reasoning_projection,
-    resolve_codex_primary_route_from_settings, resolve_codex_request_compatibility,
-    strip_legacy_codex_official_auth, CODEX_ACCOUNT_POOL_ENABLED,
 };
 pub use gemini::GeminiAdapter;
 

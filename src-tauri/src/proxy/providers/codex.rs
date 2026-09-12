@@ -1506,6 +1506,31 @@ pub(crate) fn resolve_codex_chat_reasoning_projection(
     .unwrap_or(ReasoningProjection::None)
 }
 
+/// Whether this trusted local Codex request is rendered by the Desktop client.
+/// Desktop currently only surfaces summary-backed reasoning items in the main
+/// transcript, so CCSM may adapt third-party raw reasoning at the response edge.
+pub(crate) fn is_codex_desktop_reasoning_client(
+    headers: &http::HeaderMap,
+    trusted_codex_client: bool,
+) -> bool {
+    trusted_codex_client
+        && headers
+            .get("originator")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("Codex Desktop"))
+}
+
+pub(crate) fn adapt_codex_reasoning_projection_for_desktop(
+    projection: ReasoningProjection,
+    desktop_client: bool,
+) -> ReasoningProjection {
+    if desktop_client && projection == ReasoningProjection::RawReasoningText {
+        ReasoningProjection::ReasoningSummary
+    } else {
+        projection
+    }
+}
+
 fn resolve_route_or_equivalent_provider_profile<F>(
     provider: &Provider,
     target: &ProbeTargetKey,
@@ -4129,6 +4154,35 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn desktop_reasoning_classification_is_trusted_and_narrow() {
+        let mut desktop = http::HeaderMap::new();
+        desktop.insert(
+            "originator",
+            http::HeaderValue::from_static("Codex Desktop"),
+        );
+        let mut cli = http::HeaderMap::new();
+        cli.insert("originator", http::HeaderValue::from_static("codex_cli_rs"));
+
+        assert!(is_codex_desktop_reasoning_client(&desktop, true));
+        assert!(!is_codex_desktop_reasoning_client(&desktop, false));
+        assert!(!is_codex_desktop_reasoning_client(&cli, true));
+        assert_eq!(
+            adapt_codex_reasoning_projection_for_desktop(
+                ReasoningProjection::RawReasoningText,
+                true,
+            ),
+            ReasoningProjection::ReasoningSummary
+        );
+        assert_eq!(
+            adapt_codex_reasoning_projection_for_desktop(
+                ReasoningProjection::RawReasoningText,
+                false,
+            ),
+            ReasoningProjection::RawReasoningText
+        );
+    }
 
     #[test]
     fn capability_effort_mode_keeps_wide_mappings_for_narrow_selectable() {

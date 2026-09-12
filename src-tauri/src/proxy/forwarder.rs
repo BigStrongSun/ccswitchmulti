@@ -89,6 +89,7 @@ fn create_hosted_codex_chat_sse_stream_from_verified_profile<F, Fut>(
     upstream_model: &str,
     db: Arc<crate::database::Database>,
     now: i64,
+    codex_desktop_reasoning: bool,
     diagnostic_context: Option<super::providers::streaming_codex_chat::HostedToolDiagnosticContext>,
     on_hosted_tools: F,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send
@@ -96,12 +97,15 @@ where
     F: FnMut(Vec<CompletedChatToolCall>, Value) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<Option<ChatSseStream>, String>> + Send,
 {
-    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
-        provider,
-        public_model,
-        upstream_model,
-        db.as_ref(),
-        now,
+    let reasoning_projection = super::providers::adapt_codex_reasoning_projection_for_desktop(
+        super::providers::resolve_codex_chat_reasoning_projection(
+            provider,
+            public_model,
+            upstream_model,
+            db.as_ref(),
+            now,
+        ),
+        codex_desktop_reasoning,
     );
     let observation = super::providers::resolve_codex_chat_protocol_target(
         provider,
@@ -258,6 +262,7 @@ pub struct RequestForwarder {
     session_client_provided: bool,
     /// 是否允许保留可信本地 Codex 客户端提供的 first-party originator。
     preserve_codex_client_originator: bool,
+    codex_desktop_reasoning: bool,
     /// 整流器配置
     rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -904,6 +909,7 @@ impl RequestForwarder {
         session_id: String,
         session_client_provided: bool,
         preserve_codex_client_originator: bool,
+        codex_desktop_reasoning: bool,
         streaming_first_byte_timeout: u64,
         _streaming_idle_timeout: u64,
         rectifier_config: RectifierConfig,
@@ -929,6 +935,7 @@ impl RequestForwarder {
             session_id,
             session_client_provided,
             preserve_codex_client_originator,
+            codex_desktop_reasoning,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -4440,6 +4447,7 @@ impl RequestForwarder {
                         upstream_model,
                         self.router.database_arc(),
                         chrono::Utc::now().timestamp(),
+                        self.codex_desktop_reasoning,
                         Some(hosted_tool_diagnostic_context),
                         callback,
                     );
@@ -8850,6 +8858,7 @@ mod tests {
             "qwen-mapped",
             Arc::new(db),
             200,
+            false,
             None,
             |_calls, _assistant| async { Ok::<Option<ChatSseStream>, String>(None) },
         )
@@ -8881,6 +8890,7 @@ mod tests {
             "qwen-mapped",
             Arc::new(db),
             200,
+            false,
             None,
             |_calls, _assistant| async { Ok::<Option<ChatSseStream>, String>(None) },
         )
@@ -9464,6 +9474,7 @@ mod tests {
             session_id: String::new(),
             session_client_provided: false,
             preserve_codex_client_originator: false,
+            codex_desktop_reasoning: false,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
@@ -9771,6 +9782,7 @@ mod tests {
             session_id: String::new(),
             session_client_provided: false,
             preserve_codex_client_originator: false,
+            codex_desktop_reasoning: false,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
@@ -10254,6 +10266,7 @@ mod tests {
             session_id: String::new(),
             session_client_provided: false,
             preserve_codex_client_originator: false,
+            codex_desktop_reasoning: false,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
@@ -10318,6 +10331,7 @@ mod tests {
             session_id: String::new(),
             session_client_provided: false,
             preserve_codex_client_originator: false,
+            codex_desktop_reasoning: false,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
@@ -10427,6 +10441,7 @@ mod tests {
             session_id: String::new(),
             session_client_provided: false,
             preserve_codex_client_originator: false,
+            codex_desktop_reasoning: false,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
@@ -10517,6 +10532,7 @@ mod tests {
             session_id: String::new(),
             session_client_provided: false,
             preserve_codex_client_originator: false,
+            codex_desktop_reasoning: false,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
@@ -13599,6 +13615,7 @@ mod tests {
             session_id: String::new(),
             session_client_provided: false,
             preserve_codex_client_originator: false,
+            codex_desktop_reasoning: false,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),

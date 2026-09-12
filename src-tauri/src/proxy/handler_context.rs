@@ -69,6 +69,9 @@ pub struct RequestContext {
     /// 只有本地 Codex 应用入口可以保留；External API 临时 provider 和其他协议转换
     /// 必须由 forwarder 回退到统一 CLI 标识，避免外部调用方伪造 first-party 身份。
     pub preserve_codex_client_originator: bool,
+    /// Whether a trusted local Codex Desktop caller needs summary-backed
+    /// reasoning presentation for third-party raw reasoning.
+    pub codex_desktop_reasoning: bool,
     /// 整流器配置
     pub rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -163,6 +166,10 @@ impl RequestContext {
         );
 
         let preserve_codex_client_originator = matches!(app_type, AppType::Codex);
+        let codex_desktop_reasoning = crate::proxy::providers::is_codex_desktop_reasoning_client(
+            headers,
+            preserve_codex_client_originator,
+        );
         Ok(Self {
             start_time,
             app_config,
@@ -177,6 +184,7 @@ impl RequestContext {
             session_id,
             session_client_provided: session_result.client_provided,
             preserve_codex_client_originator,
+            codex_desktop_reasoning,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -238,6 +246,7 @@ impl RequestContext {
             session_id,
             session_client_provided: session_result.client_provided,
             preserve_codex_client_originator: false,
+            codex_desktop_reasoning: false,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -291,6 +300,7 @@ impl RequestContext {
             self.session_id.clone(),
             self.session_client_provided,
             self.preserve_codex_client_originator,
+            self.codex_desktop_reasoning,
             first_byte_timeout,
             idle_timeout,
             self.rectifier_config.clone(),

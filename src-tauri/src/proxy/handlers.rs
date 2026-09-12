@@ -24,6 +24,9 @@ use super::{
         codex_chat_history::{
             record_responses_sse_stream, record_responses_sse_stream_with_request,
         },
+        codex_reasoning_mapping::{
+            create_desktop_reasoning_mapping_stream, map_completed_response_for_desktop,
+        },
         get_adapter, get_claude_api_format,
         hosted_tools::bridge::HOSTED_TOOL_LOOP_HEADER,
         openai_compat,
@@ -2955,6 +2958,11 @@ async fn handle_responses_for_app(
     let body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
     let request_body_for_history = body.clone();
+    let desktop_reasoning = app_type == AppType::Codex
+        && super::providers::is_codex_desktop_reasoning_client(
+            &headers,
+            should_handle_as_codex_client(&headers),
+        );
 
     let endpoint = endpoint_with_query(&uri, "/responses");
     let mut ctx = if app_type == AppType::Codex && !should_handle_as_codex_client(&headers) {
@@ -3113,26 +3121,55 @@ async fn handle_responses_for_app(
             .await;
     }
 
-    let response = if should_wrap_native_codex_responses_stream(is_stream, &response) {
+    let response = if should_wrap_native_codex_responses_stream(is_stream, &response)
+        || (desktop_reasoning && response.status().is_success() && response.is_sse())
+    {
         let status = response.status();
         let response_headers = response.headers().clone();
-        super::hyper_client::ProxyResponse::streamed(
-            status,
-            response_headers,
-            create_resilient_responses_sse_stream_with_context(
-                Box::pin(response.bytes_stream()),
-                stream_reconnect,
-                Some(StreamLogContext {
-                    session_id: ctx.session_id.clone(),
-                    model: ctx
-                        .outbound_model
-                        .clone()
-                        .unwrap_or_else(|| ctx.request_model.clone()),
-                    provider_id: ctx.provider.id.clone(),
-                }),
-                ctx.app_config.capacity_retry_enabled,
-            ),
-        )
+        let stream = create_resilient_responses_sse_stream_with_context(
+            Box::pin(response.bytes_stream()),
+            stream_reconnect,
+            Some(StreamLogContext {
+                session_id: ctx.session_id.clone(),
+                model: ctx
+                    .outbound_model
+                    .clone()
+                    .unwrap_or_else(|| ctx.request_model.clone()),
+                provider_id: ctx.provider.id.clone(),
+            }),
+            ctx.app_config.capacity_retry_enabled,
+        );
+        let stream = if desktop_reasoning {
+            Box::pin(create_desktop_reasoning_mapping_stream(stream))
+                as std::pin::Pin<
+                    Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send>,
+                >
+        } else {
+            Box::pin(stream)
+                as std::pin::Pin<
+                    Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send>,
+                >
+        };
+        super::hyper_client::ProxyResponse::streamed(status, response_headers, stream)
+    } else if desktop_reasoning && response.status().is_success() && response.is_json() {
+        let (mut response_headers, status, body_bytes) =
+            read_decoded_body(response, ctx.tag, std::time::Duration::ZERO).await?;
+        if let Ok(mut value) = serde_json::from_slice::<Value>(&body_bytes) {
+            map_completed_response_for_desktop(&mut value);
+            let rebuilt = serde_json::to_vec(&value).map_err(|error| {
+                ProxyError::TransformError(format!(
+                    "Failed to serialize mapped Responses response: {error}"
+                ))
+            })?;
+            strip_entity_headers_for_rebuilt_body(&mut response_headers);
+            super::hyper_client::ProxyResponse::buffered(
+                status,
+                response_headers,
+                Bytes::from(rebuilt),
+            )
+        } else {
+            super::hyper_client::ProxyResponse::buffered(status, response_headers, body_bytes)
+        }
     } else {
         response
     };
@@ -3538,6 +3575,7 @@ async fn handle_codex_xai_native_responses_rewrite(
         })
 }
 
+#[cfg(test)]
 fn create_codex_chat_sse_stream_from_verified_profile<E: std::error::Error + Send + 'static>(
     stream: impl futures::Stream<Item = Result<Bytes, E>> + Send + 'static,
     tool_context: transform_codex_chat::CodexToolContext,
@@ -3547,12 +3585,39 @@ fn create_codex_chat_sse_stream_from_verified_profile<E: std::error::Error + Sen
     db: std::sync::Arc<crate::database::Database>,
     now: i64,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
-    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
+    create_codex_chat_sse_stream_from_verified_profile_for_client(
+        stream,
+        tool_context,
         provider,
         public_model,
         upstream_model,
-        db.as_ref(),
+        db,
         now,
+        false,
+    )
+}
+
+fn create_codex_chat_sse_stream_from_verified_profile_for_client<
+    E: std::error::Error + Send + 'static,
+>(
+    stream: impl futures::Stream<Item = Result<Bytes, E>> + Send + 'static,
+    tool_context: transform_codex_chat::CodexToolContext,
+    provider: &crate::provider::Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: std::sync::Arc<crate::database::Database>,
+    now: i64,
+    desktop_client: bool,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    let reasoning_projection = super::providers::adapt_codex_reasoning_projection_for_desktop(
+        super::providers::resolve_codex_chat_reasoning_projection(
+            provider,
+            public_model,
+            upstream_model,
+            db.as_ref(),
+            now,
+        ),
+        desktop_client,
     );
     let observation =
         load_runtime_observation_profile(provider, public_model, upstream_model, db.as_ref(), now)
@@ -3569,6 +3634,7 @@ fn create_codex_chat_sse_stream_from_verified_profile<E: std::error::Error + Sen
     )
 }
 
+#[cfg(test)]
 fn chat_completion_to_response_from_verified_profile(
     body: Value,
     tool_context: &transform_codex_chat::CodexToolContext,
@@ -3578,13 +3644,38 @@ fn chat_completion_to_response_from_verified_profile(
     db: &crate::database::Database,
     now: i64,
 ) -> Result<Value, ProxyError> {
-    observe_codex_chat_json_profile(provider, public_model, upstream_model, db, &body, now);
-    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
+    chat_completion_to_response_from_verified_profile_for_client(
+        body,
+        tool_context,
         provider,
         public_model,
         upstream_model,
         db,
         now,
+        false,
+    )
+}
+
+fn chat_completion_to_response_from_verified_profile_for_client(
+    body: Value,
+    tool_context: &transform_codex_chat::CodexToolContext,
+    provider: &crate::provider::Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: &crate::database::Database,
+    now: i64,
+    desktop_client: bool,
+) -> Result<Value, ProxyError> {
+    observe_codex_chat_json_profile(provider, public_model, upstream_model, db, &body, now);
+    let reasoning_projection = super::providers::adapt_codex_reasoning_projection_for_desktop(
+        super::providers::resolve_codex_chat_reasoning_projection(
+            provider,
+            public_model,
+            upstream_model,
+            db,
+            now,
+        ),
+        desktop_client,
     );
     transform_codex_chat::chat_completion_to_response_with_context_and_projection(
         body,
@@ -3866,7 +3957,7 @@ async fn handle_codex_chat_to_responses_transform(
             CodexUpstreamSseProtocol::ChatCompletions,
             Some(log_context.clone()),
         );
-        let sse_stream = create_codex_chat_sse_stream_from_verified_profile(
+        let sse_stream = create_codex_chat_sse_stream_from_verified_profile_for_client(
             stream,
             tool_context,
             &ctx.provider,
@@ -3874,6 +3965,7 @@ async fn handle_codex_chat_to_responses_transform(
             upstream_model,
             state.db.clone(),
             projection_now,
+            ctx.codex_desktop_reasoning,
         );
         let sse_stream = create_resilient_responses_sse_stream_with_context(
             Box::pin(sse_stream),
@@ -4007,7 +4099,7 @@ async fn handle_codex_chat_to_responses_transform(
             ));
         }
     };
-    let responses_response = chat_completion_to_response_from_verified_profile(
+    let responses_response = chat_completion_to_response_from_verified_profile_for_client(
         chat_response,
         &tool_context,
         &ctx.provider,
@@ -4015,6 +4107,7 @@ async fn handle_codex_chat_to_responses_transform(
         upstream_model,
         state.db.as_ref(),
         projection_now,
+        ctx.codex_desktop_reasoning,
     )
     .map_err(|e| {
         log::error!("[Codex] Chat → Responses 响应转换失败: {e}");

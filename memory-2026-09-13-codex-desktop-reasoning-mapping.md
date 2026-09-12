@@ -1,0 +1,6 @@
+# Codex Desktop reasoning mapping in CCSM
+
+- Root cause: protocol probing correctly identifies a provider's reasoning source and selects `reasoning_text` versus `reasoning_summary`, but native Responses passthrough did not apply that result to the Codex Desktop presentation shape. The Desktop main transcript currently renders summary-backed reasoning; a raw-only `reasoning_text` item can be present in the rollout while `summary_text` remains empty.
+- Fix boundary: CCSM classifies only trusted local requests whose `originator` is `Codex Desktop`. It maps third-party raw reasoning to summary lifecycle events at the response edge; CLI, TUI, external OpenAI API, and untrusted callers retain `reasoning_text`.
+- Covered paths: native Responses streaming SSE, native Responses JSON/completed payloads, Chat-to-Responses streaming/non-streaming projection, and hosted-tool Chat loops. The mapping removes raw `content` only when no visible summary already exists, avoiding duplicate Desktop presentation.
+- Runtime distinction: source tests/build do not update the installed `CCSwitchMulti` executable. After a guarded runtime replacement, verify installed hash, listener `/health`, router logs, and a fresh Codex Desktop request separately.
