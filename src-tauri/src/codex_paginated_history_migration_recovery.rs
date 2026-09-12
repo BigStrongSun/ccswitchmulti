@@ -1,6 +1,5 @@
 use super::*;
 
-use rusqlite::backup::Backup;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -453,16 +452,25 @@ pub(super) fn history_base_overrides(
         .collect()
 }
 
-fn backup_projection_database(source_path: &Path, backup_path: &Path) -> Result<(), String> {
-    let source = Connection::open_with_flags(source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("open_projection_backup_source_failed: {error}"))?;
-    let mut destination = Connection::open(backup_path)
-        .map_err(|error| format!("open_projection_backup_destination_failed: {error}"))?;
-    let backup = Backup::new(&source, &mut destination)
-        .map_err(|error| format!("initialize_projection_backup_failed: {error}"))?;
-    backup
-        .run_to_completion(5, Duration::from_millis(25), None)
-        .map_err(|error| format!("write_projection_backup_failed: {error}"))
+fn write_cursor_repairs_snapshot(
+    backup_root: &Path,
+    repairs: &[ProviderMigrationCursorRepair],
+) -> Result<(), String> {
+    let snapshot = repairs
+        .iter()
+        .map(|repair| {
+            serde_json::json!({
+                "sourceId": repair.source_id,
+                "oldOffset": repair.old_offset,
+                "newOffset": repair.new_offset,
+                "expectedOrdinal": repair.expected_ordinal,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = serde_json::to_vec_pretty(&snapshot)
+        .map_err(|error| format!("serialize_provider_migration_cursor_snapshot_failed: {error}"))?;
+    crate::config::atomic_write(&backup_root.join("cursor-repairs.json"), &payload)
+        .map_err(|error| format!("write_provider_migration_cursor_snapshot_failed: {error}"))
 }
 
 fn rewrite_history_base_file(
@@ -543,7 +551,11 @@ pub(super) fn apply_plan(
     fs::create_dir(backup_root.join("jsonl")).map_err(|error| {
         format!("create_provider_migration_recovery_jsonl_backup_failed: {error}")
     })?;
-    backup_projection_database(projection_db, &backup_root.join("projection.sqlite"))?;
+    // A full SQLite backup of a multi-GB projection database made a tiny cursor
+    // repair spend minutes to hours in the backup step. The cursor updates below
+    // are a single atomic compare-and-set transaction, and this snapshot preserves
+    // the exact old/new rows for audit or manual recovery without copying the DB.
+    write_cursor_repairs_snapshot(backup_root, &plan.cursor_repairs)?;
     let mut modified_times = HashMap::new();
     for repair in &plan.history_base_repairs {
         let file_name = repair
@@ -756,7 +768,8 @@ mod tests {
         let outcome = apply_plan(&projection, &recovery_backup, &plan).expect("apply recovery");
         assert_eq!(outcome.repaired_cursor_count, 1);
         assert_eq!(outcome.repaired_history_base_count, 1);
-        assert!(recovery_backup.join("projection.sqlite").is_file());
+        assert!(!recovery_backup.join("projection.sqlite").exists());
+        assert!(recovery_backup.join("cursor-repairs.json").is_file());
         assert!(recovery_backup
             .join("jsonl")
             .join(child.file_name().unwrap())
@@ -780,6 +793,38 @@ mod tests {
             fs::metadata(child).expect("child metadata").len(),
             child_len_before
         );
+    }
+
+    #[test]
+    fn apply_plan_records_cursor_snapshot_without_copying_projection_database() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rollout = temp.path().join("rollout.jsonl");
+        fs::write(&rollout, b"x\n").expect("rollout");
+        let projection = temp.path().join("thread_history_1.sqlite");
+        write_projection(&projection, "thread", 1, 1);
+        let plan = ProviderMigrationRecoveryPlan {
+            cursor_repairs: vec![ProviderMigrationCursorRepair {
+                source_id: "thread".to_string(),
+                rollout_path: rollout,
+                old_offset: 1,
+                new_offset: 2,
+                expected_ordinal: 1,
+            }],
+            ..Default::default()
+        };
+        let backup_root = temp.path().join("recovery");
+
+        let outcome = apply_plan(&projection, &backup_root, &plan).expect("apply recovery");
+
+        assert_eq!(outcome.repaired_cursor_count, 1);
+        assert!(
+            !backup_root.join("projection.sqlite").exists(),
+            "small cursor recovery must not copy the whole projection database"
+        );
+        let snapshot = fs::read_to_string(backup_root.join("cursor-repairs.json"))
+            .expect("cursor repair snapshot");
+        assert!(snapshot.contains("\"thread\""), "{snapshot}");
+        assert!(snapshot.contains("\"newOffset\": 2"), "{snapshot}");
     }
 
     #[test]

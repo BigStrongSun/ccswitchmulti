@@ -5718,3 +5718,7 @@ supported in one streaming turn`。
 # 2026-09-11 CCSwitchMulti v3.20.2-5 发布审计
 
 - `v3.20.2-5` 已发布到 `BigStrongSun/ccswitchmulti`；Release run `34597225748` 与 main CI `34597214498` 均成功。Windows x64 Setup SHA-256 `F5BBAFA7...44EB`、Portable SHA-256 `3E9C4DDA...5A40`、`latest.json` version `3.20.2-5`。GitHub Release 安装包已事务安装：PID 56596、安装文件 SHA-256 `6E4C451B...2AC6`、health 200，包含进度/卡死与 `officialAuth` 标记。详见 `memory-2026-09-11-v3.20.2-5-publication.md`。
+
+# 2026-09-12 Codex 分页历史 cursor 修复的全量 DB 备份根修
+
+- v3.20.2-5 的 cursor 修复在 `apply_plan` 里用 `rusqlite::Backup::run_to_completion(5,25ms)` 全量复制 3.5 GB `thread_history_1.sqlite`，约 800 KB/s，需约 70 分钟，触发 15 分钟超时。根修改为只写 `cursor-repairs.json` 小快照，删除全量 DB 备份；30 条 cursor 更新继续由单个 transaction + CAS + boundary postcheck 保证原子性，JSONL 备份/回滚保留。新增 TDD 回归；Rust 串行 4134/0/7、cargo check、rustfmt 通过。详见 `memory-2026-09-12-paginated-history-cursor-backup-fix.md`。
