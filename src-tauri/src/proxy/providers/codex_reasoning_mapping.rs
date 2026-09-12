@@ -50,9 +50,12 @@ fn map_reasoning_item_for_desktop(item: &mut Value) -> bool {
         .iter()
         .filter_map(|part| {
             let kind = part.get("type").and_then(Value::as_str);
-            matches!(kind, Some("reasoning_text" | "text"))
-                .then(|| part.get("text").and_then(Value::as_str))
-                .flatten()
+            matches!(
+                kind,
+                Some("reasoning_text" | "reasoning_details" | "reasoning" | "text")
+            )
+            .then(|| part.get("text").and_then(Value::as_str))
+            .flatten()
         })
         .collect::<Vec<_>>()
         .join("");
@@ -144,6 +147,19 @@ pub(crate) fn map_sse_block_for_desktop(
             ) {
                 if open_reasoning.insert(id.to_string()) {
                     prefix.push_str(&serialize_event(
+                        "response.output_item.added",
+                        &json!({
+                            "type":"response.output_item.added",
+                            "output_index":index,
+                            "item":{
+                                "id":id,
+                                "type":"reasoning",
+                                "status":"in_progress",
+                                "summary":[]
+                            }
+                        }),
+                    ));
+                    prefix.push_str(&serialize_event(
                         "response.reasoning_summary_part.added",
                         &json!({
                             "type":"response.reasoning_summary_part.added",
@@ -173,6 +189,19 @@ pub(crate) fn map_sse_block_for_desktop(
                 mapped.get("output_index").and_then(Value::as_u64),
             ) {
                 if open_reasoning.insert(id.to_string()) {
+                    prefix.push_str(&serialize_event(
+                        "response.output_item.added",
+                        &json!({
+                            "type":"response.output_item.added",
+                            "output_index":index,
+                            "item":{
+                                "id":id,
+                                "type":"reasoning",
+                                "status":"in_progress",
+                                "summary":[]
+                            }
+                        }),
+                    ));
                     prefix.push_str(&serialize_event(
                         "response.reasoning_summary_part.added",
                         &json!({
@@ -293,6 +322,17 @@ mod tests {
     }
 
     #[test]
+    fn detected_readable_reasoning_variants_become_summary() {
+        let mut response = json!({"output":[{"id":"rs_2","type":"reasoning","summary":[],"content":[{"type":"reasoning_details","text":"Inspect"},{"type":"reasoning","text":" route."}]}]});
+        map_completed_response_for_desktop(&mut response);
+        assert_eq!(
+            response["output"][0]["summary"][0]["text"],
+            "Inspect route."
+        );
+        assert!(response["output"][0].get("content").is_none());
+    }
+
+    #[test]
     fn raw_sse_delta_is_renamed_to_summary_delta() {
         let mut open = HashSet::new();
         let bytes = map_sse_block_for_desktop(
@@ -325,5 +365,18 @@ mod tests {
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(text.contains("summary_text"));
         assert!(!text.contains("reasoning_text"));
+    }
+
+    #[test]
+    fn raw_delta_without_item_added_gets_complete_summary_lifecycle() {
+        let mut open = HashSet::new();
+        let bytes = map_sse_block_for_desktop(
+            "event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_early\",\"output_index\":0,\"content_index\":0,\"delta\":\"Inspect\"}",
+            &mut open,
+        );
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("response.output_item.added"));
+        assert!(text.contains("response.reasoning_summary_part.added"));
+        assert!(text.contains("response.reasoning_summary_text.delta"));
     }
 }
