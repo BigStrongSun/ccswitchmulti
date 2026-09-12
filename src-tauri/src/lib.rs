@@ -1380,6 +1380,11 @@ pub fn run() {
                     false
                 };
 
+                // After startup recovery, keep the configured port owned for as
+                // long as any live takeover remains enabled. The guard shares the
+                // same verified force-release path as the fixed UI action.
+                state.proxy_service.start_configured_listener_guard();
+
                 crate::codex_egress_timezone::refresh_automatic_timezone_before_codex_launch()
                     .await;
                 match crate::codex_startup::launch_after_startup_reconciliation(
@@ -1781,6 +1786,7 @@ pub fn run() {
             commands::get_proxy_takeover_status,
             commands::set_proxy_takeover_for_app,
             commands::force_release_proxy_port_and_restore_takeover,
+            commands::restore_configured_proxy_listener,
             commands::get_proxy_status,
             commands::diagnose_codex_multirouter,
             commands::unlock_codex_model_picker,
@@ -2713,5 +2719,26 @@ mod tests {
         let apps = enabled_proxy_apps_on_startup(&db).await;
 
         assert_eq!(apps, vec!["grokbuild"]);
+    }
+
+    #[test]
+    fn configured_listener_recovery_command_is_registered_for_frontend_invocation() {
+        // Tauri command registration is runtime-only: the frontend can typecheck
+        // successfully while invoke() still rejects an omitted command. Keep this
+        // small structural regression test next to the app builder so an IPC
+        // implementation cannot be added without exposing it to the webview.
+        let source = include_str!("lib.rs");
+        let handler_start = source
+            .find(".invoke_handler(tauri::generate_handler![")
+            .expect("application has a Tauri invoke handler");
+        let handler_end = source[handler_start..]
+            .find("\n        ])")
+            .expect("Tauri invoke handler is closed");
+        let handler = &source[handler_start..handler_start + handler_end];
+
+        assert!(
+            handler.contains("commands::restore_configured_proxy_listener,"),
+            "the fixed listener recovery button must have a registered Tauri command"
+        );
     }
 }

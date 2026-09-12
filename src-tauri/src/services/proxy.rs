@@ -260,6 +260,26 @@ fn should_run_codex_post_takeover(app_type: &AppType) -> bool {
     matches!(app_type, AppType::Codex)
 }
 
+/// Select one already-enabled local-proxy app to restore the shared listener.
+///
+/// All local-proxy apps share one listener, so recovering it once is sufficient.
+/// Codex is preferred because it is the only client whose startup is gated on the
+/// local routing readiness result; the remaining order is deterministic for logs
+/// and manual recovery receipts.
+fn configured_listener_recovery_app(status: &ProxyTakeoverStatus) -> Option<AppType> {
+    if status.codex {
+        Some(AppType::Codex)
+    } else if status.claude {
+        Some(AppType::Claude)
+    } else if status.gemini {
+        Some(AppType::Gemini)
+    } else if status.grokbuild {
+        Some(AppType::GrokBuild)
+    } else {
+        None
+    }
+}
+
 /// 代理接管模式下需要从 Claude Live 配置中移除的"模型覆盖"字段。
 ///
 /// 原因：接管模式下 `*_MODEL` 必须由 CC Switch 写成稳定的 Claude 角色别名，
@@ -1441,6 +1461,66 @@ impl ProxyService {
             released_pid,
             takeover_restored: true,
         })
+    }
+
+    /// Restore the configured shared listener when a live takeover remains
+    /// enabled but this process is no longer serving that port.
+    ///
+    /// The existing force-release path performs the process identity checks. It
+    /// may only terminate a verified previous CCSM listener; unknown owners keep
+    /// their port and surface an error for the fixed manual control.
+    pub async fn restore_configured_proxy_listener(
+        &self,
+    ) -> Result<Option<ForcedPortRecoveryResult>, String> {
+        if self.is_running().await {
+            return Ok(None);
+        }
+
+        let takeover = self.get_takeover_status().await?;
+        let Some(app) = configured_listener_recovery_app(&takeover) else {
+            return Ok(None);
+        };
+
+        self.force_release_proxy_port_and_restore_takeover(app.as_str())
+            .await
+            .map(Some)
+    }
+
+    /// Keep the configured local-proxy port owned while a live takeover is on.
+    /// The task is intentionally best-effort: startup and manual recovery share
+    /// the same transactional recovery method, while a foreign process remains
+    /// fail-closed and is logged once per distinct error instead of being killed.
+    pub fn start_configured_listener_guard(&self) {
+        let service = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_failure: Option<String> = None;
+
+            loop {
+                interval.tick().await;
+                match service.restore_configured_proxy_listener().await {
+                    Ok(Some(result)) => {
+                        last_failure = None;
+                        log::info!(
+                            "自动恢复代理监听成功: app={}, port={}, released_pid={:?}",
+                            result.app_type,
+                            result.port,
+                            result.released_pid
+                        );
+                    }
+                    Ok(None) => {
+                        last_failure = None;
+                    }
+                    Err(error) => {
+                        if last_failure.as_deref() != Some(error.as_str()) {
+                            log::warn!("代理监听守护无法恢复配置端口: {error}");
+                            last_failure = Some(error);
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// 在 provider 切换锁内关闭单个 app 的代理接管。
@@ -5237,6 +5317,31 @@ mod tests {
         assert!(should_run_codex_post_takeover(&AppType::Codex));
         assert!(!should_run_codex_post_takeover(&AppType::Claude));
         assert!(!should_run_codex_post_takeover(&AppType::Gemini));
+    }
+
+    #[test]
+    fn configured_listener_recovery_prefers_codex_and_skips_when_no_takeover_is_active() {
+        let no_takeover = ProxyTakeoverStatus::default();
+        assert_eq!(configured_listener_recovery_app(&no_takeover), None);
+
+        let mut multiple_takeovers = ProxyTakeoverStatus {
+            claude: true,
+            codex: true,
+            gemini: true,
+            grokbuild: true,
+            opencode: false,
+            openclaw: false,
+        };
+        assert_eq!(
+            configured_listener_recovery_app(&multiple_takeovers),
+            Some(AppType::Codex)
+        );
+
+        multiple_takeovers.codex = false;
+        assert_eq!(
+            configured_listener_recovery_app(&multiple_takeovers),
+            Some(AppType::Claude)
+        );
     }
 
     #[test]

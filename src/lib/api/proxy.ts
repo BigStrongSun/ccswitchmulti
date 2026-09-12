@@ -133,6 +133,15 @@ export const proxyApi = {
     });
   },
 
+  async restoreConfiguredProxyListener(): Promise<{
+    appType: string;
+    port: number;
+    releasedPid: number | null;
+    takeoverRestored: boolean;
+  } | null> {
+    return invoke("restore_configured_proxy_listener");
+  },
+
   // ========== Legacy 代理配置 API (兼容) ==========
 
   // 获取代理配置（旧版 v2 兼容接口）

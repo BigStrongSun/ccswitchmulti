@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   Clock,
@@ -26,8 +27,10 @@ import {
   useSetProxyTakeoverForApp,
   useGlobalProxyConfig,
   useUpdateGlobalProxyConfig,
+  proxyKeys,
 } from "@/lib/query/proxy";
-import type { ProxyStatus } from "@/types/proxy";
+import { proxyApi } from "@/lib/api/proxy";
+import type { ProxyStatus, ProxyTakeoverStatus } from "@/types/proxy";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 import { extractErrorMessage } from "@/utils/errorUtils";
@@ -39,6 +42,27 @@ interface ProxyPanelProps {
   isProxyPending: boolean;
 }
 
+/** The manual recovery control stays visible even before any takeover is enabled. */
+export function listenerRecoveryButtonState(
+  takeoverStatus: ProxyTakeoverStatus | undefined,
+): { enabled: boolean; detail: string } {
+  const enabled = Boolean(
+    takeoverStatus?.claude ||
+      takeoverStatus?.codex ||
+      takeoverStatus?.gemini ||
+      takeoverStatus?.grokbuild,
+  );
+  return enabled
+    ? {
+        enabled: true,
+        detail: "持续守护当前配置的监听端口；仅自动释放已验证的旧 CCSM 实例。",
+      }
+    : {
+        enabled: false,
+        detail: "先启用至少一个应用接管后才能恢复监听。",
+      };
+}
+
 export function ProxyPanel({
   enableLocalProxy,
   onEnableLocalProxyChange,
@@ -46,6 +70,7 @@ export function ProxyPanel({
   isProxyPending,
 }: ProxyPanelProps) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const { data: status } = useProxyStatusQuery();
   const isRunning = status?.running ?? false;
 
@@ -60,6 +85,8 @@ export function ProxyPanel({
   // 监听地址/端口的本地状态（端口用字符串以支持完全清空）
   const [listenAddress, setListenAddress] = useState("127.0.0.1");
   const [listenPort, setListenPort] = useState("15721");
+  const [isRestoringListener, setIsRestoringListener] = useState(false);
+  const listenerRecovery = listenerRecoveryButtonState(takeoverStatus);
 
   // 同步全局配置到本地状态
   useEffect(() => {
@@ -121,6 +148,30 @@ export function ProxyPanel({
       toast.error(
         t("proxy.logging.failed", { defaultValue: "切换日志状态失败" }),
       );
+    }
+  };
+
+  const handleRestoreConfiguredListener = async () => {
+    if (!listenerRecovery.enabled) return;
+    setIsRestoringListener(true);
+    try {
+      const result = await proxyApi.restoreConfiguredProxyListener();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: proxyKeys.status }),
+        queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus }),
+      ]);
+      toast.success(
+        result
+          ? `已恢复 ${result.port} 端口监听${result.releasedPid ? `，已释放旧进程 ${result.releasedPid}` : ""}`
+          : "当前代理监听正常，无需恢复。",
+        { closeButton: true },
+      );
+    } catch (error) {
+      toast.error(
+        `无法安全恢复监听：${extractErrorMessage(error) || t("common.unknown", { defaultValue: "未知错误" })}`,
+      );
+    } finally {
+      setIsRestoringListener(false);
     }
   };
 
@@ -257,6 +308,26 @@ export function ProxyPanel({
             onCheckedChange={onToggleProxy}
             disabled={isProxyPending}
           />
+        </div>
+
+        <div className="flex flex-col gap-3 rounded-xl border border-primary/20 bg-primary/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-1">
+            <p className="text-sm font-medium leading-none">强制恢复监听</p>
+            <p className="text-xs text-muted-foreground">
+              {listenerRecovery.detail}
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void handleRestoreConfiguredListener()}
+            disabled={!listenerRecovery.enabled || isRestoringListener}
+          >
+            {isRestoringListener ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : null}
+            恢复当前端口
+          </Button>
         </div>
 
         {/* [3] App takeover switches — animated, visible only when proxy is running */}

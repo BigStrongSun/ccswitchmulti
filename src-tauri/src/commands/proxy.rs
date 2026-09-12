@@ -261,6 +261,17 @@ pub async fn force_release_proxy_port_and_restore_takeover(
         .await
 }
 
+/// Restore the configured shared listener, if an enabled takeover has lost it.
+#[tauri::command]
+pub async fn restore_configured_proxy_listener(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<crate::services::proxy::ForcedPortRecoveryResult>, String> {
+    state
+        .proxy_service
+        .restore_configured_proxy_listener()
+        .await
+}
+
 /// 获取代理服务器状态
 #[tauri::command]
 pub async fn get_proxy_status(state: tauri::State<'_, AppState>) -> Result<ProxyStatus, String> {
