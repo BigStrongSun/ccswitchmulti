@@ -5722,3 +5722,7 @@ supported in one streaming turn`。
 # 2026-09-12 Codex 分页历史 cursor 修复的全量 DB 备份根修
 
 - v3.20.2-5 的 cursor 修复在 `apply_plan` 里用 `rusqlite::Backup::run_to_completion(5,25ms)` 全量复制 3.5 GB `thread_history_1.sqlite`，约 800 KB/s，需约 70 分钟，触发 15 分钟超时。根修改为只写 `cursor-repairs.json` 小快照，删除全量 DB 备份；30 条 cursor 更新继续由单个 transaction + CAS + boundary postcheck 保证原子性，JSONL 备份/回滚保留。新增 TDD 回归；Rust 串行 4134/0/7、cargo check、rustfmt 通过。详见 `memory-2026-09-12-paginated-history-cursor-backup-fix.md`。
+
+# 2026-09-13 代理端口旧 CCSMMulti/AppContainer 占用强制释放根修
+
+- 端口 15721 被旧 3.20.2-5 的 AppContainer hardlink 监听占用时，跨版本文件身份比较使 `force_release_proxy_port_and_restore_takeover` 误判为 foreign owner。根修新增 `/status` 验证同一 CCSM 接管实例，允许跨版本安全终止；当前进程自持端口时先 `stop()` 再恢复接管。services::proxy 98/98、paginated_history 24/24、cargo check/rustfmt 通过；全量串行仅剩无关的 usage_rollup 既有失败。详见 `memory-2026-09-13-port-force-release.md`。

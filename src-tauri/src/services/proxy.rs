@@ -58,10 +58,11 @@ enum ForcedPortRecoveryTarget {
 fn classify_forced_port_recovery_target(
     current: &crate::process_identity::ProcessIdentity,
     owner: &crate::process_identity::ProcessIdentity,
+    verified_previous_ccswitch_listener: bool,
 ) -> ForcedPortRecoveryTarget {
     if current.matches(owner) {
         ForcedPortRecoveryTarget::CurrentProcess
-    } else if current.same_executable(owner) {
+    } else if current.same_executable(owner) || verified_previous_ccswitch_listener {
         ForcedPortRecoveryTarget::VerifiedPreviousInstance
     } else {
         ForcedPortRecoveryTarget::ForeignOwner
@@ -128,6 +129,74 @@ fn proxy_identity_matches_verified_process(
         && config_scope_matches
         && runtime_matches
         && role_matches
+}
+
+fn proxy_status_matches_previous_ccswitch_instance(
+    payload: &Value,
+    port: u16,
+    owner: &crate::process_identity::ProcessIdentity,
+    expected_config_scope: &str,
+) -> bool {
+    let app_matches = payload
+        .get("app")
+        .and_then(Value::as_str)
+        .is_some_and(|app| app.trim().eq_ignore_ascii_case("ccswitchmulti"));
+    let version_matches = payload
+        .get("version")
+        .and_then(Value::as_str)
+        .and_then(|version| Version::parse(version.trim()).ok())
+        .zip(Version::parse(env!("CARGO_PKG_VERSION")).ok())
+        .is_some_and(|(remote, local)| remote.major == local.major);
+    let claimed_pid = payload
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
+    let claimed_start = payload
+        .get("process_started_at_ticks")
+        .and_then(Value::as_u64);
+    let claimed_executable = payload.get("executable_identity").and_then(Value::as_str);
+    let owner_executable = crate::process_identity::executable_fingerprint(&owner.executable_path);
+    let listener_matches = payload.get("port").and_then(Value::as_u64) == Some(u64::from(port))
+        && payload.get("running").and_then(Value::as_bool) == Some(true);
+    let instance_present = payload
+        .get("instance_id")
+        .and_then(Value::as_str)
+        .is_some_and(|instance| !instance.trim().is_empty());
+    let config_scope_matches =
+        payload.get("config_scope").and_then(Value::as_str) == Some(expected_config_scope);
+    let runtime_present = payload
+        .get("runtime_api_version")
+        .and_then(Value::as_u64)
+        .is_some_and(|version| version > 0);
+    let role_matches = payload.get("listener_role").and_then(Value::as_str) == Some("takeover");
+
+    app_matches
+        && version_matches
+        && claimed_pid == Some(owner.pid)
+        && claimed_start == Some(owner.started_at_ticks)
+        && claimed_executable == Some(owner_executable.as_str())
+        && listener_matches
+        && instance_present
+        && config_scope_matches
+        && runtime_present
+        && role_matches
+}
+
+async fn read_proxy_status_payload(port: u16) -> Option<Value> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .ok()?;
+    let response = client
+        .get(format!("http://127.0.0.1:{port}/status"))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json::<Value>().await.ok()
 }
 
 pub(crate) async fn probe_proxy_port(port: u16) -> PortOwnership {
@@ -1287,8 +1356,32 @@ impl ProxyService {
             let owner = crate::process_identity::process_identity(owner_pid)
                 .ok_or_else(|| format!("无法读取端口 {port} 的监听进程身份，已拒绝强制恢复"))?;
 
-            match classify_forced_port_recovery_target(&current, &owner) {
-                ForcedPortRecoveryTarget::CurrentProcess => {}
+            let expected_config_scope = crate::process_identity::config_scope_fingerprint();
+            let verified_previous_ccswitch_listener = match read_proxy_status_payload(port).await {
+                Some(payload) => proxy_status_matches_previous_ccswitch_instance(
+                    &payload,
+                    port,
+                    &owner,
+                    &expected_config_scope,
+                ),
+                None => false,
+            };
+            match classify_forced_port_recovery_target(
+                &current,
+                &owner,
+                verified_previous_ccswitch_listener,
+            ) {
+                ForcedPortRecoveryTarget::CurrentProcess => {
+                    // The current process is holding the port. Stop its own
+                    // proxy server so restore-takeover can bind the port again;
+                    // otherwise start() sees its own listener as an owner and
+                    // refuses with portOwnedByUnknownOwner.
+                    if self.is_running().await {
+                        self.stop()
+                            .await
+                            .map_err(|error| format!("释放当前代理端口 {port} 失败: {error}"))?;
+                    }
+                }
                 ForcedPortRecoveryTarget::ForeignOwner => {
                     return Err(format!(
                         "端口 {port} 由其他程序占用（PID {}，路径 {}），CCSM 不会终止该进程",
@@ -5163,17 +5256,30 @@ mod tests {
             executable_path: r"C:\Program Files\Other\server.exe".to_string(),
             started_at_ticks: 30,
         };
+        let previous_ccswitch_version = crate::process_identity::ProcessIdentity {
+            pid: 400,
+            executable_path: r"C:\Users\sunda\AppData\Local\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\CCSwitchMulti\cc-switch.exe".to_string(),
+            started_at_ticks: 40,
+        };
 
         assert_eq!(
-            classify_forced_port_recovery_target(&current, &old_listener),
+            classify_forced_port_recovery_target(&current, &previous_ccswitch_version, true),
             ForcedPortRecoveryTarget::VerifiedPreviousInstance
         );
         assert_eq!(
-            classify_forced_port_recovery_target(&current, &foreign_listener),
+            classify_forced_port_recovery_target(&current, &previous_ccswitch_version, false),
             ForcedPortRecoveryTarget::ForeignOwner
         );
         assert_eq!(
-            classify_forced_port_recovery_target(&current, &current),
+            classify_forced_port_recovery_target(&current, &old_listener, false),
+            ForcedPortRecoveryTarget::VerifiedPreviousInstance
+        );
+        assert_eq!(
+            classify_forced_port_recovery_target(&current, &foreign_listener, false),
+            ForcedPortRecoveryTarget::ForeignOwner
+        );
+        assert_eq!(
+            classify_forced_port_recovery_target(&current, &current, false),
             ForcedPortRecoveryTarget::CurrentProcess
         );
     }
@@ -5196,6 +5302,63 @@ mod tests {
             "listener_role": "takeover",
         });
         (payload, port, process)
+    }
+
+    #[test]
+    fn previous_ccswitch_listener_status_allows_cross_version_force_release() {
+        let owner = crate::process_identity::ProcessIdentity {
+            pid: 100,
+            executable_path:
+                r"C:\Users\sunda\AppData\Local\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\CCSwitchMulti\cc-switch.exe"
+                    .to_string(),
+            started_at_ticks: 10,
+        };
+        let payload = json!({
+            "running": true,
+            "port": 15721,
+            "app": "ccswitchmulti",
+            "version": "3.20.2-5",
+            "pid": owner.pid,
+            "executable_identity": crate::process_identity::executable_fingerprint(&owner.executable_path),
+            "process_started_at_ticks": owner.started_at_ticks,
+            "instance_id": "previous-instance",
+            "config_scope": "fixture-scope",
+            "runtime_api_version": 1,
+            "listener_role": "takeover",
+        });
+
+        assert!(proxy_status_matches_previous_ccswitch_instance(
+            &payload,
+            15721,
+            &owner,
+            "fixture-scope",
+        ));
+        assert!(!proxy_status_matches_previous_ccswitch_instance(
+            &payload,
+            15721,
+            &owner,
+            "different-scope",
+        ));
+
+        let foreign = json!({
+            "running": true,
+            "port": 15721,
+            "app": "other-app",
+            "version": "3.20.2-5",
+            "pid": owner.pid,
+            "executable_identity": crate::process_identity::executable_fingerprint(&owner.executable_path),
+            "process_started_at_ticks": owner.started_at_ticks,
+            "instance_id": "foreign-instance",
+            "config_scope": "fixture-scope",
+            "runtime_api_version": 1,
+            "listener_role": "takeover",
+        });
+        assert!(!proxy_status_matches_previous_ccswitch_instance(
+            &foreign,
+            15721,
+            &owner,
+            "fixture-scope",
+        ));
     }
 
     #[test]
