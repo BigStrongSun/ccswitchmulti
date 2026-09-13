@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-09-13 Provider / MultiRouter 保存与协议探测边界（源码核对）
+
+- 当前 `main@ab1b877d` / `v3.20.2-9` 的主 UI 保存链路没有固定的“显式探测后再发一次网络探测”：普通 Provider 由 `EditProviderDialog` 把 `protocolProbeReceiptIds` 传给 `useCodexProviderSetSave`，`createSingleCodexProtocolLabAdapter.requiresProbe()` 在 receipt 非空时返回 false，随后直接 `prepare_codex_provider_set -> commit_codex_provider_set`；MultiRouter 由 `useProtocolLabWorkflow.validate()` 取得批量 outcome 后把带 receipt 的 sources 写入 workflow draft，`buildBatchDraft(true)` 复用这些 receipt，随后直接 batch prepare/commit。
+- MultiRouter 保存前的 `restoreCodexProviderProtocolEvidence()` 不是网络探测：后端 `collect_saved_provider_protocol_evidence()` 只读取当前有效 profile/observation，再重新签发进程内 receipt；不刷新 `tested_at`/`expires_at`，不发送上游请求。普通 `update_provider` 的遗留路径也已改为同一只读证据恢复，证据缺失/过期/凭据或策略指纹变化时返回 `codex_provider_set_probe_required`，不会隐式联网。
+- 仍存在的共性边界是旧 `add_provider_internal_with_probe()`：对普通自动 Codex Provider 会无条件调用 `automatic_codex_provider_preflight()`；该遗留入口没有 receipt 参数。若某 UI/后台路径在显式探测后退回通用 `add_provider/update_provider`，receipt 会丢失，表现为再次探测或门禁失败。当前普通新增/编辑主 UI 和 MultiRouter 向导已绕过该入口，分别使用 Provider Set/Protocol Lab 直达命令；工作台对已有源的目录写回走 `update_provider`，只恢复证据，不再续期。
+- 因此现场若仍看到“保存又探测”，应先查调用边界和 IPC：是否调用了 `preflight_codex_provider_protocol_compatibility` 两次，还是只调用一次后执行了 `restore_codex_provider_protocol_evidence`；后者不是重复付费探测。重点检查 receipt 是否在表单/向导草稿构建前被清空，以及是否落入旧 `providersApi.add/update` 路径，不能把 `prepare/commit` 本身当作探测。
+- 本次源码回归：前端 Protocol Lab / MultiRouter / Provider 保存相关 4 个测试文件 48/48 通过；Rust `ordinary_update_` 4/4、证据恢复 1/1、batch prepare/commit 相关 2/2 通过。未修改产品代码、未重启在线 CCSM、未改变配置。
+
 ## 2026-09-13 CCSwitchMulti v3.20.2-9 发布
 
 - Codex Desktop reasoning 修复已在 `main@883093fd` 发布为 `v3.20.2-9`。原生 Responses 映射绑定最终 provider/model 的已验证 Responses probe profile；Chat 与原生 Responses 的可读 raw reasoning 统一按 profile 投影为 Desktop 可呈现的 summary 生命周期，CLI/TUI/External API 保持原始语义。
