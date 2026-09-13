@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-09-13 CCSwitchMulti v3.20.2-9 发布
+
+- Codex Desktop reasoning 修复已在 `main@883093fd` 发布为 `v3.20.2-9`。原生 Responses 映射绑定最终 provider/model 的已验证 Responses probe profile；Chat 与原生 Responses 的可读 raw reasoning 统一按 profile 投影为 Desktop 可呈现的 summary 生命周期，CLI/TUI/External API 保持原始语义。
+- 本地 release pipeline 使用隔离 Cargo target 完成 Windows x64 构建并导出到 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti`；raw/portable EXE SHA-256 为 `5C3916AA...2C6F634B`，PE 版本为 `3.20.2-9`，`SHA256SUMS.txt` 全部通过。
+- `fork/main`、annotated tag `v3.20.2-9` peel 均精确指向 `883093fd`。GitHub workflow `34743032605` 的 Windows x64/ARM、Linux x64/ARM、macOS、Publish Release、Assemble latest.json 全部 success；Release 共 19 资产，独立下载后 19/19 size 与 digest 匹配，6/6 updater signature 匹配。
+- 当前在线 CCSM 未被安装、停止、重启或替换；`127.0.0.1:15720/health` 仍 HTTP 200，PID `31712`。源码/本地构建/远端 Release 与当前安装运行态仍需分层表述。
+- 完整证据见 `docs/audits/2026-09-13-v3.20.2-9-release-execution.md`。
+
 ## 2026-09-11 Codex 容量重试 v22 启动迁移根修
 
 - `main@b648199e` 的首个本地 `3.20.2-3` 安装候选在真实 v22 数据库启动时失败：`Database::init()` 先执行 current seed，Codex seed 引用尚未由 v22→v23 migration 添加的 `capacity_retry_enabled`，因此 migration 单测虽通过，完整启动顺序仍会报缺列。
