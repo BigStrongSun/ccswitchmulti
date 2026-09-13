@@ -8,6 +8,14 @@
 - 因此现场若仍看到“保存又探测”，应先查调用边界和 IPC：是否调用了 `preflight_codex_provider_protocol_compatibility` 两次，还是只调用一次后执行了 `restore_codex_provider_protocol_evidence`；后者不是重复付费探测。重点检查 receipt 是否在表单/向导草稿构建前被清空，以及是否落入旧 `providersApi.add/update` 路径，不能把 `prepare/commit` 本身当作探测。
 - 本次源码回归：前端 Protocol Lab / MultiRouter / Provider 保存相关 4 个测试文件 48/48 通过；Rust `ordinary_update_` 4/4、证据恢复 1/1、batch prepare/commit 相关 2/2 通过。未修改产品代码、未重启在线 CCSM、未改变配置。
 
+## 2026-09-13 继续核对：错误重测的前端门禁根因与探测职责
+
+- 截图所说的“Chat 被自动选成 Responses、Responses 被自动选成 Chat、手动改后不能保存”属于 **协议深探测**，不是模型 reasoning 能力 TTL 检测。`selection.rs` 按完整工作流能力、可读 reasoning、最后才按 Responses 优先排序；所以两端都完整通过时故意选择 Responses。当前主线的手动协议保存路径已可覆盖此选择且不发探测请求（`advanced_manual_protocol_mode_preserves_user_transport_without_probing` 通过）；若现场仍失败，需区分安装态版本/实际 IPC，不能由旧截图反推当前源码仍失败。
+- 存在两个不同目的的证据体系：`reasoning_capabilities::DetectionCache` 是一小时、进程内的能力候选，负责 reasoning effort/参数整形；`protocol_compatibility` 的 SQLite profile 则以 ProbeTargetKey 的真实返回观察驱动 Chat 与原生 Responses 的 Desktop reasoning 显示转换。后者已按 provider、公开/上游模型、transport、端点、认证、凭据和实际 request-policy 指纹 fail-closed；不要把前者当成可安全决定响应展示形态的替代品。
+- 普通 Provider 的 `CodexFormFields` 把 provider 名、全部目录展示元数据（displayName/context/modalities/reasoning/sort 等）写入 readiness identity；任一变化都会清空一次性 receipt。`useCodexProviderSetSave` 没有调用 `restoreCodexProviderProtocolEvidence`，所以自动模型随后保存会进入真实 preflight。现有前端回归还把 `supportsImage` 变化会失效固化为预期。后端实际上只比较当前编译出的 ProbeTargetKey，因此 UI 名称或无关目录元数据不应导致新的付费请求。
+- MultiRouter 的 `refreshModels` 无论目录是否变化都 `setConnectivityResults([])` 和 `batchProtocolLab.reset()`；协议页的 Next 门禁因此拒绝继续。虽然 `saveMultiRouterPlan` 在收集到空 receipt 时会调用只读恢复并可避免网络请求，但正常 UI 已在到达保存页前把用户拦下，因此该兜底太晚。已保存方案重开时的恢复测试只覆盖保存直达，不覆盖“刷新结果相同后仍能穿过协议页”。
+- 修复应把“异步 UI 结果的完整草稿版本”与“可复用探测证据”拆开：前者仍可用完整快照防止迟到结果覆写；后者必须由后端对当前 Provider 编译 ProbeTargetKey 后执行只读恢复。普通 Provider 保存前和 MultiRouter 刷新后应调用同一恢复接口；只对恢复不到的模型源显示/触发真实深探测。不要在 TypeScript 手写字段白名单或仅从签名移除 `supportsImage` 等字段，因为未来 probe request 变化仍应由后端 policy 指纹决定。
+
 ## 2026-09-13 CCSwitchMulti v3.20.2-9 发布
 
 - Codex Desktop reasoning 修复已在 `main@883093fd` 发布为 `v3.20.2-9`。原生 Responses 映射绑定最终 provider/model 的已验证 Responses probe profile；Chat 与原生 Responses 的可读 raw reasoning 统一按 profile 投影为 Desktop 可呈现的 summary 生命周期，CLI/TUI/External API 保持原始语义。
