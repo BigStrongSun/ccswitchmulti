@@ -157,4 +157,47 @@ describe("useCodexProviderSetSave", () => {
       act(() => result.current.workflow.cancel());
     }
   });
+
+  it("confirms a per-model Chat selection as manual instead of retrying automatic probing", async () => {
+    const manuallySelectedProvider: Provider = {
+      ...provider,
+      meta: {
+        apiFormat: "openai_responses",
+        codexProtocolOverrides: { "model-a": "openai_chat" },
+      },
+    };
+    const { result } = renderHook(() => useCodexProviderSetSave(), {
+      wrapper: createWrapper(),
+    });
+    let savePromise!: Promise<void>;
+
+    try {
+      act(() => {
+        savePromise = result.current.persistCodexProviderSet(
+          manuallySelectedProvider,
+        );
+        savePromise.catch(() => undefined);
+      });
+
+      await act(async () => {
+        await savePromise;
+      });
+
+      expect(protocolCompatibilityMocks.restore).not.toHaveBeenCalled();
+      expect(protocolCompatibilityMocks.preflight).not.toHaveBeenCalled();
+      expect(protocolCompatibilityMocks.prepare).toHaveBeenCalledWith(
+        manuallySelectedProvider,
+        [],
+      );
+      expect(protocolCompatibilityMocks.commit).toHaveBeenCalledWith(
+        manuallySelectedProvider,
+        [],
+        "prepared-digest",
+        "confirm_manual",
+      );
+      expect(result.current.workflow.state.phase).toBe("committed");
+    } finally {
+      act(() => result.current.workflow.cancel());
+    }
+  });
 });

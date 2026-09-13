@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { CodexProtocolProbeProgressEvent } from "@/lib/api/protocol-compatibility";
+import type { UniversalProvider } from "@/types";
 
 import {
   createBatchCodexProtocolLabAdapter,
@@ -65,6 +66,28 @@ describe("single Codex Protocol Lab adapter", () => {
         [],
       ),
     ).toBe(false);
+  });
+
+  it("treats an explicit per-model protocol selection as manual commit intent", () => {
+    const single = createSingleCodexProtocolLabAdapter({} as never);
+    const universal = createUniversalCodexProtocolLabAdapter({} as never);
+    const perModelChatSelection = {
+      ...provider,
+      meta: { codexProtocolOverrides: { "qwen3.8": "openai_chat" as const } },
+    };
+    const universalPerModelChatSelection: UniversalProvider = {
+      id: "universal-one",
+      name: "Universal One",
+      providerType: "newapi",
+      baseUrl: "https://example.test/v1",
+      apiKey: "secret",
+      apps: { claude: false, codex: true, gemini: false },
+      models: { codex: { model: "qwen3.8" } },
+      meta: { codexProtocolOverrides: { "qwen3.8": "openai_chat" } },
+    };
+
+    expect(single.isManual(perModelChatSelection)).toBe(true);
+    expect(universal.isManual(universalPerModelChatSelection)).toBe(true);
   });
 
   it("maps the backend commit snapshot and projection status without split confirmation", async () => {

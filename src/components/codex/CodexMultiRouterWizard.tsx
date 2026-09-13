@@ -702,6 +702,37 @@ function skipsWizardDeepProtocolProbe(provider: Provider): boolean {
   return !providerHasAutomaticCodexModels(provider);
 }
 
+async function restoreWizardProtocolEvidence(
+  sources: Provider[],
+): Promise<CodexProviderSetBatchProbeOutcome> {
+  const outcomes = (
+    await Promise.all(
+      sources.map(async (provider) => {
+        if (skipsWizardDeepProtocolProbe(provider)) return null;
+        try {
+          const outcome = await restoreCodexProviderProtocolEvidence(provider);
+          return outcome
+            ? { providerId: provider.id, inputProvider: provider, outcome }
+            : null;
+        } catch {
+          // Missing, expired, or mismatched evidence must leave the gate closed;
+          // restoring evidence never falls back to a billable protocol probe.
+          return null;
+        }
+      }),
+    )
+  ).filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  return {
+    outcomes,
+    sources: sources.map((provider) => ({
+      provider,
+      receiptIds:
+        outcomes.find((entry) => entry.providerId === provider.id)?.outcome
+          .receiptIds ?? [],
+    })),
+  };
+}
+
 function skippedWizardDeepProbeResult(
   provider: Provider,
   detail: string,
@@ -1168,36 +1199,10 @@ export function CodexMultiRouterWizard({
         initialSourceIdSet.has(source.id),
       );
       setIsRestoringEvidence(true);
-      void Promise.all(
-        initialSources.map(async (provider) => {
-          if (skipsWizardDeepProtocolProbe(provider)) return null;
-          try {
-            const outcome =
-              await restoreCodexProviderProtocolEvidence(provider);
-            return outcome
-              ? { providerId: provider.id, inputProvider: provider, outcome }
-              : null;
-          } catch {
-            // Missing/old evidence must leave the gate closed, never trigger paid requests.
-            return null;
-          }
-        }),
-      ).then((entries) => {
+      void restoreWizardProtocolEvidence(initialSources).then((restored) => {
         if (targetGenerationRef.current === restoreTargetGeneration)
           setIsRestoringEvidence(false);
         if (draftGenerationRef.current !== generation) return;
-        const outcomes = entries.filter(
-          (entry): entry is NonNullable<typeof entry> => entry !== null,
-        );
-        const restored: CodexProviderSetBatchProbeOutcome = {
-          outcomes,
-          sources: initialSources.map((provider) => ({
-            provider,
-            receiptIds:
-              outcomes.find((entry) => entry.providerId === provider.id)
-                ?.outcome.receiptIds ?? [],
-          })),
-        };
         setRestoredEvidence(restored);
         setConnectivityResults(
           buildWizardConnectivityResultsFromBatchOutcome(
@@ -1978,20 +1983,19 @@ export function CodexMultiRouterWizard({
         }
       }
       if (!isCurrent()) return;
-      setDraftSources(
-        nextSources.map((source) => ({
-          ...latestProvidersRef.current.find(
+      const refreshedSources = nextSources.map((source) => ({
+        ...latestProvidersRef.current.find(
+          (provider) => provider.id === source.id,
+        ),
+        ...source,
+        name:
+          latestProvidersRef.current.find(
             (provider) => provider.id === source.id,
-          ),
-          ...source,
-          name:
-            latestProvidersRef.current.find(
-              (provider) => provider.id === source.id,
-            )?.name ?? source.name,
-        })),
-      );
+          )?.name ?? source.name,
+      }));
+      setDraftSources(refreshedSources);
       const nextAvailableModels = buildWizardModelCatalog(
-        resolveWizardModelNameCollisions(nextSources),
+        resolveWizardModelNameCollisions(refreshedSources),
       ).models.map((model) => model.model);
       setCatalogModelOrder((current) =>
         reconcileCatalogModelOrderAfterFetch(
@@ -2006,8 +2010,38 @@ export function CodexMultiRouterWizard({
           .filter((model) => nextAvailableSet.has(model))
           .slice(0, 5);
       });
-      setConnectivityResults([]);
+      // Fetching a model directory changes presentation data, not necessarily
+      // the actual probe target. Re-ask the backend to match the refreshed
+      // draft against persisted ProbeTargetKey evidence before locking the
+      // protocol step. This is read-only and cannot issue upstream requests.
+      const restoreGeneration = ++draftGenerationRef.current;
+      const restoreTargetGeneration = targetGenerationRef.current;
+      setIsRestoringEvidence(true);
       batchProtocolLab.reset();
+      const restored = await restoreWizardProtocolEvidence(refreshedSources);
+      if (
+        targetGenerationRef.current !== restoreTargetGeneration ||
+        draftGenerationRef.current !== restoreGeneration
+      ) {
+        return;
+      }
+      setRestoredEvidence(restored);
+      setConnectivityResults(
+        buildWizardConnectivityResultsFromBatchOutcome(
+          refreshedSources,
+          restored,
+          hasCodexOauthAccount,
+        ).map((result) =>
+          result.canContinue
+            ? result
+            : {
+                ...result,
+                detail:
+                  "刷新后未找到可复用的完整证据（可能缺失、过期或配置已改变），请重新探测该来源。",
+              },
+        ),
+      );
+      setIsRestoringEvidence(false);
       dispatchFlow({
         type: "FETCH_DONE",
         partial: failedCount > 0 || skippedCount > 0,

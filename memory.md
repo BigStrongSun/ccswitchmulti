@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-13 手动逐模型协议确认与 MultiRouter 刷新证据复用
+
+- `codexProtocolOverrides` 是用户对某个模型明确选择 Chat 或 Responses 的保存意图，不能只把 Provider 级 `codexProtocolMode=manual` 当作手动模式。此前 Single 与 Universal Protocol Lab adapter 错把这种草稿送为 `accept_auto`；后端在 prepare 时正确识别 override 的手动写入意图并拒绝，前端遂停在 `action_required`，没有可确认保存的操作。现在两个 adapter 都以“Provider 级 manual 或存在任一逐模型 override”为手动意图，提交 `confirm_manual`；该选择不会触发自动探测或被自动推荐覆盖。
+- MultiRouter `refreshModels()` 过去每次目录拉取完成均清空 `connectivityResults` 并 reset workflow，即使上游 target（端点、凭据、模型、policy）未变也重新关闭协议页门禁。刷新后改为把合成的最新 source 草稿传给共享 `restoreWizardProtocolEvidence()`，由后端按 ProbeTargetKey 只读核验并重新签发保存 receipt；仅在证据缺失、过期或真实目标变化时关闭门禁并提示重新探测。restore 不发送上游请求、不会延长证据期限。
+- 回归新增：Single/Universal adapter 逐模型 Chat 均识别为 manual、Provider Set 以 `confirm_manual` 提交且不 preflight、MultiRouter 相同目录刷新只恢复证据且仍可进入模型步骤。相关 6 个前端套件 58/58 通过，Prettier、`pnpm typecheck`、`git diff --check` 通过。MultiRouter 旧测试仍有 React `act(...)` 警告；没有新增失败。未构建、安装、重启或改动在线 CCSM。
+
 ## 2026-09-13 普通 Provider 保存时恢复协议探测证据
 
 - 普通 Codex Provider 的 UI receipt 是一次性的临时提交租约；`CodexFormFields` 为防止迟到异步结果覆盖而使用的完整 readiness identity 包含名称和目录展示能力等非请求字段，变更时会清空该租约。此前 `useCodexProviderSetSave` 直接把空 receipt 交给 Protocol Lab，导致保存又进入付费深探测确认。
