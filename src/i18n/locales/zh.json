@@ -302,7 +302,8 @@
         "reviewRecoveryResults": "请查看日志确认恢复结果。",
         "openLogsOrRestoreUserBackup": "请查看日志，必要时恢复用户备份。",
         "changeProxyPortOrInspectOwner": "请检查端口占用程序，或更换代理端口。",
-        "openLogsOrRetryTakeover": "请查看日志后重新启用代理接管。"
+        "openLogsOrRetryTakeover": "请查看日志后重新启用代理接管。",
+        "retryingTakeoverRestore": "端口释放后会自动重试恢复接管，无需手动操作。"
       }
     },
     "officialBlockedByProxy": "本地路由模式下不能切换到官方供应商，使用路由访问官方 API 可能导致账号被封禁",

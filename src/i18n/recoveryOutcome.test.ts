@@ -22,6 +22,7 @@ const nextSteps = [
   "openLogsOrRestoreUserBackup",
   "changeProxyPortOrInspectOwner",
   "openLogsOrRetryTakeover",
+  "retryingTakeoverRestore",
 ] as const;
 
 describe("recovery outcome translations", () => {

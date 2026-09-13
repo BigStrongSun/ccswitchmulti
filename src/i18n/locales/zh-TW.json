@@ -297,7 +297,8 @@
         "reviewRecoveryResults": "請查看記錄確認恢復結果。",
         "openLogsOrRestoreUserBackup": "請查看記錄，必要時恢復使用者備份。",
         "changeProxyPortOrInspectOwner": "請檢查連接埠占用程式，或更換代理連接埠。",
-        "openLogsOrRetryTakeover": "請查看記錄後重新啟用代理接管。"
+        "openLogsOrRetryTakeover": "請查看記錄後重新啟用代理接管。",
+        "retryingTakeoverRestore": "連接埠釋放後會自動重試恢復接管，無需手動操作。"
       }
     },
     "officialBlockedByProxy": "本地路由模式下不能切換至官方供應商，使用路由存取官方 API 可能導致帳號被封鎖",

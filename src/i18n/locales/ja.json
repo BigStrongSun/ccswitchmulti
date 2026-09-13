@@ -297,7 +297,8 @@
         "reviewRecoveryResults": "ログを開いて復旧結果を確認してください。",
         "openLogsOrRestoreUserBackup": "ログを確認し、必要に応じてユーザーバックアップを復元してください。",
         "changeProxyPortOrInspectOwner": "ポートの所有者を確認するか、別のプロキシポートを選択してください。",
-        "openLogsOrRetryTakeover": "ログを確認してから、プロキシ引き継ぎを再度有効にしてください。"
+        "openLogsOrRetryTakeover": "ログを確認してから、プロキシ引き継ぎを再度有効にしてください。",
+        "retryingTakeoverRestore": "ポートが解放されると、自動的に再試行して引き継ぎを復元します。"
       }
     },
     "officialBlockedByProxy": "ローカルルーティングモード中は公式プロバイダーに切り替えできません。ルーティング経由で公式 API にアクセスするとアカウントが停止される可能性があります。",

@@ -324,6 +324,25 @@ function App() {
     showRecoveryOutcome,
   );
 
+  // 端口释放后接管已自动恢复：收起之前那条「端口被占用 / 启动接管失败」提示。
+  useTauriEvent<{ appType?: string; ids?: string[] }>(
+    "recovery-outcome-resolved",
+    (payload) => {
+      const ids = payload?.ids ?? [];
+      if (ids.length === 0) return;
+      setPendingRecoveryOutcomeIds((current) => {
+        const next = new Set(current);
+        for (const id of ids) {
+          next.delete(id);
+        }
+        return next;
+      });
+      for (const id of ids) {
+        toast.dismiss(`recovery-${id}`);
+      }
+    },
+  );
+
   useEffect(() => {
     void settingsApi
       .getPendingRecoveryOutcomes()

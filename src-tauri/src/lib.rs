@@ -2283,6 +2283,10 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) -> bool {
                     codex_ready = false;
                 }
                 log::error!("✗ 恢复 {app_type} 的代理接管状态失败: {e}");
+                // 端口仍被占用（尤其覆盖安装后残留的、当前用户无法核验的监听）
+                // 时不要把用户意图一起丢掉：登记一个有期限的自动恢复意图，交给
+                // 监听守护每 5 秒重试，端口一释放就自动恢复接管。
+                let port_blocked = crate::services::proxy::is_port_ownership_guard_error(&e);
                 let mut outcome = services::recovery_outcome::RecoveryOutcome::for_app(
                     "startup_takeover_restore",
                     services::recovery_outcome::RecoveryOutcomeKind::StartupTakeoverFailed,
@@ -2290,7 +2294,11 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) -> bool {
                     app_type,
                 );
                 outcome.lost_fields = vec!["takeover".to_string()];
-                outcome.next_step = Some("openLogsOrRetryTakeover".to_string());
+                outcome.next_step = Some(if port_blocked {
+                    "retryingTakeoverRestore".to_string()
+                } else {
+                    "openLogsOrRetryTakeover".to_string()
+                });
                 services::recovery_outcome::record_best_effort(outcome);
                 // 失败时清除该应用的状态，避免下次启动再次尝试
                 if let Err(clear_err) = state
@@ -2299,6 +2307,15 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) -> bool {
                     .await
                 {
                     log::error!("清除 {app_type} 代理状态失败: {clear_err}");
+                }
+                if port_blocked {
+                    state
+                        .proxy_service
+                        .schedule_pending_takeover_restore(
+                            app_type,
+                            crate::services::proxy::PENDING_TAKEOVER_RESTORE_WINDOW,
+                        )
+                        .await;
                 }
             }
         }

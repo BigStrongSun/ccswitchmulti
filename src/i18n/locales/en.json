@@ -297,7 +297,8 @@
         "reviewRecoveryResults": "Open the logs and verify the recovery result.",
         "openLogsOrRestoreUserBackup": "Open the logs and restore a user backup if needed.",
         "changeProxyPortOrInspectOwner": "Inspect the port owner or choose another proxy port.",
-        "openLogsOrRetryTakeover": "Open the logs, then enable proxy takeover again."
+        "openLogsOrRetryTakeover": "Open the logs, then enable proxy takeover again.",
+        "retryingTakeoverRestore": "Takeover is retried automatically once the port is free."
       }
     },
     "officialBlockedByProxy": "Cannot switch to official provider while local routing is active. Using routing with official APIs may cause account bans.",

@@ -21,6 +21,43 @@ impl ProcessIdentity {
     }
 }
 
+/// Why a listener's owning process identity could not be read.
+///
+/// Windows reports "this PID does not exist" and "this PID belongs to another
+/// account or is otherwise protected" with different Win32 codes. The port
+/// ownership guard needs that distinction: a stale/dead PID and an unreadable
+/// foreign process are both fail-closed, but they mean very different things to
+/// the user reading the log or the toast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessIdentityError {
+    NotFound,
+    AccessDenied,
+    Unavailable(u32),
+}
+
+impl ProcessIdentityError {
+    pub(crate) fn from_win32(code: u32) -> Self {
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        const ERROR_INVALID_PARAMETER: u32 = 87;
+        match code {
+            ERROR_ACCESS_DENIED => Self::AccessDenied,
+            ERROR_INVALID_PARAMETER => Self::NotFound,
+            other => Self::Unavailable(other),
+        }
+    }
+
+    /// Human readable, Chinese-first detail used in logs and toasts.
+    pub(crate) fn detail(self) -> String {
+        match self {
+            Self::NotFound => "进程已不存在（PID 已失效或已被回收，Win32 87）".to_string(),
+            Self::AccessDenied => {
+                "拒绝访问（Win32 5：该进程属于其它账户或受系统保护，当前用户无法读取）".to_string()
+            }
+            Self::Unavailable(code) => format!("读取进程身份失败（Win32 {code}）"),
+        }
+    }
+}
+
 fn executable_paths_match(left: &str, right: &str) -> bool {
     if normalized_path(left) == normalized_path(right) {
         return true;
@@ -40,6 +77,207 @@ fn executable_paths_match(left: &str, right: &str) -> bool {
 
 pub(crate) fn current_process_identity() -> Option<ProcessIdentity> {
     process_identity(std::process::id())
+}
+
+/// One TCP endpoint row for a local port, regardless of socket state.
+///
+/// The ownership guard only ever looked at `LISTEN` rows through
+/// `GetExtendedTcpTable(TCP_TABLE_OWNER_PID_LISTENER)`. That silently hides the
+/// two other ways a `bind` can fail: a residual socket whose owner already
+/// exited, and a socket held for the port that is not in `LISTEN` at all. These
+/// rows make the failure explainable instead of "identity could not be
+/// verified".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TcpPortRow {
+    pub family: &'static str,
+    pub state: &'static str,
+    pub local_address: String,
+    pub remote_address: String,
+    pub pid: u32,
+}
+
+fn tcp_state_label(state: u32) -> &'static str {
+    match state {
+        1 => "CLOSED",
+        2 => "LISTEN",
+        3 => "SYN_SENT",
+        4 => "SYN_RCVD",
+        5 => "ESTABLISHED",
+        6 => "FIN_WAIT1",
+        7 => "FIN_WAIT2",
+        8 => "CLOSE_WAIT",
+        9 => "CLOSING",
+        10 => "LAST_ACK",
+        11 => "TIME_WAIT",
+        12 => "DELETE_TCB",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Read every local TCP endpoint row that uses `port` (IPv4 + IPv6, all states).
+#[cfg(target_os = "windows")]
+pub(crate) fn tcp_port_rows(port: u16) -> Vec<TcpPortRow> {
+    let mut rows = Vec::new();
+    collect_tcp4_port_rows(port, &mut rows);
+    collect_tcp6_port_rows(port, &mut rows);
+    rows
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn tcp_port_rows(port: u16) -> Vec<TcpPortRow> {
+    let _ = port;
+    Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+fn collect_tcp4_port_rows(port: u16, rows: &mut Vec<TcpPortRow>) {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+
+    let Some(buffer) = query_tcp_table(AF_INET as u32, TCP_TABLE_OWNER_PID_ALL) else {
+        return;
+    };
+    let count = table_entry_count::<MIB_TCPROW_OWNER_PID>(&buffer);
+    let entries = unsafe { buffer.as_ptr().add(1).cast::<MIB_TCPROW_OWNER_PID>() };
+    for index in 0..count {
+        let row = unsafe { *entries.add(index) };
+        let local_port = u16::from_be(row.dwLocalPort as u16);
+        if local_port != port {
+            continue;
+        }
+        let local_address = std::net::Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes());
+        let remote_address = std::net::Ipv4Addr::from(row.dwRemoteAddr.to_ne_bytes());
+        let remote_port = u16::from_be(row.dwRemotePort as u16);
+        rows.push(TcpPortRow {
+            family: "ipv4",
+            state: tcp_state_label(row.dwState),
+            local_address: format!("{local_address}:{local_port}"),
+            remote_address: format!("{remote_address}:{remote_port}"),
+            pid: row.dwOwningPid,
+        });
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn collect_tcp6_port_rows(port: u16, rows: &mut Vec<TcpPortRow>) {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        MIB_TCP6ROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_INET6;
+
+    let Some(buffer) = query_tcp_table(AF_INET6 as u32, TCP_TABLE_OWNER_PID_ALL) else {
+        return;
+    };
+    let count = table_entry_count::<MIB_TCP6ROW_OWNER_PID>(&buffer);
+    let entries = unsafe { buffer.as_ptr().add(1).cast::<MIB_TCP6ROW_OWNER_PID>() };
+    for index in 0..count {
+        let row = unsafe { *entries.add(index) };
+        let local_port = u16::from_be(row.dwLocalPort as u16);
+        if local_port != port {
+            continue;
+        }
+        let local_address = std::net::Ipv6Addr::from(row.ucLocalAddr);
+        let remote_address = std::net::Ipv6Addr::from(row.ucRemoteAddr);
+        let remote_port = u16::from_be(row.dwRemotePort as u16);
+        rows.push(TcpPortRow {
+            family: "ipv6",
+            state: tcp_state_label(row.dwState),
+            local_address: format!("[{local_address}]:{local_port}"),
+            remote_address: format!("[{remote_address}]:{remote_port}"),
+            pid: row.dwOwningPid,
+        });
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn table_entry_count<Row>(buffer: &[u32]) -> usize {
+    let Some(header) = buffer.first() else {
+        return 0;
+    };
+    let capacity = (buffer.len().saturating_sub(1) * std::mem::size_of::<u32>())
+        / std::mem::size_of::<Row>().max(1);
+    (*header as usize).min(capacity)
+}
+
+#[cfg(target_os = "windows")]
+fn query_tcp_table(address_family: u32, table_class: i32) -> Option<Vec<u32>> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows_sys::Win32::NetworkManagement::IpHelper::GetExtendedTcpTable;
+
+    let mut byte_len = 0u32;
+    let first = unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut byte_len,
+            0,
+            address_family,
+            table_class,
+            0,
+        )
+    };
+    if first != ERROR_INSUFFICIENT_BUFFER || byte_len < std::mem::size_of::<u32>() as u32 {
+        return None;
+    }
+
+    let word_len = (byte_len as usize).div_ceil(std::mem::size_of::<u32>());
+    let mut buffer = vec![0u32; word_len];
+    let result = unsafe {
+        GetExtendedTcpTable(
+            buffer.as_mut_ptr().cast::<c_void>(),
+            &mut byte_len,
+            0,
+            address_family,
+            table_class,
+            0,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    Some(buffer)
+}
+
+/// Build the diagnosis text for a port that could not be bound.
+///
+/// `annotate` returns a short suffix for an owning PID (resolved executable path
+/// or the reason the identity is unreadable), which keeps this formatter
+/// testable without touching the live process table.
+fn summarize_port_rows(port: u16, rows: &[TcpPortRow], annotate: impl Fn(u32) -> String) -> String {
+    const MAX_ROWS: usize = 6;
+    if rows.is_empty() {
+        return format!(
+            "端口 {port} 占用诊断：TCP 表里没有该端口的任何条目（既无 LISTEN，也无残留连接）"
+        );
+    }
+
+    let mut described = Vec::new();
+    for row in rows.iter().take(MAX_ROWS) {
+        let identity = if row.pid == 0 {
+            " 归属内核（PID 0）".to_string()
+        } else {
+            annotate(row.pid)
+        };
+        described.push(format!(
+            "{} {} {} pid={}{}",
+            row.state, row.family, row.local_address, row.pid, identity
+        ));
+    }
+    if rows.len() > MAX_ROWS {
+        described.push(format!("…还有 {} 条", rows.len() - MAX_ROWS));
+    }
+    format!("端口 {port} 占用诊断：{}", described.join("；"))
+}
+
+/// Human readable diagnosis of everything the TCP table knows about `port`.
+pub(crate) fn describe_port_blockers(port: u16) -> String {
+    let rows = tcp_port_rows(port);
+    summarize_port_rows(port, &rows, |pid| match process_identity_result(pid) {
+        Ok(identity) => format!(" path={}", identity.executable_path),
+        Err(error) => format!(" 身份不可读（{}）", error.detail()),
+    })
 }
 
 pub(crate) fn current_executable_path() -> Option<PathBuf> {
@@ -122,18 +360,18 @@ fn normalized_path(path: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+pub(crate) fn process_identity_result(pid: u32) -> Result<ProcessIdentity, ProcessIdentityError> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, FILETIME};
     use windows_sys::Win32::System::Threading::{
         GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
     if pid == 0 {
-        return None;
+        return Err(ProcessIdentityError::NotFound);
     }
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle.is_null() {
-        return None;
+        return Err(ProcessIdentityError::from_win32(unsafe { GetLastError() }));
     }
 
     let result = (|| {
@@ -143,19 +381,20 @@ pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
         let mut user = FILETIME::default();
         if unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } == 0
         {
-            return None;
+            return Err(ProcessIdentityError::from_win32(unsafe { GetLastError() }));
         }
 
         let mut path = vec![0u16; 32_768];
         let mut path_len = path.len() as u32;
         if unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &mut path_len) } == 0 {
-            return None;
+            return Err(ProcessIdentityError::from_win32(unsafe { GetLastError() }));
         }
         path.truncate(path_len as usize);
-        let executable_path = String::from_utf16(&path).ok()?;
+        let executable_path =
+            String::from_utf16(&path).map_err(|_| ProcessIdentityError::Unavailable(0))?;
         let started_at_ticks =
             (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
-        Some(ProcessIdentity {
+        Ok(ProcessIdentity {
             pid,
             executable_path,
             started_at_ticks,
@@ -281,11 +520,11 @@ pub(crate) fn terminate_verified_process(_expected: &ProcessIdentity) -> Result<
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+pub(crate) fn process_identity_result(pid: u32) -> Result<ProcessIdentity, ProcessIdentityError> {
     use libc::{proc_pidinfo, proc_pidpath, PROC_PIDTBSDINFO};
 
     if pid == 0 {
-        return None;
+        return Err(ProcessIdentityError::NotFound);
     }
 
     let mut path = [0u8; 4096];
@@ -297,10 +536,10 @@ pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
         )
     };
     if path_len <= 0 {
-        return None;
+        return Err(ProcessIdentityError::NotFound);
     }
     let executable_path = std::str::from_utf8(&path[..path_len as usize])
-        .ok()?
+        .map_err(|_| ProcessIdentityError::Unavailable(0))?
         .to_string();
 
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
@@ -315,7 +554,7 @@ pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
         )
     };
     if bytes_written != info_size as libc::c_int {
-        return None;
+        return Err(ProcessIdentityError::Unavailable(0));
     }
     let info = unsafe { info.assume_init() };
     let started_at_ticks = info
@@ -323,10 +562,10 @@ pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
         .saturating_mul(1_000_000)
         .saturating_add(info.pbi_start_tvusec);
     if started_at_ticks == 0 {
-        return None;
+        return Err(ProcessIdentityError::Unavailable(0));
     }
 
-    Some(ProcessIdentity {
+    Ok(ProcessIdentity {
         pid,
         executable_path,
         started_at_ticks,
@@ -334,20 +573,31 @@ pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+pub(crate) fn process_identity_result(pid: u32) -> Result<ProcessIdentity, ProcessIdentityError> {
     let proc_dir = PathBuf::from("/proc").join(pid.to_string());
     let executable_path = std::fs::read_link(proc_dir.join("exe"))
-        .ok()?
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ProcessIdentityError::NotFound,
+            std::io::ErrorKind::PermissionDenied => ProcessIdentityError::AccessDenied,
+            _ => ProcessIdentityError::Unavailable(error.raw_os_error().unwrap_or_default() as u32),
+        })?
         .to_string_lossy()
         .to_string();
-    let stat = std::fs::read_to_string(proc_dir.join("stat")).ok()?;
-    let close = stat.rfind(')')?;
+    let stat = std::fs::read_to_string(proc_dir.join("stat"))
+        .map_err(|_| ProcessIdentityError::Unavailable(0))?;
+    let close = stat
+        .rfind(')')
+        .ok_or(ProcessIdentityError::Unavailable(0))?;
     let fields = stat
-        .get(close + 2..)?
+        .get(close + 2..)
+        .ok_or(ProcessIdentityError::Unavailable(0))?
         .split_whitespace()
         .collect::<Vec<_>>();
-    let started_at_ticks = fields.get(19)?.parse().ok()?;
-    Some(ProcessIdentity {
+    let started_at_ticks = fields
+        .get(19)
+        .and_then(|value| value.parse().ok())
+        .ok_or(ProcessIdentityError::Unavailable(0))?;
+    Ok(ProcessIdentity {
         pid,
         executable_path,
         started_at_ticks,
@@ -360,8 +610,12 @@ pub(crate) fn tcp_listener_owner_pid(_port: u16) -> Option<u32> {
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-pub(crate) fn process_identity(_pid: u32) -> Option<ProcessIdentity> {
-    None
+pub(crate) fn process_identity_result(_pid: u32) -> Result<ProcessIdentity, ProcessIdentityError> {
+    Err(ProcessIdentityError::NotFound)
+}
+
+pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    process_identity_result(pid).ok()
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
@@ -440,5 +694,95 @@ mod tests {
         let port = listener.local_addr().expect("listener address").port();
 
         assert_eq!(tcp_listener_owner_pid(port), Some(std::process::id()));
+    }
+
+    #[test]
+    fn tcp_state_labels_cover_the_states_the_guard_reports() {
+        assert_eq!(tcp_state_label(2), "LISTEN");
+        assert_eq!(tcp_state_label(5), "ESTABLISHED");
+        assert_eq!(tcp_state_label(11), "TIME_WAIT");
+        assert_eq!(tcp_state_label(99), "UNKNOWN");
+    }
+
+    #[test]
+    fn process_identity_error_details_distinguish_missing_from_foreign() {
+        assert!(ProcessIdentityError::from_win32(5)
+            .detail()
+            .contains("其它账户"));
+        assert!(ProcessIdentityError::from_win32(87)
+            .detail()
+            .contains("已不存在"));
+        assert!(ProcessIdentityError::from_win32(1234)
+            .detail()
+            .contains("1234"));
+    }
+
+    #[test]
+    fn port_blocker_summary_names_owner_state_and_read_failure() {
+        let rows = vec![
+            TcpPortRow {
+                family: "ipv4",
+                state: "LISTEN",
+                local_address: "127.0.0.1:15721".to_string(),
+                remote_address: "0.0.0.0:0".to_string(),
+                pid: 4321,
+            },
+            TcpPortRow {
+                family: "ipv4",
+                state: "TIME_WAIT",
+                local_address: "127.0.0.1:15721".to_string(),
+                remote_address: "127.0.0.1:50000".to_string(),
+                pid: 0,
+            },
+        ];
+
+        let summary = summarize_port_rows(15721, &rows, |pid| {
+            format!(" 身份不可读（测试态，PID {pid}）")
+        });
+
+        assert!(summary.contains("LISTEN ipv4 127.0.0.1:15721 pid=4321"));
+        assert!(summary.contains("TIME_WAIT ipv4 127.0.0.1:15721 pid=0 归属内核（PID 0）"));
+        assert!(!summary.contains("没有任何条目"));
+    }
+
+    #[test]
+    fn port_blocker_summary_reports_a_port_without_any_tcp_row() {
+        let summary = summarize_port_rows(15721, &[], |_| String::new());
+        assert!(summary.contains("TCP 表里没有该端口的任何条目"));
+    }
+
+    #[test]
+    fn port_blocker_summary_is_bounded() {
+        let rows = (0..9)
+            .map(|index| TcpPortRow {
+                family: "ipv4",
+                state: "ESTABLISHED",
+                local_address: "127.0.0.1:15721".to_string(),
+                remote_address: format!("127.0.0.1:{}", 50_000 + index),
+                pid: 1000 + index,
+            })
+            .collect::<Vec<_>>();
+
+        let summary = summarize_port_rows(15721, &rows, |_| String::new());
+        assert!(summary.contains("…还有 3 条"));
+        assert_eq!(summary.matches("ESTABLISHED").count(), 6);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn live_port_rows_describe_a_listening_socket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let pid = std::process::id();
+
+        let rows = tcp_port_rows(port);
+        assert!(
+            rows.iter()
+                .any(|row| row.state == "LISTEN" && row.pid == pid),
+            "expected a LISTEN row for pid {pid}, got {rows:?}"
+        );
+        let summary = describe_port_blockers(port);
+        assert!(summary.contains("LISTEN"), "{summary}");
+        assert!(summary.contains(&format!("pid={pid}")), "{summary}");
     }
 }

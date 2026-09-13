@@ -5756,3 +5756,11 @@ supported in one streaming turn`。
 # 2026-09-13 代理端口旧 CCSMMulti/AppContainer 占用强制释放根修
 
 - 端口 15721 被旧 3.20.2-5 的 AppContainer hardlink 监听占用时，跨版本文件身份比较使 `force_release_proxy_port_and_restore_takeover` 误判为 foreign owner。根修新增 `/status` 验证同一 CCSM 接管实例，允许跨版本安全终止；当前进程自持端口时先 `stop()` 再恢复接管。services::proxy 98/98、paginated_history 24/24、cargo check/rustfmt 通过；全量串行仅剩无关的 usage_rollup 既有失败。详见 `memory-2026-09-13-port-force-release.md`。
+
+# 2026-09-13 覆盖安装后「端口身份无法核验 / 启动接管失败」诊断与自动重试
+
+- v3.20.2-9 实装后仍复现 `无法读取端口 <port> 的监听进程身份，已拒绝强制恢复` 与 `启动时恢复代理接管失败`。本机日志证实同源失败四次（09-12 13:05:08、09-13 03:54:43、09-13 20:35:39/15720、09-13 21:13:33/15721），都是 `PORT_OWNERSHIP_GUARD … (os error 10048)`。
+- 原语语义（本机实测）：`OpenProcess(QUERY_LIMITED_INFORMATION)` 只对其它账户/失效 PID 失败；同用户提权进程（TokenElevation=1）与 MSIX 包身份进程（Codex `runFullTrust`）都可读。反转实验排除三种自我残留：强杀后端口立即释放、TIME_WAIT 不阻塞重绑、子进程不继承监听 socket。⇒ 失败时的占用者是**当时存在但不属于当前用户**的 LISTEN 持有者（或有期限的外部占用）。
+- 旧实现的两个缺陷：`probe_proxy_port` 只看 LISTEN 且缺 PID/错误码，无法诊断；启动失败后立即清除 takeover 状态，5 秒守护失去重试目标，占用者消失也必须手动重开。
+- 根修：`process_identity_result()` 带 `ProcessIdentityError{NotFound|AccessDenied|Unavailable}`；`tcp_port_rows()/describe_port_blockers()` 用 `TCP_TABLE_OWNER_PID_ALL` 覆盖 IPv4/IPv6 全状态并写进日志与提示；`schedule_pending_takeover_restore()` + 守护 `retry_pending_takeover_restore()` 让端口释放后 15 分钟窗口内自动恢复接管；恢复成功发 `recovery-outcome-resolved` 收起前端提示；顺带修掉 `disable_takeover_for_app_after_switch_lock` 6 条双重编码乱码文案。仍然 fail-closed，不结束无法核验的进程。
+- 验证：`services::proxy` 102/102（含新 `pending_takeover_restore_recovers_once_the_blocking_port_frees_up` 真实占用→释放→自动恢复）、`services::recovery_outcome` 7/7、`process_identity` 11/11、typecheck/Prettier/rustfmt 通过；前端全量 194 files /1583 tests 仅剩既有失败 `tests/components/AddProviderDialog.test.tsx`（干净 detached HEAD worktree 复现）。本轮未安装/重启本机 CCSM。详见 `memory-2026-09-13-port-blocker-diagnosis.md`。

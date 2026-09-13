@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 pub const EVENT_RECOVERY_OUTCOME: &str = "recovery-outcome-recorded";
+pub const EVENT_RECOVERY_OUTCOME_RESOLVED: &str = "recovery-outcome-resolved";
 const STORE_FILE: &str = "recovery-outcomes.json";
 const MAX_OUTCOMES: usize = 64;
 
@@ -179,6 +180,58 @@ pub fn get_pending_recovery_outcomes() -> Result<Vec<RecoveryOutcome>, String> {
             .then_with(|| left.timestamp.cmp(&right.timestamp))
     });
     Ok(pending)
+}
+
+/// 端口被占用类失败在端口释放、接管自动恢复后不再需要用户处理。
+///
+/// 把该应用所有未确认的「启动接管失败 / 端口身份不明」结果标记为已确认，
+/// 并通知前端收起对应提示；返回被解决的 id（best effort）。
+pub fn resolve_port_busy_outcomes(app_type: &str) -> Vec<String> {
+    let resolved = match resolve_port_busy_outcomes_inner(app_type) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            log::warn!("标记端口占用恢复结果失败: {error}");
+            return Vec::new();
+        }
+    };
+    if resolved.is_empty() {
+        return resolved;
+    }
+    if let Some(handle) = APP_HANDLE.get() {
+        let payload = serde_json::json!({
+            "appType": app_type,
+            "ids": resolved.clone(),
+        });
+        if let Err(error) = handle.emit(EVENT_RECOVERY_OUTCOME_RESOLVED, &payload) {
+            log::warn!("发送恢复结果已解决事件失败: {error}");
+        }
+    }
+    resolved
+}
+
+fn resolve_port_busy_outcomes_inner(app_type: &str) -> Result<Vec<String>, String> {
+    let _guard = store_lock()
+        .lock()
+        .map_err(|_| "恢复结果存储锁已损坏".to_string())?;
+    let mut store = read_store_unlocked()?;
+    let acknowledged_at = now_timestamp();
+    let mut resolved = Vec::new();
+    for outcome in &mut store.outcomes {
+        let matches_app = outcome.app_type.as_deref() == Some(app_type);
+        let is_port_busy = matches!(
+            outcome.kind,
+            RecoveryOutcomeKind::StartupTakeoverFailed
+                | RecoveryOutcomeKind::PortOwnedByUnknownOwner
+        );
+        if matches_app && is_port_busy && outcome.acknowledged_at.is_none() {
+            outcome.acknowledged_at = Some(acknowledged_at.clone());
+            resolved.push(outcome.id.clone());
+        }
+    }
+    if !resolved.is_empty() {
+        write_store_unlocked(&store)?;
+    }
+    Ok(resolved)
 }
 
 fn is_run_classification(kind: RecoveryOutcomeKind) -> bool {
@@ -466,5 +519,55 @@ mod tests {
         let pending = get_pending_recovery_outcomes().expect("read pending");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, current_unclean.id);
+    }
+
+    #[test]
+    #[serial]
+    fn resolving_port_busy_outcomes_only_acknowledges_that_apps_port_failures() {
+        let _home = TempHome::new();
+        let startup_failure = outcome(
+            7,
+            "codex",
+            RecoverySeverity::Error,
+            RecoveryOutcomeKind::StartupTakeoverFailed,
+        );
+        let unknown_owner = outcome(
+            7,
+            "codex",
+            RecoverySeverity::Error,
+            RecoveryOutcomeKind::PortOwnedByUnknownOwner,
+        );
+        let other_app_failure = outcome(
+            7,
+            "claude",
+            RecoverySeverity::Error,
+            RecoveryOutcomeKind::StartupTakeoverFailed,
+        );
+        let unrelated_failure = outcome(
+            7,
+            "codex",
+            RecoverySeverity::Error,
+            RecoveryOutcomeKind::UnrecoverableUserTables,
+        );
+        for entry in [
+            &startup_failure,
+            &unknown_owner,
+            &other_app_failure,
+            &unrelated_failure,
+        ] {
+            record_recovery_outcome(entry.clone()).expect("record outcome");
+        }
+
+        let resolved = resolve_port_busy_outcomes("codex");
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains(&startup_failure.id));
+        assert!(resolved.contains(&unknown_owner.id));
+
+        let pending = get_pending_recovery_outcomes().expect("read pending");
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|entry| entry.id == other_app_failure.id));
+        assert!(pending.iter().any(|entry| entry.id == unrelated_failure.id));
+
+        assert!(resolve_port_busy_outcomes("codex").is_empty());
     }
 }
