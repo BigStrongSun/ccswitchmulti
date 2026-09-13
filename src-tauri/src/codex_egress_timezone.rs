@@ -57,6 +57,7 @@ pub enum CodexEgressMonitorState {
     Checking,
     Ready,
     RestartRequired,
+    RendererOnly,
     Error,
 }
 
@@ -67,6 +68,7 @@ pub(crate) struct CodexEgressMonitorRuntime {
     pub last_trigger: Option<String>,
     pub last_error: Option<String>,
     pub restart_required: bool,
+    pub process_timezone_unavailable: bool,
     pub consecutive_failures: u32,
 }
 
@@ -98,11 +100,16 @@ pub(crate) fn monitor_status_from_parts(
     runtime: &CodexEgressMonitorRuntime,
     _now: i64,
 ) -> CodexEgressMonitorStatus {
-    let state = if settings.mode != CodexEgressTimezoneMode::Auto {
+    let process_timezone_unavailable =
+        runtime.process_timezone_unavailable && settings.mode != CodexEgressTimezoneMode::Off;
+    let restart_required = runtime.restart_required && !process_timezone_unavailable;
+    let state = if process_timezone_unavailable {
+        CodexEgressMonitorState::RendererOnly
+    } else if settings.mode != CodexEgressTimezoneMode::Auto {
         CodexEgressMonitorState::Disabled
     } else if runtime.running {
         CodexEgressMonitorState::Checking
-    } else if runtime.restart_required {
+    } else if restart_required {
         CodexEgressMonitorState::RestartRequired
     } else if runtime.last_error.is_some() {
         CodexEgressMonitorState::Error
@@ -133,7 +140,7 @@ pub(crate) fn monitor_status_from_parts(
                 .map(|at| at.saturating_add(i64::from(interval) * 60))
         },
         monitor_interval_minutes: interval,
-        restart_required: runtime.restart_required,
+        restart_required,
     }
 }
 
@@ -816,6 +823,22 @@ pub(crate) fn notify_proxy_failure(app_type: &str, error: &ProxyError) {
 
 pub(crate) fn mark_codex_timezone_applied() {
     let applied_timezone = resolve_launch_timezone(&crate::settings::get_settings());
+    record_codex_launch_timezone(applied_timezone, false);
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn mark_codex_timezone_not_inherited() {
+    let configured = resolve_launch_timezone(&crate::settings::get_settings());
+    if configured.is_some() {
+        log::warn!("Codex MSIX activation cannot inherit TZ; process timezone remains unapplied. Renderer timezone emulation will be attempted over CDP.");
+    }
+    record_codex_launch_timezone(None, true);
+}
+
+fn record_codex_launch_timezone(
+    applied_timezone: Option<String>,
+    process_timezone_unavailable: bool,
+) {
     if let Err(error) = crate::settings::mutate_codex_egress_timezone(|settings| {
         settings.last_applied_timezone = applied_timezone;
         settings.last_applied_at = Some(Utc::now().timestamp());
@@ -826,6 +849,7 @@ pub(crate) fn mark_codex_timezone_applied() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     runtime.restart_required = false;
+    runtime.process_timezone_unavailable = process_timezone_unavailable;
     drop(runtime);
     emit_monitor_status(None);
 }
@@ -836,16 +860,21 @@ pub(crate) fn start_automatic_monitor(app_handle: AppHandle) {
         return;
     }
     let settings = crate::settings::get_settings().codex_egress_timezone;
-    if settings.mode == CodexEgressTimezoneMode::Auto
-        && settings.detected_timezone.is_some()
-        && settings.detected_timezone != settings.last_applied_timezone
-        && crate::codex_desktop::is_codex_desktop_running()
-    {
-        monitor_runtime()
+    let running = crate::codex_desktop::detect_running_codex_main_process();
+    #[cfg(target_os = "windows")]
+    let packaged = running
+        .as_deref()
+        .is_some_and(crate::codex_desktop::windows_launch::is_packaged_codex);
+    #[cfg(not(target_os = "windows"))]
+    let packaged = false;
+    initialize_monitor_launch_state(
+        &mut monitor_runtime()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .restart_required = true;
-    }
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        &settings,
+        running.is_some(),
+        packaged,
+    );
     tauri::async_runtime::spawn(async move {
         let mut last_tick = Instant::now();
         loop {
@@ -862,6 +891,20 @@ pub(crate) fn start_automatic_monitor(app_handle: AppHandle) {
             }
         }
     });
+}
+
+pub(crate) fn initialize_monitor_launch_state(
+    runtime: &mut CodexEgressMonitorRuntime,
+    settings: &CodexEgressTimezoneSettings,
+    codex_running: bool,
+    packaged: bool,
+) {
+    runtime.process_timezone_unavailable = codex_running && packaged;
+    runtime.restart_required = !runtime.process_timezone_unavailable
+        && codex_running
+        && settings.mode == CodexEgressTimezoneMode::Auto
+        && settings.detected_timezone.is_some()
+        && settings.detected_timezone != settings.last_applied_timezone;
 }
 
 #[tauri::command]

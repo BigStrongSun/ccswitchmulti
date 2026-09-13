@@ -25,6 +25,8 @@ function stateLabel(status: CodexEgressMonitorStatus) {
       return "监测正常";
     case "restart_required":
       return "出口已变化，需要刷新 Codex";
+    case "renderer_only":
+      return "仅支持页面时区同步";
     case "error":
       return "自动检测失败";
   }
@@ -127,6 +129,12 @@ export function CodexEgressTimezoneStatusCard({
             <p className="text-xs font-medium text-amber-800 dark:text-amber-200">
               新结果已经保存，但运行中的 app-server 仍使用旧 TZ。CCSM
               不会强制结束任务，请在没有运行任务时使用 Codex 状态页的安全刷新。
+            </p>
+          )}
+          {status?.state === "renderer_only" && (
+            <p className="text-xs font-medium text-amber-800 dark:text-amber-200">
+              Windows 应用包启动无法传入进程时区，只会尝试同步页面时区；
+              app-server 时区未覆盖，重复刷新无法解除此限制。
             </p>
           )}
           {(requestError || status?.lastError) && (

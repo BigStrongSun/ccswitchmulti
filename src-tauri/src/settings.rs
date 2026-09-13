@@ -426,7 +426,8 @@ pub enum CodexEgressTimezoneMode {
 
 /// Codex Desktop 进程级出口时区设置。
 ///
-/// 仅在 CCSwitchMulti 启动 Codex 时通过子进程 `TZ` 环境变量生效，不会修改
+/// 直接启动时通过子进程 `TZ` 环境变量生效；MSIX 包激活无法继承该变量，
+/// 仅通过 CDP 尝试覆盖 renderer 时区，不标记进程时区已应用。不会修改
 /// Windows 系统时区。`auto` 使用后台监测到的最新 IANA 时区；监测失败不会
 /// 阻塞 Codex 请求或启动。
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -851,31 +851,10 @@ async fn query_refresh_targets() -> Result<CodexRuntimeRefreshTargets, String> {
     Ok(classify_refresh_targets(&processes))
 }
 
-#[cfg(target_os = "windows")]
-fn resolve_windows_codex_aumid() -> Option<String> {
-    let output = powershell_utf8_output(
-        r#"
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-Get-StartApps |
-  Where-Object { $_.AppID -match '^OpenAI\.Codex(?:\.Preview)?_.*!App$' } |
-  Select-Object -First 1 -ExpandProperty AppID
-"#,
-    )
-    .ok()?;
-    let aumid = output.lines().next()?.trim();
-    (!aumid.is_empty()).then(|| aumid.to_string())
-}
-
 fn select_launch_target(
     aumid: Option<String>,
     executable: Option<PathBuf>,
-    timezone_injection_enabled: bool,
 ) -> Option<CodexRuntimeLaunchTarget> {
-    if timezone_injection_enabled {
-        if let Some(executable) = executable.clone() {
-            return Some(CodexRuntimeLaunchTarget::DesktopExecutable(executable));
-        }
-    }
     #[cfg(target_os = "windows")]
     if let Some(aumid) = aumid {
         return Some(CodexRuntimeLaunchTarget::WindowsAumid(aumid));
@@ -885,16 +864,16 @@ fn select_launch_target(
     executable.map(CodexRuntimeLaunchTarget::DesktopExecutable)
 }
 
-fn resolve_launch_target() -> Option<CodexRuntimeLaunchTarget> {
+fn resolve_launch_target() -> Result<Option<CodexRuntimeLaunchTarget>, String> {
     let executable = crate::codex_desktop::resolve_codex_executable();
-    let timezone_injection_enabled =
-        crate::codex_egress_timezone::resolve_launch_timezone(&crate::settings::get_settings())
-            .is_some();
     #[cfg(target_os = "windows")]
-    let aumid = resolve_windows_codex_aumid();
+    let aumid = match executable.as_deref() {
+        Some(path) => crate::codex_desktop::windows_launch::resolve_app_id(path)?,
+        None => None,
+    };
     #[cfg(not(target_os = "windows"))]
     let aumid = None;
-    select_launch_target(aumid, executable, timezone_injection_enabled)
+    Ok(select_launch_target(aumid, executable))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -915,7 +894,7 @@ async fn build_preflight() -> Result<CodexRuntimeRefreshPreflight, String> {
 #[cfg(target_os = "windows")]
 async fn build_preflight() -> Result<CodexRuntimeRefreshPreflight, String> {
     let targets = query_refresh_targets().await?;
-    let launch_target = resolve_launch_target();
+    let launch_target = resolve_launch_target()?;
     let paginated_history =
         tokio::task::spawn_blocking(paginated_history::inspect_paginated_history_repair)
             .await
@@ -1061,41 +1040,13 @@ fn force_terminate_process(_pid: u32) -> Result<(), String> {
     Err("codex_runtime_refresh_windows_only".to_string())
 }
 
-#[cfg(target_os = "windows")]
-fn launch_windows_aumid(aumid: &str) -> Result<(), String> {
-    use windows::core::HSTRING;
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER,
-        COINIT_APARTMENTTHREADED,
-    };
-    use windows::Win32::UI::Shell::{
-        ApplicationActivationManager, IApplicationActivationManager, AO_NONE,
-    };
-
-    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
-    let result = (|| -> Result<(), String> {
-        let manager: IApplicationActivationManager =
-            unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER) }
-                .map_err(|error| format!("codex_aumid_activation_manager_failed: {error}"))?;
-        let arguments = HSTRING::from(format!(
-            "--remote-debugging-port={} --remote-allow-origins=http://127.0.0.1:{}",
-            crate::codex_desktop::DEFAULT_CODEX_DEBUG_PORT,
-            crate::codex_desktop::DEFAULT_CODEX_DEBUG_PORT
-        ));
-        unsafe { manager.ActivateApplication(&HSTRING::from(aumid), &arguments, AO_NONE) }
-            .map(|_| ())
-            .map_err(|error| format!("codex_aumid_activation_failed: {error}"))
-    })();
-    if initialized {
-        unsafe { CoUninitialize() };
-    }
-    result
-}
-
 fn launch_codex_target(target: &CodexRuntimeLaunchTarget) -> Result<(), String> {
     match target {
         #[cfg(target_os = "windows")]
-        CodexRuntimeLaunchTarget::WindowsAumid(aumid) => launch_windows_aumid(aumid),
+        CodexRuntimeLaunchTarget::WindowsAumid(aumid) => crate::codex_desktop::launch_windows_app(
+            aumid,
+            crate::codex_desktop::DEFAULT_CODEX_DEBUG_PORT,
+        ),
         CodexRuntimeLaunchTarget::DesktopExecutable(path) => {
             crate::codex_desktop::launch_codex_with_debug_port(
                 path,
@@ -1397,7 +1348,7 @@ pub async fn refresh_codex_runtime_state(
     let _refresh_guard = CODEX_RUNTIME_REFRESH_LOCK
         .try_lock()
         .map_err(|_| "codex_runtime_refresh_already_running".to_string())?;
-    let launch_target = resolve_launch_target()
+    let launch_target = resolve_launch_target()?
         .ok_or_else(|| "codex_desktop_launch_target_not_found".to_string())?;
     let progress = RuntimeRefreshProgressEmitter::new(app);
     let mut operations = SystemCodexRuntimeRefreshOperations {
@@ -1437,19 +1388,20 @@ mod tests {
         }));
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
-    fn timezone_injection_prefers_executable_over_aumid_launch() {
+    fn registered_package_uses_activation_independently_of_timezone_settings() {
         let executable = PathBuf::from(r"C:\Program Files\WindowsApps\OpenAI.Codex\ChatGPT.exe");
-        let target = select_launch_target(
-            Some("OpenAI.Codex_123!App".to_string()),
-            Some(executable.clone()),
-            true,
-        );
-
+        let aumid = "OpenAI.Codex_publisher!UnifiedApp".to_string();
         assert_eq!(
-            target,
+            select_launch_target(Some(aumid.clone()), Some(executable.clone())),
+            Some(CodexRuntimeLaunchTarget::WindowsAumid(aumid))
+        );
+        assert_eq!(
+            select_launch_target(None, Some(executable.clone())),
             Some(CodexRuntimeLaunchTarget::DesktopExecutable(executable))
         );
+        assert_eq!(select_launch_target(None, None), None);
     }
     use std::collections::VecDeque;
 

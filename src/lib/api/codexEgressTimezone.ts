@@ -38,6 +38,7 @@ export type CodexEgressMonitorState =
   | "checking"
   | "ready"
   | "restart_required"
+  | "renderer_only"
   | "error";
 
 export interface CodexEgressMonitorStatus {

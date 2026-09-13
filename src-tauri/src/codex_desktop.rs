@@ -10,6 +10,10 @@ use sha2::{Digest, Sha256};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
+#[cfg(target_os = "windows")]
+#[path = "codex_windows_launch.rs"]
+pub(crate) mod windows_launch;
+
 pub(crate) const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
 pub(crate) const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
@@ -1776,6 +1780,10 @@ pub(crate) fn launch_codex_with_debug_port(
             );
         }
     }
+    #[cfg(target_os = "windows")]
+    if let Some(app_id) = windows_launch::resolve_app_id(executable)? {
+        return launch_windows_app(&app_id, debug_port);
+    }
     let mut command = Command::new(executable);
     append_codex_debug_args(&mut command, debug_port);
     apply_codex_launch_timezone(&mut command, launch_timezone.as_deref());
@@ -1802,13 +1810,25 @@ fn apply_codex_launch_timezone(command: &mut Command, timezone: Option<&str>) {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn launch_windows_app(app_id: &str, debug_port: u16) -> Result<(), String> {
+    windows_launch::activate(app_id, debug_port)?;
+    // The activation broker does not inherit our per-child environment. Renderer
+    // timezone emulation is applied separately by install_script over CDP.
+    crate::codex_egress_timezone::mark_codex_timezone_not_inherited();
+    Ok(())
+}
+
+fn codex_debug_args(debug_port: u16) -> [String; 2] {
+    [
+        format!("--remote-debugging-port={debug_port}"),
+        format!("--remote-allow-origins=http://127.0.0.1:{debug_port}"),
+    ]
+}
+
 /// 为 Desktop 启动命令追加 Chromium remote-debugging 参数。
 fn append_codex_debug_args(command: &mut Command, debug_port: u16) {
-    command
-        .arg(format!("--remote-debugging-port={debug_port}"))
-        .arg(format!(
-            "--remote-allow-origins=http://127.0.0.1:{debug_port}"
-        ));
+    command.args(codex_debug_args(debug_port));
 }
 
 /// Windows 下查找 Codex App 主进程的脚本。
@@ -2664,6 +2684,21 @@ fn version_tuple_from_package_name(name: &str) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_launch_transports_share_the_requested_debug_port() {
+        let mut command = Command::new("codex-desktop-placeholder");
+        append_codex_debug_args(&mut command, 9231);
+        let arguments: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        assert_eq!(arguments, codex_debug_args(9231));
+        assert_eq!(
+            codex_debug_args(9231).join(" "),
+            "--remote-debugging-port=9231 --remote-allow-origins=http://127.0.0.1:9231"
+        );
+    }
 
     /// 返回当前测试平台的 Desktop 主程序文件名。
     fn desktop_test_executable_name() -> &'static str {

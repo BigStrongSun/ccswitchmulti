@@ -12,6 +12,20 @@ vi.mock("@/lib/api/codexEgressTimezone", () => ({
 }));
 
 describe("CodexEgressTimezoneStatusCard", () => {
+  it("explains package activation without offering an ineffective refresh", async () => {
+    vi.mocked(codexEgressTimezoneApi.monitorStatus).mockResolvedValue({
+      state: "renderer_only",
+      monitorIntervalMinutes: 15,
+      restartRequired: false,
+    });
+    render(<CodexEgressTimezoneStatusCard onOpenCodexStatus={vi.fn()} />);
+    expect(await screen.findByText("仅支持页面时区同步")).toBeInTheDocument();
+    expect(screen.getByText(/重复刷新无法解除此限制/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "打开安全刷新" }),
+    ).not.toBeInTheDocument();
+  });
+
   beforeEach(() => {
     vi.mocked(codexEgressTimezoneApi.monitorStatus).mockReset();
     vi.mocked(codexEgressTimezoneApi.triggerAutomaticProbe).mockReset();

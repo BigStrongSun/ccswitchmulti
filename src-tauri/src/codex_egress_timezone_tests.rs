@@ -368,6 +368,58 @@ fn monitor_status_exposes_failure_backoff_as_the_next_check() {
     assert_eq!(status.state, CodexEgressMonitorState::Error);
     assert_eq!(status.next_check_at, Some(2_180));
 }
+
+#[test]
+fn package_activation_reports_renderer_only_without_a_refresh_loop() {
+    let runtime = CodexEgressMonitorRuntime {
+        process_timezone_unavailable: true,
+        restart_required: true,
+        ..CodexEgressMonitorRuntime::default()
+    };
+    for mode in [
+        CodexEgressTimezoneMode::Auto,
+        CodexEgressTimezoneMode::Manual,
+    ] {
+        let settings = CodexEgressTimezoneSettings {
+            mode,
+            ..CodexEgressTimezoneSettings::default()
+        };
+        let status = monitor_status_from_parts(&settings, &runtime, 2_010);
+        assert_eq!(status.state, CodexEgressMonitorState::RendererOnly);
+        assert!(!status.restart_required);
+    }
+    let status =
+        monitor_status_from_parts(&CodexEgressTimezoneSettings::default(), &runtime, 2_010);
+    assert_eq!(status.state, CodexEgressMonitorState::Disabled);
+}
+
+#[test]
+fn restarting_ccsm_preserves_the_running_package_timezone_limitation() {
+    let settings = CodexEgressTimezoneSettings {
+        mode: CodexEgressTimezoneMode::Auto,
+        detected_timezone: Some("Asia/Taipei".into()),
+        ..CodexEgressTimezoneSettings::default()
+    };
+    let mut runtime = CodexEgressMonitorRuntime::default();
+    super::codex_egress_timezone::initialize_monitor_launch_state(
+        &mut runtime,
+        &settings,
+        true,
+        true,
+    );
+    assert_eq!(
+        monitor_status_from_parts(&settings, &runtime, 0).state,
+        CodexEgressMonitorState::RendererOnly
+    );
+    assert!(!runtime.restart_required);
+    super::codex_egress_timezone::initialize_monitor_launch_state(
+        &mut runtime,
+        &settings,
+        true,
+        false,
+    );
+    assert!(runtime.restart_required);
+}
 #[tokio::test]
 #[ignore = "Explicit network diagnostic; never run as a regular test gate"]
 async fn live_trace_transport_diagnostic() {
