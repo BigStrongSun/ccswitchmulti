@@ -7,6 +7,7 @@ import type {
   CodexProviderSetCommitOutcome,
   CodexProviderSetPreview,
 } from "@/lib/api/protocol-compatibility";
+import { restoreCodexProviderProtocolEvidence } from "@/lib/api/protocol-compatibility";
 import { createSingleCodexProtocolLabAdapter } from "@/lib/protocol-lab/codex-adapters";
 import {
   ProtocolLabCancelled,
@@ -61,14 +62,31 @@ export function useCodexProviderSetSave() {
       receiptIds: string[] = [],
       options: { allowUnverifiedSave?: boolean } = {},
     ) => {
+      // UI receipts are intentionally short-lived and can be discarded when an
+      // asynchronous form update changes its presentation identity. Before an
+      // automatic save asks for a new paid probe, let the backend compile the
+      // current Provider and reissue receipts from matching persisted evidence.
+      // The restore command is read-only: it neither contacts the upstream nor
+      // extends observation expiry, and it fails closed when the real target or
+      // request policy changed.
+      let reusableReceiptIds = receiptIds;
+      if (
+        reusableReceiptIds.length === 0 &&
+        adapter.requiresProbe(provider, reusableReceiptIds)
+      ) {
+        const restored = await restoreCodexProviderProtocolEvidence(provider);
+        if (restored?.receiptIds.length) {
+          reusableReceiptIds = restored.receiptIds;
+        }
+      }
       const saveUnverified =
         options.allowUnverifiedSave === true &&
-        receiptIds.length === 0 &&
-        adapter.requiresProbe(provider, receiptIds);
+        reusableReceiptIds.length === 0 &&
+        adapter.requiresProbe(provider, reusableReceiptIds);
       const draft = saveUnverified
         ? prepareUnverifiedCodexProvider(provider)
         : provider;
-      const outcome = await workflow.save(draft, receiptIds);
+      const outcome = await workflow.save(draft, reusableReceiptIds);
       await refreshProviderViews();
       if (
         (outcome as CodexProviderSetCommitOutcome).status ===

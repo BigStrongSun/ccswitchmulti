@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-09-13 普通 Provider 保存时恢复协议探测证据
+
+- 普通 Codex Provider 的 UI receipt 是一次性的临时提交租约；`CodexFormFields` 为防止迟到异步结果覆盖而使用的完整 readiness identity 包含名称和目录展示能力等非请求字段，变更时会清空该租约。此前 `useCodexProviderSetSave` 直接把空 receipt 交给 Protocol Lab，导致保存又进入付费深探测确认。
+- 保存协调器现在只在自动 Provider 缺少 receipt 时调用 `restoreCodexProviderProtocolEvidence()`：后端以当前候选编译真实 ProbeTargetKey，从仍有效的 SQLite profile 和 observations 重签 receipt。恢复不发送上游请求、不延长有效期；端点、凭据、传输或 request policy 真变化，或证据缺失/过期时，恢复失败并继续保持原有 fail-closed 深探测门禁。
+- 回归 `useCodexProviderSetSave.test.tsx` 先验证旧实现没有调用恢复接口而稳定 RED；实现后证明保存走 `restore -> prepare -> commit`，并且不调用 preflight。聚焦前端协议相关 97/97、`pnpm typecheck` 和 Prettier 均通过；后端只读恢复定向 Rust 测试通过。未构建、安装、重启或修改在线 CCSM。
+
 ## 2026-09-13 Provider / MultiRouter 保存与协议探测边界（源码核对）
 
 - 当前 `main@ab1b877d` / `v3.20.2-9` 的主 UI 保存链路没有固定的“显式探测后再发一次网络探测”：普通 Provider 由 `EditProviderDialog` 把 `protocolProbeReceiptIds` 传给 `useCodexProviderSetSave`，`createSingleCodexProtocolLabAdapter.requiresProbe()` 在 receipt 非空时返回 false，随后直接 `prepare_codex_provider_set -> commit_codex_provider_set`；MultiRouter 由 `useProtocolLabWorkflow.validate()` 取得批量 outcome 后把带 receipt 的 sources 写入 workflow draft，`buildBatchDraft(true)` 复用这些 receipt，随后直接 batch prepare/commit。
