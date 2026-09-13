@@ -26,7 +26,7 @@ use super::{
     CodexAdapter, ProviderAdapter,
 };
 
-pub(crate) const CODEX_REQUEST_PREPARER_VERSION: u32 = 7;
+pub(crate) const CODEX_REQUEST_PREPARER_VERSION: u32 = 8;
 const DEFAULT_THIRD_PARTY_USER_AGENT: &str = concat!("CCSwitchMulti/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,6 +357,9 @@ impl CodexThirdPartyRequestPolicy {
 
     fn prepare_responses_body(&self, mut logical_body: Value) -> Result<Value, ProxyError> {
         prepare_codex_native_responses_model(&self.provider, &mut logical_body)?;
+        if super::codex_responses_tool_history::needs_namespace_consolidation(&self.base_url) {
+            super::codex_responses_tool_history::consolidate_namespaces(&mut logical_body);
+        }
         Ok(logical_body)
     }
 }
