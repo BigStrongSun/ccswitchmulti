@@ -9,6 +9,10 @@ param(
     [string]$MaintenanceMarker = "$env:LOCALAPPDATA\CCSwitchMultiGuardian\maintenance.lock",
     [string]$LogPath = "$env:LOCALAPPDATA\CCSwitchMultiGuardian\guardian.jsonl",
     [string]$LockPath = "$env:LOCALAPPDATA\CCSwitchMultiGuardian\guardian.lock",
+    [string]$ConfigPath = "$env:USERPROFILE\.cc-switch",
+    [int]$MaxRestartsPerWindow = 6,
+    [int]$RestartWindowMinutes = 30,
+    [switch]$RestartOnCleanExit,
     [int]$MaxCycles = 0,
     [switch]$NoRestart,
     [switch]$PlanOnly
@@ -134,6 +138,10 @@ $plan = [ordered]@{
     MaintenanceMarker = ConvertTo-CcsmGuardianCanonicalPath -Path $MaintenanceMarker
     LogPath = ConvertTo-CcsmGuardianCanonicalPath -Path $LogPath
     LockPath = ConvertTo-CcsmGuardianCanonicalPath -Path $LockPath
+    ConfigPath = ConvertTo-CcsmGuardianCanonicalPath -Path $ConfigPath
+    MaxRestartsPerWindow = $MaxRestartsPerWindow
+    RestartWindowMinutes = $RestartWindowMinutes
+    RestartOnCleanExit = [bool]$RestartOnCleanExit
     NoRestart = [bool]$NoRestart
 }
 if ($PlanOnly) {
@@ -151,6 +159,7 @@ try {
         [System.IO.FileShare]::None
     )
     $state = [pscustomobject]@{ FailureSinceUtc = $null }
+    $restartTimesUtc = New-Object "System.Collections.Generic.List[datetime]"
     $cycles = 0
     Write-CcsmGuardianEvent -Level "info" -Event "guardian-started" -Detail $plan
     while ($true) {
@@ -173,6 +182,29 @@ try {
                 Write-CcsmGuardianEvent -Level "warning" -Event "restart-suppressed" -Detail @{ Port = $Port }
                 return
             }
+            # 只重启“异常死亡”的实例：应用正常退出（含托盘退出）时会自己移除运行标记，
+            # 此时不重启，避免用户主动退出后被守护反复拉起。
+            if (-not $RestartOnCleanExit) {
+                $uncleanExit = Test-CcsmGuardianUncleanExit -ConfigPath $ConfigPath -GetProcessIdentity {
+                    param($ProcessId) Get-CcsmGuardianProcessIdentity -ProcessId $ProcessId
+                }
+                if (-not $uncleanExit) {
+                    Write-CcsmGuardianEvent -Level "info" -Event "restart-skipped-clean-exit" -Detail @{ Port = $Port }
+                    return
+                }
+            }
+            $budgetOk = Test-CcsmGuardianRestartBudget -RestartTimesUtc $restartTimesUtc.ToArray() `
+                -NowUtc ([datetime]::UtcNow) -WindowMinutes $RestartWindowMinutes -MaxRestarts $MaxRestartsPerWindow
+            if (-not $budgetOk) {
+                Write-CcsmGuardianEvent -Level "warning" -Event "restart-rate-limited" -Detail @{
+                    Port = $Port
+                    WindowMinutes = $RestartWindowMinutes
+                    MaxRestarts = $MaxRestartsPerWindow
+                    RestartsInWindow = $restartTimesUtc.Count
+                }
+                return
+            }
+            $restartTimesUtc.Add([datetime]::UtcNow)
             Invoke-CcsmGuardianRecovery -InstalledExecutable $InstalledExecutable `
                 -IsMaintenance $isMaintenance `
                 -InstalledExecutableExists { Test-Path -LiteralPath $InstalledExecutable -PathType Leaf } `

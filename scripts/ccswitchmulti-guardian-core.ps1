@@ -323,6 +323,49 @@ function Invoke-CcsmGuardianIteration {
     $State.FailureSinceUtc = $now
 }
 
+function Test-CcsmGuardianUncleanExit {
+    <#
+    应用只在“正常退出”时由自己移除运行标记 app-run-marker.json。标记仍在、而它记录的
+    进程已经不存在，说明上一次运行是异常死亡（崩溃/被杀），才允许守护重启。
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ConfigPath,
+        [Parameter(Mandatory = $true)][scriptblock]$GetProcessIdentity
+    )
+
+    $configRoot = [System.IO.Path]::GetFullPath($ConfigPath)
+    $markerPath = Join-Path $configRoot "logs\app-run-marker.json"
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $false }
+    try {
+        $marker = [System.IO.File]::ReadAllText($markerPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    } catch {
+        return $false
+    }
+    $markerPid = 0
+    if ($marker.PSObject.Properties.Name -contains "pid") { $markerPid = [int]$marker.pid }
+    if ($markerPid -lt 1) { return $true }
+    try {
+        $identity = & $GetProcessIdentity $markerPid
+    } catch {
+        return $true
+    }
+    return $null -eq $identity
+}
+
+function Test-CcsmGuardianRestartBudget {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][datetime[]]$RestartTimesUtc,
+        [Parameter(Mandatory = $true)][datetime]$NowUtc,
+        [Parameter(Mandatory = $true)][int]$WindowMinutes,
+        [Parameter(Mandatory = $true)][int]$MaxRestarts
+    )
+
+    if ($WindowMinutes -lt 1 -or $MaxRestarts -lt 1) { return $false }
+    $windowStart = $NowUtc.ToUniversalTime().AddMinutes(-$WindowMinutes)
+    $recent = @($RestartTimesUtc | Where-Object { $_.ToUniversalTime() -ge $windowStart })
+    return $recent.Count -lt $MaxRestarts
+}
+
 function Invoke-CcsmGuardianRecovery {
     param(
         [Parameter(Mandatory = $true)][string]$InstalledExecutable,
