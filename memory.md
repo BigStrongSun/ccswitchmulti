@@ -5785,3 +5785,5 @@ supported in one streaming turn`。
 
 - 用户指定现有状态/流量页；实现见memory-2026-09-14-codex-traffic-observability.md。分支bigstrongsun/codex-traffic-observability。主子直接分层、缓存拆分、未知非零、50条样本及有界扫描标识；复用成熟rollout parser根修累计/继承/去重。未修改代理路由或安装程序。
 - 独立focused85前端+41用量+48解析测试通过，真实语料1ignored；全前端1587通过/1既有mock失败且原主树复现。不要将开发构建当已安装证据。
+
+- 自动采集补充更正：源码lib.rs已有启动时+60秒Rust session sync，Codex已接入；流量页refetchInterval=false只停前端query，不停后台采集。真正缺口为Codex字节追加读取、轻量主子聚合查询、同步完成通知与运行态验收。不要沿用“没有后台自动采集”的旧结论。

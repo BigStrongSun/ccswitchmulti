@@ -8,7 +8,7 @@
 - 原流量fallback自己解析累计total，会高估父继承与重放；现在通过session_usage_codex::read_verified_codex_rollout_usage复用成熟parser的last优先、签名去重、父prefix剥离及timestamp验证。无法验证则missing，不回填猜测值。
 - 该读侧DTO统一cache-normalized非缓存输入；费用计算单独传Codex cache-inclusive raw input，避免再次减cache导致低估。数据底层不迁移、不写真实Codex历史。
 - parentGroups只使用session_meta结构化thread_spawn parent_thread_id，冲突关系拒绝，普通fork不算子智能体。父直接用量只取同范围codex_session来源；child依赖rollout回退时父同步可能历史错归属，parentDirectUsage=null并parentUsageStatus=unknown_may_overlap。各层重叠不得相加。
-- 请求与会话两路证据不合并、不伪造整体任务耗时或模型效率排名。代理请求轻量自动刷新；会话读取仅进入流量页/手动同步触发，取消周期大规模扫描，完整后台增量采集尚未实现。
+- 请求与会话两路证据不合并、不伪造整体任务耗时或模型效率排名。代理请求轻量自动刷新；会话面板查询在进入流量页/手动同步后触发，取消的是前端周期查询，不是后端同步。2026-09-14复核纠正：lib.rs已有启动一次+每60秒session sync，Codex已接入；尚未实现的是Codex追加字节增量解析及面板完成事件通知。
 
 ## 提交与验证
 前端54fe98d9/f4edf3ff/296f1c8a/7bb6f577/cc0eb805；后端86b87012。后续文档提交可由git log追溯。
@@ -22,3 +22,8 @@
 
 ## 检索
 内置web搜索与Matrix独立搜索已使用；内置无可读返回，Matrix精确检索第三方结果不作依据，另open官方Codex app-server文档（重定向learn.chatgpt.com/docs/app-server）确认事件能力背景。具体修复以本地源码和真实测试为证据，不声称完成两链成功交叉验证。
+
+## 自动采集现状更正（2026-09-14后续源码复核）
+前次回答“会话采集必须手动/后台自动采集没有实现”不准确，不能沿用。lib.rs:1437–1478已有Rust后台spawn，启动同步并每60秒sync_all_unlocked；同session_sync_mutex串行化，spawn_blocking处理解析。session_usage.rs:107–113调用sync_codex_usage。
+现有Codex增量仅“新增事件写入”，不是“追加字节读取”：每pass收集目录并建rollout index，mtime不变跳过，变化文件从头parse，再按last_line_offset跳过已处理事件。session_log_sync已有last_byte_offset但供Claude使用；Codex使用modified+line offset。
+下一步建议复用worker与游标表：先完成结果状态/事件通知和轻量面板DB查询；再做变动文件队列+追加字节解析、persist parser state、半行/UTF8边界、截断重写/归档识别、父缺失重试、事务游标与幂等去重，保留低频补偿扫描。不是再加一个timer直接调用重型面板query。安装态每60秒同步真实健康尚未验，源码存在不代表运行成功。本轮只更正文档未改运行配置或采集代码。
