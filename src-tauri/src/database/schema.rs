@@ -348,6 +348,11 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // Codex has its own byte-level checkpoint because its parser must
+        // persist semantic state across appends; do not overload Claude's
+        // generic line cursor with opaque parser state.
+        Self::create_codex_incremental_usage_tables(conn)?;
+
         // 19. 多设备额度协作只缓存每设备最新的脱敏聚合报告。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS quota_collaboration_reports (
@@ -599,6 +604,11 @@ impl Database {
                         log::info!("迁移数据库从 v22 到 v23（新增 Codex 容量错误自动续跑开关）");
                         Self::migrate_v22_to_v23(conn)?;
                         Self::set_user_version(conn, 23)?;
+                    }
+                    23 => {
+                        log::info!("迁移数据库从 v23 到 v24（Codex 追加解析游标与会话元数据）");
+                        Self::migrate_v23_to_v24(conn)?;
+                        Self::set_user_version(conn, 24)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1393,6 +1403,45 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    fn migrate_v23_to_v24(conn: &Connection) -> Result<(), AppError> {
+        Self::create_codex_incremental_usage_tables(conn)
+    }
+
+    fn create_codex_incremental_usage_tables(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS codex_usage_file_checkpoints (
+                file_path TEXT PRIMARY KEY,
+                session_id TEXT,
+                last_byte_offset INTEGER NOT NULL DEFAULT 0,
+                last_complete_line_offset INTEGER NOT NULL DEFAULT 0,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                file_modified INTEGER NOT NULL DEFAULT 0,
+                head_window_len INTEGER,
+                head_fingerprint INTEGER,
+                tail_fingerprint INTEGER,
+                parser_state TEXT NOT NULL DEFAULT '{}',
+                updated_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_codex_usage_file_checkpoints_session
+                ON codex_usage_file_checkpoints(session_id);
+             CREATE TABLE IF NOT EXISTS codex_usage_sessions (
+                session_id TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                is_subagent INTEGER NOT NULL DEFAULT 0,
+                parent_thread_id TEXT,
+                model TEXT,
+                first_activity_at INTEGER,
+                last_activity_at INTEGER,
+                last_seen_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_codex_usage_sessions_parent
+                ON codex_usage_sessions(parent_thread_id);
+             CREATE INDEX IF NOT EXISTS idx_codex_usage_sessions_file
+                ON codex_usage_sessions(file_path);",
+        )
+        .map_err(|e| AppError::Database(format!("创建 Codex 增量用量表失败: {e}")))
     }
 
     /// v8 → v9: 全面补充模型定价（清空 + 重新 seed）
@@ -4238,6 +4287,42 @@ mod tests {
                 "lookup does not constrain the complete identity {expected}: {plan:?}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn codex_incremental_usage_v23_migration_creates_checkpoint_and_session_metadata(
+    ) -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        Database::set_user_version(&conn, 23)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        for table in ["codex_usage_file_checkpoints", "codex_usage_sessions"] {
+            assert!(Database::table_exists(&conn, table)?, "missing {table}");
+        }
+        conn.execute(
+            "INSERT INTO codex_usage_sessions
+             (session_id, file_path, is_subagent, parent_thread_id, model, last_seen_at)
+             VALUES ('thread-1', '/codex/sessions/rollout-thread-1.jsonl', 1, 'parent-1', 'gpt-5.6', 123)",
+            [],
+        )?;
+        let row: (String, i64, Option<String>, i64) = conn.query_row(
+            "SELECT file_path, is_subagent, parent_thread_id, last_seen_at
+             FROM codex_usage_sessions WHERE session_id = 'thread-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(
+            row,
+            (
+                "/codex/sessions/rollout-thread-1.jsonl".to_string(),
+                1,
+                Some("parent-1".to_string()),
+                123
+            )
+        );
         Ok(())
     }
 
