@@ -19,6 +19,7 @@ import {
   buildMultiRouterRuntimeStatus,
   buildCodexProxyBaseUrl,
   buildModelCatalogForRoutes,
+  buildRouteTrafficRows,
   CodexRouterWorkspacePage,
   createRoutePolicyDraft,
   createDraftRoutingPlan,
@@ -369,6 +370,45 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("keeps proxy input, cache, and output token dimensions separate", () => {
+    const provider: Provider = {
+      id: "traffic-provider",
+      name: "Traffic Provider",
+      settingsConfig: { modelCatalog: { models: [{ model: "model-a" }] } },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
+    const rows = buildRouteTrafficRows({
+      logs: [
+        createCodexProxyLog({
+          providerId: provider.id,
+          model: "model-a",
+          requestModel: "model-a",
+          inputTokens: 120,
+          cacheReadTokens: 80,
+          cacheCreationTokens: 20,
+          outputTokens: 40,
+        }),
+      ],
+      routes:
+        readCodexRouting(plan)?.routes.map((route, index) => ({
+          provider: plan,
+          route,
+          index,
+        })) ?? [],
+      selectedPlan: plan,
+      providersById: new Map([[provider.id, provider]]),
+    });
+
+    expect(rows[0]!).toMatchObject({
+      inputTokens: 40,
+      cacheReadTokens: 80,
+      cacheCreationTokens: 20,
+      outputTokens: 40,
+    });
+  });
   it.each(["deepseek-flash", "deepseek-flash-opencode-go"])(
     "preserves declared reasoning for saved route %s when another provider has the same model",
     async (visibleModel) => {

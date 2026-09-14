@@ -4,7 +4,9 @@ import { CodexSessionTrafficPanel } from "./CodexSessionTrafficPanel";
 export function CodexSessionTrafficPanelFixture() {
   return (
     <main className="min-h-screen bg-background p-6">
-      <p className="mb-3 text-sm font-semibold text-amber-700">FIXTURE — synthetic local evidence, not live usage</p>
+      <p className="mb-3 text-sm font-semibold text-amber-700">
+        FIXTURE — synthetic local evidence, not live usage
+      </p>
       <CodexSessionTrafficPanel
         rangeLabel="今日（本地日历日）"
         isLoading={false}
@@ -22,9 +24,70 @@ export function CodexSessionTrafficPanelFixture() {
           historyTruncated: false,
           proxyUsageIncluded: false,
           agents: [],
+          parentGroups: [
+            {
+              parentSessionId: "parent-observed-fixture",
+              childSessionCount: 2,
+              observedUsageChildren: 2,
+              missingUsageChildren: 0,
+              childRequestCount: 6,
+              childInputTokens: 1440,
+              childCacheReadTokens: 960,
+              childCacheCreationTokens: 0,
+              childOutputTokens: 384,
+              childTotalTokens: 2784,
+              parentDirectUsage: {
+                requestCount: 3,
+                inputTokens: 360,
+                cacheReadTokens: 120,
+                cacheCreationTokens: 0,
+                outputTokens: 96,
+                totalTokens: 576,
+              },
+              parentDirectUsageSource: "session_sync",
+            },
+            {
+              parentSessionId: "parent-missing-fixture",
+              childSessionCount: 1,
+              observedUsageChildren: 0,
+              missingUsageChildren: 1,
+              childRequestCount: 0,
+              childInputTokens: 0,
+              childCacheReadTokens: 0,
+              childCacheCreationTokens: 0,
+              childOutputTokens: 0,
+              childTotalTokens: 0,
+              parentDirectUsage: null,
+              parentDirectUsageSource: "none",
+            },
+          ],
           modelStats: [
-            { model: "gpt-5.6-sol", agentCount: 2, observedUsageAgents: 2, missingUsageAgents: 0, requestCount: 6, inputTokens: 1440, cacheReadTokens: 960, cacheCreationTokens: 0, outputTokens: 384, totalTokens: 2784, totalCost: "0.0123" },
-            { model: "unknown-upstream", agentCount: 1, observedUsageAgents: 0, missingUsageAgents: 1, requestCount: 0, inputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, outputTokens: 0, totalTokens: 0, totalCost: "0" },
+            {
+              model: "gpt-5.6-sol",
+              agentCount: 2,
+              observedUsageAgents: 2,
+              missingUsageAgents: 0,
+              requestCount: 6,
+              inputTokens: 1440,
+              cacheReadTokens: 960,
+              cacheCreationTokens: 0,
+              outputTokens: 384,
+              totalTokens: 2784,
+              totalCost: "0.0123",
+            },
+            {
+              model: "unknown-upstream",
+              agentCount: 1,
+              observedUsageAgents: 0,
+              missingUsageAgents: 1,
+              requestCount: 0,
+              inputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              totalCost: "0",
+            },
           ],
         }}
       />

@@ -135,7 +135,7 @@ import type {
   CodexSubagentVersion,
   Provider,
 } from "@/types";
-import type { RequestLog } from "@/types/usage";
+import { getFreshInputTokens, type RequestLog } from "@/types/usage";
 import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import type {
   CodexDiagnosticCheck,
@@ -251,6 +251,11 @@ type RouteTrafficRow = {
   requestCount: number;
   successCount: number;
   failedCount: number;
+  /** Cache-normalized fresh input; raw Codex input includes cache reads. */
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  outputTokens: number;
   totalTokens: number;
   avgLatencyMs: number;
 };
@@ -2589,7 +2594,7 @@ function updateRouteObservedProtocol(
 }
 
 /// 从请求日志聚合 MultiRouter 子 provider / model 流量；无法归属的日志留给状态页单独提示。
-function buildRouteTrafficRows({
+export function buildRouteTrafficRows({
   logs,
   routerEvents = [],
   routes,
@@ -2617,7 +2622,14 @@ function buildRouteTrafficRows({
     target: RouteTrafficTarget,
     model: string,
     statusCode: number,
-    tokens: number,
+    tokenUsage: Pick<
+      RequestLog,
+      | "appType"
+      | "inputTokens"
+      | "cacheReadTokens"
+      | "cacheCreationTokens"
+      | "outputTokens"
+    >,
     latencyMs: number,
     matchedRoute?: RouteEntry,
   ) {
@@ -2640,6 +2652,10 @@ function buildRouteTrafficRows({
         requestCount: 0,
         successCount: 0,
         failedCount: 0,
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: 0,
         totalTokens: 0,
         avgLatencyMs: 0,
         latencyTotalMs: 0,
@@ -2652,7 +2668,16 @@ function buildRouteTrafficRows({
     } else if (statusCode >= 400) {
       current.failedCount += 1;
     }
-    current.totalTokens += tokens;
+    const freshInputTokens = getFreshInputTokens(tokenUsage);
+    current.inputTokens += freshInputTokens;
+    current.cacheReadTokens += tokenUsage.cacheReadTokens;
+    current.cacheCreationTokens += tokenUsage.cacheCreationTokens;
+    current.outputTokens += tokenUsage.outputTokens;
+    current.totalTokens +=
+      freshInputTokens +
+      tokenUsage.cacheReadTokens +
+      tokenUsage.cacheCreationTokens +
+      tokenUsage.outputTokens;
     current.latencyTotalMs += latencyMs;
     current.avgLatencyMs = Math.round(
       current.latencyTotalMs / current.requestCount,
@@ -2685,10 +2710,7 @@ function buildRouteTrafficRows({
       target,
       model,
       log.statusCode,
-      log.inputTokens +
-        log.outputTokens +
-        log.cacheReadTokens +
-        log.cacheCreationTokens,
+      log,
       log.latencyMs,
       matchedRoute,
     );
@@ -2713,7 +2735,13 @@ function buildRouteTrafficRows({
       routeTrafficTarget(matchedRoute, providersById),
       event.model || matchedRoute.route.match?.models?.[0] || "unknown",
       routerEventStatusCode(event),
-      0,
+      {
+        appType: "codex",
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: 0,
+      },
       0,
       matchedRoute,
     );
@@ -2746,6 +2774,10 @@ function buildRouteTrafficRows({
         requestCount: 0,
         successCount: 0,
         failedCount: 0,
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: 0,
         totalTokens: 0,
         avgLatencyMs: 0,
         latencyTotalMs: 0,
@@ -7816,12 +7848,15 @@ function StatusTab({
               detail="仅展示今日最近 50 条已加载 Codex 请求样本，不是全天总量；归属来自真实日志字段或 requestModel 的尝试性匹配，不能由路由配置推断。"
             />
             <div className="mt-3 overflow-hidden rounded-lg border border-border dark:border-slate-700">
-              <div className="grid grid-cols-[1.2fr_1.2fr_0.7fr_0.7fr_0.8fr_0.8fr] gap-2 bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground dark:bg-slate-900/80 dark:text-slate-300">
+              <div className="grid grid-cols-[1.1fr_1.1fr_0.55fr_0.55fr_0.7fr_0.7fr_0.7fr_0.7fr_0.65fr] gap-2 bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground dark:bg-slate-900/80 dark:text-slate-300">
                 <span>Provider</span>
                 <span>Model</span>
                 <span className="text-right">请求</span>
                 <span className="text-right">失败</span>
-                <span className="text-right">Tokens</span>
+                <span className="text-right">非缓存输入</span>
+                <span className="text-right">缓存读取</span>
+                <span className="text-right">缓存写入</span>
+                <span className="text-right">输出</span>
                 <span className="text-right">延迟</span>
               </div>
               {isLoading ? (
@@ -7832,14 +7867,23 @@ function StatusTab({
                 trafficRows.map((row) => (
                   <div
                     key={`${row.providerId}-${row.model}`}
-                    className="grid grid-cols-[1.2fr_1.2fr_0.7fr_0.7fr_0.8fr_0.8fr] gap-2 border-t border-border px-3 py-2 text-xs text-foreground dark:border-slate-800 dark:text-slate-300"
+                    className="grid grid-cols-[1.1fr_1.1fr_0.55fr_0.55fr_0.7fr_0.7fr_0.7fr_0.7fr_0.65fr] gap-2 border-t border-border px-3 py-2 text-xs text-foreground dark:border-slate-800 dark:text-slate-300"
                   >
                     <span className="truncate">{row.providerName}</span>
                     <span className="truncate font-mono">{row.model}</span>
                     <span className="text-right">{row.requestCount}</span>
                     <span className="text-right">{row.failedCount}</span>
                     <span className="text-right">
-                      {row.totalTokens.toLocaleString()}
+                      {row.inputTokens.toLocaleString()}
+                    </span>
+                    <span className="text-right">
+                      {row.cacheReadTokens.toLocaleString()}
+                    </span>
+                    <span className="text-right">
+                      {row.cacheCreationTokens.toLocaleString()}
+                    </span>
+                    <span className="text-right">
+                      {row.outputTokens.toLocaleString()}
                     </span>
                     <span className="text-right">{row.avgLatencyMs}ms</span>
                   </div>
@@ -7855,8 +7899,11 @@ function StatusTab({
               )}
             </div>
             <div className="mt-3 text-xs text-muted-foreground">
-              当前已加载 {logs.length} 条（接口共 {requestLogs?.total ?? logs.length} 条）今日 Codex 请求样本；其中尝试归属真实代理日志 {routedLogs.length} 条、router 诊断事件{" "}
-              {routerRequestEvents.length} 条。诊断事件不是用量记录；这里不把 codex_session
+              当前已加载 {logs.length} 条（接口共{" "}
+              {requestLogs?.total ?? logs.length} 条）今日 Codex
+              请求样本；其中尝试归属真实代理日志 {routedLogs.length} 条、router
+              诊断事件 {routerRequestEvents.length}{" "}
+              条。诊断事件不是用量记录；这里不把 codex_session
               历史同步当作转发，也不与会话统计相加。
             </div>
           </section>
