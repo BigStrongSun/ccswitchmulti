@@ -265,6 +265,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
         );
     }
 
+    let mut unhealthy_logged = false;
     loop {
         let current = crate::process_identity::process_identity(args.parent_pid);
         let still_running = match (expected.as_ref(), current.as_ref()) {
@@ -272,15 +273,20 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
             _ => false,
         };
         if still_running {
-            if args.port > 0
-                && !crate::process_identity::tcp_listener_owner_pid(args.port).is_some()
-            {
-                append_event(
-                    &config_dir,
-                    "warning",
-                    "supervisor-parent-unhealthy",
-                    serde_json::json!({ "parentPid": args.parent_pid, "port": args.port }),
-                );
+            let port_ready = args.port == 0
+                || crate::process_identity::tcp_listener_owner_pid(args.port).is_some();
+            if !port_ready {
+                if !unhealthy_logged {
+                    unhealthy_logged = true;
+                    append_event(
+                        &config_dir,
+                        "warning",
+                        "supervisor-parent-unhealthy",
+                        serde_json::json!({ "parentPid": args.parent_pid, "port": args.port }),
+                    );
+                }
+            } else {
+                unhealthy_logged = false;
             }
             std::thread::sleep(POLL_INTERVAL);
             continue;
