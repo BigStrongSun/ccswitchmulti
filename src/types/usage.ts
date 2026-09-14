@@ -184,7 +184,7 @@ export interface CodexSubagentUsageStats {
   agents: CodexSubagentUsageAgent[];
   modelStats: CodexSubagentModelUsage[];
   skippedReason?: string;
-  /** Number of subagent sessions found in the bounded history list. */
+  /** Number of subagent sessions represented by the current local DB snapshot. */
   scannedHistoryAgents?: number;
   /** Sessions whose history timestamp is in the requested range. */
   inRangeAgents?: number;
@@ -194,12 +194,30 @@ export interface CodexSubagentUsageStats {
   observedUsageAgents?: number;
   /** In-range sessions without any local usage evidence. */
   missingUsageAgents?: number;
-  /** The history listing was truncated before all sessions could be inspected. */
+  /** The local DB snapshot was truncated before all sessions could be inspected. */
   historyTruncated?: boolean;
   /** Always false: proxy traffic is deliberately excluded from this session view. */
   proxyUsageIncluded?: false;
   /** Direct, explicitly recorded subagent parent IDs only; overlaps agents/modelStats. */
   parentGroups?: CodexSubagentParentUsageGroup[];
+}
+
+/** Cached backend status for the periodic local Codex session collector. */
+export interface SessionCollectionStatus {
+  revision: number;
+  phase: "not_started" | "idle" | "running" | "degraded";
+  /** UTC Unix seconds, not JavaScript milliseconds. */
+  lastStartedAt?: number | null;
+  /** UTC Unix seconds, not JavaScript milliseconds. */
+  lastCompletedAt?: number | null;
+  /** UTC Unix seconds, not JavaScript milliseconds. */
+  lastSuccessAt?: number | null;
+  imported: number;
+  deferred: number;
+  errorsCount: number;
+  lastErrorSummary?: string | null;
+  nextRunAt?: number | null;
+  intervalSecs: number;
 }
 
 export interface CodexSubagentParentUsageGroup {

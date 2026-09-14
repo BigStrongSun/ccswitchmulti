@@ -75,6 +75,17 @@ vi.mock("@/lib/query/usage", () => ({
     isLoading: false,
     error: null,
   }),
+  useSessionCollectionStatus: () => ({
+    data: {
+      revision: 0,
+      phase: "not_started",
+      imported: 0,
+      deferred: 0,
+      errorsCount: 0,
+      intervalSecs: 60,
+    },
+    error: null,
+  }),
   useRequestLogs: () => requestLogsFixture.value,
 }));
 

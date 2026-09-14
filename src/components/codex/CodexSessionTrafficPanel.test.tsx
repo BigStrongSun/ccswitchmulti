@@ -1,8 +1,115 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { CodexSessionTrafficPanel } from "./CodexSessionTrafficPanel";
 
 describe("CodexSessionTrafficPanel", () => {
+  it("labels an empty successful collector snapshot without inventing traffic", () => {
+    render(
+      <CodexSessionTrafficPanel
+        isLoading={false}
+        error={null}
+        rangeLabel="今日"
+        isSyncing={false}
+        onSync={vi.fn()}
+        collectionStatus={{
+          revision: 4,
+          phase: "idle",
+          lastStartedAt: 1_700_000_000,
+          lastCompletedAt: 1_700_000_004,
+          lastSuccessAt: 1_700_000_004,
+          imported: 0,
+          deferred: 0,
+          errorsCount: 0,
+          lastErrorSummary: null,
+          nextRunAt: 1_700_000_060,
+          intervalSecs: 60,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("后台采集空闲")).toBeInTheDocument();
+    expect(screen.getByText(/最近成功.*暂无新增/)).toBeInTheDocument();
+    expect(screen.queryByText("采集正常")).not.toBeInTheDocument();
+  });
+
+  it("surfaces a degraded collector with its deferred work and error summary", () => {
+    render(
+      <CodexSessionTrafficPanel
+        isLoading={false}
+        error={null}
+        rangeLabel="今日"
+        isSyncing={false}
+        onSync={vi.fn()}
+        collectionStatus={{
+          revision: 8,
+          phase: "degraded",
+          lastStartedAt: 1_700_000_000,
+          lastCompletedAt: 1_700_000_004,
+          lastSuccessAt: 1_699_999_940,
+          imported: 2,
+          deferred: 3,
+          errorsCount: 1,
+          lastErrorSummary: "rollout 文件仍在写入",
+          nextRunAt: 1_700_000_060,
+          intervalSecs: 60,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("后台采集降级")).toBeInTheDocument();
+    expect(screen.getByText(/待处理 3/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/错误摘要：rollout 文件仍在写入/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not present a not-started collector as an empty successful run", () => {
+    render(
+      <CodexSessionTrafficPanel
+        isLoading={false}
+        error={null}
+        rangeLabel="今日"
+        isSyncing={false}
+        onSync={vi.fn()}
+        collectionStatus={{
+          revision: 0,
+          phase: "not_started",
+          lastStartedAt: null,
+          lastCompletedAt: null,
+          lastSuccessAt: null,
+          imported: 0,
+          deferred: 0,
+          errorsCount: 0,
+          lastErrorSummary: null,
+          nextRunAt: null,
+          intervalSecs: 60,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("后台采集尚未启动")).toBeInTheDocument();
+    expect(
+      screen.getByText(/尚无成功采集；可点击立即同步/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/本轮暂无新增/)).not.toBeInTheDocument();
+  });
+
+  it("calls the existing manual sync path exactly once per click", () => {
+    const onSync = vi.fn();
+    render(
+      <CodexSessionTrafficPanel
+        isLoading={false}
+        error={null}
+        rangeLabel="今日"
+        isSyncing={false}
+        onSync={onSync}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "立即同步会话用量" }));
+    expect(onSync).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps session usage separate, exposes token dimensions, and marks missing usage unknown", () => {
     render(
       <CodexSessionTrafficPanel
@@ -100,7 +207,9 @@ describe("CodexSessionTrafficPanel", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("所选范围内有用量证据")).toBeInTheDocument();
     expect(
-      screen.getByText(/范围无法确认.*已包含在未采集用量中/),
+      screen.getByText(
+        /会话范围无法确认，未计入所选范围；它们不属于未采集用量/,
+      ),
     ).toBeInTheDocument();
     expect(screen.getByText("非缓存输入")).toBeInTheDocument();
     expect(screen.getByText("缓存读取")).toBeInTheDocument();
@@ -117,7 +226,7 @@ describe("CodexSessionTrafficPanel", () => {
       "3(1 未采集)",
     );
     expect(
-      screen.getByText(/请求耗时：会话历史未采集可信耗时，不显示为 0ms。/),
+      screen.getByText(/请求耗时：会话记录未采集可信耗时，不显示为 0ms。/),
     ).toBeInTheDocument();
   });
 });

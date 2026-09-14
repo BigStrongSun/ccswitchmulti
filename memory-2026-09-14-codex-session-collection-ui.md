@@ -1,0 +1,7 @@
+# Codex session collection UI contract
+
+- `get_session_collection_status` and `session-collection-updated` share the camelCase `SessionCollectionStatus` payload. Timestamps are UTC Unix **seconds**, not JavaScript milliseconds; `revision` is monotonically increasing and must reject out-of-order notifications.
+- The application-level `useUsageEventBridge` owns both usage and session-collection listeners. Collection events only invalidate the cached status and Codex subagent stats queries; they must never invoke sync or create a frontend timer.
+- The Codex traffic subview alone enables its status/stats queries. `not_started`, pending/deferred work, and degraded/error states are explicit UI states; no state should be presented as automatically healthy without evidence. In particular, `not_started` is amber and explains that there is no successful collection yet.
+- The backend stats are DB snapshots, not live history scans. UI labels use “会话元数据库存/数据库快照”; range membership requires actual usage timestamps and never treats metadata `lastSeen` as token-time evidence. `unknownRangeAgents` are excluded from the selected range and are not included in missing usage.
+- Manual visual fixtures live in `src/components/codex/CodexSessionTrafficPanel.fixture.tsx`: the base fixture covers collected + deferred evidence; `CodexSessionCollectionStatusFixtureGallery` shows successful, not-started, and degraded snapshots. They are synthetic and intentionally not wired into navigation.

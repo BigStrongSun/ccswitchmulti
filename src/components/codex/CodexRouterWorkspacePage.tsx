@@ -99,6 +99,7 @@ import {
   usageKeys,
   useCodexSubagentUsageStats,
   useRequestLogs,
+  useSessionCollectionStatus,
 } from "@/lib/query/usage";
 import { cn } from "@/lib/utils";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
@@ -7097,6 +7098,8 @@ function StatusTab({
     refetchInterval: false,
     enabled: trafficViewActive,
   });
+  const { data: collectionStatus, error: collectionStatusError } =
+    useSessionCollectionStatus({ enabled: trafficViewActive });
   const [diagnostics, setDiagnostics] =
     useState<CodexMultiRouterDiagnostics | null>(null);
   const [diagnoseError, setDiagnoseError] = useState<string | null>(null);
@@ -7925,6 +7928,8 @@ function StatusTab({
             isSyncing={isSyncingSessionUsage}
             onSync={() => void syncCodexSessionUsage()}
             syncMessage={sessionSyncMessage}
+            collectionStatus={collectionStatus}
+            collectionStatusError={collectionStatusError}
           />
         </div>
       )}

@@ -1,6 +1,9 @@
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { CodexSubagentUsageStats } from "@/types/usage";
+import type {
+  CodexSubagentUsageStats,
+  SessionCollectionStatus,
+} from "@/types/usage";
 
 type Props = {
   stats?: CodexSubagentUsageStats;
@@ -10,7 +13,34 @@ type Props = {
   isSyncing: boolean;
   onSync: () => void;
   syncMessage?: string | null;
+  collectionStatus?: SessionCollectionStatus;
+  collectionStatusError?: unknown;
 };
+
+function formatCollectorTime(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "未记录";
+  }
+  return new Date(value * 1000).toLocaleString(undefined, {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function collectorLabel(phase: SessionCollectionStatus["phase"]): string {
+  switch (phase) {
+    case "idle":
+      return "后台采集空闲";
+    case "running":
+      return "后台采集中";
+    case "degraded":
+      return "后台采集降级";
+    case "not_started":
+      return "后台采集尚未启动";
+  }
+}
 
 function formatTokenCount(value: number): string {
   return value.toLocaleString();
@@ -35,6 +65,8 @@ export function CodexSessionTrafficPanel({
   isSyncing,
   onSync,
   syncMessage,
+  collectionStatus,
+  collectionStatusError,
 }: Props) {
   const scanned = stats?.scannedHistoryAgents ?? stats?.totalAgents ?? 0;
   const observed = stats?.observedUsageAgents ?? 0;
@@ -48,7 +80,7 @@ export function CodexSessionTrafficPanel({
             {rangeLabel}子 Agent 会话流量
           </h3>
           <p className="mt-1 text-sm leading-6 text-muted-foreground">
-            只基于本地 Codex 历史与已同步的 <code>codex_session</code>{" "}
+            只基于本地 Codex 会话索引与已同步的 <code>codex_session</code>{" "}
             用量；请求统计与会话统计独立，不能相加。
           </p>
         </div>
@@ -60,7 +92,7 @@ export function CodexSessionTrafficPanel({
           className="gap-2 border-violet-300 bg-background/70 text-violet-700 hover:bg-violet-100 dark:border-violet-500/50 dark:bg-violet-500/10 dark:text-violet-100 dark:hover:bg-violet-500/20"
         >
           <RefreshCw className={`h-4 w-4 ${isSyncing ? "animate-spin" : ""}`} />
-          同步会话用量
+          立即同步会话用量
         </Button>
       </div>
 
@@ -69,6 +101,10 @@ export function CodexSessionTrafficPanel({
           {syncMessage}
         </div>
       ) : null}
+      <CollectorStatus
+        status={collectionStatus}
+        error={collectionStatusError}
+      />
       {error ? (
         <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100">
           子 Agent 用量读取失败：
@@ -77,20 +113,20 @@ export function CodexSessionTrafficPanel({
       ) : null}
       {stats?.skippedReason ? (
         <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/30 dark:text-amber-100">
-          Codex 历史读取跳过：{stats.skippedReason}
+          会话用量索引读取跳过：{stats.skippedReason}
         </div>
       ) : null}
 
       <div className="mt-3 grid gap-2 sm:grid-cols-3">
         <Summary
-          label="本次有界扫描"
+          label="会话元数据库存"
           value={`${scanned} 个`}
-          detail="仅本次有限历史列表，不代表全库"
+          detail="仅当前本地数据库快照，不代表全库"
         />
         <Summary
           label="所选范围内有用量证据"
           value={`${observed} 个`}
-          detail="数值来自会话同步或经验证的 rollout 事件"
+          detail="数值来自已同步的会话用量记录"
         />
         <Summary
           label="未采集用量"
@@ -101,12 +137,12 @@ export function CodexSessionTrafficPanel({
       {stats?.unknownRangeAgents ? (
         <p className="mt-2 text-xs text-amber-800 dark:text-amber-200">
           有 {stats.unknownRangeAgents}{" "}
-          个会话范围无法确认，已包含在未采集用量中，不能与未采集数相加。
+          个会话范围无法确认，未计入所选范围；它们不属于未采集用量。
         </p>
       ) : null}
       {stats?.historyTruncated ? (
         <p className="mt-2 text-xs text-amber-800 dark:text-amber-200">
-          本地历史列表已截断；统计仅覆盖本次有界读取到的会话。
+          本地会话索引已截断；统计仅覆盖当前数据库快照中的会话。
         </p>
       ) : null}
 
@@ -173,7 +209,7 @@ export function CodexSessionTrafficPanel({
       </div>
 
       <div className="mt-3 rounded-lg border border-border bg-background/70 px-3 py-2 text-xs leading-6 text-muted-foreground dark:border-slate-700 dark:bg-slate-950/20 dark:text-slate-300">
-        请求耗时：会话历史未采集可信耗时，不显示为
+        请求耗时：会话记录未采集可信耗时，不显示为
         0ms。费用为本地价表估算，零值显示为待核验，不等同上游账单。状态库：
         {stats?.stateDbPath ?? "未定位"}。
       </div>
@@ -181,6 +217,64 @@ export function CodexSessionTrafficPanel({
         <ParentGroups groups={stats.parentGroups} />
       ) : null}
     </section>
+  );
+}
+
+function CollectorStatus({
+  status,
+  error,
+}: {
+  status?: SessionCollectionStatus;
+  error: unknown;
+}) {
+  if (error) {
+    return (
+      <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/30 dark:text-amber-100">
+        后台采集状态暂不可用：
+        {error instanceof Error ? error.message : String(error)}
+      </div>
+    );
+  }
+  if (!status) return null;
+  const degraded = status.phase === "degraded";
+  const notStarted = status.phase === "not_started";
+  const pending = status.deferred > 0;
+  return (
+    <div
+      className={`mt-3 rounded-md border px-3 py-2 text-xs leading-6 ${
+        degraded
+          ? "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100"
+          : notStarted
+            ? "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/30 dark:text-amber-100"
+            : pending
+              ? "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/30 dark:text-amber-100"
+              : "border-sky-200 bg-background/70 text-muted-foreground dark:border-sky-700/50 dark:bg-sky-950/20 dark:text-sky-100"
+      }`}
+    >
+      <span className="font-semibold">{collectorLabel(status.phase)}</span>
+      {notStarted ? (
+        <div className="mt-1">尚无成功采集；可点击立即同步或等待后台启动。</div>
+      ) : (
+        <>
+          {" · "}最近成功 {formatCollectorTime(status.lastSuccessAt)}
+          {" · "}
+          {status.imported > 0 ? `本轮新增 ${status.imported}` : "本轮暂无新增"}
+          {" · "}待处理 {status.deferred}
+          {" · "}错误 {status.errorsCount}
+          {status.nextRunAt
+            ? ` · 下次约 ${formatCollectorTime(status.nextRunAt)}`
+            : null}
+        </>
+      )}
+      {status.lastErrorSummary ? (
+        <div className="mt-1">错误摘要：{status.lastErrorSummary}</div>
+      ) : null}
+      {pending && !degraded ? (
+        <div className="mt-1">
+          存在待处理会话，当前空闲状态不代表全部数据已采集。
+        </div>
+      ) : null}
+    </div>
   );
 }
 

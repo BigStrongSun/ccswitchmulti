@@ -156,6 +156,8 @@ export const usageKeys = {
       customEndDate ?? 0,
       limit,
     ] as const,
+  sessionCollectionStatus: () =>
+    [...usageKeys.all, "session-collection-status"] as const,
   quotaCollaboration: () => [...usageKeys.all, "quota-collaboration"] as const,
   detail: (requestId: string) =>
     [...usageKeys.all, "detail", requestId] as const,
@@ -366,6 +368,17 @@ export function useCodexSubagentUsageStats(
       return usageApi.getCodexSubagentUsageStats(startDate, endDate, limit);
     },
     refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
+    refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
+    enabled: options?.enabled ?? true,
+  });
+}
+
+/** Reads the collector's cached DB snapshot; it never starts a sync or parser. */
+export function useSessionCollectionStatus(options?: UsageQueryOptions) {
+  return useQuery({
+    queryKey: usageKeys.sessionCollectionStatus(),
+    queryFn: usageApi.getSessionCollectionStatus,
+    refetchInterval: options?.refetchInterval ?? false,
     refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
     enabled: options?.enabled ?? true,
   });

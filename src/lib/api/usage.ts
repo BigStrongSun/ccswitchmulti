@@ -15,6 +15,7 @@ import type {
   SessionSyncResult,
   DataSourceSummary,
   CodexSubagentUsageStats,
+  SessionCollectionStatus,
   QuotaCollaborationOverview,
 } from "@/types/usage";
 import type { UsageResult } from "@/types";
@@ -156,6 +157,10 @@ export const usageApi = {
       endDate,
       limit,
     });
+  },
+
+  getSessionCollectionStatus: async (): Promise<SessionCollectionStatus> => {
+    return invoke("get_session_collection_status");
   },
 
   getQuotaCollaborationOverview:
