@@ -36,3 +36,11 @@
 - 卸载守护：同上加 `-Uninstall`
 - 看日志：`%LOCALAPPDATA%\CCSwitchMultiGuardian\guardian.jsonl`（事件：guardian-started / health-loss-detected / health-loss-threshold-reached / product-started / recovery-ready / restart-skipped-clean-exit / restart-rate-limited / recovery-deferred-maintenance）
 - 只想观察不重启：`watch-ccswitchmulti.ps1 -NoRestart`；只打印计划：`-PlanOnly`。
+
+## 追加：守护自身的健壮性（同日 17:15 刷新安装）
+
+- 现场发现：计划任务在 17:09 重启过一次守护进程（`LastRunTime 17:09:22`），而上一实例没有留下任何异常原因——说明守护可能被单轮循环里的瞬时异常（WMI/CIM/网络查询抖动）带死，然后靠任务的 RestartCount 才回来。
+- 根修：`Invoke-CcsmGuardianSafeIteration`（core）把单轮迭代包在 try/catch 里，异常只写 `iteration-failed` 事件并继续下一轮；watcher 外层 try/catch 在真正退出前写 `guardian-exiting`（带 Error 与 Cycles）。
+- `install-ccswitchmulti-watchdog.ps1` 现在会在启动前先停掉守护目录里的旧 watcher（刷新安装，避免 IgnoreNew 让新脚本不生效）。
+- 验证：Pester `ccswitchmulti-watchdog` 6/6（新增两条：单轮异常不致死、正常轮次不写事件）；4 个脚本 parse 0 error；刷新后任务 Running、watcher PID 40844、安装态脚本与仓库哈希一致、日志新增 `guardian-started`。
+- 另一次真实现场（17:08:26 应用 `event_loop_exit` 正常退出、17:09:22 守护由任务重启、17:10:40 判定 `restart-skipped-clean-exit`、17:10:45 由用户再次启动）证明“正常退出不打扰”在真实场景下按设计工作。

@@ -162,6 +162,7 @@ try {
     $restartTimesUtc = New-Object "System.Collections.Generic.List[datetime]"
     $cycles = 0
     Write-CcsmGuardianEvent -Level "info" -Event "guardian-started" -Detail $plan
+    try {
     while ($true) {
         $cycles++
         $isMaintenance = { Test-CcsmGuardianMaintenance }
@@ -227,11 +228,17 @@ try {
                 -WaitReady { param($ProcessId) Wait-CcsmGuardianReady -ExpectedPid $ProcessId } `
                 -WriteEvent $writeEvent
         }
-        Invoke-CcsmGuardianIteration -State $state -NowUtc ([datetime]::UtcNow) `
-            -FailureThresholdSeconds $FailureThresholdSeconds -IsMaintenance $isMaintenance `
-            -InspectRuntime $inspectRuntime -Recover $recover -WriteEvent $writeEvent
+        Invoke-CcsmGuardianSafeIteration -WriteEvent $writeEvent -Action {
+            Invoke-CcsmGuardianIteration -State $state -NowUtc ([datetime]::UtcNow) `
+                -FailureThresholdSeconds $FailureThresholdSeconds -IsMaintenance $isMaintenance `
+                -InspectRuntime $inspectRuntime -Recover $recover -WriteEvent $writeEvent
+        } | Out-Null
         if ($MaxCycles -gt 0 -and $cycles -ge $MaxCycles) { break }
         Start-Sleep -Seconds $PollSeconds
+    }
+    } catch {
+        Write-CcsmGuardianEvent -Level "error" -Event "guardian-exiting" -Detail @{ Error = $_.Exception.Message; Cycles = $cycles }
+        throw
     }
 } catch [System.IO.IOException] {
     throw "another CCSwitchMulti guardian instance already owns $LockPath"

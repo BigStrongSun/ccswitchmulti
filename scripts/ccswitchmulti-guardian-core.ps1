@@ -366,6 +366,25 @@ function Test-CcsmGuardianRestartBudget {
     return $recent.Count -lt $MaxRestarts
 }
 
+function Invoke-CcsmGuardianSafeIteration {
+    <#
+    守护是常驻进程，任何一次循环里的瞬时异常（WMI/CIM/网络查询抖动）都不应该让
+    守护整体退出：吞掉异常、写 iteration-failed 事件，然后继续下一轮。
+    #>
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Action,
+        [Parameter(Mandatory = $true)][scriptblock]$WriteEvent
+    )
+
+    try {
+        & $Action
+        return $true
+    } catch {
+        & $WriteEvent "error" "iteration-failed" @{ Error = $_.Exception.Message }
+        return $false
+    }
+}
+
 function Invoke-CcsmGuardianRecovery {
     param(
         [Parameter(Mandatory = $true)][string]$InstalledExecutable,

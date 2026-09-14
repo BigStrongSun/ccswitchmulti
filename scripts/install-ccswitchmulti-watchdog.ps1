@@ -79,6 +79,12 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Se
 
 $startedAt = [datetime]::UtcNow
 if (-not $NoStart) {
+    # 刷新安装：先停掉旧 watcher（只停本守护目录里的那个进程），避免 IgnoreNew 让新脚本不生效。
+    $existingWatchers = @(Get-CcsmWatchdogProcesses)
+    foreach ($existing in $existingWatchers) {
+        Stop-Process -Id ([int]$existing.ProcessId) -Force -ErrorAction SilentlyContinue
+    }
+    if ($existingWatchers.Count -gt 0) { Start-Sleep -Seconds 2 }
     Start-ScheduledTask -TaskName $TaskName
     $deadline = (Get-Date).AddSeconds(45)
     while ((Get-Date) -lt $deadline) {

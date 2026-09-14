@@ -47,3 +47,20 @@ Describe "CCSwitchMulti watchdog restart policy" {
         (Test-CcsmGuardianRestartBudget -RestartTimesUtc @($now.AddMinutes(-90)) -NowUtc $now -WindowMinutes 30 -MaxRestarts 1) | Should Be $true
     }
 }
+
+Describe "CCSwitchMulti watchdog loop resilience" {
+    It "keeps running when a single iteration throws" {
+        $events = New-Object System.Collections.Generic.List[string]
+        $writeEvent = { param($Level, $Event, $Detail) $events.Add("$Level|$Event") | Out-Null }
+        $ok = Invoke-CcsmGuardianSafeIteration -WriteEvent $writeEvent -Action { throw "transient wmi failure" }
+        $ok | Should Be $false
+        ($events -join ",") | Should Match "error\|iteration-failed"
+    }
+
+    It "reports success for a healthy iteration" {
+        $events = New-Object System.Collections.Generic.List[string]
+        $writeEvent = { param($Level, $Event, $Detail) $events.Add("$Level|$Event") | Out-Null }
+        (Invoke-CcsmGuardianSafeIteration -WriteEvent $writeEvent -Action { $script:ran = $true }) | Should Be $true
+        $events.Count | Should Be 0
+    }
+}
