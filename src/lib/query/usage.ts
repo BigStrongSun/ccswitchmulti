@@ -12,6 +12,8 @@ const DEFAULT_REFETCH_INTERVAL_MS = 30000;
 type UsageQueryOptions = {
   refetchInterval?: number | false;
   refetchIntervalInBackground?: boolean;
+  /** Keep a bounded query dormant until its owning view is visible. */
+  enabled?: boolean;
 };
 
 type RequestLogsQueryArgs = {
@@ -365,6 +367,7 @@ export function useCodexSubagentUsageStats(
     },
     refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
+    enabled: options?.enabled ?? true,
   });
 }
 

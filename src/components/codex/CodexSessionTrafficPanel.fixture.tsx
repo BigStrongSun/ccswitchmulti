@@ -1,0 +1,33 @@
+import { CodexSessionTrafficPanel } from "./CodexSessionTrafficPanel";
+
+/** Manual Vite preview fixture: conspicuously synthetic, never wired into app navigation. */
+export function CodexSessionTrafficPanelFixture() {
+  return (
+    <main className="min-h-screen bg-background p-6">
+      <p className="mb-3 text-sm font-semibold text-amber-700">FIXTURE — synthetic local evidence, not live usage</p>
+      <CodexSessionTrafficPanel
+        rangeLabel="今日（本地日历日）"
+        isLoading={false}
+        error={null}
+        isSyncing={false}
+        onSync={() => undefined}
+        stats={{
+          codexHome: "C:/fixture/.codex",
+          totalAgents: 3,
+          scannedHistoryAgents: 3,
+          inRangeAgents: 3,
+          unknownRangeAgents: 0,
+          observedUsageAgents: 2,
+          missingUsageAgents: 1,
+          historyTruncated: false,
+          proxyUsageIncluded: false,
+          agents: [],
+          modelStats: [
+            { model: "gpt-5.6-sol", agentCount: 2, observedUsageAgents: 2, missingUsageAgents: 0, requestCount: 6, inputTokens: 1440, cacheReadTokens: 960, cacheCreationTokens: 0, outputTokens: 384, totalTokens: 2784, totalCost: "0.0123" },
+            { model: "unknown-upstream", agentCount: 1, observedUsageAgents: 0, missingUsageAgents: 1, requestCount: 0, inputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, outputTokens: 0, totalTokens: 0, totalCost: "0" },
+          ],
+        }}
+      />
+    </main>
+  );
+}
