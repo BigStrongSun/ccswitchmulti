@@ -115,6 +115,7 @@ describe("CodexSessionTrafficPanel", () => {
       <CodexSessionTrafficPanel
         stats={{
           codexHome: "C:/Users/test/.codex",
+          stateDbPath: "C:/private/session-usage.sqlite",
           totalAgents: 4,
           scannedHistoryAgents: 4,
           inRangeAgents: 3,
@@ -228,5 +229,12 @@ describe("CodexSessionTrafficPanel", () => {
     expect(
       screen.getByText(/请求耗时：会话记录未采集可信耗时，不显示为 0ms。/),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(/数据来源：CCSM 本地会话用量账/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/状态库：|未定位/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("C:/private/session-usage.sqlite"),
+    ).not.toBeInTheDocument();
   });
 });

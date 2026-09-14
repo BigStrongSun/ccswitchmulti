@@ -210,8 +210,8 @@ export function CodexSessionTrafficPanel({
 
       <div className="mt-3 rounded-lg border border-border bg-background/70 px-3 py-2 text-xs leading-6 text-muted-foreground dark:border-slate-700 dark:bg-slate-950/20 dark:text-slate-300">
         请求耗时：会话记录未采集可信耗时，不显示为
-        0ms。费用为本地价表估算，零值显示为待核验，不等同上游账单。状态库：
-        {stats?.stateDbPath ?? "未定位"}。
+        0ms。费用为本地价表估算，零值显示为待核验，不等同上游账单。数据来源：CCSM
+        本地会话用量账。
       </div>
       {stats?.parentGroups?.length ? (
         <ParentGroups groups={stats.parentGroups} />
