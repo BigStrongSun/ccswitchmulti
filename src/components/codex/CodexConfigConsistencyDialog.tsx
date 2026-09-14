@@ -19,7 +19,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { CodexConfigConsistencyReport } from "@/lib/api/codexConfigConsistency";
+import type {
+  CodexBlockedHistoryReasonGroup,
+  CodexConfigConsistencyReport,
+} from "@/lib/api/codexConfigConsistency";
 import type {
   CodexRuntimeRefreshLogEntry,
   CodexRuntimeRefreshPhase,
@@ -141,6 +144,101 @@ function refreshStageIndex(stage?: string): number {
   );
 }
 
+/// 后端 `blockedReasonGroups[].code` 到用户可读解释的映射。
+///
+/// 这些条目都不是“待修复项”，而是 CCSM 主动保持原样的文件；面板必须说清
+/// 具体原因，用户才能判断是否需要人工介入。
+const BLOCKED_HISTORY_REASON_KEYS: Record<string, string> = {
+  provider_migration_cursor_mapping_missing:
+    "blockedReasonCursorMappingMissing",
+  provider_migration_history_base_mapping_missing:
+    "blockedReasonHistoryBaseMappingMissing",
+  history_base_offset_not_record_boundary:
+    "blockedReasonHistoryBaseNotBoundary",
+  rollout_session_id_mismatch: "blockedReasonSessionIdMismatch",
+  unsafe_projection_duplicate_record: "blockedReasonUnsafeDuplicate",
+  rollout_lineage_is_not_paginated: "blockedReasonNotPaginated",
+  invalid_rollout_filename: "blockedReasonInvalidRolloutFilename",
+  ambiguous_rollout_id: "blockedReasonAmbiguousRolloutId",
+  rollout_contains_no_records: "blockedReasonEmptyRollout",
+  rollout_does_not_start_with_session_metadata:
+    "blockedReasonMissingSessionMetadata",
+};
+
+const IMMUTABLE_HISTORY_REASON_KEYS: Array<[string, string]> = [
+  ["compressed history", "blockedReasonImmutableCompressed"],
+  ["invalid history header", "blockedReasonImmutableInvalidHeader"],
+  ["missing session metadata", "blockedReasonImmutableMissingMetadata"],
+  ["linked history", "blockedReasonImmutableLinked"],
+  ["non-legacy thread rows", "blockedReasonImmutableThreadRows"],
+  ["non-legacy history envelope", "blockedReasonImmutableNonLegacyEnvelope"],
+];
+
+function blockedHistoryReasonKey(code: string, detail: string): string {
+  if (code === "codex_paginated_history_immutable") {
+    return (
+      IMMUTABLE_HISTORY_REASON_KEYS.find(([needle]) =>
+        detail.includes(needle),
+      )?.[1] ?? "blockedReasonImmutableUnknown"
+    );
+  }
+  return BLOCKED_HISTORY_REASON_KEYS[code] ?? "blockedReasonUnknown";
+}
+
+function BlockedHistoryReasonDetails({
+  groups,
+}: {
+  groups?: CodexBlockedHistoryReasonGroup[];
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  if (!groups || groups.length === 0) return null;
+  return (
+    <div className="mt-2 space-y-1">
+      <button
+        type="button"
+        className="text-xs text-blue-600 underline-offset-2 hover:underline dark:text-blue-300"
+        onClick={() => setExpanded((current) => !current)}
+      >
+        {expanded
+          ? t("codexConfigConsistency.blockedReasonDetailsHide")
+          : t("codexConfigConsistency.blockedReasonDetailsShow")}
+      </button>
+      {expanded ? (
+        <ul className="space-y-2">
+          {groups.map((group) => (
+            <li
+              key={`${group.code}:${group.detail}`}
+              className="rounded-md border bg-background/60 p-2 text-xs"
+            >
+              <p className="font-medium">
+                {t(
+                  `codexConfigConsistency.${blockedHistoryReasonKey(
+                    group.code,
+                    group.detail,
+                  )}`,
+                )}{" "}
+                · {group.count}{" "}
+                {t("codexConfigConsistency.paginatedHistoryFiles")}
+              </p>
+              <p className="mt-1 break-all text-muted-foreground">
+                {t("codexConfigConsistency.blockedReasonCode")} {group.code}
+                {group.detail ? ` (${group.detail})` : ""}
+              </p>
+              {group.samples.length > 0 ? (
+                <p className="mt-1 break-all text-muted-foreground">
+                  {t("codexConfigConsistency.blockedReasonSamples")}{" "}
+                  {group.samples.join("、")}
+                </p>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 export function CodexConfigConsistencyDialog({
   report,
   pending,
@@ -175,9 +273,14 @@ export function CodexConfigConsistencyDialog({
     const completedWithWarnings =
       completed && refresh.result?.outcome === "completed_with_warnings";
     const history = refresh.preflight?.paginatedHistory;
-    const historyNeedsAttention =
-      (history?.affectedRolloutCount ?? 0) > 0 ||
-      (history?.blockedRolloutCount ?? 0) > 0;
+    const repairableHistoryCount = history?.affectedRolloutCount ?? 0;
+    const skippedHistoryCount = history?.blockedRolloutCount ?? 0;
+    // 只有“能安全修复”的历史才算需要处理；被保护性跳过（保持原样）的文件
+    // 不是待办项，否则状态面板会在每次开机时反复提示一个永远无法处理的问题。
+    const historyNeedsAttention = repairableHistoryCount > 0;
+    const historySkippedOnly =
+      !historyNeedsAttention && skippedHistoryCount > 0;
+    const blockedHistoryGroups = history?.blockedReasonGroups ?? [];
     const rotatedThreadCount = history?.rotatedThreadCount ?? 0;
     const rotatedSegmentCount = history?.rotatedSegmentCount ?? 0;
     const currentStageIndex = refreshStageIndex(refresh.progress?.stage);
@@ -257,6 +360,11 @@ export function CodexConfigConsistencyDialog({
                     {t("codexConfigConsistency.codexHistoryBugNotice")}
                   </div>
                 ) : null}
+                {historySkippedOnly ? (
+                  <div className="rounded-md border bg-muted/20 p-3 text-muted-foreground">
+                    {t("codexConfigConsistency.paginatedHistoryNoActionNotice")}
+                  </div>
+                ) : null}
                 <div className="rounded-md border bg-muted/20 p-3">
                   <div className="flex items-center justify-between gap-3">
                     <p className="font-medium">
@@ -284,29 +392,50 @@ export function CodexConfigConsistencyDialog({
                     </p>
                     <span
                       className={
-                        refresh.preflight.paginatedHistory
-                          .affectedRolloutCount > 0 ||
-                        refresh.preflight.paginatedHistory.blockedRolloutCount >
-                          0
+                        historyNeedsAttention
                           ? "text-amber-600 dark:text-amber-300"
-                          : "text-emerald-600 dark:text-emerald-300"
+                          : historySkippedOnly
+                            ? "text-muted-foreground"
+                            : "text-emerald-600 dark:text-emerald-300"
                       }
                     >
-                      {refresh.preflight.paginatedHistory.affectedRolloutCount >
-                        0 ||
-                      refresh.preflight.paginatedHistory.blockedRolloutCount > 0
-                        ? t("codexConfigConsistency.statusWarning")
-                        : t("codexConfigConsistency.statusReady")}
+                      {historyNeedsAttention
+                        ? t("codexConfigConsistency.statusRepairNeeded")
+                        : historySkippedOnly
+                          ? t("codexConfigConsistency.statusNoActionNeeded")
+                          : t("codexConfigConsistency.statusReady")}
                     </span>
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {refresh.preflight.paginatedHistory.affectedRolloutCount > 0
-                      ? `${t("codexConfigConsistency.paginatedHistoryFiles")} ${refresh.preflight.paginatedHistory.affectedRolloutCount} · ${t("codexConfigConsistency.duplicateOrdinals")} ${refresh.preflight.paginatedHistory.duplicateOrdinalCount} · ${t("codexConfigConsistency.providerMigrationCursors")} ${refresh.preflight.paginatedHistory.providerMigrationCursorCount ?? 0} · ${t("codexConfigConsistency.historyBaseReferences")} ${refresh.preflight.paginatedHistory.providerMigrationHistoryBaseCount ?? 0}`
-                      : refresh.preflight.paginatedHistory.blockedRolloutCount >
-                          0
-                        ? `${t("codexConfigConsistency.paginatedHistorySkipped")} ${refresh.preflight.paginatedHistory.blockedRolloutCount}`
+                    {repairableHistoryCount > 0
+                      ? `${t("codexConfigConsistency.paginatedHistoryFiles")} ${repairableHistoryCount} · ${t("codexConfigConsistency.duplicateOrdinals")} ${refresh.preflight.paginatedHistory.duplicateOrdinalCount} · ${t("codexConfigConsistency.providerMigrationCursors")} ${refresh.preflight.paginatedHistory.providerMigrationCursorCount ?? 0} · ${t("codexConfigConsistency.historyBaseReferences")} ${refresh.preflight.paginatedHistory.providerMigrationHistoryBaseCount ?? 0}`
+                      : skippedHistoryCount > 0
+                        ? `${t("codexConfigConsistency.paginatedHistorySkipped")} ${skippedHistoryCount}`
                         : t("codexConfigConsistency.noPaginatedHistoryIssue")}
                   </p>
+                  {repairableHistoryCount > 0 && skippedHistoryCount > 0 ? (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("codexConfigConsistency.paginatedHistorySkipped")}{" "}
+                      {skippedHistoryCount}
+                    </p>
+                  ) : null}
+                  {repairableHistoryCount > 0 ? (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("codexConfigConsistency.paginatedHistoryRepairHint")}
+                    </p>
+                  ) : null}
+                  {skippedHistoryCount > 0 ? (
+                    <>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {t(
+                          "codexConfigConsistency.paginatedHistorySkippedHint",
+                        )}
+                      </p>
+                      <BlockedHistoryReasonDetails
+                        groups={blockedHistoryGroups}
+                      />
+                    </>
+                  ) : null}
                   {rotatedThreadCount > 0 ? (
                     <p className="mt-1 text-xs text-muted-foreground">
                       {t("codexConfigConsistency.rotatedHistoryThreads")}{" "}
@@ -375,6 +504,9 @@ export function CodexConfigConsistencyDialog({
                       {refresh.preflight.paginatedHistory
                         .providerMigrationHistoryBaseCount ?? 0}
                     </p>
+                    <p className="mt-1 text-xs">
+                      {t("codexConfigConsistency.paginatedHistoryRepairHint")}
+                    </p>
                     {rotatedThreadCount > 0 ? (
                       <p className="mt-1 text-xs">
                         {t("codexConfigConsistency.rotatedHistoryThreads")}{" "}
@@ -389,9 +521,17 @@ export function CodexConfigConsistencyDialog({
                   </div>
                 ) : null}
                 {refresh.preflight.paginatedHistory.blockedRolloutCount > 0 ? (
-                  <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-amber-800 dark:text-amber-200">
-                    {t("codexConfigConsistency.paginatedHistorySkipped")}{" "}
-                    {refresh.preflight.paginatedHistory.blockedRolloutCount}
+                  <div className="rounded-md border bg-muted/20 p-3 text-muted-foreground">
+                    <p>
+                      {t("codexConfigConsistency.paginatedHistorySkipped")}{" "}
+                      {refresh.preflight.paginatedHistory.blockedRolloutCount}
+                    </p>
+                    <p className="mt-1 text-xs">
+                      {t("codexConfigConsistency.paginatedHistorySkippedHint")}
+                    </p>
+                    <BlockedHistoryReasonDetails
+                      groups={blockedHistoryGroups}
+                    />
                   </div>
                 ) : null}
                 <p className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-blue-800 dark:text-blue-200">

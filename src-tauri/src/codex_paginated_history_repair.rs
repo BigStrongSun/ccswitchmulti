@@ -40,6 +40,117 @@ pub struct PaginatedHistoryRepairPreflight {
     pub affected_bytes: u64,
     pub blocked_rollout_count: usize,
     pub blocked_reason: Option<String>,
+    pub blocked_reason_groups: Vec<BlockedRolloutReasonGroup>,
+}
+
+/// “保持原样、不会自动修改”的历史文件按原因分组统计。
+///
+/// 分页历史修复只会改写可安全验证的重复序号/迁移游标；其余文件会被保护性跳过。
+/// 旧实现只暴露 `blocked_reason`（第一条排序后的原始报文），前端因此既说不清
+/// “为什么被跳过”，也说不清“需要做什么”。这里按原因码分组，附带少量示例，
+/// 让状态面板可以直接展示可执行的解释。
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockedRolloutReasonGroup {
+    /// 稳定原因码，例如 `codex_paginated_history_immutable`。
+    pub code: String,
+    /// 同一原因码下的细分原因；无细分时为空字符串。
+    pub detail: String,
+    pub count: usize,
+    /// 示例（文件路径或 rollout id），最多 `BLOCKED_REASON_SAMPLE_LIMIT` 条。
+    pub samples: Vec<String>,
+}
+
+const BLOCKED_REASON_SAMPLE_LIMIT: usize = 5;
+const IMMUTABLE_BLOCKED_PREFIX: &str = "codex_paginated_history_immutable: ";
+const IMMUTABLE_BLOCKED_TRAILER: &str =
+    "; provider migration cannot safely rewrite byte-addressed history";
+
+/// 把原始 blocked 报文拆成 (原因码, 细分原因, 示例)。
+///
+/// 保护性跳过来自两组代码：迁移守卫的 `codex_paginated_history_immutable`
+/// 报文，以及分页谱系/投影游标检查抛出的 `code: key=value` 报文。
+fn classify_blocked_reason(message: &str) -> (String, String, Option<String>) {
+    let trimmed = message.trim();
+    if let Some(rest) = trimmed.strip_prefix(IMMUTABLE_BLOCKED_PREFIX) {
+        let (sample, tail) = match rest.split_once(": ") {
+            Some((path, tail)) => (Some(path.trim().to_string()), tail),
+            None => (None, rest),
+        };
+        let detail = tail
+            .strip_suffix(IMMUTABLE_BLOCKED_TRAILER)
+            .unwrap_or(tail)
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .to_string();
+        return (
+            "codex_paginated_history_immutable".to_string(),
+            detail,
+            sample,
+        );
+    }
+
+    let head = trimmed
+        .split([':', '='])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let code = if head.is_empty() {
+        trimmed.to_string()
+    } else {
+        head
+    };
+    let sample = trimmed
+        .split_once("path=")
+        .map(|(_, value)| value)
+        .or_else(|| trimmed.split_once("rollout_id=").map(|(_, value)| value))
+        .map(|value| {
+            value
+                .split([';', ',', ' '])
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .to_string()
+        })
+        .filter(|value| !value.is_empty());
+    (code, String::new(), sample)
+}
+
+fn group_blocked_reasons(blocked: &[String]) -> Vec<BlockedRolloutReasonGroup> {
+    let mut groups: Vec<BlockedRolloutReasonGroup> = Vec::new();
+    for message in blocked {
+        let (code, detail, sample) = classify_blocked_reason(message);
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group.code == code && group.detail == detail)
+        {
+            group.count += 1;
+            if let Some(sample) = sample {
+                if group.samples.len() < BLOCKED_REASON_SAMPLE_LIMIT
+                    && !group.samples.contains(&sample)
+                {
+                    group.samples.push(sample);
+                }
+            }
+            continue;
+        }
+        groups.push(BlockedRolloutReasonGroup {
+            code,
+            detail,
+            count: 1,
+            samples: sample.into_iter().collect(),
+        });
+    }
+    groups.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.code.cmp(&right.code))
+            .then_with(|| left.detail.cmp(&right.detail))
+    });
+    groups
 }
 
 /// 分页历史修复的可观测进度事件。
@@ -1261,6 +1372,7 @@ pub(crate) fn inspect_paginated_history_repair() -> Result<PaginatedHistoryRepai
             .sum(),
         blocked_rollout_count: plan.blocked.len(),
         blocked_reason: plan.blocked.first().cloned(),
+        blocked_reason_groups: group_blocked_reasons(&plan.blocked),
     })
 }
 
@@ -1540,6 +1652,95 @@ mod tests {
             ));
         }
         std::fs::write(path, text).expect("write rollout fixture");
+    }
+
+    #[test]
+    fn blocked_reason_classifier_separates_immutable_envelope_from_lineage_errors() {
+        let (code, detail, sample) = classify_blocked_reason(
+            "codex_paginated_history_immutable: C:\\codex\\sessions\\rollout-a.jsonl: non-legacy history envelope; provider migration cannot safely rewrite byte-addressed history",
+        );
+        assert_eq!(code, "codex_paginated_history_immutable");
+        assert_eq!(detail, "non-legacy history envelope");
+        assert_eq!(
+            sample.as_deref(),
+            Some("C:\\codex\\sessions\\rollout-a.jsonl")
+        );
+
+        let (code, detail, sample) = classify_blocked_reason(
+            "rollout_lineage_is_not_paginated: path=C:\\codex\\sessions\\rollout-b.jsonl",
+        );
+        assert_eq!(code, "rollout_lineage_is_not_paginated");
+        assert!(detail.is_empty());
+        assert_eq!(
+            sample.as_deref(),
+            Some("C:\\codex\\sessions\\rollout-b.jsonl")
+        );
+
+        let (code, _, sample) = classify_blocked_reason(
+            "provider_migration_cursor_mapping_missing: rollout_id=01a00000-0000-7000-8000-000000000001",
+        );
+        assert_eq!(code, "provider_migration_cursor_mapping_missing");
+        assert_eq!(
+            sample.as_deref(),
+            Some("01a00000-0000-7000-8000-000000000001")
+        );
+
+        let (code, _, sample) = classify_blocked_reason("rollout_contains_no_records");
+        assert_eq!(code, "rollout_contains_no_records");
+        assert!(sample.is_none());
+    }
+
+    #[test]
+    fn blocked_reason_groups_count_and_cap_samples() {
+        let mut blocked = (0..8)
+            .map(|index| {
+                format!(
+                    "rollout_lineage_is_not_paginated: path=C:\\codex\\sessions\\rollout-{index}.jsonl"
+                )
+            })
+            .collect::<Vec<_>>();
+        blocked.push(
+            "codex_paginated_history_immutable: C:\\codex\\sessions\\rollout-z.jsonl: non-legacy history envelope; provider migration cannot safely rewrite byte-addressed history"
+                .to_string(),
+        );
+        blocked.push(
+            "codex_paginated_history_immutable: C:\\codex\\sessions\\rollout-y.jsonl: non-legacy history envelope; provider migration cannot safely rewrite byte-addressed history"
+                .to_string(),
+        );
+        let groups = group_blocked_reasons(&blocked);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].code, "rollout_lineage_is_not_paginated");
+        assert_eq!(groups[0].count, 8);
+        assert_eq!(groups[0].samples.len(), BLOCKED_REASON_SAMPLE_LIMIT);
+        assert_eq!(groups[1].code, "codex_paginated_history_immutable");
+        assert_eq!(groups[1].detail, "non-legacy history envelope");
+        assert_eq!(groups[1].count, 2);
+        assert_eq!(groups[1].samples.len(), 2);
+    }
+
+    /// 本机诊断：打印真实 `CODEX_HOME` 下分页历史被保护性跳过的原因分布。
+    ///
+    /// 该用例会读取用户真实历史目录，因此默认忽略，只在排查“状态面板一直提示
+    /// 分页历史需要处理”时显式执行：
+    /// `cargo test --lib real_history_blocked_reason_census -- --ignored --nocapture`
+    #[test]
+    #[ignore = "diagnostic: reads the real CODEX_HOME history directory"]
+    fn real_history_blocked_reason_census() {
+        let preflight = inspect_paginated_history_repair().expect("inspect paginated history");
+        println!(
+            "affected={} duplicate_ordinals={} provider_cursors={} history_base={} blocked={}",
+            preflight.affected_rollout_count,
+            preflight.duplicate_ordinal_count,
+            preflight.provider_migration_cursor_count,
+            preflight.provider_migration_history_base_count,
+            preflight.blocked_rollout_count
+        );
+        for group in &preflight.blocked_reason_groups {
+            println!(
+                "  {} [{}] count={} samples={:?}",
+                group.code, group.detail, group.count, group.samples
+            );
+        }
     }
 
     #[test]

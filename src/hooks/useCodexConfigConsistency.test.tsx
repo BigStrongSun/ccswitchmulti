@@ -120,6 +120,46 @@ describe("useCodexConfigConsistency", () => {
     });
   });
 
+  it("keeps the status panel closed for history files that are only kept unchanged", async () => {
+    const consistent: CodexConfigConsistencyReport = {
+      ...drift,
+      state: "consistent",
+      changedKeys: [],
+      reason: null,
+    };
+    vi.mocked(codexConfigConsistencyApi.inspect).mockResolvedValue(consistent);
+    vi.mocked(
+      codexConfigConsistencyApi.inspectRuntimeRefresh,
+    ).mockResolvedValue({
+      supported: true,
+      canRefresh: true,
+      snapshotToken: "skipped-history-snapshot",
+      desktopProcessCount: 1,
+      appServerProcessCount: 1,
+      processCount: 2,
+      launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+      warning: null,
+      paginatedHistory: {
+        affectedRolloutCount: 0,
+        duplicateOrdinalCount: 0,
+        affectedBytes: 0,
+        blockedRolloutCount: 38,
+        blockedReason:
+          "history_base_offset_not_record_boundary: rollout_id=01a00000-0000-7000-8000-000000000002",
+      },
+    });
+
+    const { result } = renderHook(() => useCodexConfigConsistency());
+
+    await waitFor(() =>
+      expect(
+        codexConfigConsistencyApi.inspectRuntimeRefresh,
+      ).toHaveBeenCalled(),
+    );
+    expect(result.current.refresh.phase).toBe("idle");
+    expect(result.current.report).toBeNull();
+  });
+
   it("requires a checked preflight before refreshing and preserves progress until completion", async () => {
     const runtimeStale: CodexConfigConsistencyReport = {
       ...drift,
