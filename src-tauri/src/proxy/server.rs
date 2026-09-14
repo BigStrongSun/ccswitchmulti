@@ -26,7 +26,7 @@ use axum::{
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 /// 代理服务器状态（共享）
@@ -73,6 +73,9 @@ pub struct ProxyServer {
     shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
     /// 服务器任务句柄，用于等待服务器实际关闭
     server_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// 已接受的连接任务。stop() 必须把它们一起结束，否则这些 socket 仍占着本地端口，
+    /// Windows 下会让紧接着的重绑定直接失败（10048）。
+    connection_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl ProxyServer {
@@ -127,6 +130,7 @@ impl ProxyServer {
             state,
             shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),
+            connection_tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -151,6 +155,15 @@ impl ProxyServer {
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .map_err(|e| ProxyError::BindFailed(format_bind_error(&addr, e)))?;
+        // 显式清掉监听句柄的继承位：否则子进程（WebView2 等）可能继承该 socket，
+        // 主进程被强杀后端口仍以“已死 PID 的 LISTEN 行”被占住。
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::io::AsRawSocket;
+            crate::process_identity::harden_socket_handle_not_inheritable(
+                listener.as_raw_socket() as usize
+            );
+        }
         let local_addr = listener
             .local_addr()
             .map_err(|e| ProxyError::BindFailed(format_bind_error(&addr, e)))?;
@@ -190,6 +203,7 @@ impl ProxyServer {
         // 启动服务器 — 使用手动 hyper HTTP/1.1 accept loop
         // 开启 preserve_header_case 以捕获客户端请求头的原始大小写
         let state = self.state.clone();
+        let connection_tasks = self.connection_tasks.clone();
         let handle = tokio::spawn(async move {
             let mut shutdown_rx = shutdown_rx;
             loop {
@@ -205,7 +219,8 @@ impl ProxyServer {
                         };
 
                         let app = app.clone();
-                        tokio::spawn(async move {
+                        let connection_tasks = connection_tasks.clone();
+                        let connection = tokio::spawn(async move {
                             // Peek raw TCP bytes to capture original header casing
                             // before hyper parses (and lowercases) the header names.
                             let original_cases = {
@@ -252,6 +267,9 @@ impl ProxyServer {
                                 log::debug!("[{SRV}] connection error: {e}", SRV = log_srv::CONN_ERR);
                             }
                         });
+                        let mut tasks = connection_tasks.lock().await;
+                        tasks.retain(|task| !task.is_finished());
+                        tasks.push(connection);
                     }
                     _ = &mut shutdown_rx => {
                         break;
@@ -280,6 +298,23 @@ impl ProxyServer {
             let _ = tx.send(());
         } else {
             return Err(ProxyError::NotRunning);
+        }
+
+        // 1.5 立即中止所有已接受的连接任务：只关监听器是不够的——keep-alive/流式连接
+        // 会继续持有本地端口的 socket，Windows 上紧接着的重绑定会直接 10048，导致
+        // “端口被占用”的假象和反复失败。这里显式 abort，保证端口真正释放。
+        {
+            let mut tasks = self.connection_tasks.lock().await;
+            let aborted = tasks.len();
+            for task in tasks.drain(..) {
+                task.abort();
+            }
+            if aborted > 0 {
+                log::info!(
+                    "[{}] 已中止 {aborted} 个在途连接，释放本地端口",
+                    log_srv::STOPPED
+                );
+            }
         }
 
         // 2. 等待服务器任务结束（带 5 秒超时保护）
@@ -665,6 +700,38 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn restart_rebinds_while_previous_connections_still_open() {
+        let _home = TestHomeGuard::new();
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+        let port = probe.local_addr().expect("probe addr").port();
+        drop(probe);
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let config = ProxyConfig {
+            listen_address: "127.0.0.1".to_string(),
+            listen_port: port,
+            ..ProxyConfig::default()
+        };
+        let server = ProxyServer::new(config, db.clone(), None);
+        server.start().await.expect("first start");
+
+        // 保持一个客户端连接不关闭：等价于“stop 时仍有在途连接”。
+        let client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("client connect");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        server.stop().await.expect("stop");
+        // 关键断言：旧连接还没释放时，也必须能在同一端口重新绑定（修复前会 10048）。
+        server
+            .start()
+            .await
+            .expect("rebind with previous connection still open");
+        drop(client);
+        server.stop().await.expect("final stop");
+    }
     #[test]
     fn bind_error_for_addr_in_use_includes_actionable_port_diagnostic() {
         let addr: SocketAddr = "127.0.0.1:15721".parse().expect("socket addr");

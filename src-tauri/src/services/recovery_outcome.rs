@@ -137,6 +137,19 @@ pub fn record_recovery_outcome(mut outcome: RecoveryOutcome) -> Result<(), Strin
             .lock()
             .map_err(|_| "恢复结果存储锁已损坏".to_string())?;
         let mut store = read_store_unlocked()?;
+        // 同一个未确认问题重复出现时只保留一条：否则每 5 秒一次的重试会不断生成
+        // 新的未确认结果，界面就会不停弹同样的提示。
+        let duplicate = outcome.acknowledged_at.is_none()
+            && store.outcomes.iter().any(|existing| {
+                existing.acknowledged_at.is_none()
+                    && existing.generation == outcome.generation
+                    && existing.operation == outcome.operation
+                    && existing.kind == outcome.kind
+                    && existing.app_type == outcome.app_type
+            });
+        if duplicate {
+            return Ok(());
+        }
         store.generation = store.generation.max(outcome.generation);
         store.outcomes.push(outcome.clone());
         trim_outcomes(&mut store.outcomes);
@@ -521,6 +534,37 @@ mod tests {
         assert_eq!(pending[0].id, current_unclean.id);
     }
 
+    #[test]
+    #[serial]
+    fn repeated_identical_failures_do_not_stack_duplicate_outcomes() {
+        let _home = TempHome::new();
+        let first = outcome(
+            9,
+            "codex",
+            RecoverySeverity::Error,
+            RecoveryOutcomeKind::PortOwnedByUnknownOwner,
+        );
+        let second = outcome(
+            9,
+            "codex",
+            RecoverySeverity::Error,
+            RecoveryOutcomeKind::PortOwnedByUnknownOwner,
+        );
+        let different = outcome(
+            9,
+            "codex",
+            RecoverySeverity::Error,
+            RecoveryOutcomeKind::StartupTakeoverFailed,
+        );
+        record_recovery_outcome(first.clone()).expect("record first");
+        record_recovery_outcome(second).expect("record duplicate");
+        record_recovery_outcome(different.clone()).expect("record different kind");
+
+        let pending = get_pending_recovery_outcomes().expect("read pending");
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|entry| entry.id == first.id));
+        assert!(pending.iter().any(|entry| entry.id == different.id));
+    }
     #[test]
     #[serial]
     fn resolving_port_busy_outcomes_only_acknowledges_that_apps_port_failures() {

@@ -1192,6 +1192,24 @@ impl ProxyService {
                                 crate::services::recovery_outcome::record_best_effort(outcome);
                             }
                             PortOwnership::UnknownOwner | PortOwnership::Unreachable => {
+                                // 端口只被本进程自己的残留连接占着（没有外部监听者）：这不是
+                                // “身份不明的程序”，不给用户报错、也不记录恢复结果，等连接释放
+                                // 后由重试自动恢复即可（stop() 也会主动中止这些连接）。
+                                if let Some(current) =
+                                    crate::process_identity::current_process_identity()
+                                {
+                                    if crate::process_identity::port_rows_all_owned_by(
+                                        listen_port,
+                                        current.pid,
+                                    ) {
+                                        log::warn!(
+                                        "端口 {listen_port} 当前只被本进程的残留连接占用，等待其释放后重试"
+                                    );
+                                        return Err(format!(
+                                        "{PORT_OWNERSHIP_GUARD_PREFIX}: 端口 {listen_port} 只被本进程的残留连接占用，正在等待释放（原始错误: {start_error}）"
+                                    ));
+                                    }
+                                }
                                 let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
                                 "proxy_listener_ownership",
                                 crate::services::recovery_outcome::RecoveryOutcomeKind::PortOwnedByUnknownOwner,
@@ -1473,9 +1491,12 @@ impl ProxyService {
     /// 端口当前的 LISTEN 行是否指向一个已经退出的 PID（残留监听）。
     pub(crate) fn stale_listener_owner_pid(port: u16) -> Option<u32> {
         let owner = crate::process_identity::tcp_listener_owner_pid(port)?;
-        match crate::process_identity::process_identity_result(owner) {
-            Err(crate::process_identity::ProcessIdentityError::NotFound) => Some(owner),
-            _ => None,
+        // 判定标准是“这个 PID 是否还存在”，而不是 OpenProcess 的错误码：进程刚被终止时
+        // 可能返回 ERROR_GEN_FAILURE(31)，实测就是这样漏掉了一次残留释放。
+        if crate::process_identity::process_exists(owner) {
+            None
+        } else {
+            Some(owner)
         }
     }
 
@@ -1522,10 +1543,7 @@ impl ProxyService {
                     // 创建者已退出、LISTEN 行仍在 = socket 句柄活在别的进程里。
                     // 先释放本产品自己的残留子进程；端口真正空出来后按“端口已释放”
                     // 继续恢复接管，不再把用户卡在无法解除的错误上。
-                    if matches!(
-                        identity_error,
-                        crate::process_identity::ProcessIdentityError::NotFound
-                    ) {
+                    if !crate::process_identity::process_exists(owner_pid) {
                         match self.release_stale_listener_holders(owner_pid, port).await {
                             Ok(released)
                                 if released > 0

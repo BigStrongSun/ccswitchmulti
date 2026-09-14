@@ -377,6 +377,70 @@ pub(crate) fn child_processes_of(_parent_pid: u32) -> Vec<ChildProcess> {
     Vec::new()
 }
 
+/// 判断 PID 当前是否真实存在（用于区分“监听者已死、socket 句柄仍被别人持有”的残留行）。
+///
+/// 不能只看 OpenProcess 的错误码：进程刚被终止时可能返回 ERROR_GEN_FAILURE(31)，
+/// 而不是 ERROR_INVALID_PARAMETER(87)；因此这里直接查进程快照。
+#[cfg(target_os = "windows")]
+pub(crate) fn process_exists(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    if pid == 0 {
+        return false;
+    }
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return true;
+    }
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    let mut found = false;
+    while has_entry {
+        if entry.th32ProcessID == pid {
+            found = true;
+            break;
+        }
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+    found
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn process_exists(pid: u32) -> bool {
+    process_identity(pid).is_some()
+}
+
+/// 该端口的所有 TCP 行是否都属于同一个 PID（即占用者是“我们自己”而不是外部程序）。
+pub(crate) fn port_rows_all_owned_by(port: u16, pid: u32) -> bool {
+    let rows = tcp_port_rows(port);
+    !rows.is_empty() && rows.iter().all(|row| row.pid == pid)
+}
+
+/// 让监听 socket 句柄不可被后续创建的子进程继承。
+///
+/// 实测过：应用被强杀后，15721 的 LISTEN 行会以“已死的 PID”继续存在，说明句柄被
+/// 子进程（WebView2 等）持有；显式清掉继承位可以避免这个残留。
+#[cfg(target_os = "windows")]
+pub(crate) fn harden_socket_handle_not_inheritable(raw_socket: usize) {
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+    if raw_socket == 0 || raw_socket == usize::MAX {
+        return;
+    }
+    let handle = raw_socket as windows_sys::Win32::Foundation::HANDLE;
+    unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn harden_socket_handle_not_inheritable(_raw_socket: usize) {}
+
 pub(crate) fn current_executable_path() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
@@ -865,6 +929,28 @@ mod tests {
         assert_eq!(summary.matches("ESTABLISHED").count(), 6);
     }
 
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn process_exists_matches_reality() {
+        assert!(process_exists(std::process::id()));
+        assert!(!process_exists(0));
+        assert!(!process_exists(0xFFFF_FFF0));
+    }
+
+    #[test]
+    fn port_rows_are_attributed_to_the_listening_process() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let port = listener.local_addr().expect("addr").port();
+        assert!(port_rows_all_owned_by(port, std::process::id()));
+        assert!(!port_rows_all_owned_by(
+            port,
+            std::process::id().wrapping_add(1)
+        ));
+        let free = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        let free_port = free.local_addr().expect("addr").port();
+        drop(free);
+        assert!(!port_rows_all_owned_by(free_port, std::process::id()));
+    }
     #[test]
     fn product_helper_allowlist_is_narrow() {
         assert!(is_product_helper_image("msedgewebview2.exe", "", None));
