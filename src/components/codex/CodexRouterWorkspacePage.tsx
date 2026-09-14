@@ -7169,8 +7169,17 @@ function StatusTab({
   );
   const trafficRows = buildRouteTrafficRows({
     logs: proxyLogs,
-    // 流量分段的请求/Token/延迟只可由 request_log 支撑；诊断事件没有
-    // usage 或 latency，混入会把最近样本的请求数抬高、平均延迟压低。
+    routerEvents,
+    routes: routeEntries,
+    selectedPlan,
+    providersById,
+    routeSummaries: routeSummaryMap,
+  });
+  // 流量分段的请求/Token/延迟只可由 request_log 支撑；诊断事件没有
+  // usage 或 latency，混入会把最近样本的请求数抬高、平均延迟压低。
+  // Keep the diagnostic-backed rows above for link/protocol evidence.
+  const requestTrafficRows = buildRouteTrafficRows({
+    logs: proxyLogs,
     routerEvents: [],
     routes: routeEntries,
     selectedPlan,
@@ -7356,7 +7365,7 @@ function StatusTab({
         diagnostics={diagnostics}
         protocolCount={protocolRows.length}
         trafficCount={
-          trafficRows.length + (subagentUsage?.modelStats.length ?? 0)
+          requestTrafficRows.length + (subagentUsage?.modelStats.length ?? 0)
         }
         providerCount={selectedRoutes.length}
         onChange={setStatusView}
@@ -7845,7 +7854,7 @@ function StatusTab({
             <SectionHeader
               icon={Database}
               title="今日最近请求样本（子 Provider / Model）"
-              detail="仅展示今日最近 50 条已加载 Codex 请求样本，不是全天总量；归属来自真实日志字段或 requestModel 的尝试性匹配，不能由路由配置推断。"
+              detail="仅展示今日最近 50 条已加载 Codex 请求样本，不是全天总量；requestModel 匹配的归属仅供参考，不代表实际上游已确认。"
             />
             <div className="mt-3 overflow-hidden rounded-lg border border-border dark:border-slate-700">
               <div className="grid grid-cols-[1.1fr_1.1fr_0.55fr_0.55fr_0.7fr_0.7fr_0.7fr_0.7fr_0.65fr] gap-2 bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground dark:bg-slate-900/80 dark:text-slate-300">
@@ -7863,8 +7872,8 @@ function StatusTab({
                 <div className="p-4 text-sm text-muted-foreground">
                   正在读取统计...
                 </div>
-              ) : trafficRows.length > 0 ? (
-                trafficRows.map((row) => (
+              ) : requestTrafficRows.length > 0 ? (
+                requestTrafficRows.map((row) => (
                   <div
                     key={`${row.providerId}-${row.model}`}
                     className="grid grid-cols-[1.1fr_1.1fr_0.55fr_0.55fr_0.7fr_0.7fr_0.7fr_0.7fr_0.65fr] gap-2 border-t border-border px-3 py-2 text-xs text-foreground dark:border-slate-800 dark:text-slate-300"
