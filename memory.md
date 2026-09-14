@@ -5801,3 +5801,4 @@ supported in one streaming turn`。
 ## 2026-09-14 Codex 流量功能本地 main 集成
 - 合并 main@7c9a2e79 与流量分支@c8dacb09，保留双方 memory 与看门狗；隔离候选验收后快进主目录，不动其它未提交修改。
 - 合并树 Rust 4178 passed/7 ignored；前端1607 passed/1既有失败（干净main独立复现）；tsc/build通过。详见 memory-2026-09-14-codex-traffic-main-merge.md。未安装、未推送。
+- 2026-09-15 “提示一直弹”根修（v3.20.2-13，提交 `45fc0ab4`）：`ProxyServer::stop()` 只关监听 socket、没中止已接受连接任务 → 旧 keep-alive/流式连接继续占着 15721，Windows 下立刻重绑 10048；重试每 5 秒失败一次并各写一条未确认恢复结果 → 前端连环弹。修复：stop 中止全部在途连接（新增回归 restart_rebinds_while_previous_connections_still_open）、自身残留连接不再报“身份不明”也不写结果、同一代际相同结果去重、残留判定改用 process_exists、监听句柄显式不可继承。验证：全量 Rust 单线程 4180 passed；装 3.20.2-13 后 kill 主进程 → supervisor 1.1s 拉起且日志无 PORT_OWNERSHIP_GUARD。历史重复条目（7 条 portOwned + 1 条 startupTakeoverFailed + 2 条测试 uncleanExit）已标记已确认，备份在验收目录。详见 `memory-2026-09-15-port-self-hold-and-toast-storm.md`。
