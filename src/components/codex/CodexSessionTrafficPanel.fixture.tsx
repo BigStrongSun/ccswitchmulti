@@ -59,6 +59,7 @@ export function CodexSessionTrafficPanelFixture() {
               childTotalTokens: 0,
               parentDirectUsage: null,
               parentDirectUsageSource: "none",
+              parentUsageStatus: "unknown_may_overlap",
             },
           ],
           modelStats: [

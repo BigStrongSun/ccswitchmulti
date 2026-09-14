@@ -128,6 +128,7 @@ export function CodexSessionTrafficPanel({
           stats.modelStats.map((row) => {
             const observedRows = row.observedUsageAgents ?? row.agentCount;
             const missingRows = row.missingUsageAgents ?? 0;
+            const totalSessions = observedRows + missingRows;
             const fullyMissing = observedRows === 0 && missingRows > 0;
             return (
               <div
@@ -136,7 +137,7 @@ export function CodexSessionTrafficPanel({
               >
                 <span className="truncate font-mono">{row.model}</span>
                 <span className="text-right">
-                  {row.agentCount}
+                  {totalSessions}
                   {missingRows ? (
                     <em className="ml-1 not-italic text-amber-700 dark:text-amber-200">
                       ({missingRows} 未采集)
@@ -204,7 +205,9 @@ function ParentGroups({
             : "子用量未采集";
         const parentUsage = group.parentDirectUsage
           ? `父直接同步请求 ${group.parentDirectUsage.requestCount}；非缓存输入 ${formatTokenCount(group.parentDirectUsage.inputTokens)} / 缓存读取 ${formatTokenCount(group.parentDirectUsage.cacheReadTokens)} / 缓存写入 ${formatTokenCount(group.parentDirectUsage.cacheCreationTokens)} / 输出 ${formatTokenCount(group.parentDirectUsage.outputTokens)} / 总数 ${formatTokenCount(group.parentDirectUsage.totalTokens)}`
-          : "父直接用量未采集";
+          : group.parentUsageStatus === "unknown_may_overlap"
+            ? "父同步记录可能包含子用量，暂不计入"
+            : "父直接用量未采集";
         return (
           <div
             key={group.parentSessionId}

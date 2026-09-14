@@ -52,12 +52,13 @@ describe("CodexSessionTrafficPanel", () => {
               childTotalTokens: 0,
               parentDirectUsage: null,
               parentDirectUsageSource: "none",
+              parentUsageStatus: "unknown_may_overlap",
             },
           ],
           modelStats: [
             {
               model: "gpt-5.6-sol",
-              agentCount: 3,
+              agentCount: 2,
               observedUsageAgents: 2,
               missingUsageAgents: 1,
               requestCount: 8,
@@ -109,6 +110,12 @@ describe("CodexSessionTrafficPanel", () => {
       screen.getByText(/父直接同步请求 2；非缓存输入 50/),
     ).toBeInTheDocument();
     expect(screen.getByText("子用量未采集")).toBeInTheDocument();
+    expect(
+      screen.getByText("父同步记录可能包含子用量，暂不计入"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("gpt-5.6-sol").parentElement).toHaveTextContent(
+      "3(1 未采集)",
+    );
     expect(
       screen.getByText(/请求耗时：会话历史未采集可信耗时，不显示为 0ms。/),
     ).toBeInTheDocument();

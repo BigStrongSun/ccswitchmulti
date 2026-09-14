@@ -222,6 +222,8 @@ export interface CodexSubagentParentUsageGroup {
     totalTokens: number;
   } | null;
   parentDirectUsageSource: "session_sync" | "none";
+  /** A legacy parent sync record may include child work; display it but never add it. */
+  parentUsageStatus?: "observed" | "unknown_may_overlap" | "not_observed";
 }
 
 /** 单台 CCSwitchMulti 上报的脱敏 Codex 用量聚合。 */
