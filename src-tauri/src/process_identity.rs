@@ -280,6 +280,103 @@ pub(crate) fn describe_port_blockers(port: u16) -> String {
     })
 }
 
+/// A live process whose parent is `parent_pid`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChildProcess {
+    pub pid: u32,
+    pub name: String,
+    pub executable_path: String,
+}
+
+/// Whether this image belongs to this product and may therefore be terminated
+/// when it is the real holder of a stale listener socket.
+///
+/// Locally reproduced failure mode: a listening socket can outlive the process
+/// that created it when another live process holds a duplicated copy of the
+/// handle. The TCP table then keeps naming the dead creator as the owner, so the
+/// ownership guard can neither verify nor terminate it. Only this product own
+/// helper images (WebView2 host, sidecars, the app itself) may be ended to
+/// release such a listener; everything else stays fail-closed.
+pub(crate) fn is_product_helper_image(
+    name: &str,
+    executable_path: &str,
+    install_dir: Option<&str>,
+) -> bool {
+    const HELPER_IMAGES: [&str; 4] = [
+        "msedgewebview2.exe",
+        "ccsm.exe",
+        "codex-history-repairer.exe",
+        "cc-switch.exe",
+    ];
+    let lower_name = name.trim().to_ascii_lowercase();
+    if HELPER_IMAGES.contains(&lower_name.as_str()) {
+        return true;
+    }
+    let normalized = normalized_path(executable_path);
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized.contains(r"\microsoft\edgewebview\application\") {
+        return true;
+    }
+    if let Some(dir) = install_dir {
+        let dir = normalized_path(dir);
+        if !dir.is_empty() && normalized.starts_with(&dir) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Live child processes of `parent_pid`.
+#[cfg(target_os = "windows")]
+pub(crate) fn child_processes_of(parent_pid: u32) -> Vec<ChildProcess> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let mut result = Vec::new();
+    if parent_pid == 0 {
+        return result;
+    }
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return result;
+    }
+
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while has_entry {
+        if entry.th32ParentProcessID == parent_pid && entry.th32ProcessID != 0 {
+            let end = entry
+                .szExeFile
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(entry.szExeFile.len());
+            result.push(ChildProcess {
+                pid: entry.th32ProcessID,
+                name: String::from_utf16_lossy(&entry.szExeFile[..end]),
+                executable_path: process_identity(entry.th32ProcessID)
+                    .map(|identity| identity.executable_path)
+                    .unwrap_or_default(),
+            });
+        }
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn child_processes_of(_parent_pid: u32) -> Vec<ChildProcess> {
+    Vec::new()
+}
+
 pub(crate) fn current_executable_path() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
@@ -766,6 +863,52 @@ mod tests {
         let summary = summarize_port_rows(15721, &rows, |_| String::new());
         assert!(summary.contains("…还有 3 条"));
         assert_eq!(summary.matches("ESTABLISHED").count(), 6);
+    }
+
+    #[test]
+    fn product_helper_allowlist_is_narrow() {
+        assert!(is_product_helper_image("msedgewebview2.exe", "", None));
+        assert!(is_product_helper_image("CC-SWITCH.EXE", "", None));
+        assert!(is_product_helper_image(
+            "msedgewebview2.exe",
+            r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\1.2.3\msedgewebview2.exe",
+            None
+        ));
+        assert!(is_product_helper_image(
+            "other.exe",
+            r"C:\Users\test\AppData\Local\CCSwitchMulti\other.exe",
+            Some(r"C:\Users\test\AppData\Local\CCSwitchMulti")
+        ));
+        assert!(!is_product_helper_image(
+            "cmd.exe",
+            r"C:\Windows\System32\cmd.exe",
+            Some(r"C:\Users\test\AppData\Local\CCSwitchMulti")
+        ));
+        assert!(!is_product_helper_image(
+            "chrome.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            None
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn child_processes_of_reports_a_live_child() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping", "-n", "11", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn child");
+        let children = child_processes_of(std::process::id());
+        let found = children.iter().any(|entry| entry.pid == child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            found,
+            "spawned child must be reported as a child of this process: {children:?}"
+        );
     }
 
     #[test]

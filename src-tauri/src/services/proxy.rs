@@ -1154,33 +1154,58 @@ impl ProxyService {
                         .await
                         .map_err(|e| format!("获取代理端口失败: {e}"))?
                         .listen_port;
-                    match probe_proxy_port(listen_port).await {
-                        PortOwnership::CompatibleInstance => {
-                            log::warn!(
+                    // 已死 PID 的 LISTEN 行说明端口被残留 socket 占着：先释放本产品
+                    // 自己的残留子进程，再重试一次启动。
+                    if let Some(stale_owner) = Self::stale_listener_owner_pid(listen_port) {
+                        match self
+                            .release_stale_listener_holders(stale_owner, listen_port)
+                            .await
+                        {
+                            Ok(released) if released > 0 => {
+                                if self.start().await.is_ok() {
+                                    log::info!(
+                                        "已释放端口 {listen_port} 的残留监听持有者（{released} 个进程），代理服务重新启动成功"
+                                    );
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                log::warn!("释放端口 {listen_port} 的残留监听持有者失败: {error}")
+                            }
+                        }
+                    }
+                    if self.is_running().await {
+                        log::info!("代理服务已在端口 {listen_port} 上运行，跳过端口占用判定");
+                    } else {
+                        match probe_proxy_port(listen_port).await {
+                            PortOwnership::CompatibleInstance => {
+                                log::warn!(
                                 "端口 {listen_port} 已由同配置作用域、同运行协议的 CCSwitchMulti 实例占用；本实例仅复用该监听，不会终止其进程"
                             );
-                            let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                                let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
                                 "proxy_listener_ownership",
                                 crate::services::recovery_outcome::RecoveryOutcomeKind::PortOwnedByCompatibleInstance,
                                 crate::services::recovery_outcome::RecoverySeverity::Info,
                                 app_type_str,
                             );
-                            outcome.kept_fields = vec!["listener".to_string()];
-                            crate::services::recovery_outcome::record_best_effort(outcome);
-                        }
-                        PortOwnership::UnknownOwner | PortOwnership::Unreachable => {
-                            let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                                outcome.kept_fields = vec!["listener".to_string()];
+                                crate::services::recovery_outcome::record_best_effort(outcome);
+                            }
+                            PortOwnership::UnknownOwner | PortOwnership::Unreachable => {
+                                let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
                                 "proxy_listener_ownership",
                                 crate::services::recovery_outcome::RecoveryOutcomeKind::PortOwnedByUnknownOwner,
                                 crate::services::recovery_outcome::RecoverySeverity::Error,
                                 app_type_str,
                             );
-                            outcome.next_step = Some("changeProxyPortOrInspectOwner".to_string());
-                            crate::services::recovery_outcome::record_best_effort(outcome);
-                            return Err(format!(
+                                outcome.next_step =
+                                    Some("changeProxyPortOrInspectOwner".to_string());
+                                crate::services::recovery_outcome::record_best_effort(outcome);
+                                return Err(format!(
                                 "{PORT_OWNERSHIP_GUARD_PREFIX}: 代理端口 {listen_port} 的监听进程身份无法完整验证；CCSwitchMulti 不会结束或接管该进程（原始错误: {start_error}）。{}",
                                 crate::process_identity::describe_port_blockers(listen_port)
                             ));
+                            }
                         }
                     }
                 }
@@ -1383,6 +1408,98 @@ impl ProxyService {
     /// This is intentionally stricter than a generic "kill port owner" action: the
     /// listener must still belong to the exact same executable as this process, and
     /// its PID/start time are revalidated immediately before termination.
+    /// 一个监听 socket 可能在创建它的进程退出后仍然存活：另一个存活进程持有该
+    /// handle 的复制品（本机已复现：把监听 socket 复制给子进程后杀掉父进程，TCP 表
+    /// 里的 LISTEN 行仍指向已死的父 PID，bind 报 10048）。此时按 PID 既无法核验也
+    /// 无法终止，只能释放**本产品自己的**残留子进程，其它进程继续 fail-closed。
+    pub(crate) async fn release_stale_listener_holders(
+        &self,
+        owner_pid: u32,
+        port: u16,
+    ) -> Result<u32, String> {
+        let install_dir = crate::process_identity::current_executable_path().and_then(|path| {
+            path.parent()
+                .map(|parent| parent.to_string_lossy().to_string())
+        });
+        let children = crate::process_identity::child_processes_of(owner_pid);
+        let mut released = 0u32;
+        for child in children {
+            if !crate::process_identity::is_product_helper_image(
+                &child.name,
+                &child.executable_path,
+                install_dir.as_deref(),
+            ) {
+                log::warn!(
+                    "残留监听 PID {owner_pid} 的子进程 {}（{}）不属于本产品，拒绝终止",
+                    child.pid,
+                    child.name
+                );
+                continue;
+            }
+            let Some(identity) = crate::process_identity::process_identity(child.pid) else {
+                continue;
+            };
+            if identity.pid != child.pid {
+                continue;
+            }
+            match crate::process_identity::terminate_verified_process(&identity) {
+                Ok(()) => {
+                    released = released.saturating_add(1);
+                    log::warn!(
+                        "已终止残留监听持有子进程 {}（{}），用于释放端口 {port}",
+                        child.pid,
+                        child.name
+                    );
+                }
+                Err(error) => log::warn!("终止残留监听持有子进程 {} 失败: {error}", child.pid),
+            }
+        }
+        if released > 0 {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match crate::process_identity::tcp_listener_owner_pid(port) {
+                    None => break,
+                    Some(pid) if pid != owner_pid => break,
+                    _ if tokio::time::Instant::now() < deadline => {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                    }
+                    _ => break,
+                }
+            }
+        }
+        Ok(released)
+    }
+
+    /// 端口当前的 LISTEN 行是否指向一个已经退出的 PID（残留监听）。
+    pub(crate) fn stale_listener_owner_pid(port: u16) -> Option<u32> {
+        let owner = crate::process_identity::tcp_listener_owner_pid(port)?;
+        match crate::process_identity::process_identity_result(owner) {
+            Err(crate::process_identity::ProcessIdentityError::NotFound) => Some(owner),
+            _ => None,
+        }
+    }
+
+    /// 残留监听被释放后端口已经变空：直接完成接管恢复。
+    async fn complete_forced_recovery_without_owner(
+        &self,
+        app: &AppType,
+        port: u16,
+    ) -> Result<ForcedPortRecoveryResult, String> {
+        self.set_takeover_for_app(app.as_str(), true).await?;
+        let running = self.is_running().await;
+        let live_matches = self.live_takeover_matches_current_proxy(app).await?;
+        if !running || !live_matches {
+            return Err(format!(
+                "端口 {port} 已释放，但接管校验失败：proxy_running={running}, live_matches={live_matches}"
+            ));
+        }
+        Ok(ForcedPortRecoveryResult {
+            app_type: app.as_str().to_string(),
+            port,
+            released_pid: None,
+            takeover_restored: true,
+        })
+    }
     pub async fn force_release_proxy_port_and_restore_takeover(
         &self,
         app_type: &str,
@@ -1402,6 +1519,32 @@ impl ProxyService {
             let owner = match crate::process_identity::process_identity_result(owner_pid) {
                 Ok(owner) => owner,
                 Err(identity_error) => {
+                    // 创建者已退出、LISTEN 行仍在 = socket 句柄活在别的进程里。
+                    // 先释放本产品自己的残留子进程；端口真正空出来后按“端口已释放”
+                    // 继续恢复接管，不再把用户卡在无法解除的错误上。
+                    if matches!(
+                        identity_error,
+                        crate::process_identity::ProcessIdentityError::NotFound
+                    ) {
+                        match self.release_stale_listener_holders(owner_pid, port).await {
+                            Ok(released)
+                                if released > 0
+                                    && crate::process_identity::tcp_listener_owner_pid(port)
+                                        .is_none() =>
+                            {
+                                log::warn!(
+                                    "端口 {port} 的残留监听（PID {owner_pid} 已退出）已释放：终止了 {released} 个本产品残留子进程"
+                                );
+                                return self
+                                    .complete_forced_recovery_without_owner(&app, port)
+                                    .await;
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                log::warn!("释放端口 {port} 的残留监听持有者失败: {error}")
+                            }
+                        }
+                    }
                     // 读不到对端进程身份时必须保持 fail-closed（既不能核验、也
                     // 没有权限终止），但要把「到底是谁、为什么读不到」讲清楚，
                     // 否则现场只能看到一个无法排查的错误。
@@ -5456,6 +5599,44 @@ mod tests {
 
     fn assert_env_str(env: &Map<String, Value>, key: &str, expected: Option<&str>) {
         assert_eq!(env.get(key).and_then(|value| value.as_str()), expected);
+    }
+
+    #[test]
+    fn stale_listener_owner_pid_ignores_a_live_owner() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let port = listener.local_addr().expect("listener address").port();
+        assert_eq!(ProxyService::stale_listener_owner_pid(port), None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn release_stale_listener_holders_never_touches_foreign_children() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping", "-n", "11", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn foreign child");
+
+        let released = service
+            .release_stale_listener_holders(std::process::id(), 15999)
+            .await
+            .expect("release helper");
+        assert_eq!(released, 0, "foreign children must never be terminated");
+        let alive = crate::process_identity::process_identity(child.id()).is_some();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            alive,
+            "foreign child must survive the stale-listener release"
+        );
     }
 
     #[test]
