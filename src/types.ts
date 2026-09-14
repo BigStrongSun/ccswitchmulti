@@ -652,6 +652,8 @@ export interface Settings {
   skipClaudeOnboarding?: boolean;
   // 是否开机自启
   launchOnStartup?: boolean;
+  /// 内置看门狗（supervisor）：主进程异常退出后由同一二进制自动拉起
+  watchdogEnabled?: boolean;
   // 是否在 CCSwitchMulti 启动后启动 Codex Desktop（独立于开机自启）
   launchCodexDesktopWithCcswitch?: boolean;
   // Codex 子进程级出口时区；不会修改操作系统时区

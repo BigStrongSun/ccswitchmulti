@@ -49,6 +49,7 @@ mod services;
 mod session_manager;
 mod settings;
 mod store;
+pub mod watchdog;
 
 mod tray;
 mod usage_events;
@@ -1384,6 +1385,16 @@ pub fn run() {
                 // long as any live takeover remains enabled. The guard shares the
                 // same verified force-release path as the fixed UI action.
                 state.proxy_service.start_configured_listener_guard();
+
+                // 内置跨平台看门狗：同一二进制以 --ccsm-supervise 模式再起一个守护进程，
+                // 主进程异常死亡后由它拉起。是否启用由设置 watchdog_enabled 控制。
+                let watchdog_port = state
+                    .db
+                    .get_proxy_config()
+                    .await
+                    .map(|config| config.listen_port)
+                    .unwrap_or(0);
+                crate::watchdog::spawn_supervisor(&crate::config::get_app_config_dir(), watchdog_port);
 
                 crate::codex_egress_timezone::refresh_automatic_timezone_before_codex_launch()
                     .await;

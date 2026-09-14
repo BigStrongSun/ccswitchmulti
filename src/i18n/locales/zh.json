@@ -721,6 +721,8 @@
     "windowBehaviorHint": "配置窗口最小化与 Claude 插件联动策略。",
     "launchOnStartup": "开机自启",
     "launchOnStartupDescription": "随系统启动自动运行 CC Switch",
+    "watchdogEnabled": "崩溃自动恢复（看门狗）",
+    "watchdogEnabledDescription": "内置守护进程盯着主程序；只有异常退出才会自动拉起，正常退出不会打扰",
     "launchCodexDesktopWithCcswitch": "启动 CCSwitchMulti 时启动 Codex Desktop",
     "launchCodexDesktopWithCcswitchDescription": "独立开关，默认关闭；仅开启开机自启不会启动 Codex Desktop",
     "silentStartup": "静默启动",

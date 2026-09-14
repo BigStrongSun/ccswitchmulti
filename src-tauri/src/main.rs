@@ -2,6 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // 看门狗模式：同一个二进制被应用自己以 --ccsm-supervise 拉起，只负责盯着主进程，
+    // 不初始化 Tauri、不创建窗口。Windows/macOS/Linux 共用这一条路径。
+    let args = std::env::args().collect::<Vec<String>>();
+    if let Some(supervise_args) = cc_switch_lib::watchdog::parse_supervise_args(&args) {
+        cc_switch_lib::watchdog::run_supervisor(supervise_args);
+    }
     // 在 Linux 上设置 WebKit 环境变量以解决 DMA-BUF 渲染问题
     // 某些 Linux 系统（如 Debian 13.2、Nvidia GPU）上 WebKitGTK 的 DMA-BUF 渲染器可能导致白屏/黑屏
     // 参考: https://github.com/tauri-apps/tauri/issues/9394
