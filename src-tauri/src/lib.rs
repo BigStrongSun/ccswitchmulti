@@ -1544,6 +1544,7 @@ pub fn run() {
             commands::pick_directory,
             commands::open_external,
             commands::get_init_error,
+            commands::get_watchdog_status,
             commands::get_pending_recovery_outcomes,
             commands::acknowledge_recovery_outcomes,
             commands::get_migration_result,

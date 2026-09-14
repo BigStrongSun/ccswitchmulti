@@ -391,6 +391,86 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
     std::process::exit(0);
 }
 
+/// 守护日志里的一条事件（供设置页的“看门狗 / 端口自检”面板展示）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchdogEventRecord {
+    pub timestamp: String,
+    pub level: String,
+    pub event: String,
+    pub detail: serde_json::Value,
+}
+
+/// 读取最近 limit 条守护事件（新到旧）。
+pub fn recent_events(config_dir: &Path, limit: usize) -> Vec<WatchdogEventRecord> {
+    let path = log_dir(config_dir).join(WATCHDOG_LOG_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut records = Vec::new();
+    for line in text.lines().rev() {
+        if records.len() >= limit {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        records.push(WatchdogEventRecord {
+            timestamp: value
+                .get("timestamp")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            level: value
+                .get("level")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("info")
+                .to_string(),
+            event: value
+                .get("event")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            detail: value
+                .get("detail")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        });
+    }
+    records
+}
+
+/// 最近一次为 parent_pid 拉起的守护进程 PID（来自守护日志的 supervisor-spawned 事件）。
+pub fn last_supervisor_pid(config_dir: &Path, parent_pid: u32) -> Option<u32> {
+    recent_events(config_dir, 64)
+        .into_iter()
+        .filter(|record| record.event == "supervisor-spawned")
+        .find_map(|record| {
+            let detail = record.detail;
+            let detail_parent = detail
+                .get("parentPid")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok());
+            if detail_parent != Some(parent_pid) {
+                return None;
+            }
+            detail
+                .get("supervisorPid")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+        })
+}
+
+/// 当前重启窗口内已经发生的自动拉起次数。
+pub fn recent_restart_count(config_dir: &Path) -> usize {
+    let now = now_secs();
+    let window_start = now.saturating_sub(RESTART_WINDOW_SECS);
+    read_recent_restarts(config_dir)
+        .into_iter()
+        .filter(|value| *value >= window_start)
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +516,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn supervisor_log_round_trip_finds_events_and_last_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        let log = logs.join(WATCHDOG_LOG_FILE);
+        let lines = [
+            r#"{"timestamp":"t1","level":"info","event":"supervisor-spawned","detail":{"supervisorPid":11,"parentPid":100}}"#,
+            r#"{"timestamp":"t2","level":"info","event":"supervisor-watching","detail":{"parentPid":100}}"#,
+            r#"{"timestamp":"t3","level":"warning","event":"supervisor-restarted","detail":{"parentPid":100,"newPid":101}}"#,
+            r#"{"timestamp":"t4","level":"info","event":"supervisor-spawned","detail":{"supervisorPid":22,"parentPid":999}}"#,
+        ]
+        .join("\n");
+        std::fs::write(&log, lines).expect("write log");
+
+        let events = recent_events(dir.path(), 10);
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].event, "supervisor-spawned");
+        assert_eq!(last_supervisor_pid(dir.path(), 100), Some(11));
+        assert_eq!(last_supervisor_pid(dir.path(), 999), Some(22));
+        assert_eq!(last_supervisor_pid(dir.path(), 1234), None);
+    }
     #[test]
     fn restart_budget_limits_crash_loops() {
         let now = 1_000_000u64;
