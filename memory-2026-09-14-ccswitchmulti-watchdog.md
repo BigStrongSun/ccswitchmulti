@@ -44,3 +44,11 @@
 - `install-ccswitchmulti-watchdog.ps1` 现在会在启动前先停掉守护目录里的旧 watcher（刷新安装，避免 IgnoreNew 让新脚本不生效）。
 - 验证：Pester `ccswitchmulti-watchdog` 6/6（新增两条：单轮异常不致死、正常轮次不写事件）；4 个脚本 parse 0 error；刷新后任务 Running、watcher PID 40844、安装态脚本与仓库哈希一致、日志新增 `guardian-started`。
 - 另一次真实现场（17:08:26 应用 `event_loop_exit` 正常退出、17:09:22 守护由任务重启、17:10:40 判定 `restart-skipped-clean-exit`、17:10:45 由用户再次启动）证明“正常退出不打扰”在真实场景下按设计工作。
+
+## 追加：设置页“看门狗与端口自检”面板（v3.20.2-14，提交 0c9b82e7）
+
+- 后端只读命令 `get_watchdog_status`（`commands/watchdog.rs`）：读 `logs/watchdog.jsonl`、`logs/watchdog-state.json` 与 TCP 表，返回守护进程 PID/存活、最近 30 分钟自动拉起次数、端口监听 PID/路径/就绪、端口占用诊断文本、最近 8 条守护事件。
+- `watchdog` 模块新增 `recent_events` / `last_supervisor_pid` / `recent_restart_count`（含单元测试 `supervisor_log_round_trip_finds_events_and_last_pid`）。
+- 前端新增 `src/lib/api/watchdog.ts` + `src/components/settings/WatchdogStatusPanel.tsx`（4 语言文案），挂在设置页 `WindowSettings` 之后；右上角可刷新，面板只读，不改运行状态。
+- 验证：组件测试 2/2（健康态/异常态）；全量 Rust 单线程 4182 passed / 0 failed / 7 ignored；前端全量 1610 tests 仅剩既有 `AddProviderDialog` 失败（干净 worktree 已复现）。
+- 安装：事务 `ccsm-20260915-011700-…` 将 3.20.2-13 → **3.20.2-14**；安装态/注册表/运行态一致、health 200、`listener_role=takeover`、内置 supervisor PID 32796；安装态二进制含 `get_watchdog_status` / `看门狗` / `占用诊断` / `supervisor-restarted`，构建产物 `dist/assets/index-*.js` 含 `watchdogPanelTitle` 与 `get_watchdog_status`。
