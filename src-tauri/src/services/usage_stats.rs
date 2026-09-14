@@ -2,14 +2,19 @@
 //!
 //! 提供使用量数据的聚合查询功能
 
+#[cfg(test)]
 use crate::codex_history_migration::{
     list_codex_history_sessions, CodexHistorySessionListOptions, CodexHistorySessionListOutcome,
     CodexHistorySessionSummary,
 };
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
+#[cfg(test)]
+use crate::proxy::usage::calculator::CostCalculator;
+use crate::proxy::usage::calculator::ModelPricing;
+#[cfg(test)]
 use crate::proxy::usage::parser::TokenUsage;
+#[cfg(test)]
 use crate::services::session_usage_codex::{
     build_rollout_index, read_verified_codex_rollout_usage, RolloutIndex,
 };
@@ -20,7 +25,9 @@ use chrono::{Local, NaiveDate, TimeZone, Timelike};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::io::{BufRead, BufReader};
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -807,6 +814,7 @@ fn local_day_start_rfc3339(day: NaiveDate) -> String {
 ///
 /// 这里只读取结构化元数据和模型字段，不解析消息正文，避免把会话内容引入流量统计。
 #[derive(Debug, Clone, Default)]
+#[cfg(test)]
 struct CodexSubagentIdentity {
     agent_nickname: Option<String>,
     agent_role: Option<String>,
@@ -816,6 +824,7 @@ struct CodexSubagentIdentity {
 }
 
 /// 从 Codex JSON 值中读取非空字符串字段。
+#[cfg(test)]
 fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -826,6 +835,7 @@ fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 /// 从 session_meta 的 payload 中解析子 Agent 身份。
+#[cfg(test)]
 fn parse_codex_subagent_identity(payload: &serde_json::Value) -> CodexSubagentIdentity {
     let spawn = payload
         .pointer("/source/subagent/thread_spawn")
@@ -853,6 +863,7 @@ fn parse_codex_subagent_identity(payload: &serde_json::Value) -> CodexSubagentId
 }
 
 /// 从一条 Codex JSONL 行里提取当前模型，用于没有用量行时仍显示子 Agent 模型。
+#[cfg(test)]
 fn codex_model_from_jsonl_value(value: &serde_json::Value) -> Option<String> {
     match value.get("type").and_then(|item| item.as_str()) {
         Some("turn_context") => value
@@ -884,6 +895,7 @@ fn codex_model_from_jsonl_value(value: &serde_json::Value) -> Option<String> {
 
 /// 子 Agent rollout 里的累计 token 快照。
 #[derive(Debug, Clone, Default)]
+#[cfg(test)]
 struct CodexSubagentCumulativeTokens {
     input: u64,
     cached_input: u64,
@@ -892,6 +904,7 @@ struct CodexSubagentCumulativeTokens {
 
 /// 从 Codex token_count 的 usage JSON 中提取累计或增量 token。
 /// 归一化从 rollout JSONL 读取到的模型名，使回退统计与同步日志口径一致。
+#[cfg(test)]
 fn normalize_codex_subagent_model(raw: &str) -> String {
     let mut name = raw.trim().to_lowercase();
     if let Some(pos) = name.rfind('/') {
@@ -923,6 +936,7 @@ fn normalize_codex_subagent_model(raw: &str) -> String {
 ///
 /// 该回退只用于修复子 Agent session_id 被旧同步器写成父线程 ID 的历史数据；
 /// 找不到定价时返回 0，不影响 token 和请求数的真实统计。
+#[cfg(test)]
 fn estimate_codex_subagent_rollout_cost(
     conn: &Connection,
     model: &str,
@@ -951,6 +965,7 @@ fn estimate_codex_subagent_rollout_cost(
 /// 判断历史线程更新时间是否可能落在当前统计范围内。
 ///
 /// 这只是回退解析的性能闸门；真正是否计入仍由 token_count 事件时间戳判断。
+#[cfg(test)]
 fn codex_subagent_history_may_overlap_range(
     item: &CodexHistorySessionSummary,
     start_date: Option<i64>,
@@ -974,6 +989,7 @@ fn codex_subagent_history_may_overlap_range(
 ///
 /// 旧同步逻辑会把子 Agent 的 token_count 归到父线程 session_id；当数据库按子 Agent
 /// id 查不到同步行时，用这个只读回退恢复当前页面的真实 token/request 统计。
+#[cfg(test)]
 fn parse_codex_subagent_usage_from_rollout(
     conn: &Connection,
     rollout_path: Option<&str>,
@@ -1033,6 +1049,7 @@ fn parse_codex_subagent_usage_from_rollout(
 }
 
 /// 读取 rollout JSONL 的元数据和第一个模型字段。
+#[cfg(test)]
 fn codex_subagent_identity_from_rollout(path: Option<&str>) -> CodexSubagentIdentity {
     let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) else {
         return CodexSubagentIdentity::default();
@@ -1174,6 +1191,7 @@ fn codex_subagent_bucket_has_tokens(bucket: &CodexSubagentUsageBucket) -> bool {
 ///
 /// 已含 token 时不必再打开 rollout JSONL 做只读回退；只有零 token 的官方 OAuth
 /// 会话才需要解析本地文件，避免高频状态轮询反复读大文件。
+#[cfg(test)]
 fn codex_subagent_usage_has_tokens(
     usage_by_model: &HashMap<String, CodexSubagentUsageBucket>,
 ) -> bool {
@@ -1183,6 +1201,7 @@ fn codex_subagent_usage_has_tokens(
 }
 
 /// 用 rollout token_count 修正数据库中只有请求数、没有 token 的子 Agent 用量。
+#[cfg(test)]
 fn merge_codex_subagent_rollout_usage(
     usage_by_model: &mut HashMap<String, CodexSubagentUsageBucket>,
     rollout_usage: HashMap<String, CodexSubagentUsageBucket>,
@@ -1294,6 +1313,7 @@ fn query_codex_direct_session_usage(
 ///
 /// 新版 Codex 会写 `thread_source=subagent`；旧数据或兼容数据可能只在 source
 /// JSON 文本中保留 subagent 标记，因此这里保守接受这两种证据。
+#[cfg(test)]
 fn is_codex_subagent_summary(item: &CodexHistorySessionSummary) -> bool {
     item.thread_source.as_deref() == Some("subagent")
         || item
@@ -1309,6 +1329,7 @@ fn is_codex_subagent_summary(item: &CodexHistorySessionSummary) -> bool {
 ///
 /// 代理转发日志本身不携带子 Agent 身份；这里必须先用 Codex active SQLite/JSONL
 /// 证明某个 session 是 subagent，再只聚合该 session 的 `codex_session` 同步用量。
+#[cfg(test)]
 fn build_codex_subagent_usage_stats_from_history(
     conn: &Connection,
     history: CodexHistorySessionListOutcome,
@@ -1859,8 +1880,9 @@ fn build_codex_subagent_usage_stats_from_db(
                         if in_selected_range(first) || in_selected_range(last) => {}
                     // Both endpoints lie on the same known side of the range.
                     (Some(_), Some(_))
-                        if !((start_date.is_some_and(|start| first_activity_at.unwrap() < start)
-                            && end_date.is_some_and(|end| last_activity_at.unwrap() > end))) =>
+                        if !(start_date
+                            .is_some_and(|start| first_activity_at.unwrap() < start)
+                            && end_date.is_some_and(|end| last_activity_at.unwrap() > end)) =>
                     {
                         continue;
                     }
@@ -4018,7 +4040,8 @@ mod tests {
     }
 
     #[test]
-    fn db_subagent_stats_does_not_treat_a_spanning_activity_interval_as_in_range() -> Result<(), AppError> {
+    fn db_subagent_stats_does_not_treat_a_spanning_activity_interval_as_in_range(
+    ) -> Result<(), AppError> {
         let db = Database::memory()?;
         let conn = lock_conn!(db.conn);
         conn.execute_batch(
