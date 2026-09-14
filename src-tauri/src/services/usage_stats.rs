@@ -4002,7 +4002,9 @@ mod tests {
 
         assert_eq!(stats.total_agents, 1);
         assert!(!stats.proxy_usage_included);
-        assert_eq!(stats.agents[0].total_tokens, 17);
+        // `input_tokens` is cache-inclusive raw input. The DTO total uses
+        // fresh input (10 - 2) + cache read (2) + output (5), not 10 + 2 + 5.
+        assert_eq!(stats.agents[0].total_tokens, 15);
         assert_eq!(
             stats.agents[0].parent_thread_id.as_deref(),
             Some("parent-1")
@@ -4033,7 +4035,9 @@ mod tests {
 
         let stats = build_codex_subagent_usage_stats_from_db(&conn, Some(90), Some(110), 80)?;
 
-        assert_eq!(stats.total_agents, 1);
+        // Known token-event endpoints are both before the selected range, so
+        // this metadata inventory row is excluded rather than range-unknown.
+        assert_eq!(stats.total_agents, 0);
         assert_eq!(stats.missing_usage_agents, 0);
         assert!(stats.agents.is_empty());
         assert_eq!(stats.unknown_range_agents, 0);
