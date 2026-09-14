@@ -219,6 +219,62 @@ struct ParsedCodexFile {
     has_billable_tokens: bool,
 }
 
+/// 只读的、已完成 parent replay 剥离的 rollout token 事件。
+///
+/// 状态页必须复用此解析器，而不能把 `total_token_usage` 当成可直接相加的请求用量。
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedCodexRolloutUsageEvent {
+    pub model: String,
+    pub timestamp: DateTime<Utc>,
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// 解析失败、父 replay 无法验证、或某个可计费用量缺少时间戳时返回 `None`。
+/// 这让读侧把它表示成未知，而不是把累计快照猜成真实用量。
+pub(crate) fn read_verified_codex_rollout_usage(
+    file_path: &Path,
+    rollout_index: &RolloutIndex,
+) -> Result<Option<Vec<VerifiedCodexRolloutUsageEvent>>, AppError> {
+    let parsed = parse_codex_file(file_path, thread_id_from_filename(file_path))?;
+    let replay_prefix = match &parsed.parent {
+        ParentResolution::None => 0,
+        ParentResolution::Deferred(_) => return Ok(None),
+        ParentResolution::Parent(parent_id) => {
+            let Some(cutoff) = parsed.root_timestamp else {
+                return Ok(None);
+            };
+            let Ok(parent_signatures) = resolve_parent_signatures(parent_id, cutoff, rollout_index)
+            else {
+                return Ok(None);
+            };
+            matching_replay_prefix(&parsed.token_events, &parent_signatures)
+        }
+    };
+    let mut events = Vec::new();
+    for event in parsed.token_events.iter().skip(replay_prefix) {
+        if event.delta.is_zero() {
+            continue;
+        }
+        let Some(timestamp) = event.timestamp.as_deref().and_then(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .ok()
+                .map(|value| value.with_timezone(&Utc))
+        }) else {
+            return Ok(None);
+        };
+        events.push(VerifiedCodexRolloutUsageEvent {
+            model: event.model.clone(),
+            timestamp,
+            input_tokens: event.delta.input as u64,
+            cached_input_tokens: event.delta.cached_input as u64,
+            output_tokens: event.delta.output as u64,
+        });
+    }
+    Ok(Some(events))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PendingReason {
     MissingParent(String),
@@ -658,7 +714,7 @@ fn parse_cumulative_tokens(total_usage: &serde_json::Value) -> Option<Cumulative
     })
 }
 
-type RolloutIndex = HashMap<String, Vec<PathBuf>>;
+pub(crate) type RolloutIndex = HashMap<String, Vec<PathBuf>>;
 
 #[derive(Debug, Default)]
 struct CodexFileSyncResult {
@@ -744,7 +800,7 @@ fn collect_codex_session_files(codex_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn build_rollout_index(files: &[PathBuf]) -> RolloutIndex {
+pub(crate) fn build_rollout_index(files: &[PathBuf]) -> RolloutIndex {
     let mut index = RolloutIndex::new();
     for path in files {
         if let Some(thread_id) = thread_id_from_filename(path) {
