@@ -380,6 +380,8 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       createDraftRoutingPlan([provider], [provider]),
       provider,
     );
+    const routing = readCodexRouting(plan);
+    const routes = routing?.routes ?? [];
     const rows = buildRouteTrafficRows({
       logs: [
         createCodexProxyLog({
@@ -392,12 +394,11 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
           outputTokens: 40,
         }),
       ],
-      routes:
-        readCodexRouting(plan)?.routes.map((route, index) => ({
-          provider: plan,
-          route,
-          index,
-        })) ?? [],
+      routes: routes.map((route, index) => ({
+        provider: plan,
+        route,
+        index,
+      })),
       selectedPlan: plan,
       providersById: new Map([[provider.id, provider]]),
     });
