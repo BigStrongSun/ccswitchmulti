@@ -1211,14 +1211,12 @@ function targetProviderOptionLabel(
   return badges.length ? `${provider} (${badges.join(" / ")})` : provider;
 }
 
-/// 把后端并发保护错误改写成用户可执行的关 App 指引。
+/// 仅按明确的后端错误码解释能力边界，不从产品名、路径或“运行”猜测进程占用。
+/// 真正的进程保护错误由后端提供退出指引，原样保留。
 function historyRepairErrorMessage(message: string): string {
   const text = message.trim();
-  if (
-    /Codex|ChatGPT|app-server|running|进程|运行/i.test(text) &&
-    !text.includes("完全退出")
-  ) {
-    return `${text}\n请完全退出 Codex / ChatGPT App 后再点“确认修复”；写入成功后重新打开 Codex 等新版目录重建。`;
+  if (text.startsWith("codex_paginated_history_immutable:")) {
+    return `当前历史包含分页或无法安全检查的记录，此旧式 Provider/可见性修复入口不支持改写。退出或重启 Codex 不能解除格式保护；本次操作已被安全检查阻止。请保留原始历史和备份，不要删除分页字段或强制迁移。该错误本身不代表历史已损坏。\n\n技术详情：${text}`;
   }
   return text;
 }
