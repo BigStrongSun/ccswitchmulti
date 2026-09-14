@@ -18,6 +18,8 @@ use tauri::{AppHandle, Emitter};
 
 /// 前端监听的事件名
 pub const EVENT_USAGE_LOG_RECORDED: &str = "usage-log-recorded";
+/// A collection lifecycle update, including runs that import zero records.
+pub const EVENT_SESSION_COLLECTION_UPDATED: &str = "session-collection-updated";
 
 /// 防抖窗口：合并 200ms 内的多次通知。
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(200);
@@ -68,6 +70,19 @@ pub fn notify_log_recorded() {
             log::warn!("emit {EVENT_USAGE_LOG_RECORDED} 失败: {e}");
         }
     });
+}
+
+/// Best-effort collection status notification. Lifecycle transitions deliberately
+/// do not share the usage-log debounce because revisions must remain observable.
+pub fn notify_session_collection_updated(
+    status: &crate::services::session_collection::SessionCollectionStatus,
+) {
+    let Some(handle) = APP_HANDLE.get() else {
+        return;
+    };
+    if let Err(error) = handle.emit(EVENT_SESSION_COLLECTION_UPDATED, status) {
+        log::warn!("emit {EVENT_SESSION_COLLECTION_UPDATED} failed: {error}");
+    }
 }
 
 #[cfg(test)]

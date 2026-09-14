@@ -152,6 +152,10 @@ export interface CodexSubagentUsageAgent {
   lastUsedAt?: number;
   updatedAt?: string;
   rolloutPath?: string;
+  /** Whether this session has locally observed usage; missing numeric zeroes are compatibility placeholders only. */
+  usageStatus?: "observed" | "missing";
+  /** Local evidence used for observed usage. */
+  usageSource?: "session_sync" | "rollout" | "none";
 }
 
 /** Codex 子 Agent 本地会话用量按模型聚合后的统计。 */
@@ -165,6 +169,10 @@ export interface CodexSubagentModelUsage {
   cacheCreationTokens: number;
   totalTokens: number;
   totalCost: string;
+  /** Sessions with locally observed usage included in the numeric aggregates. */
+  observedUsageAgents?: number;
+  /** Sessions in this model group whose usage was not collected. */
+  missingUsageAgents?: number;
 }
 
 /** MultiRouter 状态页展示的 Codex 子 Agent 本地会话统计。 */
@@ -176,6 +184,64 @@ export interface CodexSubagentUsageStats {
   agents: CodexSubagentUsageAgent[];
   modelStats: CodexSubagentModelUsage[];
   skippedReason?: string;
+  /** Number of subagent sessions represented by the current local DB snapshot. */
+  scannedHistoryAgents?: number;
+  /** Sessions whose history timestamp is in the requested range. */
+  inRangeAgents?: number;
+  /** Sessions which cannot be placed in the requested range. */
+  unknownRangeAgents?: number;
+  /** In-range sessions with a session-sync row or rollout token evidence. */
+  observedUsageAgents?: number;
+  /** In-range sessions without any local usage evidence. */
+  missingUsageAgents?: number;
+  /** The local DB snapshot was truncated before all sessions could be inspected. */
+  historyTruncated?: boolean;
+  /** Always false: proxy traffic is deliberately excluded from this session view. */
+  proxyUsageIncluded?: false;
+  /** Direct, explicitly recorded subagent parent IDs only; overlaps agents/modelStats. */
+  parentGroups?: CodexSubagentParentUsageGroup[];
+}
+
+/** Cached backend status for the periodic local Codex session collector. */
+export interface SessionCollectionStatus {
+  revision: number;
+  phase: "not_started" | "idle" | "running" | "degraded";
+  /** UTC Unix seconds, not JavaScript milliseconds. */
+  lastStartedAt?: number | null;
+  /** UTC Unix seconds, not JavaScript milliseconds. */
+  lastCompletedAt?: number | null;
+  /** UTC Unix seconds, not JavaScript milliseconds. */
+  lastSuccessAt?: number | null;
+  imported: number;
+  deferred: number;
+  errorsCount: number;
+  lastErrorSummary?: string | null;
+  nextRunAt?: number | null;
+  intervalSecs: number;
+}
+
+export interface CodexSubagentParentUsageGroup {
+  parentSessionId: string;
+  childSessionCount: number;
+  observedUsageChildren: number;
+  missingUsageChildren: number;
+  childRequestCount: number;
+  childInputTokens: number;
+  childCacheReadTokens: number;
+  childCacheCreationTokens: number;
+  childOutputTokens: number;
+  childTotalTokens: number;
+  parentDirectUsage: {
+    requestCount: number;
+    inputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  } | null;
+  parentDirectUsageSource: "session_sync" | "none";
+  /** A legacy parent sync record may include child work; display it but never add it. */
+  parentUsageStatus?: "observed" | "unknown_may_overlap" | "not_observed";
 }
 
 /** 单台 CCSwitchMulti 上报的脱敏 Codex 用量聚合。 */

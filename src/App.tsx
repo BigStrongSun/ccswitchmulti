@@ -51,6 +51,7 @@ import { hermesKeys, useOpenHermesWebUI } from "@/hooks/useHermes";
 import { hermesApi } from "@/lib/api/hermes";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
+import { useUsageEventBridge } from "@/hooks/useUsageEventBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { useCodexLocalRoutingNotice } from "@/hooks/useCodexLocalRoutingNotice";
@@ -474,6 +475,7 @@ function App() {
   const effectiveUsageProvider = useLastValidValue(usageProvider);
 
   useUsageCacheBridge();
+  useUsageEventBridge();
 
   const promptPanelRef = useRef<PromptPanelHandle>(null);
   const [promptPrimaryAction, setPromptPrimaryAction] =

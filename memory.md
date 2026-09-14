@@ -5781,3 +5781,23 @@ supported in one streaming turn`。
 - 2026-09-14 v3.20.2-11 根修“端口被占用且强制解除也失败”：本机用 `.tmp/portsim stale` 复现——把监听 socket 句柄复制给子进程后父进程退出，TCP 表仍显示 `LISTENING <已死父PID>`、bind 报 10048、按 PID 无法核验也无法终止；杀掉真正持句柄的子进程后端口立即释放。应用侧新增 `child_processes_of()/is_product_helper_image()/release_stale_listener_holders()`：仅当 owner 已退出时终止**本产品**残留子进程并等端口释放（外来进程继续 fail-closed），启动恢复与“解除占用并恢复接管”都走该路径。提交 `3972d29f`，版本 3.20.2-11；services::proxy 104/104、全量 Rust 单线程 4158 passed。已用修好的事务脚本安装（事务 `ccsm-20260914-121747-…`：verified-child-stopped(msedgewebview2 49596) → port-held-during-install → transaction-success(49040)），安装后 installed/registry/status/marker 全为 3.20.2-11。详见 `memory-2026-09-14-stale-listener-release.md`。
 - 2026-09-14 看门狗落地：仓库原有 `watch-ccswitchmulti.ps1`+core 既没注册也没运行、且不区分正常退出与崩溃。新增 `Test-CcsmGuardianUncleanExit`（运行标记仍在且 PID 已消失=异常死亡才重启）与 `Test-CcsmGuardianRestartBudget`（默认 6 次/30 分钟），watcher 新增 `-ConfigPath/-MaxRestartsPerWindow/-RestartWindowMinutes/-RestartOnCleanExit`；新增 `scripts/install-ccswitchmulti-watchdog.ps1` 注册每用户登录任务 `CCSwitchMulti-Watchdog`（隐藏、IgnoreNew、无时限、失败重试 3 次）。验证：Pester 4/4；实测 kill 后 `health-loss → threshold(9s) → product-started(66848) → recovery-ready`（停机 9–13 秒）；无 marker（正常退出）时只记 `restart-skipped-clean-exit` 不拉起；正式任务 State=Running 且安装脚本与仓库哈希一致。生产阈值 60 秒、安装期间由维护租约抑制。详见 `memory-2026-09-14-ccswitchmulti-watchdog.md`。
 - 2026-09-14 守护健壮性追加：发现 17:09 计划任务重启过守护且无异常记录（疑似单轮瞬时异常致死）⇒ core 新增 `Invoke-CcsmGuardianSafeIteration`（单轮异常只记 `iteration-failed` 不退出）、watcher 外层写 `guardian-exiting(Error,Cycles)`，安装脚本刷新时先停旧 watcher；Pester 6/6、parse 0 error，刷新后任务 Running/watcher 40844/安装态哈希一致。详见 `memory-2026-09-14-ccswitchmulti-watchdog.md`。
+
+
+## 2026-09-14 Codex 状态/流量页证据化统计（开发分支，未安装）
+
+- 用户指定现有状态/流量页；实现见memory-2026-09-14-codex-traffic-observability.md。分支bigstrongsun/codex-traffic-observability。主子直接分层、缓存拆分、未知非零、50条样本及有界扫描标识；复用成熟rollout parser根修累计/继承/去重。未修改代理路由或安装程序。
+- 独立focused85前端+41用量+48解析测试通过，真实语料1ignored；全前端1587通过/1既有mock失败且原主树复现。不要将开发构建当已安装证据。
+
+- 自动采集补充更正：源码lib.rs已有启动时+60秒Rust session sync，Codex已接入；流量页refetchInterval=false只停前端query，不停后台采集。真正缺口为Codex字节追加读取、轻量主子聚合查询、同步完成通知与运行态验收。不要沿用“没有后台自动采集”的旧结论。
+
+## 2026-09-14 Codex 自动采集开发完成（未安装）
+- 见 memory-2026-09-14-codex-automatic-collection.md：统一既有worker与状态事件、DB-only统计、schema24及byte-tail checkpoint、15分钟发现补偿；重写不自动删历史账，父直接归属未知时不造数字。
+- 全Rust4175通过7ignored；focused前端93通过，tsc/build通过；全前端复跑1595通过1既有失败。未安装、未实验、未推送。
+
+## 2026-09-14 Codex 流量页 UI 重构（未安装）
+- 详见 memory-2026-09-14-codex-traffic-ui-redesign.md：消费概览置顶、模型搜索筛选排序、显式父子任务、右侧详情、紧凑采集状态与折叠诊断；未知用量包括详情均不显示为零。
+- 最终聚焦 99/99、tsc、生产构建通过；交互 fixture 为合成数据。浏览器视觉验收安全停止，未完成；未安装、重启或推送。
+
+## 2026-09-14 Codex 流量功能本地 main 集成
+- 合并 main@7c9a2e79 与流量分支@c8dacb09，保留双方 memory 与看门狗；隔离候选验收后快进主目录，不动其它未提交修改。
+- 合并树 Rust 4178 passed/7 ignored；前端1607 passed/1既有失败（干净main独立复现）；tsc/build通过。详见 memory-2026-09-14-codex-traffic-main-merge.md。未安装、未推送。

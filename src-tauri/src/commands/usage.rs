@@ -173,6 +173,13 @@ pub async fn get_codex_subagent_usage_stats(
     .await
 }
 
+/// 获取后台会话采集的非敏感运行状态；不触发文件扫描或网络请求。
+#[tauri::command]
+pub fn get_session_collection_status(
+) -> crate::services::session_collection::SessionCollectionStatus {
+    crate::services::session_collection::get_session_collection_status()
+}
+
 /// 读取本机已缓存的 Codex 多设备额度协作报告。
 ///
 /// 该命令不主动发网络请求；远端同步失败时，页面仍能安全展示最后一次成功缓存。
@@ -336,15 +343,8 @@ pub fn delete_model_pricing(state: State<'_, AppState>, model_id: String) -> Res
 pub async fn sync_session_usage(
     state: State<'_, AppState>,
 ) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
-    let db = state.db.clone();
-    let _guard = crate::services::session_usage::session_sync_mutex()
-        .lock()
-        .await;
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::services::session_usage::sync_all_unlocked(&db)
-    })
-    .await
-    .map_err(|error| AppError::Message(format!("会话用量同步任务失败: {error}")))
+    crate::services::session_collection::run_session_collection(state.db.clone(), false, false)
+        .await
 }
 
 /// Codex reset 成功后，无论重导是否导入新行或返回错误，都必须通知前端刷新。

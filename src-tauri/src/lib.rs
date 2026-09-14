@@ -1445,49 +1445,12 @@ pub fn run() {
                     }
                 });
 
-                // Session log usage sync: 启动时同步一次，之后每 60 秒检查
-                let db_for_session_sync = state.db.clone();
-                tauri::async_runtime::spawn(async move {
-                    const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
-
-                    async fn run_session_sync(db: std::sync::Arc<crate::database::Database>, backfill: bool) {
-                        let _guard = crate::services::session_usage::session_sync_mutex()
-                            .lock()
-                            .await;
-                        let task = tauri::async_runtime::spawn_blocking(move || {
-                            if backfill {
-                                if let Err(error) = db.backfill_missing_usage_costs() {
-                                    log::warn!("Usage cost startup backfill failed: {error}");
-                                }
-                            }
-                            crate::services::session_usage::sync_all_unlocked(&db)
-                        });
-                        match task.await {
-                            Ok(result) if !result.errors.is_empty() => {
-                                log::warn!(
-                                    "Session usage sync completed with {} error(s)",
-                                    result.errors.len()
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(error) => log::warn!("Session usage blocking task failed: {error}"),
-                        }
-                    }
-
-                    // 首次同步（含费用回填）
-                    run_session_sync(db_for_session_sync.clone(), true).await;
-
-                    // 定期同步
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                        SESSION_SYNC_INTERVAL_SECS,
-                    ));
-                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    interval.tick().await; // skip immediate first tick
-                    loop {
-                        interval.tick().await;
-                        run_session_sync(db_for_session_sync.clone(), false).await;
-                    }
-                });
+                // Session log collection shares one coordinator with manual sync.
+                // It starts immediately, then schedules each next pass after the
+                // previous pass completes so the exposed `nextRunAt` is exact.
+                crate::services::session_collection::start_periodic_session_collection(
+                    state.db.clone(),
+                );
             });
 
             // Linux: 禁用 WebKitGTK 硬件加速，防止 EGL 初始化失败导致白屏
@@ -1850,6 +1813,7 @@ pub fn run() {
             commands::get_request_logs,
             commands::get_request_detail,
             commands::get_codex_subagent_usage_stats,
+            commands::get_session_collection_status,
             commands::clear_usage_logs,
             commands::get_model_pricing,
             commands::update_model_pricing,

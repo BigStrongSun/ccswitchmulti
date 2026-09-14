@@ -20,6 +20,7 @@ pub mod recovery_outcome;
 pub mod s3;
 pub mod s3_auto_sync;
 pub mod s3_sync;
+pub mod session_collection;
 pub mod session_usage;
 pub mod session_usage_codex;
 pub mod session_usage_gemini;
