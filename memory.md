@@ -5787,3 +5787,7 @@ supported in one streaming turn`。
 - 独立focused85前端+41用量+48解析测试通过，真实语料1ignored；全前端1587通过/1既有mock失败且原主树复现。不要将开发构建当已安装证据。
 
 - 自动采集补充更正：源码lib.rs已有启动时+60秒Rust session sync，Codex已接入；流量页refetchInterval=false只停前端query，不停后台采集。真正缺口为Codex字节追加读取、轻量主子聚合查询、同步完成通知与运行态验收。不要沿用“没有后台自动采集”的旧结论。
+
+## 2026-09-14 Codex 自动采集开发完成（未安装）
+- 见 memory-2026-09-14-codex-automatic-collection.md：统一既有worker与状态事件、DB-only统计、schema24及byte-tail checkpoint、15分钟发现补偿；重写不自动删历史账，父直接归属未知时不造数字。
+- 全Rust4175通过7ignored；focused前端93通过，tsc/build通过；全前端复跑1595通过1既有失败。未安装、未实验、未推送。

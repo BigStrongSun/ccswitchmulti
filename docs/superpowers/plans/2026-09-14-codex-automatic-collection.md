@@ -20,11 +20,11 @@
 
 ## Task 1 — Incremental ledger (Terra incremental_codex)
 **Files:** src-tauri/src/services/session_usage_codex.rs (+ child modules), src-tauri/src/database/schema.rs, src-tauri/src/database/mod.rs.
-**Interface:** schema v24, codex_usage_sessions(session_id, file_path, is_subagent, parent_thread_id, model, last_seen_at); session_id 对应 proxy_request_logs.session_id，时间为 Unix seconds。内部 checkpoint 存版本化状态和完整行 byte offset。
+**Interface:** schema v24, codex_usage_sessions(session_id, file_path, is_subagent, parent_thread_id, model, first_activity_at?, last_activity_at?, last_seen_at); session_id 对应 proxy_request_logs.session_id，时间为 Unix seconds。内部 checkpoint 存版本化状态和完整行 byte offset。
 - [ ] Migration RED/GREEN：v23 升级及 fresh schema。
 - [ ] full / append 共享逐行 parser，状态增长有界，继承关系不可猜测。
 - [ ] usage / dedup / metadata / checkpoint 单事务；失败回滚且下次可重试。
-- [ ] 追加、restart、空变化、半行/分裂 UTF8、截断/重写、归档、父晚到验证。
+- [ ] 追加、restart、空变化、半行/分裂 UTF8、截断/重写、归档、父晚到验证。非追加修改 fail-closed/deferred，不自动删除已验证历史账；需要既有受控 Codex 重建。
 - [ ] 变化文件发现有界，保留周期补偿扫描；bytes-read 验证而非仅声称增量。
 - [ ] focused Rust 测试与提交。
 
@@ -53,3 +53,11 @@
 
 ## Source validation
 本轮已独立调用内置 web 与 Matrix；内置链无可读返回，不能声称双链确认。Matrix open 官方 Tauri calling-frontend 文档支持小型事件及异步unlisten清理设计。具体既有同步逻辑以本地源码为准，所有新计量语义以fixture验证。
+
+## Review decisions during implementation
+- last_seen_at 是采集时间，绝不作为使用发生时间；只有有效 token 事件提供 first/last_activity_at。区间两端跨越查询窗口也不能证明窗口内有事件。
+- legacy 父会话可能包含旧错误子归属；没有完整归属版本证明时父直接用量返回 unknown_may_overlap，不把历史父行冒充纯主模型用量。
+- 检测到文件截断/非追加重写只保留历史账并标待处理；清理日志不等于撤销已经消费的 Tokens，因此不自动删除proxy账或日汇总。
+- 正常追加检测验证旧head窗口和cursor前tail；任意中段原地修改同时追加无法仅靠局部hash绝对识别，不宣称此能力。
+- 原计划的有界发现补偿仅负责发现漏扫文件，不等于全文件hash审计。
+- 首轮全量解析和checkpoint必须来自同一受限snapshot；usage/dedup/metadata/checkpoint同事务，任何插入错误不得吞掉后推进offset。
