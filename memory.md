@@ -5770,3 +5770,11 @@ supported in one streaming turn`。
 - 旧实现的两个缺陷：`probe_proxy_port` 只看 LISTEN 且缺 PID/错误码，无法诊断；启动失败后立即清除 takeover 状态，5 秒守护失去重试目标，占用者消失也必须手动重开。
 - 根修：`process_identity_result()` 带 `ProcessIdentityError{NotFound|AccessDenied|Unavailable}`；`tcp_port_rows()/describe_port_blockers()` 用 `TCP_TABLE_OWNER_PID_ALL` 覆盖 IPv4/IPv6 全状态并写进日志与提示；`schedule_pending_takeover_restore()` + 守护 `retry_pending_takeover_restore()` 让端口释放后 15 分钟窗口内自动恢复接管；恢复成功发 `recovery-outcome-resolved` 收起前端提示；顺带修掉 `disable_takeover_for_app_after_switch_lock` 6 条双重编码乱码文案。仍然 fail-closed，不结束无法核验的进程。
 - 验证：`services::proxy` 102/102（含新 `pending_takeover_restore_recovers_once_the_blocking_port_frees_up` 真实占用→释放→自动恢复）、`services::recovery_outcome` 7/7、`process_identity` 11/11、typecheck/Prettier/rustfmt 通过；前端全量 194 files /1583 tests 仅剩既有失败 `tests/components/AddProviderDialog.test.tsx`（干净 detached HEAD worktree 复现）。本轮未安装/重启本机 CCSM。详见 `memory-2026-09-13-port-blocker-diagnosis.md`。
+
+# 2026-09-14 v3.20.2-10 本地构建 + 官方事务“卸载→安装”验收（含端口残留根修）
+
+- 用户要求按最新 main 构建并只用既有安全事务脚本安装（先卸载旧版本再安装新版本）。构建于 `main@226843b7` 的干净 detached worktree：installer `CCSwitchMulti_3.20.2-10_x64-setup.exe` SHA-256 `5E7E671B…6070`，内嵌 installed payload SHA-256 `17F5AE8F…4A77`。
+- 第一次事务失败（23:05–23:07）：stop 掉 PID 29944 后 `wait-port-release` 120 秒超时，回滚又用旧 PID 重启失败，服务整夜不可用直到次日重启。回滚日志证明 TCP 表里仍有指向已消失 PID 的 LISTEN 行——与应用 `PORT_OWNERSHIP_GUARD` 的“无法核验的监听者”同源；旧脚本在 owner 不可读时静默轮询，日志里既没有 PID 也没有原因。
+- 事务根修 `3ff9bfa0`：stop 时连已验证进程的子进程一起结束；owner 不可读时记录 `port-owner-unreadable`（PID/错误/tasklist/netstat）并在 20 秒内带 PID fail-closed；端口一释放就由事务自己 `TcpListener(ExclusiveAddressUse)` 占住到启动前（`port-held-during-install`），杜绝第三方抢端口；回滚按路径启动旧版本，绝不再留“零进程”。Pester 52/52、parse 0 error。
+- 第二次事务成功：`preflight(14028)` → `verified-child-stopped(msedgewebview2 33020)` → `port-held-during-install(15721)` → `transaction-success(13704)`，16 秒完成。安装后独立复核 installed/registry/status/marker 全为 3.20.2-10、hash 等于期望 payload、health healthy、role=takeover、应用日志无 PORT_OWNERSHIP_GUARD，二进制含“占用诊断/retryingTakeoverRestore/recovery-outcome-resolved”。
+- 边界：`recovery-outcomes.json` 中 00:12:30 的历史 `startupTakeoverFailed` 仍需手动关闭（成功启动不会清历史条目）；证据目录 `C:\Users\sunda\Documents\LLMservice\ccsm-portfix-acceptance-20260913\`；未推送、未发布 Release。详见 `memory-2026-09-14-v3.20.2-10-install.md`。
