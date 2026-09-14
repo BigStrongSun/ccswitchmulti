@@ -824,6 +824,14 @@ function Wait-CcsmCondition {
     throw "timed out waiting for $Description"
 }
 
+function Get-CcsmPortListenerSnapshot {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    return @(netstat -ano |
+        Select-String (":{0}\s" -f $Port) |
+        ForEach-Object { $_.Line.Trim() })
+}
+
 function ConvertTo-CcsmNativeRegistryPath {
     param([string]$RegistryKey)
 
@@ -1367,19 +1375,64 @@ function New-CcsmRealOperations {
             throw "process instance changed before verified stop"
         }
         if ($null -eq $liveIdentity.Handle) { throw "verified process handle is unavailable" }
+        # 结束“已验证实例”时必须连它的子进程一起结束：主进程被 TerminateProcess 杀掉后，
+        # 监听 socket 可能仍留在存活的 WebView2/辅助子进程里，端口随后会以“已死 PID 的 LISTEN 行”
+        # 继续被占用，既阻塞重装也阻塞新实例绑定。子进程在杀主进程之前按父 PID 采样。
+        $childProcesses = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$([int]$ExpectedIdentity.ProcessId)" -ErrorAction SilentlyContinue)
         Stop-CcsmVerifiedProcessHandle -Process $liveIdentity.Handle -TimeoutSeconds $Context.TimeoutSeconds
+        foreach ($child in $childProcesses) {
+            $childId = [int]$child.ProcessId
+            if ($childId -le 0) { continue }
+            try {
+                $childProcess = Get-Process -Id $childId -ErrorAction Stop
+                $childProcess.Kill()
+                [void]$childProcess.WaitForExit(5000)
+                & $operations.WriteLog $Context "warning" "verified-child-stopped" @{ ProcessId = $childId; Name = [string]$child.Name }
+            } catch {
+                & $operations.WriteLog $Context "warning" "verified-child-stop-skipped" @{ ProcessId = $childId; Name = [string]$child.Name; Error = $_.Exception.Message }
+            }
+        }
     }
+
+    $script:CcsmPortHold = $null
     $operations.WaitPortReleased = {
         param($Context)
-        $state = [pscustomobject]@{ ReplacementStops = 0 }
+        $state = [pscustomobject]@{
+            ReplacementStops   = 0
+            UnreadableOwnerPid = $null
+            UnreadableSinceUtc = $null
+            UnreadableLogged   = $false
+        }
         Wait-CcsmCondition -TimeoutSeconds $Context.TimeoutSeconds -Description "port $($Context.Port) release" -Condition {
             $owner = & $operations.GetListenerOwner $Context.Port
             if ($null -eq $owner) { return $true }
             try {
                 $identity = & $operations.GetProcessIdentity ([int]$owner)
+                $state.UnreadableOwnerPid = $null
+                $state.UnreadableSinceUtc = $null
+                $state.UnreadableLogged = $false
             } catch {
-                # The TCP row can briefly outlive the process handle. Poll again instead of treating
-                # the stale owner as a product replacement or a foreign listener.
+                # 监听 socket 可能比创建它的进程活得更久（子进程/系统组件仍持有句柄），
+                # 于是 TCP 表里的 LISTEN 行指向一个已经不存在的 PID：既不能核验也不能结束。
+                # 必须记录确切 PID 与内核状态并尽快 fail-closed，而不是静默轮询到超时。
+                $now = [DateTime]::UtcNow
+                if ($state.UnreadableOwnerPid -ne [int]$owner) {
+                    $state.UnreadableOwnerPid = [int]$owner
+                    $state.UnreadableSinceUtc = $now
+                    $state.UnreadableLogged = $false
+                }
+                if (-not $state.UnreadableLogged) {
+                    $state.UnreadableLogged = $true
+                    & $operations.WriteLog $Context "warning" "port-owner-unreadable" @{
+                        ProcessId = [int]$owner
+                        Error     = $_.Exception.Message
+                        Tasklist  = @(tasklist /fi ("PID eq {0}" -f [int]$owner) /fo csv /nh)
+                        Netstat   = @(Get-CcsmPortListenerSnapshot -Port $Context.Port)
+                    }
+                }
+                if (($now - $state.UnreadableSinceUtc).TotalSeconds -ge 20) {
+                    throw "port $($Context.Port) remains LISTENing for PID $($owner), whose process identity cannot be read ($($_.Exception.Message)); the listener socket outlived its owner process"
+                }
                 return $false
             }
             $action = Resolve-CcsmReplacementListenerAction -Context $Context -ListenerIdentity $identity
@@ -1397,7 +1450,15 @@ function New-CcsmRealOperations {
             }
             return $false
         }
+        # 端口一旦空闲就由事务自己占用，直到准备启动实例为止：否则任何第三方进程都能在
+        # “卸载→安装”窗口里抢走端口，让新实例绑定失败（本机已实测发生过）。
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Parse("127.0.0.1"), [int]$Context.Port)
+        $listener.ExclusiveAddressUse = $true
+        $listener.Start()
+        $script:CcsmPortHold = $listener
+        & $operations.WriteLog $Context "warning" "port-held-during-install" @{ Port = [int]$Context.Port }
     }
+
     $operations.RetireRunMarker = {
         param($Context, $ExpectedIdentity)
         foreach ($configPath in $Context.ConfigPaths) {
@@ -1418,26 +1479,60 @@ function New-CcsmRealOperations {
     }
     $operations.StartProcess = {
         param($Context, $Mode)
+        if ($null -ne $script:CcsmPortHold) {
+            try { $script:CcsmPortHold.Stop() } catch { }
+            $script:CcsmPortHold = $null
+            & $operations.WriteLog $Context "warning" "port-hold-released" @{ Port = [int]$Context.Port; Mode = $Mode }
+        }
         $owner = & $operations.GetListenerOwner $Context.Port
         if ($null -ne $owner) {
-            $identity = & $operations.GetProcessIdentity ([int]$owner)
-            $expectedVersion = if ($Mode -eq "new") { $Context.ExpectedInstalledVersion } else { $Context.ExpectedCurrentVersion }
-            $expectedHash = if ($Mode -eq "new") { $Context.ExpectedInstalledHash } else { $Context.ExpectedCurrentHash }
-            $actualVersion = & $operations.GetFileVersion $Context.InstalledExecutable
-            $actualHash = & $operations.GetFileHash $Context.InstalledExecutable
-            $health = & $operations.GetHealth $Context.HealthUri
-            $adoptedPid = Resolve-CcsmExistingRuntimeProcessId -Context $Context -ListenerIdentity $identity `
-                -ExpectedVersion $expectedVersion -ExpectedHash $expectedHash `
-                -ActualVersion $actualVersion -ActualHash $actualHash -Health $health
-            & $operations.WriteLog $Context "warning" "existing-listener-adopted" @{
-                ProcessId = $adoptedPid
-                Mode = $Mode
+            $identity = $null
+            try {
+                $identity = & $operations.GetProcessIdentity ([int]$owner)
+            } catch {
+                & $operations.WriteLog $Context "warning" "start-adopt-skipped-unreadable-owner" @{
+                    ProcessId = [int]$owner
+                    Mode      = $Mode
+                    Error     = $_.Exception.Message
+                }
             }
-            return $adoptedPid
+            if ($null -ne $identity) {
+                $expectedVersion = if ($Mode -eq "new") { $Context.ExpectedInstalledVersion } else { $Context.ExpectedCurrentVersion }
+                $expectedHash = if ($Mode -eq "new") { $Context.ExpectedInstalledHash } else { $Context.ExpectedCurrentHash }
+                $actualVersion = & $operations.GetFileVersion $Context.InstalledExecutable
+                $actualHash = & $operations.GetFileHash $Context.InstalledExecutable
+                $health = & $operations.GetHealth $Context.HealthUri
+                $adoptedPid = Resolve-CcsmExistingRuntimeProcessId -Context $Context -ListenerIdentity $identity `
+                    -ExpectedVersion $expectedVersion -ExpectedHash $expectedHash `
+                    -ActualVersion $actualVersion -ActualHash $actualHash -Health $health
+                & $operations.WriteLog $Context "warning" "existing-listener-adopted" @{
+                    ProcessId = $adoptedPid
+                    Mode = $Mode
+                }
+                return $adoptedPid
+            }
+        }
+        if ($Mode -eq "previous") {
+            # 回滚必须能真正把旧版本拉起来：端口可能仍被“已死 PID 的 LISTEN 行”占着，这里给它
+            # 一个有界窗口去消失；即使仍被占用也照样启动旧 EXE（它会 fail-closed 并提示端口错误），
+            # 绝不能再让用户手上一个进程都没有。
+            $graceSeconds = [Math]::Min(180, [Math]::Max(30, [int]$Context.TimeoutSeconds))
+            $deadline = [DateTime]::UtcNow.AddSeconds($graceSeconds)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                $pendingOwner = & $operations.GetListenerOwner $Context.Port
+                if ($null -eq $pendingOwner) { break }
+                try {
+                    [void](& $operations.GetProcessIdentity ([int]$pendingOwner))
+                    break
+                } catch {
+                    Start-Sleep -Milliseconds 500
+                }
+            }
         }
         $process = Start-Process -FilePath $Context.InstalledExecutable -WindowStyle Hidden -PassThru
         return [int]$process.Id
     }
+
     $operations.WaitReady = {
         param($Context, $ProcessId)
         Wait-CcsmCondition -TimeoutSeconds $Context.TimeoutSeconds -Description "CCSwitchMulti listener and health" -Condition {
