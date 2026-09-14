@@ -3,10 +3,7 @@
 //! 提供使用量数据的聚合查询功能
 
 #[cfg(test)]
-use crate::codex_history_migration::{
-    list_codex_history_sessions, CodexHistorySessionListOptions, CodexHistorySessionListOutcome,
-    CodexHistorySessionSummary,
-};
+use crate::codex_history_migration::{CodexHistorySessionListOutcome, CodexHistorySessionSummary};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 #[cfg(test)]
@@ -1805,9 +1802,13 @@ fn build_codex_subagent_usage_stats_from_db(
         if request_count <= 0 {
             continue;
         }
-        let model =
-            usage_model.unwrap_or_else(|| entry.1.clone().unwrap_or_else(|| "unknown".to_string()));
-        entry.3.insert(
+        let (_, metadata_model, _, _, buckets) = entry;
+        let model = usage_model.unwrap_or_else(|| {
+            metadata_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
+        });
+        buckets.insert(
             model,
             CodexSubagentUsageBucket {
                 request_count: request_count.max(0) as u64,
@@ -4007,7 +4008,7 @@ mod tests {
             Some("parent-1")
         );
         assert_eq!(stats.agents[0].usage_source, "session_sync");
-        assert_eq!(stats.parent_groups[0].parent_direct_usage, None);
+        assert!(stats.parent_groups[0].parent_direct_usage.is_none());
         assert_eq!(
             stats.parent_groups[0].parent_usage_status,
             "unknown_may_overlap"
