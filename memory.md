@@ -5791,3 +5791,7 @@ supported in one streaming turn`。
 ## 2026-09-14 Codex 自动采集开发完成（未安装）
 - 见 memory-2026-09-14-codex-automatic-collection.md：统一既有worker与状态事件、DB-only统计、schema24及byte-tail checkpoint、15分钟发现补偿；重写不自动删历史账，父直接归属未知时不造数字。
 - 全Rust4175通过7ignored；focused前端93通过，tsc/build通过；全前端复跑1595通过1既有失败。未安装、未实验、未推送。
+
+## 2026-09-14 Codex 流量页 UI 重构（未安装）
+- 详见 memory-2026-09-14-codex-traffic-ui-redesign.md：消费概览置顶、模型搜索筛选排序、显式父子任务、右侧详情、紧凑采集状态与折叠诊断；未知用量包括详情均不显示为零。
+- 最终聚焦 99/99、tsc、生产构建通过；交互 fixture 为合成数据。浏览器视觉验收安全停止，未完成；未安装、重启或推送。

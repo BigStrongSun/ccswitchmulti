@@ -381,6 +381,40 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("puts session consumption before diagnostic request samples in the traffic view", async () => {
+    const provider: Provider = {
+      id: "traffic-layout",
+      name: "Traffic layout",
+      settingsConfig: { modelCatalog: { models: [{ model: "model-a" }] } },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: /流量.*组统计/ }),
+    );
+    const samples = await screen.findByText(
+      "今日最近请求样本（子 Provider / Model）",
+    );
+    const sync = screen.getByRole("button", { name: /立即同步/ });
+    expect(
+      sync.compareDocumentPosition(samples) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
   it("keeps proxy input, cache, and output token dimensions separate", () => {
     const provider: Provider = {
       id: "traffic-provider",

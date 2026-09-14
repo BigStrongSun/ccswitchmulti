@@ -558,8 +558,9 @@ function TaskRows({
               </Button>
             </summary>
             <div className="border-t border-border px-3 py-2 text-xs text-muted-foreground">
-              子任务仅计入子会话：请求 {group.childRequestCount}；Tokens{" "}
-              {tokens(group.childTotalTokens)}。
+              {group.observedUsageChildren > 0
+                ? `子任务仅计入子会话：请求 ${group.childRequestCount}；Tokens ${tokens(group.childTotalTokens)}。`
+                : "子任务用量未采集，不以 0 请求或 0 Tokens 表示。"}
               {group.parentUsageStatus === "unknown_may_overlap"
                 ? " 父同步记录可能包含子用量，暂不计入。"
                 : group.parentDirectUsage
@@ -669,12 +670,18 @@ function DetailSheet({
         </DialogHeader>
         {detail?.kind === "model" ? (
           <div className="space-y-4 overflow-y-auto p-5 text-sm">
-            <Breakdown
-              input={detail.row.inputTokens}
-              cache={detail.row.cacheReadTokens}
-              creation={detail.row.cacheCreationTokens}
-              output={detail.row.outputTokens}
-            />
+            {observed(detail.row) ? (
+              <Breakdown
+                input={detail.row.inputTokens}
+                cache={detail.row.cacheReadTokens}
+                creation={detail.row.cacheCreationTokens}
+                output={detail.row.outputTokens}
+              />
+            ) : (
+              <p className="text-muted-foreground">
+                尚无用量证据；未采集不以 0 Tokens 或 $0 表示。
+              </p>
+            )}
             <p>
               来源：{observed(detail.row) ? "已观测本地会话证据" : "未采集"}
               。费用：
@@ -689,12 +696,18 @@ function DetailSheet({
           </div>
         ) : detail?.kind === "agent" ? (
           <div className="space-y-4 overflow-y-auto p-5 text-sm">
-            <Breakdown
-              input={detail.agent.inputTokens}
-              cache={detail.agent.cacheReadTokens}
-              creation={detail.agent.cacheCreationTokens}
-              output={detail.agent.outputTokens}
-            />
+            {detail.agent.usageStatus === "observed" ? (
+              <Breakdown
+                input={detail.agent.inputTokens}
+                cache={detail.agent.cacheReadTokens}
+                creation={detail.agent.cacheCreationTokens}
+                output={detail.agent.outputTokens}
+              />
+            ) : (
+              <p className="text-muted-foreground">
+                尚无用量证据；未采集不以 0 Tokens 或 $0 表示。
+              </p>
+            )}
             <p>
               来源：
               {detail.agent.usageSource === "session_sync"
@@ -714,12 +727,18 @@ function DetailSheet({
           </div>
         ) : detail ? (
           <div className="space-y-4 overflow-y-auto p-5 text-sm">
-            <Breakdown
-              input={detail.group.childInputTokens}
-              cache={detail.group.childCacheReadTokens}
-              creation={detail.group.childCacheCreationTokens}
-              output={detail.group.childOutputTokens}
-            />
+            {detail.group.observedUsageChildren > 0 ? (
+              <Breakdown
+                input={detail.group.childInputTokens}
+                cache={detail.group.childCacheReadTokens}
+                creation={detail.group.childCacheCreationTokens}
+                output={detail.group.childOutputTokens}
+              />
+            ) : (
+              <p className="text-muted-foreground">
+                尚无用量证据；未采集不以 0 Tokens 或 $0 表示。
+              </p>
+            )}
             <p>
               来源：
               {detail.children.length === 0

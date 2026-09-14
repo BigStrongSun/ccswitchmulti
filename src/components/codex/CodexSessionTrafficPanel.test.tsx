@@ -520,4 +520,103 @@ describe("CodexSessionTrafficPanel", () => {
     );
     expect(screen.getByRole("dialog")).toHaveTextContent("可追溯子任务");
   });
+
+  it("keeps missing model, child, and parent-group detail values unknown even with a legacy parent direct record", () => {
+    render(
+      <CodexSessionTrafficPanel
+        stats={{
+          codexHome: "",
+          totalAgents: 1,
+          observedUsageAgents: 0,
+          missingUsageAgents: 1,
+          agents: [
+            {
+              sessionId: "missing-child",
+              title: "未采集子任务",
+              parentThreadId: "legacy-parent",
+              models: [],
+              requestCount: 0,
+              inputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              totalCost: "0",
+              usageStatus: "missing",
+              usageSource: "none",
+            },
+          ],
+          modelStats: [
+            {
+              model: "missing-model",
+              agentCount: 1,
+              observedUsageAgents: 0,
+              missingUsageAgents: 1,
+              requestCount: 0,
+              inputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              totalCost: "0",
+            },
+          ],
+          parentGroups: [
+            {
+              parentSessionId: "legacy-parent",
+              childSessionCount: 1,
+              observedUsageChildren: 0,
+              missingUsageChildren: 1,
+              childRequestCount: 0,
+              childInputTokens: 0,
+              childCacheReadTokens: 0,
+              childCacheCreationTokens: 0,
+              childOutputTokens: 0,
+              childTotalTokens: 0,
+              parentDirectUsage: {
+                requestCount: 5,
+                inputTokens: 10,
+                cacheReadTokens: 4,
+                cacheCreationTokens: 0,
+                outputTokens: 3,
+                totalTokens: 17,
+              },
+              parentDirectUsageSource: "session_sync",
+              parentUsageStatus: "unknown_may_overlap",
+            },
+          ],
+        }}
+        isLoading={false}
+        error={null}
+        rangeLabel="今日"
+        isSyncing={false}
+        onSync={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /missing-model/ }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("尚无用量证据");
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("Token 构成");
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "按任务" }), {
+      button: 0,
+    });
+    expect(screen.getByText(/子任务用量未采集/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/父同步记录可能包含子用量，暂不计入/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/已记录父直接用量/)).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "查看 legacy-parent 详情" }),
+    );
+    expect(screen.getByRole("dialog")).toHaveTextContent("尚无用量证据");
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("Token 构成");
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "查看 missing-child 详情" }),
+    );
+    expect(screen.getByRole("dialog")).toHaveTextContent("尚无用量证据");
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("Token 构成");
+  });
 });

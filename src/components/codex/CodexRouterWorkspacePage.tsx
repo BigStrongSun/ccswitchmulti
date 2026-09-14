@@ -7853,6 +7853,17 @@ function StatusTab({
 
       {statusView === "traffic" && (
         <div className="space-y-4">
+          <CodexSessionTrafficPanel
+            stats={subagentUsage}
+            isLoading={isLoadingSubagentUsage}
+            error={subagentUsageError}
+            rangeLabel={`${getUsageRangePresetLabel(range.preset, (_key, options) => options?.defaultValue ?? "当天")}（本地日历日）`}
+            isSyncing={isSyncingSessionUsage}
+            onSync={() => void syncCodexSessionUsage()}
+            syncMessage={sessionSyncMessage}
+            collectionStatus={collectionStatus}
+            collectionStatusError={collectionStatusError}
+          />
           <section className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-4 dark:border-emerald-700/40 dark:bg-emerald-950/10">
             <SectionHeader
               icon={Database}
@@ -7919,18 +7930,6 @@ function StatusTab({
               历史同步当作转发，也不与会话统计相加。
             </div>
           </section>
-
-          <CodexSessionTrafficPanel
-            stats={subagentUsage}
-            isLoading={isLoadingSubagentUsage}
-            error={subagentUsageError}
-            rangeLabel={`${getUsageRangePresetLabel(range.preset, (_key, options) => options?.defaultValue ?? "当天")}（本地日历日）`}
-            isSyncing={isSyncingSessionUsage}
-            onSync={() => void syncCodexSessionUsage()}
-            syncMessage={sessionSyncMessage}
-            collectionStatus={collectionStatus}
-            collectionStatusError={collectionStatusError}
-          />
         </div>
       )}
     </div>
