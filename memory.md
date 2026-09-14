@@ -5779,3 +5779,9 @@ supported in one streaming turn`。
 - 第二次事务成功：`preflight(14028)` → `verified-child-stopped(msedgewebview2 33020)` → `port-held-during-install(15721)` → `transaction-success(13704)`，16 秒完成。安装后独立复核 installed/registry/status/marker 全为 3.20.2-10、hash 等于期望 payload、health healthy、role=takeover、应用日志无 PORT_OWNERSHIP_GUARD，二进制含“占用诊断/retryingTakeoverRestore/recovery-outcome-resolved”。
 - 边界：`recovery-outcomes.json` 中 00:12:30 的历史 `startupTakeoverFailed` 仍需手动关闭（成功启动不会清历史条目）；证据目录 `C:\Users\sunda\Documents\LLMservice\ccsm-portfix-acceptance-20260913\`；未推送、未发布 Release。详见 `memory-2026-09-14-v3.20.2-10-install.md`。
 - 2026-09-14 v3.20.2-11 根修“端口被占用且强制解除也失败”：本机用 `.tmp/portsim stale` 复现——把监听 socket 句柄复制给子进程后父进程退出，TCP 表仍显示 `LISTENING <已死父PID>`、bind 报 10048、按 PID 无法核验也无法终止；杀掉真正持句柄的子进程后端口立即释放。应用侧新增 `child_processes_of()/is_product_helper_image()/release_stale_listener_holders()`：仅当 owner 已退出时终止**本产品**残留子进程并等端口释放（外来进程继续 fail-closed），启动恢复与“解除占用并恢复接管”都走该路径。提交 `3972d29f`，版本 3.20.2-11；services::proxy 104/104、全量 Rust 单线程 4158 passed。已用修好的事务脚本安装（事务 `ccsm-20260914-121747-…`：verified-child-stopped(msedgewebview2 49596) → port-held-during-install → transaction-success(49040)），安装后 installed/registry/status/marker 全为 3.20.2-11。详见 `memory-2026-09-14-stale-listener-release.md`。
+
+
+## 2026-09-14 Codex 状态/流量页证据化统计（开发分支，未安装）
+
+- 用户指定现有状态/流量页；实现见memory-2026-09-14-codex-traffic-observability.md。分支bigstrongsun/codex-traffic-observability。主子直接分层、缓存拆分、未知非零、50条样本及有界扫描标识；复用成熟rollout parser根修累计/继承/去重。未修改代理路由或安装程序。
+- 独立focused85前端+41用量+48解析测试通过，真实语料1ignored；全前端1587通过/1既有mock失败且原主树复现。不要将开发构建当已安装证据。
