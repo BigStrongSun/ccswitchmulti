@@ -92,7 +92,11 @@ impl CodexDiscoveryState {
             for root in &self.roots {
                 let root_path = canonical_existing_directory(&root.path)?;
                 let known = self.known_paths.entry(root.kind).or_default();
-                known.retain(|path| path.is_file() && is_path_within_root(path, &root_path));
+                *known = known
+                    .iter()
+                    .filter_map(|path| fs::canonicalize(path).ok())
+                    .filter(|path| path.is_file() && is_path_within_root(path, &root_path))
+                    .collect();
                 known.extend(
                     candidates
                         .iter()
@@ -115,8 +119,14 @@ impl CodexDiscoveryState {
         root: &Path,
         now: i64,
     ) -> Result<BTreeSet<PathBuf>, AppError> {
-        let mut paths = self.known_paths.get(&kind).cloned().unwrap_or_default();
-        paths.retain(|path| path.is_file() && is_path_within_root(path, root));
+        let mut paths: BTreeSet<PathBuf> = self
+            .known_paths
+            .get(&kind)
+            .into_iter()
+            .flatten()
+            .filter_map(|path| fs::canonicalize(path).ok())
+            .filter(|path| path.is_file() && is_path_within_root(path, root))
+            .collect();
 
         // Active rollouts are date partitioned; a shallow recent-date walk
         // catches new files without revisiting historic directories each tick.
@@ -129,8 +139,10 @@ impl CodexDiscoveryState {
                     .join(format!("{:04}", day.year()))
                     .join(format!("{:02}", day.month()))
                     .join(format!("{:02}", day.day()));
-                if recent.is_dir() {
-                    paths.extend(collect_jsonl_shallow(&recent)?);
+                if let Ok(canonical_recent) = fs::canonicalize(&recent) {
+                    if canonical_recent.is_dir() && is_path_within_root(&canonical_recent, root) {
+                        paths.extend(collect_jsonl_shallow(&canonical_recent, root)?);
+                    }
                 }
             }
         }
@@ -154,7 +166,7 @@ fn is_path_within_root(path: &Path, root: &Path) -> bool {
     path.strip_prefix(root).is_ok()
 }
 
-fn collect_jsonl_shallow(dir: &Path) -> Result<BTreeSet<PathBuf>, AppError> {
+fn collect_jsonl_shallow(dir: &Path, root: &Path) -> Result<BTreeSet<PathBuf>, AppError> {
     let mut paths = BTreeSet::new();
     let entries = fs::read_dir(dir)
         .map_err(|error| AppError::Config(format!("读取 Codex 会话目录失败: {error}")))?;
@@ -163,7 +175,11 @@ fn collect_jsonl_shallow(dir: &Path) -> Result<BTreeSet<PathBuf>, AppError> {
             .map_err(|error| AppError::Config(format!("读取 Codex 会话目录项失败: {error}")))?
             .path();
         if path.is_file() && is_jsonl(&path) {
-            paths.insert(fs::canonicalize(&path).unwrap_or(path));
+            if let Ok(canonical) = fs::canonicalize(&path) {
+                if is_path_within_root(&canonical, root) {
+                    paths.insert(canonical);
+                }
+            }
         }
     }
     Ok(paths)
@@ -174,20 +190,35 @@ fn collect_jsonl_recursive(root: &Path) -> Result<BTreeSet<PathBuf>, AppError> {
     if !root.is_dir() {
         return Ok(paths);
     }
-    let mut pending = vec![root.to_path_buf()];
+    let root = fs::canonicalize(root)
+        .map_err(|error| AppError::Config(format!("无法规范化 Codex 会话根目录: {error}")))?;
+    let mut pending = vec![root.clone()];
+    let mut visited_dirs = BTreeSet::new();
     while let Some(dir) = pending.pop() {
-        let entries = fs::read_dir(&dir)
+        let canonical_dir = match fs::canonicalize(&dir) {
+            Ok(path) if path.is_dir() && is_path_within_root(&path, &root) => path,
+            _ => continue,
+        };
+        if !visited_dirs.insert(canonical_dir.clone()) {
+            continue;
+        }
+        let entries = fs::read_dir(&canonical_dir)
             .map_err(|error| AppError::Config(format!("读取 Codex 会话目录失败: {error}")))?;
         for entry in entries {
             let path = entry
                 .map_err(|error| AppError::Config(format!("读取 Codex 会话目录项失败: {error}")))?
                 .path();
             if path.is_dir() {
-                pending.push(path);
+                if let Ok(canonical) = fs::canonicalize(&path) {
+                    if canonical.is_dir() && is_path_within_root(&canonical, &root) {
+                        pending.push(canonical);
+                    }
+                }
             } else if path.is_file() && is_jsonl(&path) {
-                let canonical = fs::canonicalize(&path).unwrap_or(path);
-                if is_path_within_root(&canonical, root) {
-                    paths.insert(canonical);
+                if let Ok(canonical) = fs::canonicalize(&path) {
+                    if is_path_within_root(&canonical, &root) {
+                        paths.insert(canonical);
+                    }
                 }
             }
         }
@@ -315,5 +346,19 @@ mod tests {
         assert!(!tick.full_scan);
         assert!(tick.paths.iter().any(|path| path.ends_with("late.jsonl")));
         fs::remove_dir_all(root).expect("cleanup fixture");
+    }
+
+    #[test]
+    fn canonical_external_path_is_rejected_by_root_isolation() {
+        let root = fixture_root("root-isolation");
+        let external = fixture_root("external");
+        let root_canonical = fs::canonicalize(&root).expect("canonical root");
+        let external_file = external.join("outside.jsonl");
+        write_fixture(&external_file);
+        let external_canonical = fs::canonicalize(&external_file).expect("canonical external");
+
+        assert!(!is_path_within_root(&external_canonical, &root_canonical));
+        fs::remove_dir_all(root).expect("cleanup root fixture");
+        fs::remove_dir_all(external).expect("cleanup external fixture");
     }
 }
