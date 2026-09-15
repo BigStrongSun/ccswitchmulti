@@ -39,6 +39,8 @@ vi.mock("react-i18next", () => ({
         "codexConfigConsistency.rendererCompatibilityStatus": "历史查询兼容层",
         "codexConfigConsistency.statusReady": "正常",
         "codexConfigConsistency.statusWarning": "需要处理",
+        "codexConfigConsistency.statusRepairNeeded": "需要修复",
+        "codexConfigConsistency.statusNoActionNeeded": "无需修复",
         "codexConfigConsistency.statusPending": "重启后验证",
         "codexConfigConsistency.noPaginatedHistoryIssue":
           "未发现可安全修复的重复序号。",
@@ -60,10 +62,33 @@ vi.mock("react-i18next", () => ({
         "codexConfigConsistency.providerMigrationCursors": "迁移游标",
         "codexConfigConsistency.historyBaseReferences": "父段引用",
         "codexConfigConsistency.paginatedHistorySkipped":
-          "其他异常历史保持原样：",
+          "保持原样、不会自动修改的历史文件",
+        "codexConfigConsistency.paginatedHistorySkippedHint":
+          "这些文件不会被自动改写；只有 Codex 打开会话报错时才需要人工排查。",
+        "codexConfigConsistency.paginatedHistoryRepairHint":
+          "点击下方备份、修复并重新打开即可修正这些游标。",
+        "codexConfigConsistency.paginatedHistoryNoActionNotice":
+          "分页历史没有可修复项，不需要你处理。",
+        "codexConfigConsistency.blockedReasonDetailsShow":
+          "查看原因明细（原因 / 数量 / 示例）",
+        "codexConfigConsistency.blockedReasonDetailsHide": "收起原因明细",
+        "codexConfigConsistency.blockedReasonCode": "原因码：",
+        "codexConfigConsistency.blockedReasonSamples": "示例：",
+        "codexConfigConsistency.blockedReasonCursorMappingMissing":
+          "缺少可核验的迁移前备份，无法换算新的字节偏移",
         "codexConfigConsistency.historyCompatibilityCheck":
           "会备份原始 JSONL、保留全部对话并恢复分页投影。",
         "codexConfigConsistency.confirmRefresh": "关闭、重写并重新打开",
+        "codexConfigConsistency.confirmRefreshWithoutRepair":
+          "重新应用配置并打开",
+        "codexConfigConsistency.confirmSituationTitle": "本次刷新会做什么",
+        "codexConfigConsistency.confirmSituationRepair":
+          "需要修复的历史：{{count}} 个文件（重复序号 {{duplicates}} · 迁移游标 {{cursors}} · 父段引用 {{historyBases}}）。",
+        "codexConfigConsistency.confirmSituationSkipped":
+          "没有需要修复的历史文件；{{count}} 个文件保持原样，不会被自动改写。",
+        "codexConfigConsistency.confirmSituationNone":
+          "没有发现需要修复的历史文件。",
+        "codexConfigConsistency.confirmScopeTitle": "修复范围与边界",
         "codexConfigConsistency.cancelRefresh": "取消",
         "codexConfigConsistency.refreshingTitle": "正在刷新 Codex 状态",
         "codexConfigConsistency.refreshingDescription":
@@ -332,12 +357,23 @@ describe("CodexConfigConsistencyDialog", () => {
     expect(
       within(confirmation).getByText("检测到可安全恢复的分页历史投影"),
     ).toBeInTheDocument();
-    expect(within(confirmation).getByText(/历史文件.*1/)).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText(/^历史文件 1 · 重复序号 3/),
+    ).toBeInTheDocument();
     expect(within(confirmation).getByText(/重复序号.*3/)).toBeInTheDocument();
     expect(within(confirmation).getByText(/迁移游标.*4/)).toBeInTheDocument();
     expect(within(confirmation).getByText(/父段引用.*2/)).toBeInTheDocument();
     expect(
-      within(confirmation).getByText(/其他异常历史保持原样：.*1/),
+      within(confirmation).getByText(/保持原样、不会自动修改的历史文件.*1/),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText("本次刷新会做什么"),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText(/需要修复的历史：\{\{count\}\} 个文件/),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText("修复范围与边界"),
     ).toBeInTheDocument();
     fireEvent.click(
       within(confirmation).getByRole("button", {
@@ -345,6 +381,70 @@ describe("CodexConfigConsistencyDialog", () => {
       }),
     );
     expect(onConfirmRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("states that nothing needs repair and renames the confirm button accordingly", () => {
+    render(
+      <CodexConfigConsistencyDialog
+        report={null}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "confirm",
+          progress: null,
+          preflight: {
+            supported: true,
+            canRefresh: true,
+            snapshotToken: "confirm-no-repair",
+            desktopProcessCount: 1,
+            appServerProcessCount: 1,
+            processCount: 2,
+            launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+            warning: "active_tasks_will_be_interrupted",
+            paginatedHistory: {
+              affectedRolloutCount: 0,
+              duplicateOrdinalCount: 0,
+              providerMigrationCursorCount: 0,
+              providerMigrationHistoryBaseCount: 0,
+              affectedBytes: 0,
+              blockedRolloutCount: 38,
+              blockedReason:
+                "history_base_offset_not_record_boundary: rollout_id=01a00000-0000-7000-8000-000000000003",
+              blockedReasonGroups: [],
+            },
+          },
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={vi.fn()}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    const confirmation = screen.getByRole("dialog", {
+      name: "确认刷新 Codex 状态",
+    });
+    expect(
+      within(confirmation).getByText(
+        /没有需要修复的历史文件；\{\{count\}\} 个文件保持原样/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).queryByText(/需要修复的历史：/),
+    ).not.toBeInTheDocument();
+    expect(
+      within(confirmation).getByRole("button", {
+        name: "重新应用配置并打开",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).queryByRole("button", {
+        name: "关闭、重写并重新打开",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows all five refresh stages in one modal instead of stacking another dialog", () => {
@@ -692,8 +792,17 @@ describe("CodexConfigConsistencyDialog", () => {
               affectedRolloutCount: 0,
               duplicateOrdinalCount: 0,
               affectedBytes: 0,
-              blockedRolloutCount: 1,
-              blockedReason: "unsafe_rollout_ordinal_sequence",
+              blockedRolloutCount: 1114,
+              blockedReason:
+                "provider_migration_cursor_mapping_missing: rollout_id=01a00000-0000-7000-8000-000000000001",
+              blockedReasonGroups: [
+                {
+                  code: "provider_migration_cursor_mapping_missing",
+                  detail: "",
+                  count: 1114,
+                  samples: ["01a00000-0000-7000-8000-000000000001"],
+                },
+              ],
             },
           },
         }}
@@ -707,10 +816,83 @@ describe("CodexConfigConsistencyDialog", () => {
       />,
     );
 
-    expect(screen.getByText("需要处理")).toBeInTheDocument();
-    expect(screen.getByText(/其他异常历史保持原样：.*1/)).toBeInTheDocument();
+    expect(screen.getByText("无需修复")).toBeInTheDocument();
+    expect(
+      screen.getByText(/保持原样、不会自动修改的历史文件.*1114/),
+    ).toBeInTheDocument();
     expect(
       screen.queryByText("未发现可安全修复的重复序号。"),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /这些文件不会被自动改写；只有 Codex 打开会话报错时才需要人工排查。/,
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "查看原因明细（原因 / 数量 / 示例）",
+      }),
+    );
+    expect(
+      screen.getByText(/缺少可核验的迁移前备份，无法换算新的字节偏移.*1114/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/原因码： provider_migration_cursor_mapping_missing/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/示例： 01a00000-0000-7000-8000-000000000001/),
+    ).toBeInTheDocument();
+  });
+
+  it("marks verified repairable history as needing repair and explains the action", () => {
+    render(
+      <CodexConfigConsistencyDialog
+        report={null}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "status",
+          progress: null,
+          preflight: {
+            supported: true,
+            canRefresh: true,
+            snapshotToken: "repairable-history",
+            desktopProcessCount: 1,
+            appServerProcessCount: 1,
+            processCount: 2,
+            launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+            warning: null,
+            paginatedHistory: {
+              affectedRolloutCount: 1114,
+              duplicateOrdinalCount: 0,
+              providerMigrationCursorCount: 1114,
+              providerMigrationHistoryBaseCount: 0,
+              affectedBytes: 0,
+              blockedRolloutCount: 38,
+              blockedReason:
+                "history_base_offset_not_record_boundary: rollout_id=01a00000-0000-7000-8000-000000000002",
+              blockedReasonGroups: [],
+            },
+          },
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={vi.fn()}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("需要修复")).toBeInTheDocument();
+    expect(screen.getByText(/历史文件.*1114/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/点击下方备份、修复并重新打开即可修正这些游标。/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("无需修复")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/保持原样、不会自动修改的历史文件.*38/),
+    ).toBeInTheDocument();
   });
 });

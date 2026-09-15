@@ -14,6 +14,7 @@ export const settingsSchema = z.object({
   enableClaudePluginIntegration: z.boolean().optional(),
   skipClaudeOnboarding: z.boolean().optional(),
   launchOnStartup: z.boolean().optional(),
+  watchdogEnabled: z.boolean().optional(),
   launchCodexDesktopWithCcswitch: z.boolean().optional(),
   codexEgressTimezone: z
     .object({

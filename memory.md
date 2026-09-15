@@ -1,5 +1,33 @@
 # CC Switch Repository Memory
 
+## 2026-09-13 手动逐模型协议确认与 MultiRouter 刷新证据复用
+
+- `codexProtocolOverrides` 是用户对某个模型明确选择 Chat 或 Responses 的保存意图，不能只把 Provider 级 `codexProtocolMode=manual` 当作手动模式。此前 Single 与 Universal Protocol Lab adapter 错把这种草稿送为 `accept_auto`；后端在 prepare 时正确识别 override 的手动写入意图并拒绝，前端遂停在 `action_required`，没有可确认保存的操作。现在两个 adapter 都以“Provider 级 manual 或存在任一逐模型 override”为手动意图，提交 `confirm_manual`；该选择不会触发自动探测或被自动推荐覆盖。
+- MultiRouter `refreshModels()` 过去每次目录拉取完成均清空 `connectivityResults` 并 reset workflow，即使上游 target（端点、凭据、模型、policy）未变也重新关闭协议页门禁。刷新后改为把合成的最新 source 草稿传给共享 `restoreWizardProtocolEvidence()`，由后端按 ProbeTargetKey 只读核验并重新签发保存 receipt；仅在证据缺失、过期或真实目标变化时关闭门禁并提示重新探测。restore 不发送上游请求、不会延长证据期限。
+- 回归新增：Single/Universal adapter 逐模型 Chat 均识别为 manual、Provider Set 以 `confirm_manual` 提交且不 preflight、MultiRouter 相同目录刷新只恢复证据且仍可进入模型步骤。相关 6 个前端套件 58/58 通过，Prettier、`pnpm typecheck`、`git diff --check` 通过。MultiRouter 旧测试仍有 React `act(...)` 警告；没有新增失败。未构建、安装、重启或改动在线 CCSM。
+
+## 2026-09-13 普通 Provider 保存时恢复协议探测证据
+
+- 普通 Codex Provider 的 UI receipt 是一次性的临时提交租约；`CodexFormFields` 为防止迟到异步结果覆盖而使用的完整 readiness identity 包含名称和目录展示能力等非请求字段，变更时会清空该租约。此前 `useCodexProviderSetSave` 直接把空 receipt 交给 Protocol Lab，导致保存又进入付费深探测确认。
+- 保存协调器现在只在自动 Provider 缺少 receipt 时调用 `restoreCodexProviderProtocolEvidence()`：后端以当前候选编译真实 ProbeTargetKey，从仍有效的 SQLite profile 和 observations 重签 receipt。恢复不发送上游请求、不延长有效期；端点、凭据、传输或 request policy 真变化，或证据缺失/过期时，恢复失败并继续保持原有 fail-closed 深探测门禁。
+- 回归 `useCodexProviderSetSave.test.tsx` 先验证旧实现没有调用恢复接口而稳定 RED；实现后证明保存走 `restore -> prepare -> commit`，并且不调用 preflight。聚焦前端协议相关 97/97、`pnpm typecheck` 和 Prettier 均通过；后端只读恢复定向 Rust 测试通过。未构建、安装、重启或修改在线 CCSM。
+
+## 2026-09-13 Provider / MultiRouter 保存与协议探测边界（源码核对）
+
+- 当前 `main@ab1b877d` / `v3.20.2-9` 的主 UI 保存链路没有固定的“显式探测后再发一次网络探测”：普通 Provider 由 `EditProviderDialog` 把 `protocolProbeReceiptIds` 传给 `useCodexProviderSetSave`，`createSingleCodexProtocolLabAdapter.requiresProbe()` 在 receipt 非空时返回 false，随后直接 `prepare_codex_provider_set -> commit_codex_provider_set`；MultiRouter 由 `useProtocolLabWorkflow.validate()` 取得批量 outcome 后把带 receipt 的 sources 写入 workflow draft，`buildBatchDraft(true)` 复用这些 receipt，随后直接 batch prepare/commit。
+- MultiRouter 保存前的 `restoreCodexProviderProtocolEvidence()` 不是网络探测：后端 `collect_saved_provider_protocol_evidence()` 只读取当前有效 profile/observation，再重新签发进程内 receipt；不刷新 `tested_at`/`expires_at`，不发送上游请求。普通 `update_provider` 的遗留路径也已改为同一只读证据恢复，证据缺失/过期/凭据或策略指纹变化时返回 `codex_provider_set_probe_required`，不会隐式联网。
+- 仍存在的共性边界是旧 `add_provider_internal_with_probe()`：对普通自动 Codex Provider 会无条件调用 `automatic_codex_provider_preflight()`；该遗留入口没有 receipt 参数。若某 UI/后台路径在显式探测后退回通用 `add_provider/update_provider`，receipt 会丢失，表现为再次探测或门禁失败。当前普通新增/编辑主 UI 和 MultiRouter 向导已绕过该入口，分别使用 Provider Set/Protocol Lab 直达命令；工作台对已有源的目录写回走 `update_provider`，只恢复证据，不再续期。
+- 因此现场若仍看到“保存又探测”，应先查调用边界和 IPC：是否调用了 `preflight_codex_provider_protocol_compatibility` 两次，还是只调用一次后执行了 `restore_codex_provider_protocol_evidence`；后者不是重复付费探测。重点检查 receipt 是否在表单/向导草稿构建前被清空，以及是否落入旧 `providersApi.add/update` 路径，不能把 `prepare/commit` 本身当作探测。
+- 本次源码回归：前端 Protocol Lab / MultiRouter / Provider 保存相关 4 个测试文件 48/48 通过；Rust `ordinary_update_` 4/4、证据恢复 1/1、batch prepare/commit 相关 2/2 通过。未修改产品代码、未重启在线 CCSM、未改变配置。
+
+## 2026-09-13 继续核对：错误重测的前端门禁根因与探测职责
+
+- 截图所说的“Chat 被自动选成 Responses、Responses 被自动选成 Chat、手动改后不能保存”属于 **协议深探测**，不是模型 reasoning 能力 TTL 检测。`selection.rs` 按完整工作流能力、可读 reasoning、最后才按 Responses 优先排序；所以两端都完整通过时故意选择 Responses。当前主线的手动协议保存路径已可覆盖此选择且不发探测请求（`advanced_manual_protocol_mode_preserves_user_transport_without_probing` 通过）；若现场仍失败，需区分安装态版本/实际 IPC，不能由旧截图反推当前源码仍失败。
+- 存在两个不同目的的证据体系：`reasoning_capabilities::DetectionCache` 是一小时、进程内的能力候选，负责 reasoning effort/参数整形；`protocol_compatibility` 的 SQLite profile 则以 ProbeTargetKey 的真实返回观察驱动 Chat 与原生 Responses 的 Desktop reasoning 显示转换。后者已按 provider、公开/上游模型、transport、端点、认证、凭据和实际 request-policy 指纹 fail-closed；不要把前者当成可安全决定响应展示形态的替代品。
+- 普通 Provider 的 `CodexFormFields` 把 provider 名、全部目录展示元数据（displayName/context/modalities/reasoning/sort 等）写入 readiness identity；任一变化都会清空一次性 receipt。`useCodexProviderSetSave` 没有调用 `restoreCodexProviderProtocolEvidence`，所以自动模型随后保存会进入真实 preflight。现有前端回归还把 `supportsImage` 变化会失效固化为预期。后端实际上只比较当前编译出的 ProbeTargetKey，因此 UI 名称或无关目录元数据不应导致新的付费请求。
+- MultiRouter 的 `refreshModels` 无论目录是否变化都 `setConnectivityResults([])` 和 `batchProtocolLab.reset()`；协议页的 Next 门禁因此拒绝继续。虽然 `saveMultiRouterPlan` 在收集到空 receipt 时会调用只读恢复并可避免网络请求，但正常 UI 已在到达保存页前把用户拦下，因此该兜底太晚。已保存方案重开时的恢复测试只覆盖保存直达，不覆盖“刷新结果相同后仍能穿过协议页”。
+- 修复应把“异步 UI 结果的完整草稿版本”与“可复用探测证据”拆开：前者仍可用完整快照防止迟到结果覆写；后者必须由后端对当前 Provider 编译 ProbeTargetKey 后执行只读恢复。普通 Provider 保存前和 MultiRouter 刷新后应调用同一恢复接口；只对恢复不到的模型源显示/触发真实深探测。不要在 TypeScript 手写字段白名单或仅从签名移除 `supportsImage` 等字段，因为未来 probe request 变化仍应由后端 policy 指纹决定。
+
 ## 2026-09-13 CCSwitchMulti v3.20.2-9 发布
 
 - Codex Desktop reasoning 修复已在 `main@883093fd` 发布为 `v3.20.2-9`。原生 Responses 映射绑定最终 provider/model 的已验证 Responses probe profile；Chat 与原生 Responses 的可读 raw reasoning 统一按 profile 投影为 Desktop 可呈现的 summary 生命周期，CLI/TUI/External API 保持原始语义。
@@ -5734,3 +5762,46 @@ supported in one streaming turn`。
 # 2026-09-13 代理端口旧 CCSMMulti/AppContainer 占用强制释放根修
 
 - 端口 15721 被旧 3.20.2-5 的 AppContainer hardlink 监听占用时，跨版本文件身份比较使 `force_release_proxy_port_and_restore_takeover` 误判为 foreign owner。根修新增 `/status` 验证同一 CCSM 接管实例，允许跨版本安全终止；当前进程自持端口时先 `stop()` 再恢复接管。services::proxy 98/98、paginated_history 24/24、cargo check/rustfmt 通过；全量串行仅剩无关的 usage_rollup 既有失败。详见 `memory-2026-09-13-port-force-release.md`。
+
+# 2026-09-13 覆盖安装后「端口身份无法核验 / 启动接管失败」诊断与自动重试
+
+- v3.20.2-9 实装后仍复现 `无法读取端口 <port> 的监听进程身份，已拒绝强制恢复` 与 `启动时恢复代理接管失败`。本机日志证实同源失败四次（09-12 13:05:08、09-13 03:54:43、09-13 20:35:39/15720、09-13 21:13:33/15721），都是 `PORT_OWNERSHIP_GUARD … (os error 10048)`。
+- 原语语义（本机实测）：`OpenProcess(QUERY_LIMITED_INFORMATION)` 只对其它账户/失效 PID 失败；同用户提权进程（TokenElevation=1）与 MSIX 包身份进程（Codex `runFullTrust`）都可读。反转实验排除三种自我残留：强杀后端口立即释放、TIME_WAIT 不阻塞重绑、子进程不继承监听 socket。⇒ 失败时的占用者是**当时存在但不属于当前用户**的 LISTEN 持有者（或有期限的外部占用）。
+- 旧实现的两个缺陷：`probe_proxy_port` 只看 LISTEN 且缺 PID/错误码，无法诊断；启动失败后立即清除 takeover 状态，5 秒守护失去重试目标，占用者消失也必须手动重开。
+- 根修：`process_identity_result()` 带 `ProcessIdentityError{NotFound|AccessDenied|Unavailable}`；`tcp_port_rows()/describe_port_blockers()` 用 `TCP_TABLE_OWNER_PID_ALL` 覆盖 IPv4/IPv6 全状态并写进日志与提示；`schedule_pending_takeover_restore()` + 守护 `retry_pending_takeover_restore()` 让端口释放后 15 分钟窗口内自动恢复接管；恢复成功发 `recovery-outcome-resolved` 收起前端提示；顺带修掉 `disable_takeover_for_app_after_switch_lock` 6 条双重编码乱码文案。仍然 fail-closed，不结束无法核验的进程。
+- 验证：`services::proxy` 102/102（含新 `pending_takeover_restore_recovers_once_the_blocking_port_frees_up` 真实占用→释放→自动恢复）、`services::recovery_outcome` 7/7、`process_identity` 11/11、typecheck/Prettier/rustfmt 通过；前端全量 194 files /1583 tests 仅剩既有失败 `tests/components/AddProviderDialog.test.tsx`（干净 detached HEAD worktree 复现）。本轮未安装/重启本机 CCSM。详见 `memory-2026-09-13-port-blocker-diagnosis.md`。
+
+# 2026-09-14 v3.20.2-10 本地构建 + 官方事务“卸载→安装”验收（含端口残留根修）
+
+- 用户要求按最新 main 构建并只用既有安全事务脚本安装（先卸载旧版本再安装新版本）。构建于 `main@226843b7` 的干净 detached worktree：installer `CCSwitchMulti_3.20.2-10_x64-setup.exe` SHA-256 `5E7E671B…6070`，内嵌 installed payload SHA-256 `17F5AE8F…4A77`。
+- 第一次事务失败（23:05–23:07）：stop 掉 PID 29944 后 `wait-port-release` 120 秒超时，回滚又用旧 PID 重启失败，服务整夜不可用直到次日重启。回滚日志证明 TCP 表里仍有指向已消失 PID 的 LISTEN 行——与应用 `PORT_OWNERSHIP_GUARD` 的“无法核验的监听者”同源；旧脚本在 owner 不可读时静默轮询，日志里既没有 PID 也没有原因。
+- 事务根修 `3ff9bfa0`：stop 时连已验证进程的子进程一起结束；owner 不可读时记录 `port-owner-unreadable`（PID/错误/tasklist/netstat）并在 20 秒内带 PID fail-closed；端口一释放就由事务自己 `TcpListener(ExclusiveAddressUse)` 占住到启动前（`port-held-during-install`），杜绝第三方抢端口；回滚按路径启动旧版本，绝不再留“零进程”。Pester 52/52、parse 0 error。
+- 第二次事务成功：`preflight(14028)` → `verified-child-stopped(msedgewebview2 33020)` → `port-held-during-install(15721)` → `transaction-success(13704)`，16 秒完成。安装后独立复核 installed/registry/status/marker 全为 3.20.2-10、hash 等于期望 payload、health healthy、role=takeover、应用日志无 PORT_OWNERSHIP_GUARD，二进制含“占用诊断/retryingTakeoverRestore/recovery-outcome-resolved”。
+- 边界：`recovery-outcomes.json` 中 00:12:30 的历史 `startupTakeoverFailed` 仍需手动关闭（成功启动不会清历史条目）；证据目录 `C:\Users\sunda\Documents\LLMservice\ccsm-portfix-acceptance-20260913\`；未推送、未发布 Release。详见 `memory-2026-09-14-v3.20.2-10-install.md`。
+- 2026-09-14 v3.20.2-11 根修“端口被占用且强制解除也失败”：本机用 `.tmp/portsim stale` 复现——把监听 socket 句柄复制给子进程后父进程退出，TCP 表仍显示 `LISTENING <已死父PID>`、bind 报 10048、按 PID 无法核验也无法终止；杀掉真正持句柄的子进程后端口立即释放。应用侧新增 `child_processes_of()/is_product_helper_image()/release_stale_listener_holders()`：仅当 owner 已退出时终止**本产品**残留子进程并等端口释放（外来进程继续 fail-closed），启动恢复与“解除占用并恢复接管”都走该路径。提交 `3972d29f`，版本 3.20.2-11；services::proxy 104/104、全量 Rust 单线程 4158 passed。已用修好的事务脚本安装（事务 `ccsm-20260914-121747-…`：verified-child-stopped(msedgewebview2 49596) → port-held-during-install → transaction-success(49040)），安装后 installed/registry/status/marker 全为 3.20.2-11。详见 `memory-2026-09-14-stale-listener-release.md`。
+- 2026-09-14 看门狗落地：仓库原有 `watch-ccswitchmulti.ps1`+core 既没注册也没运行、且不区分正常退出与崩溃。新增 `Test-CcsmGuardianUncleanExit`（运行标记仍在且 PID 已消失=异常死亡才重启）与 `Test-CcsmGuardianRestartBudget`（默认 6 次/30 分钟），watcher 新增 `-ConfigPath/-MaxRestartsPerWindow/-RestartWindowMinutes/-RestartOnCleanExit`；新增 `scripts/install-ccswitchmulti-watchdog.ps1` 注册每用户登录任务 `CCSwitchMulti-Watchdog`（隐藏、IgnoreNew、无时限、失败重试 3 次）。验证：Pester 4/4；实测 kill 后 `health-loss → threshold(9s) → product-started(66848) → recovery-ready`（停机 9–13 秒）；无 marker（正常退出）时只记 `restart-skipped-clean-exit` 不拉起；正式任务 State=Running 且安装脚本与仓库哈希一致。生产阈值 60 秒、安装期间由维护租约抑制。详见 `memory-2026-09-14-ccswitchmulti-watchdog.md`。
+- 2026-09-14 守护健壮性追加：发现 17:09 计划任务重启过守护且无异常记录（疑似单轮瞬时异常致死）⇒ core 新增 `Invoke-CcsmGuardianSafeIteration`（单轮异常只记 `iteration-failed` 不退出）、watcher 外层写 `guardian-exiting(Error,Cycles)`，安装脚本刷新时先停旧 watcher；Pester 6/6、parse 0 error，刷新后任务 Running/watcher 40844/安装态哈希一致。详见 `memory-2026-09-14-ccswitchmulti-watchdog.md`。
+
+
+## 2026-09-14 Codex 状态/流量页证据化统计（开发分支，未安装）
+
+- 用户指定现有状态/流量页；实现见memory-2026-09-14-codex-traffic-observability.md。分支bigstrongsun/codex-traffic-observability。主子直接分层、缓存拆分、未知非零、50条样本及有界扫描标识；复用成熟rollout parser根修累计/继承/去重。未修改代理路由或安装程序。
+- 独立focused85前端+41用量+48解析测试通过，真实语料1ignored；全前端1587通过/1既有mock失败且原主树复现。不要将开发构建当已安装证据。
+
+- 自动采集补充更正：源码lib.rs已有启动时+60秒Rust session sync，Codex已接入；流量页refetchInterval=false只停前端query，不停后台采集。真正缺口为Codex字节追加读取、轻量主子聚合查询、同步完成通知与运行态验收。不要沿用“没有后台自动采集”的旧结论。
+
+## 2026-09-14 Codex 自动采集开发完成（未安装）
+- 见 memory-2026-09-14-codex-automatic-collection.md：统一既有worker与状态事件、DB-only统计、schema24及byte-tail checkpoint、15分钟发现补偿；重写不自动删历史账，父直接归属未知时不造数字。
+- 全Rust4175通过7ignored；focused前端93通过，tsc/build通过；全前端复跑1595通过1既有失败。未安装、未实验、未推送。
+
+## 2026-09-14 Codex 流量页 UI 重构（未安装）
+- 详见 memory-2026-09-14-codex-traffic-ui-redesign.md：消费概览置顶、模型搜索筛选排序、显式父子任务、右侧详情、紧凑采集状态与折叠诊断；未知用量包括详情均不显示为零。
+- 最终聚焦 99/99、tsc、生产构建通过；交互 fixture 为合成数据。浏览器视觉验收安全停止，未完成；未安装、重启或推送。
+
+## 2026-09-14 Codex 流量功能本地 main 集成
+- 合并 main@7c9a2e79 与流量分支@c8dacb09，保留双方 memory 与看门狗；隔离候选验收后快进主目录，不动其它未提交修改。
+- 合并树 Rust 4178 passed/7 ignored；前端1607 passed/1既有失败（干净main独立复现）；tsc/build通过。详见 memory-2026-09-14-codex-traffic-main-merge.md。未安装、未推送。
+- 2026-09-15 “提示一直弹”根修（v3.20.2-13，提交 `45fc0ab4`）：`ProxyServer::stop()` 只关监听 socket、没中止已接受连接任务 → 旧 keep-alive/流式连接继续占着 15721，Windows 下立刻重绑 10048；重试每 5 秒失败一次并各写一条未确认恢复结果 → 前端连环弹。修复：stop 中止全部在途连接（新增回归 restart_rebinds_while_previous_connections_still_open）、自身残留连接不再报“身份不明”也不写结果、同一代际相同结果去重、残留判定改用 process_exists、监听句柄显式不可继承。验证：全量 Rust 单线程 4180 passed；装 3.20.2-13 后 kill 主进程 → supervisor 1.1s 拉起且日志无 PORT_OWNERSHIP_GUARD。历史重复条目（7 条 portOwned + 1 条 startupTakeoverFailed + 2 条测试 uncleanExit）已标记已确认，备份在验收目录。详见 `memory-2026-09-15-port-self-hold-and-toast-storm.md`。
+- 2026-09-15 看门狗面板（v3.20.2-14，提交 `0c9b82e7`）：设置页新增只读“看门狗与端口自检”，后端命令 `get_watchdog_status` 汇总守护 PID/存活、最近 30 分钟自动拉起次数、端口监听 PID/路径/就绪、端口占用诊断与最近 8 条守护事件；watchdog 模块新增 recent_events/last_supervisor_pid/recent_restart_count（含单测），前端新增 WatchdogStatusPanel（组件测试 2/2）与 4 语言文案。验证：全量 Rust 单线程 4182 passed；事务 `ccsm-20260915-011700-…` 已把 3.20.2-13 升到 3.20.2-14（health 200、takeover、supervisor 32796），安装态二进制与前端 bundle 均含新命令/文案。详见 `memory-2026-09-14-ccswitchmulti-watchdog.md`。
+- 2026-09-15 分页历史“需要处理”说清原因并找回可修复项（v3.20.2-15，提交 `4c4c929d` + `1515573d`）：开机反复弹窗的根因是“保持原样”的 blocked 文件被当成待办（`affected>0||blocked>0`），且其数量只增不减；真实数据里 1152 条有 1114 条是 `provider_migration_cursor_mapping_missing`——旧 CCSM Provider 迁移把 rollout 的 `model_provider` 从 `openai` 改成 `codex_model_router_v2`（字节 diff 证明每条恰好 +15），但没有同步 Codex `thread_history_1.sqlite` 的投影游标字节偏移（游标序号仍正确，偏移短 15×k，落进记录中间）。根修：`codex_history_provider_migration_backup_parents()` 纳入 `codex-history-current-desktop-visibility-repair-v1` 快照世代（核验规则不变，仍 fail-closed），preflight 新增 `blocked_reason_groups` 结构化原因，面板拆成“需要修复 / 无需修复 / 正常”并新增原因明细（原因/数量/示例），自动弹窗只由可修复项触发。真实数据只读预检：affected 0→1114、blocked 1152→38。验证：paginated_history 27 passed/1 ignored、`cargo test --lib codex` 1721 passed、前端 22 passed、tsc/Prettier 通过；事务 `ccsm-20260915-021411-…` 把 3.20.2-14 升到 3.20.2-15（安装态 hash 36D352…、health 200、takeover、supervisor 46992）。写入式历史修复仍需用户自己点“备份、修复并重新打开”（会关闭 Codex）。详见 `memory-2026-09-15-paginated-history-status-visibility.md`。
+- 2026-09-15 OpenAI Official 线路 `503 无可用 Provider`（v3.20.2-16，提交 `4861a204` + `60bd05e0`）：09:17:59 起到 chatgpt.com 的 TLS 握手连续失败（`unexpected EOF during handshake`），此后 240 次官方线路请求 100% 是 3–6ms 的 503，`codex-router.log` 最后一次 `upstream_send` 停在 09:19:12（请求根本没发出去）。根因：账号池把网络层瞬时失败按“每账号连续失败”累计（阈值 3、梯度 30s/120s/600s/1800s），`4044e7ae` 36 秒内连续 9 次、`native_codex_auth` 2 秒内连续 6 次 → 双双 30 分钟软避让 → `ordered_pool_entries` 返回空 → 展开 0 候选 → 直接 503 且从不访问上游，也就永远无法自愈。同型故障历史上出现过（09-11 09:21 一分钟 114 次、09-12 01:07–01:08 数十次），软避让梯度代码自 2026-08-01 `15a59743` 就存在。根修：全池被避让时按“最早恢复”回退放行（软避让=排序偏好），凭据失效/额度低于 reserve/代际不匹配仍 fail-closed；账号池空候选记 `[POOL-001]`；`NoAvailableProvider` 文案补充可操作信息。验证：新回归 `all_soft_avoided_accounts_still_probe_earliest_recovery`、`cargo test --lib proxy::` 1968 passed；事务 `ccsm-20260915-101253-…` 把 3.20.2-15 升到 3.20.2-16（安装态 hash 6BC442…、health 200、takeover、supervisor 64640）。详见 `memory-2026-09-15-oauth-pool-soft-avoid-hard-failure.md`。

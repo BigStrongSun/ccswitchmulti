@@ -49,6 +49,7 @@ mod services;
 mod session_manager;
 mod settings;
 mod store;
+pub mod watchdog;
 
 mod tray;
 mod usage_events;
@@ -1385,6 +1386,16 @@ pub fn run() {
                 // same verified force-release path as the fixed UI action.
                 state.proxy_service.start_configured_listener_guard();
 
+                // 内置跨平台看门狗：同一二进制以 --ccsm-supervise 模式再起一个守护进程，
+                // 主进程异常死亡后由它拉起。是否启用由设置 watchdog_enabled 控制。
+                let watchdog_port = state
+                    .db
+                    .get_proxy_config()
+                    .await
+                    .map(|config| config.listen_port)
+                    .unwrap_or(0);
+                crate::watchdog::spawn_supervisor(&crate::config::get_app_config_dir(), watchdog_port);
+
                 crate::codex_egress_timezone::refresh_automatic_timezone_before_codex_launch()
                     .await;
                 match crate::codex_startup::launch_after_startup_reconciliation(
@@ -1434,49 +1445,12 @@ pub fn run() {
                     }
                 });
 
-                // Session log usage sync: 启动时同步一次，之后每 60 秒检查
-                let db_for_session_sync = state.db.clone();
-                tauri::async_runtime::spawn(async move {
-                    const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
-
-                    async fn run_session_sync(db: std::sync::Arc<crate::database::Database>, backfill: bool) {
-                        let _guard = crate::services::session_usage::session_sync_mutex()
-                            .lock()
-                            .await;
-                        let task = tauri::async_runtime::spawn_blocking(move || {
-                            if backfill {
-                                if let Err(error) = db.backfill_missing_usage_costs() {
-                                    log::warn!("Usage cost startup backfill failed: {error}");
-                                }
-                            }
-                            crate::services::session_usage::sync_all_unlocked(&db)
-                        });
-                        match task.await {
-                            Ok(result) if !result.errors.is_empty() => {
-                                log::warn!(
-                                    "Session usage sync completed with {} error(s)",
-                                    result.errors.len()
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(error) => log::warn!("Session usage blocking task failed: {error}"),
-                        }
-                    }
-
-                    // 首次同步（含费用回填）
-                    run_session_sync(db_for_session_sync.clone(), true).await;
-
-                    // 定期同步
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                        SESSION_SYNC_INTERVAL_SECS,
-                    ));
-                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    interval.tick().await; // skip immediate first tick
-                    loop {
-                        interval.tick().await;
-                        run_session_sync(db_for_session_sync.clone(), false).await;
-                    }
-                });
+                // Session log collection shares one coordinator with manual sync.
+                // It starts immediately, then schedules each next pass after the
+                // previous pass completes so the exposed `nextRunAt` is exact.
+                crate::services::session_collection::start_periodic_session_collection(
+                    state.db.clone(),
+                );
             });
 
             // Linux: 禁用 WebKitGTK 硬件加速，防止 EGL 初始化失败导致白屏
@@ -1570,6 +1544,7 @@ pub fn run() {
             commands::pick_directory,
             commands::open_external,
             commands::get_init_error,
+            commands::get_watchdog_status,
             commands::get_pending_recovery_outcomes,
             commands::acknowledge_recovery_outcomes,
             commands::get_migration_result,
@@ -1839,6 +1814,7 @@ pub fn run() {
             commands::get_request_logs,
             commands::get_request_detail,
             commands::get_codex_subagent_usage_stats,
+            commands::get_session_collection_status,
             commands::clear_usage_logs,
             commands::get_model_pricing,
             commands::update_model_pricing,
@@ -2283,6 +2259,10 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) -> bool {
                     codex_ready = false;
                 }
                 log::error!("✗ 恢复 {app_type} 的代理接管状态失败: {e}");
+                // 端口仍被占用（尤其覆盖安装后残留的、当前用户无法核验的监听）
+                // 时不要把用户意图一起丢掉：登记一个有期限的自动恢复意图，交给
+                // 监听守护每 5 秒重试，端口一释放就自动恢复接管。
+                let port_blocked = crate::services::proxy::is_port_ownership_guard_error(&e);
                 let mut outcome = services::recovery_outcome::RecoveryOutcome::for_app(
                     "startup_takeover_restore",
                     services::recovery_outcome::RecoveryOutcomeKind::StartupTakeoverFailed,
@@ -2290,7 +2270,11 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) -> bool {
                     app_type,
                 );
                 outcome.lost_fields = vec!["takeover".to_string()];
-                outcome.next_step = Some("openLogsOrRetryTakeover".to_string());
+                outcome.next_step = Some(if port_blocked {
+                    "retryingTakeoverRestore".to_string()
+                } else {
+                    "openLogsOrRetryTakeover".to_string()
+                });
                 services::recovery_outcome::record_best_effort(outcome);
                 // 失败时清除该应用的状态，避免下次启动再次尝试
                 if let Err(clear_err) = state
@@ -2299,6 +2283,15 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) -> bool {
                     .await
                 {
                     log::error!("清除 {app_type} 代理状态失败: {clear_err}");
+                }
+                if port_blocked {
+                    state
+                        .proxy_service
+                        .schedule_pending_takeover_restore(
+                            app_type,
+                            crate::services::proxy::PENDING_TAKEOVER_RESTORE_WINDOW,
+                        )
+                        .await;
                 }
             }
         }

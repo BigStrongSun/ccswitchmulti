@@ -59,7 +59,7 @@ export function createSingleCodexProtocolLabAdapter(
       return providerHasAutomaticCodexModels(provider);
     },
     isManual(provider) {
-      return provider.meta?.codexProtocolMode === "manual";
+      return hasExplicitCodexProtocolSelection(provider);
     },
     async preflight(provider, onProgress) {
       const outcome = await api.preflightCodexProviderProtocolCompatibility(
@@ -140,7 +140,7 @@ export function createUniversalCodexProtocolLabAdapter(
       return provider.meta?.codexProtocolMode !== "manual";
     },
     isManual(provider) {
-      return provider.meta?.codexProtocolMode === "manual";
+      return hasExplicitCodexProtocolSelection(provider);
     },
     async preflight(provider, onProgress) {
       const outcome = await api.preflightUniversalCodexProtocolCompatibility(
@@ -412,6 +412,15 @@ function enabledPublicModels(provider: Provider): string[] {
 
 function sourceNeedsProtocolProbe(provider: Provider): boolean {
   return providerHasAutomaticCodexModels(provider);
+}
+
+function hasExplicitCodexProtocolSelection(
+  provider: Pick<Provider, "meta"> | Pick<UniversalProvider, "meta">,
+): boolean {
+  return (
+    provider.meta?.codexProtocolMode === "manual" ||
+    Object.keys(provider.meta?.codexProtocolOverrides ?? {}).length > 0
+  );
 }
 
 function skipsCodexProtocolProbe(provider: Provider): boolean {

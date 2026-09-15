@@ -810,10 +810,14 @@ impl RequestForwarder {
             .ordered_pool_entries(&self.session_id, native_authorization)
             .await;
         let mut expanded = Vec::new();
+        let mut pool_providers_without_candidates = 0usize;
         for provider in providers {
             if !provider_requests_codex_account_pool(&provider) {
                 expanded.push(provider);
                 continue;
+            }
+            if entries.is_empty() {
+                pool_providers_without_candidates += 1;
             }
             for pool_candidate in &entries {
                 let entry = &pool_candidate.entry;
@@ -823,6 +827,13 @@ impl RequestForwarder {
                     pool_candidate.credential_generation,
                 ));
             }
+        }
+        if pool_providers_without_candidates > 0 {
+            // 这条日志是“请求根本没发出去”的唯一线索：以前这种情况只会返回
+            // 一个 3ms 的 503 无可用 Provider，日志里什么都没有。
+            log::warn!(
+                "[CodexOAuthPool] [POOL-001] {pool_providers_without_candidates} 个账号池路由没有可尝试账号（账号全部不可用），本次请求不会访问上游；请检查 OpenAI Official 各账号的登录状态与额度"
+            );
         }
         expanded
     }

@@ -359,6 +359,104 @@ describe("CodexMultiRouterWizard", () => {
       calls,
     );
   });
+  it("rechecks saved evidence after an unchanged model refresh instead of discarding the protocol gate", async () => {
+    const source: Provider = {
+      id: "refresh-source",
+      name: "Refresh Source",
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test" },
+        modelCatalog: { models: [{ model: "good" }] },
+      },
+    };
+    const plan: Provider = {
+      id: "refresh-plan",
+      name: "Refresh Plan",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "refresh-route",
+              targetProviderId: source.id,
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+    const restoredEvidence = {
+      provider: source,
+      receiptIds: ["refresh-receipt"],
+      observations: [],
+      protocolApplied: false,
+      adaptationPreview: {
+        persistence: "single" as const,
+        status: "ready" as const,
+        models: [],
+      },
+      records: [
+        {
+          probeVersion: 1,
+          testedAt: 100,
+          expiresAt: 4102444800,
+          target: {
+            provider_id: source.id,
+            public_model: "good",
+            upstream_model: "good",
+            transport: "open_ai_responses",
+            endpoint_fingerprint: "endpoint",
+            credential_fingerprint: "credential",
+            request_policy_fingerprint: "policy",
+          },
+          result: {
+            readiness: "verified" as const,
+            selected_transport: "open_ai_responses" as const,
+            branches: [],
+          },
+        },
+      ],
+    };
+    const fetchSpy = vi
+      .spyOn(modelFetchApi, "fetchModelsForConfig")
+      .mockResolvedValueOnce([{ id: "good", ownedBy: null }]);
+    restoreCodexProviderProtocolEvidence.mockReset();
+    restoreCodexProviderProtocolEvidence
+      .mockResolvedValueOnce(restoredEvidence)
+      .mockResolvedValueOnce(restoredEvidence);
+
+    try {
+      renderWizard([source, plan], { mode: "edit", planId: plan.id });
+      fireEvent.click(screen.getByRole("button", { name: "协议深探测" }));
+      await screen.findByText(/已检查保存记录：复用 1/);
+      const restoreCallsBeforeRefresh =
+        restoreCodexProviderProtocolEvidence.mock.calls.length;
+      const probeCallsBeforeRefresh =
+        preflightCodexProviderProtocolCompatibility.mock.calls.length;
+
+      fireEvent.click(screen.getByRole("button", { name: "同步模型目录" }));
+      fireEvent.click(screen.getByRole("button", { name: "自动获取模型列表" }));
+
+      await waitFor(() =>
+        expect(restoreCodexProviderProtocolEvidence.mock.calls.length).toBe(
+          restoreCallsBeforeRefresh + 1,
+        ),
+      );
+      expect(
+        preflightCodexProviderProtocolCompatibility.mock.calls.length,
+      ).toBe(probeCallsBeforeRefresh);
+      expect(
+        screen.getByRole("button", { name: "选择模型" }),
+      ).not.toHaveAttribute("data-read-only", "true");
+    } finally {
+      fetchSpy.mockRestore();
+      restoreCodexProviderProtocolEvidence.mockReset();
+      restoreCodexProviderProtocolEvidence.mockResolvedValue(null);
+    }
+  });
+
   it("ignores late saved evidence after a newly created source is integrated", async () => {
     const source: Provider = {
       id: "saved",

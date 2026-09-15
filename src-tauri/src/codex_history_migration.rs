@@ -4074,6 +4074,13 @@ pub(crate) fn codex_history_provider_migration_backup_parents() -> Vec<PathBuf> 
         OFFICIAL_OPENAI_HISTORY_RESTORE_NAME,
         OFFICIAL_UNIFY_MIGRATION_NAME,
         OFFICIAL_UNIFY_RESTORE_BACKUP_NAME,
+        // “当前桌面历史可见性修复”快照也保存了 provider 改写前的 rollout 原文。
+        // 真实数据里 1129 个分页会话的投影游标字节偏移正好等于该世代快照长度，
+        // provider 字段改写（`openai` → `codex_model_router_v2`，每条 +15 字节）
+        // 之后游标就落在记录中间。恢复流程必须能读到这份备份，才可能逐记录核验
+        // 并修正游标；核验规则本身仍然是“只有 provider 字段不同 + 序号连续”，
+        // 因此把该世代加入候选不会放宽 fail-closed 判定。
+        CURRENT_DESKTOP_HISTORY_REPAIR_NAME,
     ]
     .into_iter()
     .map(|name| backups.join(name))

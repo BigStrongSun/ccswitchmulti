@@ -13,6 +13,9 @@
 //! - `turn_context` → 提取当前 model
 //! - `event_msg` (type=token_count) → 提取累计 token 用量，计算 delta
 
+#[path = "session_usage_codex_discovery.rs"]
+mod discovery;
+
 use crate::codex_config::get_codex_config_dir;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
@@ -26,9 +29,11 @@ use crate::services::usage_stats::{
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
@@ -42,9 +47,82 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 const CODEX_THREAD_REQUEST_ID_PREFIX: &str = "codex_session:thread-v1";
+const CODEX_FINGERPRINT_BYTES: usize = 4096;
+
+#[cfg(test)]
+static CODEX_APPEND_BYTES_READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+fn take_codex_append_bytes_read() -> u64 {
+    CODEX_APPEND_BYTES_READ.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[derive(Debug)]
+struct CodexCheckpoint {
+    last_byte_offset: i64,
+    file_size: i64,
+    file_modified: i64,
+    head_window_len: Option<i64>,
+    head_fingerprint: Option<i64>,
+    tail_fingerprint: Option<i64>,
+    state: CodexParserState,
+}
+
+fn codex_fingerprint(bytes: &[u8]) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"codex-incremental-rollout-v1");
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    i64::from(u32::from_be_bytes(
+        digest[..4].try_into().unwrap_or_default(),
+    ))
+}
+
+fn read_codex_window(file: &mut fs::File, offset: u64, len: usize) -> Result<Vec<u8>, AppError> {
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| AppError::Config(format!("定位 Codex rollout 指纹失败: {e}")))?;
+    let mut bytes = vec![0; len];
+    let mut read = 0;
+    while read < len {
+        let count = file
+            .read(&mut bytes[read..])
+            .map_err(|e| AppError::Config(format!("读取 Codex rollout 指纹失败: {e}")))?;
+        if count == 0 {
+            break;
+        }
+        read += count;
+    }
+    bytes.truncate(read);
+    Ok(bytes)
+}
+
+fn codex_head_window_len(size: i64) -> i64 {
+    size.clamp(0, CODEX_FINGERPRINT_BYTES as i64)
+}
+
+fn codex_head_before(file: &mut fs::File, len: i64) -> Result<i64, AppError> {
+    Ok(codex_fingerprint(&read_codex_window(
+        file,
+        0,
+        len.max(0) as usize,
+    )?))
+}
+
+fn codex_tail_before(file: &mut fs::File, end: i64) -> Result<i64, AppError> {
+    let end = end.max(0) as u64;
+    let start = end.saturating_sub(CODEX_FINGERPRINT_BYTES as u64);
+    // The end is a committed historical boundary. A small rollout can grow
+    // after checkpointing; hashing past this boundary would absorb new bytes
+    // and falsely turn a normal append into a rewrite.
+    Ok(codex_fingerprint(&read_codex_window(
+        file,
+        start,
+        (end - start) as usize,
+    )?))
+}
 
 /// 累计 token 用量（跟踪 total_token_usage 字段）
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct CumulativeTokens {
     input: u64,
     cached_input: u64,
@@ -52,7 +130,7 @@ struct CumulativeTokens {
 }
 
 /// 单次 API 调用的 token 增量
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct DeltaTokens {
     input: u32,
     cached_input: u32,
@@ -65,7 +143,7 @@ impl DeltaTokens {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct TokenCountersSignature {
     input: Option<u64>,
     cached_input: Option<u64>,
@@ -74,7 +152,7 @@ struct TokenCountersSignature {
     total: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct TokenUsageSignature {
     total: Option<TokenCountersSignature>,
     last: Option<TokenCountersSignature>,
@@ -189,7 +267,7 @@ struct CachedReplayPrefix {
     prefix: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ParsedTokenEvent {
     line_offset: i64,
     signature: TokenUsageSignature,
@@ -199,11 +277,61 @@ struct ParsedTokenEvent {
     timestamp: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum ParentResolution {
     None,
     Parent(String),
     Deferred(String),
+}
+
+/// Persisted semantic parser state for append-only Codex JSONL files.  This is
+/// deliberately a bounded state machine, never an event cache: a restart can
+/// resume at a byte cursor without re-reading the historical rollout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexParserState {
+    version: u8,
+    root_thread_id: Option<String>,
+    meta_thread_id: Option<String>,
+    root_meta_seen: bool,
+    root_timestamp: Option<DateTime<Utc>>,
+    parent: ParentResolution,
+    is_subagent: bool,
+    current_model: String,
+    total_high_water: Option<CumulativeTokens>,
+    // JSON object keys cannot be Option<String>; the empty string is the
+    // exact on-disk representation of the parser's None rate-limit lane.
+    last_signature_by_source: HashMap<String, TokenUsageSignature>,
+    previous_token_signature: Option<TokenUsageSignature>,
+    event_index: u32,
+    has_billable_tokens: bool,
+    first_activity_at: Option<i64>,
+    last_activity_at: Option<i64>,
+}
+
+impl CodexParserState {
+    fn initial(root_thread_id: Option<String>) -> Self {
+        Self {
+            version: 1,
+            root_thread_id,
+            meta_thread_id: None,
+            root_meta_seen: false,
+            root_timestamp: None,
+            parent: ParentResolution::None,
+            is_subagent: false,
+            current_model: "unknown".to_string(),
+            total_high_water: None,
+            last_signature_by_source: HashMap::new(),
+            previous_token_signature: None,
+            event_index: 0,
+            has_billable_tokens: false,
+            first_activity_at: None,
+            last_activity_at: None,
+        }
+    }
+
+    fn valid(&self) -> bool {
+        self.version == 1 && self.last_signature_by_source.len() <= 64
+    }
 }
 
 #[derive(Debug)]
@@ -217,6 +345,74 @@ struct ParsedCodexFile {
     token_events: Vec<ParsedTokenEvent>,
     line_offset: i64,
     has_billable_tokens: bool,
+}
+
+#[derive(Debug)]
+struct CodexParseSnapshot {
+    parsed: ParsedCodexFile,
+    state: CodexParserState,
+    complete_bytes: i64,
+    file_size: i64,
+    file_modified: i64,
+    head_window_len: i64,
+    head_fingerprint: i64,
+    tail_fingerprint: i64,
+}
+
+/// 只读的、已完成 parent replay 剥离的 rollout token 事件。
+///
+/// 状态页必须复用此解析器，而不能把 `total_token_usage` 当成可直接相加的请求用量。
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedCodexRolloutUsageEvent {
+    pub model: String,
+    pub timestamp: DateTime<Utc>,
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// 解析失败、父 replay 无法验证、或某个可计费用量缺少时间戳时返回 `None`。
+/// 这让读侧把它表示成未知，而不是把累计快照猜成真实用量。
+pub(crate) fn read_verified_codex_rollout_usage(
+    file_path: &Path,
+    rollout_index: &RolloutIndex,
+) -> Result<Option<Vec<VerifiedCodexRolloutUsageEvent>>, AppError> {
+    let parsed = parse_codex_file(file_path, thread_id_from_filename(file_path))?;
+    let replay_prefix = match &parsed.parent {
+        ParentResolution::None => 0,
+        ParentResolution::Deferred(_) => return Ok(None),
+        ParentResolution::Parent(parent_id) => {
+            let Some(cutoff) = parsed.root_timestamp else {
+                return Ok(None);
+            };
+            let Ok(parent_signatures) = resolve_parent_signatures(parent_id, cutoff, rollout_index)
+            else {
+                return Ok(None);
+            };
+            matching_replay_prefix(&parsed.token_events, &parent_signatures)
+        }
+    };
+    let mut events = Vec::new();
+    for event in parsed.token_events.iter().skip(replay_prefix) {
+        if event.delta.is_zero() {
+            continue;
+        }
+        let Some(timestamp) = event.timestamp.as_deref().and_then(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .ok()
+                .map(|value| value.with_timezone(&Utc))
+        }) else {
+            return Ok(None);
+        };
+        events.push(VerifiedCodexRolloutUsageEvent {
+            model: event.model.clone(),
+            timestamp,
+            input_tokens: event.delta.input as u64,
+            cached_input_tokens: event.delta.cached_input as u64,
+            output_tokens: event.delta.output as u64,
+        });
+    }
+    Ok(Some(events))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,6 +549,14 @@ pub(crate) fn reset_codex_usage_on_conn(
                 [file_path],
             )
             .map_err(|error| AppError::Database(format!("清理 Codex 同步 cursor 失败: {error}")))?;
+        }
+    }
+    for table in ["codex_usage_file_checkpoints", "codex_usage_sessions"] {
+        if sqlite_table_exists(conn, table)? {
+            conn.execute(&format!("DELETE FROM {table}"), [])
+                .map_err(|error| {
+                    AppError::Database(format!("清理 Codex 增量状态表 {table} 失败: {error}"))
+                })?;
         }
     }
     Ok(())
@@ -515,6 +719,104 @@ impl CodexSyncPass {
     }
 }
 
+fn load_codex_checkpoint(
+    db: &Database,
+    file_path: &Path,
+) -> Result<Option<CodexCheckpoint>, AppError> {
+    let path = file_path.to_string_lossy().to_string();
+    let file_name = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let conn = lock_conn!(db.conn);
+    let mut statement = conn.prepare(
+        "SELECT last_byte_offset, file_size, file_modified, head_window_len, head_fingerprint, tail_fingerprint, parser_state
+         FROM codex_usage_file_checkpoints
+         WHERE file_path = ?1 OR ((file_path LIKE ?2 OR file_path LIKE ?3) AND ?4 <> '')
+         ORDER BY CASE WHEN file_path = ?1 THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
+    ).map_err(|e| AppError::Database(format!("读取 Codex checkpoint 失败: {e}")))?;
+    let result = statement.query_row(
+        rusqlite::params![
+            path,
+            format!("%/{file_name}"),
+            format!("%\\{file_name}"),
+            file_name
+        ],
+        |row| {
+            let state_text: String = row.get(6)?;
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                state_text,
+            ))
+        },
+    );
+    match result {
+        Ok((
+            last_byte_offset,
+            file_size,
+            file_modified,
+            head_window_len,
+            head_fingerprint,
+            tail_fingerprint,
+            state_text,
+        )) => {
+            let state = serde_json::from_str::<CodexParserState>(&state_text).ok();
+            Ok(state
+                .filter(CodexParserState::valid)
+                .map(|state| CodexCheckpoint {
+                    last_byte_offset,
+                    file_size,
+                    file_modified,
+                    head_window_len,
+                    head_fingerprint,
+                    tail_fingerprint,
+                    state,
+                }))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(AppError::Database(format!(
+            "读取 Codex checkpoint 失败: {e}"
+        ))),
+    }
+}
+
+fn save_codex_checkpoint_on_conn(
+    conn: &rusqlite::Connection,
+    file_path: &Path,
+    state: &CodexParserState,
+    byte_offset: i64,
+    file_size: i64,
+    file_modified: i64,
+    head_window_len: i64,
+    head_fingerprint: i64,
+    tail_fingerprint: i64,
+) -> Result<(), AppError> {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let state_text = serde_json::to_string(state)
+        .map_err(|e| AppError::Config(format!("序列化 Codex parser state 失败: {e}")))?;
+    conn.execute(
+        "INSERT INTO codex_usage_file_checkpoints
+         (file_path, session_id, last_byte_offset, last_complete_line_offset, file_size, file_modified,
+          head_window_len, head_fingerprint, tail_fingerprint, parser_state, updated_at)
+         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(file_path) DO UPDATE SET session_id=excluded.session_id,
+           last_byte_offset=excluded.last_byte_offset, file_size=excluded.file_size,
+           file_modified=excluded.file_modified, head_window_len=excluded.head_window_len, head_fingerprint=excluded.head_fingerprint,
+           tail_fingerprint=excluded.tail_fingerprint, parser_state=excluded.parser_state,
+           updated_at=excluded.updated_at",
+        rusqlite::params![file_path.to_string_lossy().to_string(), state.meta_thread_id.as_ref().or(state.root_thread_id.as_ref()), byte_offset, file_size, file_modified, head_window_len, head_fingerprint, tail_fingerprint, state_text, now],
+    ).map_err(|e| AppError::Database(format!("保存 Codex checkpoint 失败: {e}")))?;
+    Ok(())
+}
+
 fn get_codex_sync_state(
     db: &Database,
     file_path: &Path,
@@ -658,7 +960,33 @@ fn parse_cumulative_tokens(total_usage: &serde_json::Value) -> Option<Cumulative
     })
 }
 
-type RolloutIndex = HashMap<String, Vec<PathBuf>>;
+pub(crate) type RolloutIndex = HashMap<String, Vec<PathBuf>>;
+
+static CODEX_DISCOVERY: OnceLock<Mutex<discovery::CodexDiscoveryState>> = OnceLock::new();
+
+fn discover_codex_session_files(codex_dir: &Path) -> Result<Vec<PathBuf>, AppError> {
+    let roots = vec![
+        discovery::CodexDiscoveryRoot {
+            kind: discovery::CodexDiscoveryRootKind::Sessions,
+            path: codex_dir.join("sessions"),
+        },
+        discovery::CodexDiscoveryRoot {
+            kind: discovery::CodexDiscoveryRootKind::ArchivedSessions,
+            path: codex_dir.join("archived_sessions"),
+        },
+    ];
+    let state =
+        CODEX_DISCOVERY.get_or_init(|| Mutex::new(discovery::CodexDiscoveryState::new(roots)));
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let mut state = state
+        .lock()
+        .map_err(|error| AppError::Database(format!("Codex discovery mutex poisoned: {error}")))?;
+    let batch = state.discover_at(now)?;
+    Ok(batch.paths)
+}
 
 #[derive(Debug, Default)]
 struct CodexFileSyncResult {
@@ -671,7 +999,7 @@ struct CodexFileSyncResult {
 /// 同步 Codex 使用数据（从 JSONL 会话日志）
 pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     let codex_dir = get_codex_config_dir();
-    let files = collect_codex_session_files(&codex_dir);
+    let files = discover_codex_session_files(&codex_dir)?;
     let rollout_index = build_rollout_index(&files);
     let mut pass = CodexSyncPass::load(db)?;
 
@@ -744,7 +1072,7 @@ fn collect_codex_session_files(codex_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn build_rollout_index(files: &[PathBuf]) -> RolloutIndex {
+pub(crate) fn build_rollout_index(files: &[PathBuf]) -> RolloutIndex {
     let mut index = RolloutIndex::new();
     for path in files {
         if let Some(thread_id) = thread_id_from_filename(path) {
@@ -996,6 +1324,267 @@ fn parse_codex_file(
     })
 }
 
+/// Parse one already-complete JSONL record with the same accounting rules as
+/// `parse_codex_file`.  The append reader calls this only after a newline was
+/// observed, so an incomplete UTF-8/JSON tail never mutates persisted state.
+fn parse_codex_incremental_line(
+    file_path: &Path,
+    state: &mut CodexParserState,
+    line: &str,
+    line_offset: i64,
+) -> Option<ParsedTokenEvent> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let is_event_msg = line.contains("\"event_msg\"");
+    let is_turn_context = line.contains("\"turn_context\"");
+    let is_session_meta = line.contains("\"session_meta\"");
+    if (!is_event_msg && !is_turn_context && !is_session_meta)
+        || (is_event_msg && !line.contains("\"token_count\""))
+    {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let event_type = value.get("type")?.as_str()?;
+    match event_type {
+        "session_meta" if !state.root_meta_seen => {
+            state.root_meta_seen = true;
+            state.root_timestamp = parse_timestamp(value.get("timestamp"));
+            let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
+            state.parent = explicit_parent_from_meta(payload);
+            state.is_subagent = payload
+                .get("source")
+                .and_then(|source| {
+                    source
+                        .get("subagent")
+                        .and_then(|subagent| subagent.get("thread_spawn"))
+                        .or_else(|| source.get("thread_spawn"))
+                })
+                .and_then(|spawn| spawn.get("parent_thread_id"))
+                .and_then(serde_json::Value::as_str)
+                .is_some();
+            state.meta_thread_id = non_empty_string(
+                payload
+                    .get("id")
+                    .or_else(|| payload.get("thread_id"))
+                    .or_else(|| payload.get("threadId")),
+            )
+            .map(|id| {
+                uuid::Uuid::parse_str(&id)
+                    .map(|value| value.hyphenated().to_string())
+                    .unwrap_or(id)
+            });
+            if let (Some(filename_id), Some(meta_id)) =
+                (&state.root_thread_id, state.meta_thread_id.as_ref())
+            {
+                let leading_id = leading_thread_id_from_filename(file_path);
+                if filename_id != meta_id && leading_id.as_deref() != Some(meta_id.as_str()) {
+                    state.parent = ParentResolution::Deferred(format!(
+                        "文件名线程 ID ({filename_id}) 与 root meta ID ({meta_id}) 不一致"
+                    ));
+                }
+            }
+            if let ParentResolution::Parent(parent_id) = &mut state.parent {
+                match uuid::Uuid::parse_str(parent_id) {
+                    Ok(value) => *parent_id = value.hyphenated().to_string(),
+                    Err(_) => {
+                        state.parent = ParentResolution::Deferred(format!(
+                            "显式 parent_thread_id 不是有效 UUID: {parent_id}"
+                        ))
+                    }
+                }
+            }
+            if matches!((&state.root_thread_id, &state.parent), (Some(root), ParentResolution::Parent(parent_id)) if root == parent_id)
+            {
+                state.parent = ParentResolution::Deferred(
+                    "parent_thread_id 与 root_thread_id 相同".to_string(),
+                );
+            }
+            None
+        }
+        "turn_context" => {
+            if let Some(model) = value
+                .get("payload")
+                .and_then(|payload| {
+                    payload
+                        .get("model")
+                        .or_else(|| payload.get("info").and_then(|info| info.get("model")))
+                })
+                .and_then(serde_json::Value::as_str)
+            {
+                state.current_model = normalize_codex_model(model);
+            }
+            None
+        }
+        "event_msg" => {
+            let payload = value.get("payload")?;
+            if payload.get("type")?.as_str()? != "token_count" {
+                return None;
+            }
+            let info = payload.get("info").filter(|info| !info.is_null())?;
+            let signature = parse_token_signature(info)?;
+            if let Some(model) = info
+                .get("model")
+                .or_else(|| info.get("model_name"))
+                .or_else(|| payload.get("model"))
+                .and_then(serde_json::Value::as_str)
+            {
+                state.current_model = normalize_codex_model(model);
+            }
+            let snapshot_source = token_snapshot_source(payload);
+            let lane = snapshot_source.clone().unwrap_or_default();
+            let total = info
+                .get("total_token_usage")
+                .and_then(parse_cumulative_tokens);
+            let last = info
+                .get("last_token_usage")
+                .and_then(parse_cumulative_tokens);
+            if total.is_none() && last.is_none() {
+                return None;
+            }
+            let has_total_snapshot = total.is_some();
+            let duplicate_snapshot = has_total_snapshot
+                && (state.last_signature_by_source.get(&lane) == Some(&signature)
+                    || state.previous_token_signature.as_ref() == Some(&signature));
+            if has_total_snapshot {
+                state
+                    .last_signature_by_source
+                    .insert(lane, signature.clone());
+            }
+            state.previous_token_signature = Some(signature.clone());
+            let delta = if duplicate_snapshot {
+                DeltaTokens {
+                    input: 0,
+                    cached_input: 0,
+                    output: 0,
+                }
+            } else if let Some(last) = last {
+                DeltaTokens {
+                    input: last.input as u32,
+                    cached_input: last.cached_input as u32,
+                    output: last.output as u32,
+                }
+            } else if let Some(total) = total.as_ref() {
+                compute_delta(&state.total_high_water, total)
+            } else {
+                return None;
+            };
+            if let Some(total) = total {
+                if let Some(high_water) = state.total_high_water.as_mut() {
+                    update_high_water(high_water, &total);
+                } else {
+                    state.total_high_water = Some(total);
+                }
+            }
+            let delta = DeltaTokens {
+                cached_input: delta.cached_input.min(delta.input),
+                ..delta
+            };
+            let event_index = if delta.is_zero() {
+                None
+            } else {
+                state.has_billable_tokens = true;
+                state.event_index = state.event_index.saturating_add(1);
+                Some(state.event_index)
+            };
+            let timestamp = value
+                .get("timestamp")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            if event_index.is_some() {
+                if let Some(activity_at) = timestamp
+                    .as_deref()
+                    .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+                    .map(|timestamp| timestamp.timestamp())
+                {
+                    state.first_activity_at = Some(
+                        state
+                            .first_activity_at
+                            .map_or(activity_at, |current| current.min(activity_at)),
+                    );
+                    state.last_activity_at = Some(
+                        state
+                            .last_activity_at
+                            .map_or(activity_at, |current| current.max(activity_at)),
+                    );
+                }
+            }
+            Some(ParsedTokenEvent {
+                line_offset,
+                signature,
+                delta,
+                event_index,
+                model: state.current_model.clone(),
+                timestamp,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Read one bounded file snapshot.  The caller captures size/mtime once and
+/// this reader is capped at that size, so a concurrent append is deliberately
+/// left for the next pass rather than being accidentally checkpointed.
+fn parse_codex_snapshot(file_path: &Path) -> Result<CodexParseSnapshot, AppError> {
+    let metadata = fs::metadata(file_path)
+        .map_err(|e| AppError::Config(format!("读取 Codex snapshot 元数据失败: {e}")))?;
+    let file_size = metadata.len() as i64;
+    let file_modified = metadata_modified_nanos(&metadata);
+    let mut file = fs::File::open(file_path)
+        .map_err(|e| AppError::Config(format!("打开 Codex snapshot 失败: {e}")))?;
+    let head_window_len = codex_head_window_len(file_size);
+    let head_fingerprint = codex_head_before(&mut file, head_window_len)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| AppError::Config(format!("定位 Codex snapshot 失败: {e}")))?;
+    let mut reader = BufReader::new(file.take(file_size.max(0) as u64));
+    let mut state = CodexParserState::initial(thread_id_from_filename(file_path));
+    let mut events = Vec::new();
+    let mut buffer = Vec::new();
+    let mut complete_bytes = 0i64;
+    let mut line_offset = 0i64;
+    loop {
+        buffer.clear();
+        let read = reader
+            .read_until(b'\n', &mut buffer)
+            .map_err(|e| AppError::Config(format!("读取 Codex snapshot 失败: {e}")))?;
+        if read == 0 || !buffer.ends_with(b"\n") {
+            break;
+        }
+        complete_bytes += read as i64;
+        line_offset += 1;
+        if let Ok(line) = std::str::from_utf8(&buffer) {
+            if let Some(event) =
+                parse_codex_incremental_line(file_path, &mut state, line, line_offset)
+            {
+                events.push(event);
+            }
+        }
+    }
+    let parsed = ParsedCodexFile {
+        root_thread_id: state.root_thread_id.clone(),
+        meta_thread_id: state.meta_thread_id.clone(),
+        root_meta_seen: state.root_meta_seen,
+        root_timestamp: state.root_timestamp,
+        parent: state.parent.clone(),
+        token_events: events,
+        line_offset,
+        has_billable_tokens: state.has_billable_tokens,
+    };
+    let mut fingerprint_file = fs::File::open(file_path)
+        .map_err(|e| AppError::Config(format!("打开 Codex snapshot prefix 指纹失败: {e}")))?;
+    let tail_fingerprint = codex_tail_before(&mut fingerprint_file, complete_bytes)?;
+    Ok(CodexParseSnapshot {
+        parsed,
+        state,
+        complete_bytes,
+        file_size,
+        file_modified,
+        head_window_len,
+        head_fingerprint,
+        tail_fingerprint,
+    })
+}
+
 fn parent_signatures_before(
     parent_path: &Path,
     cutoff: DateTime<Utc>,
@@ -1159,6 +1748,171 @@ fn mark_deferred(
 /// 与大文件重导期间面板的响应性。
 const CODEX_INSERT_BATCH_SIZE: usize = 1000;
 
+fn save_codex_session_metadata_on_conn(
+    conn: &rusqlite::Connection,
+    file_path: &Path,
+    state: &CodexParserState,
+) -> Result<(), AppError> {
+    let Some(session_id) = state
+        .meta_thread_id
+        .as_ref()
+        .or(state.root_thread_id.as_ref())
+    else {
+        return Ok(());
+    };
+    let parent_thread_id = match &state.parent {
+        ParentResolution::Parent(parent) => Some(parent.as_str()),
+        _ => None,
+    };
+    // Only the structured thread_spawn path is a subagent. forked_from_id is
+    // intentionally not enough; the parser state retains both distinctions.
+    let is_subagent = state.is_subagent as i64;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO codex_usage_sessions (session_id, file_path, is_subagent, parent_thread_id, model, first_activity_at, last_activity_at, last_seen_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(session_id) DO UPDATE SET file_path=excluded.file_path,
+           is_subagent=excluded.is_subagent, parent_thread_id=excluded.parent_thread_id,
+           model=excluded.model, first_activity_at=excluded.first_activity_at,
+           last_activity_at=excluded.last_activity_at, last_seen_at=excluded.last_seen_at",
+        rusqlite::params![session_id, file_path.to_string_lossy().to_string(), is_subagent, parent_thread_id, state.current_model, state.first_activity_at, state.last_activity_at, now],
+    ).map_err(|e| AppError::Database(format!("保存 Codex 会话元数据失败: {e}")))?;
+    Ok(())
+}
+
+fn sync_codex_append(
+    db: &Database,
+    file_path: &Path,
+    checkpoint: CodexCheckpoint,
+    file_modified: i64,
+    file_size: i64,
+    head_fingerprint: i64,
+    _previous_tail_fingerprint: i64,
+    pass: &mut CodexSyncPass,
+) -> Result<CodexFileSyncResult, AppError> {
+    let mut file = fs::File::open(file_path)
+        .map_err(|e| AppError::Config(format!("无法打开 Codex append 文件: {e}")))?;
+    file.seek(SeekFrom::Start(checkpoint.last_byte_offset.max(0) as u64))
+        .map_err(|e| AppError::Config(format!("定位 Codex append cursor 失败: {e}")))?;
+    let remaining = file_size.saturating_sub(checkpoint.last_byte_offset).max(0) as u64;
+    let mut reader = BufReader::new(file.take(remaining));
+    let mut state = checkpoint.state;
+    let head_window_len = checkpoint.head_window_len.unwrap_or(0);
+    let mut offset = checkpoint.last_byte_offset;
+    let mut line_offset = 0i64;
+    let mut events = Vec::new();
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        let read = reader
+            .read_until(b'\n', &mut buffer)
+            .map_err(|e| AppError::Config(format!("读取 Codex append 文件失败: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        #[cfg(test)]
+        CODEX_APPEND_BYTES_READ.fetch_add(read as u64, std::sync::atomic::Ordering::Relaxed);
+        if !buffer.ends_with(b"\n") {
+            break;
+        }
+        offset += read as i64;
+        line_offset += 1;
+        let Ok(line) = std::str::from_utf8(&buffer) else {
+            continue;
+        };
+        if let Some(event) = parse_codex_incremental_line(file_path, &mut state, line, line_offset)
+        {
+            events.push(event);
+        }
+    }
+    if !state.valid() {
+        return Err(AppError::Config(
+            "Codex parser state exceeded bounded lane limit; requires full rebuild".to_string(),
+        ));
+    }
+    let mut committed_fingerprint_file = fs::File::open(file_path)
+        .map_err(|e| AppError::Config(format!("打开 Codex append prefix 指纹失败: {e}")))?;
+    let committed_tail_fingerprint = codex_tail_before(&mut committed_fingerprint_file, offset)?;
+    let root_thread_id = state
+        .root_thread_id
+        .as_deref()
+        .ok_or_else(|| AppError::Config("Codex append parser 缺少 root thread id".to_string()))?;
+    let session_id = state.meta_thread_id.as_deref().unwrap_or(root_thread_id);
+    let mut result = CodexFileSyncResult::default();
+    let batches = events.chunks(CODEX_INSERT_BATCH_SIZE).collect::<Vec<_>>();
+    for (batch_index, batch) in batches.iter().enumerate() {
+        let last = batch_index + 1 == batches.len();
+        let conn = lock_conn!(db.conn);
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| AppError::Database(format!("开启 Codex append 事务失败: {e}")))?;
+        let mut suspected = 0;
+        for event in *batch {
+            let Some(event_index) = event.event_index else {
+                continue;
+            };
+            let request_id =
+                format!("{CODEX_THREAD_REQUEST_ID_PREFIX}:{root_thread_id}:{event_index}");
+            match insert_codex_session_entry_on_conn(
+                &tx,
+                &request_id,
+                &event.delta,
+                &event.model,
+                Some(session_id),
+                event.timestamp.as_deref(),
+                &mut suspected,
+                &mut pass.pricing,
+            ) {
+                Ok(true) => result.imported = result.imported.saturating_add(1),
+                Ok(false) => result.skipped = result.skipped.saturating_add(1),
+                Err(error) => return Err(error),
+            }
+        }
+        if last {
+            save_codex_session_metadata_on_conn(&tx, file_path, &state)?;
+            save_codex_checkpoint_on_conn(
+                &tx,
+                file_path,
+                &state,
+                offset,
+                file_size,
+                file_modified,
+                head_window_len,
+                head_fingerprint,
+                committed_tail_fingerprint,
+            )?;
+        }
+        tx.commit()
+            .map_err(|e| AppError::Database(format!("提交 Codex append 事务失败: {e}")))?;
+        result.suspected_duplicates = result.suspected_duplicates.saturating_add(suspected);
+    }
+    if batches.is_empty() {
+        let conn = lock_conn!(db.conn);
+        let tx = conn.unchecked_transaction().map_err(|e| {
+            AppError::Database(format!("开启 Codex append checkpoint 事务失败: {e}"))
+        })?;
+        save_codex_session_metadata_on_conn(&tx, file_path, &state)?;
+        save_codex_checkpoint_on_conn(
+            &tx,
+            file_path,
+            &state,
+            offset,
+            file_size,
+            file_modified,
+            head_window_len,
+            head_fingerprint,
+            committed_tail_fingerprint,
+        )?;
+        tx.commit().map_err(|e| {
+            AppError::Database(format!("提交 Codex append checkpoint 事务失败: {e}"))
+        })?;
+    }
+    Ok(result)
+}
+
 /// 同步单个 Codex JSONL 文件。
 fn sync_single_codex_file(
     db: &Database,
@@ -1174,11 +1928,66 @@ fn sync_single_codex_file(
     let file_modified = metadata_modified_nanos(&metadata);
     let file_size = metadata.len();
 
+    // A checkpoint is authoritative only when the physical prefix still
+    // matches. Same-size mtime changes are treated as rewrites (full rebuild),
+    // while a strictly growing file may use the append path after checking the
+    // old EOF tail and immutable head. A prefix modified *and* appended cannot
+    // be proven without a full hash; this collector therefore never claims
+    // absolute detection for that adversarial race and exposes no compensating
+    // full-hash scan in this change.
+    let checkpoint = load_codex_checkpoint(db, file_path)?;
+    let has_checkpoint = checkpoint.is_some();
+    if let Some(checkpoint) = checkpoint {
+        let Some(head_window_len) = checkpoint.head_window_len else {
+            return Ok(mark_deferred(
+                file_path,
+                file_modified,
+                file_size,
+                PendingReason::Stable(
+                    "旧 checkpoint 缺少固定 head window；需受控 Codex 重建".to_string(),
+                ),
+            ));
+        };
+        let mut fingerprint_file = fs::File::open(file_path)
+            .map_err(|e| AppError::Config(format!("无法打开 Codex checkpoint 文件: {e}")))?;
+        let head_fingerprint = codex_head_before(&mut fingerprint_file, head_window_len)?;
+        let old_tail = codex_tail_before(&mut fingerprint_file, checkpoint.last_byte_offset)?;
+        let prefix_matches = checkpoint.head_fingerprint == Some(head_fingerprint)
+            && checkpoint.tail_fingerprint == Some(old_tail);
+        if file_size as i64 == checkpoint.file_size && prefix_matches {
+            return Ok(CodexFileSyncResult::default());
+        }
+        let append_safe = file_size as i64 > checkpoint.file_size && prefix_matches;
+        if append_safe {
+            return sync_codex_append(
+                db,
+                file_path,
+                checkpoint,
+                file_modified,
+                file_size as i64,
+                head_fingerprint,
+                old_tail,
+                pass,
+            );
+        }
+        return Ok(mark_deferred(
+            file_path,
+            file_modified,
+            file_size,
+            PendingReason::Stable(
+                "rollout 非追加式重写/截断；保留已验证账本，需受控 Codex 重建".to_string(),
+            ),
+        ));
+    }
+
     // 检查同步状态
     let (last_modified, last_offset) = get_codex_sync_state(db, file_path, &pass.cursors)?;
 
     // 文件未变化则跳过
-    if file_modified <= last_modified {
+    // A pre-v24 line cursor has no parser state. Re-read it once to construct
+    // state (the old event offset still suppresses duplicate inserts), then
+    // persist the byte checkpoint atomically with the final cursor advance.
+    if has_checkpoint && file_modified <= last_modified {
         return Ok(CodexFileSyncResult::default());
     }
 
@@ -1209,9 +2018,34 @@ fn sync_single_codex_file(
         }
     }
 
-    let parsed = parse_codex_file(file_path, thread_id_from_filename(file_path))?;
+    let snapshot = parse_codex_snapshot(file_path)?;
+    if snapshot.file_size != file_size as i64 || snapshot.file_modified != file_modified {
+        return Err(AppError::Config(
+            "Codex rollout 在读取 snapshot 期间变化；下轮重试".to_string(),
+        ));
+    }
+    let parsed = snapshot.parsed;
     if !parsed.has_billable_tokens {
-        update_sync_state(db, &file_path_str, file_modified, parsed.line_offset)?;
+        let conn = lock_conn!(db.conn);
+        let tx = conn.unchecked_transaction().map_err(|e| {
+            AppError::Database(format!("开启 Codex 空文件 checkpoint 事务失败: {e}"))
+        })?;
+        update_sync_state_on_conn(&tx, &file_path_str, file_modified, parsed.line_offset)?;
+        save_codex_session_metadata_on_conn(&tx, file_path, &snapshot.state)?;
+        save_codex_checkpoint_on_conn(
+            &tx,
+            file_path,
+            &snapshot.state,
+            snapshot.complete_bytes,
+            snapshot.file_size,
+            snapshot.file_modified,
+            snapshot.head_window_len,
+            snapshot.head_fingerprint,
+            snapshot.tail_fingerprint,
+        )?;
+        tx.commit().map_err(|e| {
+            AppError::Database(format!("提交 Codex 空文件 checkpoint 事务失败: {e}"))
+        })?;
         return Ok(CodexFileSyncResult::default());
     }
     let Some(root_thread_id) = parsed.root_thread_id.as_deref() else {
@@ -1355,16 +2189,25 @@ fn sync_single_codex_file(
             ) {
                 Ok(true) => batch_imported += 1,
                 Ok(false) => batch_skipped += 1,
-                Err(e) => {
-                    log::warn!("[CODEX-SYNC] 插入失败 ({request_id}): {e}");
-                    batch_skipped += 1;
-                }
+                Err(error) => return Err(error),
             }
         }
         if is_last_batch {
             // 游标推进与最后一批数据同事务提交：中途崩溃时两者一起回滚，
             // 不会出现"游标已推进但数据缺失"的丢数据窗口。
             update_sync_state_on_conn(&tx, &file_path_str, file_modified, parsed.line_offset)?;
+            save_codex_session_metadata_on_conn(&tx, file_path, &snapshot.state)?;
+            save_codex_checkpoint_on_conn(
+                &tx,
+                file_path,
+                &snapshot.state,
+                snapshot.complete_bytes,
+                snapshot.file_size,
+                snapshot.file_modified,
+                snapshot.head_window_len,
+                snapshot.head_fingerprint,
+                snapshot.tail_fingerprint,
+            )?;
         }
         tx.commit()
             .map_err(|e| AppError::Database(format!("提交 Codex 会话写入事务失败: {e}")))?;
@@ -1375,7 +2218,25 @@ fn sync_single_codex_file(
     }
 
     if to_insert.is_empty() {
-        update_sync_state(db, &file_path_str, file_modified, parsed.line_offset)?;
+        let conn = lock_conn!(db.conn);
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| AppError::Database(format!("开启 Codex 空事件事务失败: {e}")))?;
+        update_sync_state_on_conn(&tx, &file_path_str, file_modified, parsed.line_offset)?;
+        save_codex_session_metadata_on_conn(&tx, file_path, &snapshot.state)?;
+        save_codex_checkpoint_on_conn(
+            &tx,
+            file_path,
+            &snapshot.state,
+            snapshot.complete_bytes,
+            snapshot.file_size,
+            snapshot.file_modified,
+            snapshot.head_window_len,
+            snapshot.head_fingerprint,
+            snapshot.tail_fingerprint,
+        )?;
+        tx.commit()
+            .map_err(|e| AppError::Database(format!("提交 Codex 空事件事务失败: {e}")))?;
     }
     Ok(result)
 }
@@ -1625,6 +2486,56 @@ mod tests {
         })
     }
 
+    #[test]
+    fn codex_incremental_state_matches_full_parser_and_does_not_commit_partial_utf8_tail(
+    ) -> Result<(), AppError> {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(format!("rollout-{PARENT_ID}.jsonl"));
+        let values = vec![
+            session_meta(PARENT_ID),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5.6"}}),
+            token_count_at(10, 2, 3, "2026-09-14T00:00:01Z"),
+        ];
+        write_jsonl(&file, &values);
+        let full = parse_codex_file(&file, Some(PARENT_ID.to_string()))?;
+        let bytes = fs::read(&file).unwrap();
+        let mut state = CodexParserState::initial(Some(PARENT_ID.to_string()));
+        let mut offset = 0;
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if !line.ends_with(b"\n") {
+                break;
+            }
+            offset += 1;
+            let _ = parse_codex_incremental_line(
+                &file,
+                &mut state,
+                std::str::from_utf8(line).unwrap(),
+                offset,
+            );
+        }
+        assert_eq!(
+            state.event_index,
+            full.token_events
+                .iter()
+                .filter_map(|event| event.event_index)
+                .max()
+                .unwrap_or(0)
+        );
+        assert_eq!(
+            state.current_model,
+            full.token_events
+                .last()
+                .map(|event| event.model.clone())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        let before = state.event_index;
+        let partial = b"{\"type\":\"event_msg\",\"payload\":\"\xF0\x9F";
+        assert!(std::str::from_utf8(partial).is_err());
+        // The byte reader never calls the state machine for this un-terminated tail.
+        assert_eq!(state.event_index, before);
+        Ok(())
+    }
+
     fn token_count(input: u64, cached: u64, output: u64) -> serde_json::Value {
         token_count_at(input, cached, output, "2026-07-10T03:00:02Z")
     }
@@ -1686,6 +2597,182 @@ mod tests {
             .collect::<Vec<_>>();
         let mut pass = CodexSyncPass::load(db)?;
         sync_single_codex_file(db, file, &build_rollout_index(&files), &mut pass)
+    }
+
+    #[test]
+    fn incremental_sync_appends_small_rollout_across_restart_without_rereading_history(
+    ) -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let file = rollout_path(dir.path(), PARENT_ID);
+        write_jsonl(
+            &file,
+            &[
+                session_meta(PARENT_ID),
+                turn_context(),
+                token_count_at(10, 2, 3, "2026-09-14T00:00:01Z"),
+            ],
+        );
+        assert!(fs::metadata(&file).unwrap().len() < CODEX_FINGERPRINT_BYTES as u64);
+        let db = Database::memory()?;
+        assert_eq!(sync_test_file(&db, &file, &[&file])?.imported, 1);
+        assert_eq!(take_codex_append_bytes_read(), 0);
+
+        let appended = token_count_at(20, 4, 7, "2026-09-14T00:00:02Z").to_string() + "\n";
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap()
+            .write_all(appended.as_bytes())
+            .unwrap();
+        // A new pass emulates process restart: only persisted checkpoint state
+        // may carry the model/high-water/signature/event-index semantics.
+        assert_eq!(sync_test_file(&db, &file, &[&file])?.imported, 1);
+        assert_eq!(take_codex_append_bytes_read(), appended.len() as u64);
+        let conn = lock_conn!(db.conn);
+        let rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE data_source='codex_session'",
+            [],
+            |row| row.get(0),
+        )?;
+        let checkpoint: (i64, i64) = conn.query_row("SELECT last_byte_offset, file_size FROM codex_usage_file_checkpoints WHERE file_path=?1", [file.to_string_lossy().to_string()], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        assert_eq!(rows, 2);
+        assert_eq!(checkpoint.0, checkpoint.1);
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_sync_same_size_rewrite_fails_closed_even_when_mtime_is_unchanged(
+    ) -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let file = rollout_path(dir.path(), PARENT_ID);
+        write_jsonl(
+            &file,
+            &[
+                session_meta(PARENT_ID),
+                turn_context(),
+                token_count_at(10, 2, 3, "2026-09-14T00:00:01Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        assert_eq!(sync_test_file(&db, &file, &[&file])?.imported, 1);
+        let before = fs::read(&file).unwrap();
+        let mut rewritten = before.clone();
+        let index = rewritten
+            .iter()
+            .position(|byte| *byte == b'3')
+            .expect("fixture token digit");
+        rewritten[index] = b'9';
+        fs::write(&file, rewritten).unwrap();
+        let result = sync_test_file(&db, &file, &[&file])?;
+        assert!(result.deferred);
+        let conn = lock_conn!(db.conn);
+        let rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE data_source='codex_session'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(rows, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_sync_retries_split_utf8_line_before_advancing_checkpoint() -> Result<(), AppError>
+    {
+        let dir = tempdir().unwrap();
+        let file = rollout_path(dir.path(), PARENT_ID);
+        write_jsonl(
+            &file,
+            &[
+                session_meta(PARENT_ID),
+                turn_context(),
+                token_count_at(10, 2, 3, "2026-09-14T00:00:01Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        assert_eq!(sync_test_file(&db, &file, &[&file])?.imported, 1);
+        let partial_line =
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-😀\"}}\n".as_bytes();
+        let split = partial_line
+            .windows(4)
+            .position(|bytes| bytes == [0xF0, 0x9F, 0x98, 0x80])
+            .expect("emoji bytes")
+            + 1;
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap()
+            .write_all(&partial_line[..split])
+            .unwrap();
+        assert_eq!(sync_test_file(&db, &file, &[&file])?.imported, 0);
+        let conn = lock_conn!(db.conn);
+        let offset_before: i64 = conn.query_row(
+            "SELECT last_byte_offset FROM codex_usage_file_checkpoints WHERE file_path=?1",
+            [file.to_string_lossy().to_string()],
+            |row| row.get(0),
+        )?;
+        drop(conn);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap()
+            .write_all(&partial_line[split..])
+            .unwrap();
+        let appended = token_count_at(20, 4, 7, "2026-09-14T00:00:02Z").to_string() + "\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap()
+            .write_all(appended.as_bytes())
+            .unwrap();
+        assert_eq!(sync_test_file(&db, &file, &[&file])?.imported, 1);
+        let conn = lock_conn!(db.conn);
+        let offset_after: i64 = conn.query_row(
+            "SELECT last_byte_offset FROM codex_usage_file_checkpoints WHERE file_path=?1",
+            [file.to_string_lossy().to_string()],
+            |row| row.get(0),
+        )?;
+        assert!(offset_after > offset_before);
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_sync_insert_failure_rolls_back_usage_metadata_and_checkpoint(
+    ) -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let file = rollout_path(dir.path(), PARENT_ID);
+        write_jsonl(
+            &file,
+            &[
+                session_meta(PARENT_ID),
+                turn_context(),
+                token_count_at(10, 2, 3, "2026-09-14T00:00:01Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "CREATE TRIGGER fail_codex_usage_insert
+                   BEFORE INSERT ON proxy_request_logs
+                   WHEN NEW.data_source = 'codex_session'
+                   BEGIN SELECT RAISE(ABORT, 'fixture insert failure'); END;",
+            )?;
+        }
+        assert!(sync_test_file(&db, &file, &[&file]).is_err());
+        let conn = lock_conn!(db.conn);
+        let counts: (i64, i64, i64, i64) = conn.query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM proxy_request_logs WHERE data_source='codex_session'),
+               (SELECT COUNT(*) FROM codex_usage_file_checkpoints),
+               (SELECT COUNT(*) FROM codex_usage_sessions),
+               (SELECT COUNT(*) FROM session_log_sync WHERE file_path=?1)",
+            [file.to_string_lossy().to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(counts, (0, 0, 0, 0));
+        Ok(())
     }
 
     #[test]

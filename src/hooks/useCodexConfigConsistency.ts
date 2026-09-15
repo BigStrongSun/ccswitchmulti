@@ -203,15 +203,16 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
           await codexConfigConsistencyApi.inspectRuntimeRefresh();
         if (!active || runtimeRefreshActiveRef.current) return;
         const history = preflight.paginatedHistory;
-        const historyNeedsAttention =
-          history.affectedRolloutCount > 0 || history.blockedRolloutCount > 0;
+        // 只有“存在可安全修复项”时才自动弹出状态面板。被保护性跳过
+        // （保持原样）的文件不是待办项：把它当作需要处理会导致每次开机都
+        // 重复弹出同一个无法处理的提示。
+        const historyNeedsAttention = history.affectedRolloutCount > 0;
         if (!historyNeedsAttention) return;
         const historyKey = [
+          history.affectedRolloutCount,
           history.duplicateOrdinalCount,
           history.rotatedThreadCount,
           history.rotatedSegmentCount,
-          history.blockedRolloutCount,
-          history.blockedReason ?? "",
         ].join(":");
         if (seenHistoryDamageRef.current.has(historyKey)) return;
         seenHistoryDamageRef.current.add(historyKey);

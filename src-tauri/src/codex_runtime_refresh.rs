@@ -1260,6 +1260,11 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
         let deadline =
             Instant::now() + runtime_verification_timeout(self.history_repair_outcome.as_ref());
         let mut last_core_error = None;
+        let mut reported_history_pending = false;
+        // 追平失败时的补写（把停在已核验重复元数据上的序号对齐回文件实际值）只在
+        // 本轮验证里做一次：它在 Codex 运行时写投影库，反复写既无意义，也会和
+        // Codex 自己的物化互相覆盖。
+        let mut attempted_history_followup = false;
         loop {
             let targets = query_refresh_targets().await?;
             let fresh_app_server = targets.app_servers.iter().any(|process| {
@@ -1274,25 +1279,44 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
                     && consistency.runtime_activation.state
                         == CodexConfigRuntimeActivationState::Current
                 {
-                    let history_ready = self
+                    let history_status = self
                         .history_repair_outcome
                         .as_ref()
-                        .map(paginated_history::repaired_projections_caught_up)
-                        .transpose()?
-                        .unwrap_or(true);
+                        .map(paginated_history::repaired_projection_status)
+                        .transpose()?;
+                    if let Some(status) = history_status.as_ref() {
+                        if status.pending > 0 && !reported_history_pending {
+                            reported_history_pending = true;
+                            log::info!(
+                                "{} repaired paginated-history projection cursor(s) are valid record boundaries but not yet re-materialized by Codex (lazy catch-up); damaged={}",
+                                status.pending,
+                                status.damaged
+                            );
+                        }
+                    }
+                    let history_ready = history_status
+                        .as_ref()
+                        .is_none_or(paginated_history::RepairedProjectionStatus::is_caught_up);
                     if !history_ready {
-                        if let Some(outcome) = self.history_repair_outcome.clone() {
-                            let repaired = tokio::task::spawn_blocking(move || {
-                                paginated_history::repair_newly_stalled_projection_cursors(&outcome)
-                            })
-                            .await
-                            .map_err(|error| {
-                                format!("paginated_history_followup_repair_join_failed: {error}")
-                            })??;
-                            if repaired > 0 {
-                                log::info!(
+                        if !attempted_history_followup {
+                            attempted_history_followup = true;
+                            if let Some(outcome) = self.history_repair_outcome.clone() {
+                                let repaired = tokio::task::spawn_blocking(move || {
+                                    paginated_history::repair_newly_stalled_projection_cursors(
+                                        &outcome,
+                                    )
+                                })
+                                .await
+                                .map_err(|error| {
+                                    format!(
+                                        "paginated_history_followup_repair_join_failed: {error}"
+                                    )
+                                })??;
+                                if repaired > 0 {
+                                    log::info!(
                                     "Rewound {repaired} later Codex paginated-history projection cursor(s) during verification"
                                 );
+                                }
                             }
                         }
                         last_core_error =

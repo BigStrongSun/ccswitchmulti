@@ -2,14 +2,19 @@
 //!
 //! 提供使用量数据的聚合查询功能
 
-use crate::codex_history_migration::{
-    list_codex_history_sessions, CodexHistorySessionListOptions, CodexHistorySessionListOutcome,
-    CodexHistorySessionSummary,
-};
+#[cfg(test)]
+use crate::codex_history_migration::{CodexHistorySessionListOutcome, CodexHistorySessionSummary};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
+#[cfg(test)]
+use crate::proxy::usage::calculator::CostCalculator;
+use crate::proxy::usage::calculator::ModelPricing;
+#[cfg(test)]
 use crate::proxy::usage::parser::TokenUsage;
+#[cfg(test)]
+use crate::services::session_usage_codex::{
+    build_rollout_index, read_verified_codex_rollout_usage, RolloutIndex,
+};
 use crate::services::sql_helpers::{
     fresh_input_sql, INPUT_TOKEN_SEMANTICS_FRESH, INPUT_TOKEN_SEMANTICS_TOTAL,
 };
@@ -17,8 +22,10 @@ use chrono::{Local, NaiveDate, TimeZone, Timelike};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+#[cfg(test)]
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
 
@@ -131,6 +138,10 @@ pub struct CodexSubagentUsageAgent {
     pub last_used_at: Option<i64>,
     pub updated_at: Option<String>,
     pub rollout_path: Option<String>,
+    /// `observed` 只表示本范围内已从本地同步/rollout 取得用量；`missing` 不等于零。
+    pub usage_status: String,
+    /// 不混入代理日志；用于前端解释这条会话的本地用量证据。
+    pub usage_source: String,
 }
 
 /// Codex 子 Agent 用量按模型聚合后的统计行。
@@ -146,6 +157,8 @@ pub struct CodexSubagentModelUsage {
     pub cache_creation_tokens: u64,
     pub total_tokens: u64,
     pub total_cost: String,
+    pub observed_usage_agents: u64,
+    pub missing_usage_agents: u64,
 }
 
 /// MultiRouter 状态页使用的 Codex 子 Agent 监控数据。
@@ -159,6 +172,51 @@ pub struct CodexSubagentUsageStats {
     pub agents: Vec<CodexSubagentUsageAgent>,
     pub model_stats: Vec<CodexSubagentModelUsage>,
     pub skipped_reason: Option<String>,
+    /// 本次有界 history 列表中被明确识别为 subagent 的会话数；不是全库总数。
+    pub scanned_history_agents: u64,
+    /// 本范围内有精确用量事件的子 Agent 数。
+    pub in_range_agents: u64,
+    /// 只有 history 更新时间提示、却没有本范围用量事件的会话数，不能冒称在范围内。
+    pub unknown_range_agents: u64,
+    pub observed_usage_agents: u64,
+    pub missing_usage_agents: u64,
+    /// history API 的有限窗口是否可能遗漏更旧的会话。
+    pub history_truncated: bool,
+    /// 固定为 false：这里绝不把 proxy usage 与会话同步用量相加。
+    pub proxy_usage_included: bool,
+    /// 直接父子协作视图，与顶层会话/模型统计重叠，绝不能相加。
+    pub parent_groups: Vec<CodexSubagentParentUsageGroup>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentParentDirectUsage {
+    pub request_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentParentUsageGroup {
+    pub parent_session_id: String,
+    pub child_session_count: u64,
+    pub observed_usage_children: u64,
+    pub missing_usage_children: u64,
+    pub child_request_count: u64,
+    pub child_input_tokens: u64,
+    pub child_output_tokens: u64,
+    pub child_cache_read_tokens: u64,
+    pub child_cache_creation_tokens: u64,
+    pub child_total_tokens: u64,
+    /// 只来自同一 `codex_session` 同步表；None 不等于父会话没有消耗。
+    pub parent_direct_usage: Option<CodexSubagentParentDirectUsage>,
+    pub parent_direct_usage_source: String,
+    /// `unknown_may_overlap` 表示旧 child 归属可能写在这个 parent session 下。
+    pub parent_usage_status: String,
 }
 
 /// 请求日志过滤器
@@ -753,6 +811,7 @@ fn local_day_start_rfc3339(day: NaiveDate) -> String {
 ///
 /// 这里只读取结构化元数据和模型字段，不解析消息正文，避免把会话内容引入流量统计。
 #[derive(Debug, Clone, Default)]
+#[cfg(test)]
 struct CodexSubagentIdentity {
     agent_nickname: Option<String>,
     agent_role: Option<String>,
@@ -762,6 +821,7 @@ struct CodexSubagentIdentity {
 }
 
 /// 从 Codex JSON 值中读取非空字符串字段。
+#[cfg(test)]
 fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -772,6 +832,7 @@ fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 /// 从 session_meta 的 payload 中解析子 Agent 身份。
+#[cfg(test)]
 fn parse_codex_subagent_identity(payload: &serde_json::Value) -> CodexSubagentIdentity {
     let spawn = payload
         .pointer("/source/subagent/thread_spawn")
@@ -780,16 +841,26 @@ fn parse_codex_subagent_identity(payload: &serde_json::Value) -> CodexSubagentId
         return CodexSubagentIdentity::default();
     };
 
+    let parent_thread_id = json_string_field(spawn, "parent_thread_id");
+    // `forked_from_id` 是 replay/历史继承证据，不天然等于 subagent 父子关系。
+    // 两个结构化字段同时存在但冲突时，宁可不展示关系，也不要拼出半真树。
+    let forked_from_id = json_string_field(payload, "forked_from_id");
+    let parent_thread_id = match (parent_thread_id, forked_from_id) {
+        (Some(parent), Some(forked)) if parent != forked => None,
+        (parent, _) => parent,
+    };
+
     CodexSubagentIdentity {
         agent_nickname: json_string_field(spawn, "agent_nickname"),
         agent_role: json_string_field(spawn, "agent_role"),
-        parent_thread_id: json_string_field(spawn, "parent_thread_id"),
+        parent_thread_id,
         depth: spawn.get("depth").and_then(|value| value.as_i64()),
         primary_model: None,
     }
 }
 
 /// 从一条 Codex JSONL 行里提取当前模型，用于没有用量行时仍显示子 Agent 模型。
+#[cfg(test)]
 fn codex_model_from_jsonl_value(value: &serde_json::Value) -> Option<String> {
     match value.get("type").and_then(|item| item.as_str()) {
         Some("turn_context") => value
@@ -821,6 +892,7 @@ fn codex_model_from_jsonl_value(value: &serde_json::Value) -> Option<String> {
 
 /// 子 Agent rollout 里的累计 token 快照。
 #[derive(Debug, Clone, Default)]
+#[cfg(test)]
 struct CodexSubagentCumulativeTokens {
     input: u64,
     cached_input: u64,
@@ -828,45 +900,8 @@ struct CodexSubagentCumulativeTokens {
 }
 
 /// 从 Codex token_count 的 usage JSON 中提取累计或增量 token。
-fn parse_codex_subagent_cumulative_tokens(
-    value: &serde_json::Value,
-) -> Option<CodexSubagentCumulativeTokens> {
-    if !value.is_object() {
-        return None;
-    }
-    Some(CodexSubagentCumulativeTokens {
-        input: value
-            .get("input_tokens")
-            .and_then(|item| item.as_u64())
-            .unwrap_or(0),
-        cached_input: value
-            .get("cached_input_tokens")
-            .or_else(|| value.get("cache_read_input_tokens"))
-            .and_then(|item| item.as_u64())
-            .unwrap_or(0),
-        output: value
-            .get("output_tokens")
-            .and_then(|item| item.as_u64())
-            .unwrap_or(0),
-    })
-}
-
-/// 计算 token_count 累计值相对上一条事件的增量。
-fn codex_subagent_token_delta(
-    previous: &Option<CodexSubagentCumulativeTokens>,
-    current: &CodexSubagentCumulativeTokens,
-) -> CodexSubagentCumulativeTokens {
-    match previous {
-        Some(previous) => CodexSubagentCumulativeTokens {
-            input: current.input.saturating_sub(previous.input),
-            cached_input: current.cached_input.saturating_sub(previous.cached_input),
-            output: current.output.saturating_sub(previous.output),
-        },
-        None => current.clone(),
-    }
-}
-
 /// 归一化从 rollout JSONL 读取到的模型名，使回退统计与同步日志口径一致。
+#[cfg(test)]
 fn normalize_codex_subagent_model(raw: &str) -> String {
     let mut name = raw.trim().to_lowercase();
     if let Some(pos) = name.rfind('/') {
@@ -898,6 +933,7 @@ fn normalize_codex_subagent_model(raw: &str) -> String {
 ///
 /// 该回退只用于修复子 Agent session_id 被旧同步器写成父线程 ID 的历史数据；
 /// 找不到定价时返回 0，不影响 token 和请求数的真实统计。
+#[cfg(test)]
 fn estimate_codex_subagent_rollout_cost(
     conn: &Connection,
     model: &str,
@@ -926,6 +962,7 @@ fn estimate_codex_subagent_rollout_cost(
 /// 判断历史线程更新时间是否可能落在当前统计范围内。
 ///
 /// 这只是回退解析的性能闸门；真正是否计入仍由 token_count 事件时间戳判断。
+#[cfg(test)]
 fn codex_subagent_history_may_overlap_range(
     item: &CodexHistorySessionSummary,
     start_date: Option<i64>,
@@ -949,9 +986,11 @@ fn codex_subagent_history_may_overlap_range(
 ///
 /// 旧同步逻辑会把子 Agent 的 token_count 归到父线程 session_id；当数据库按子 Agent
 /// id 查不到同步行时，用这个只读回退恢复当前页面的真实 token/request 统计。
+#[cfg(test)]
 fn parse_codex_subagent_usage_from_rollout(
     conn: &Connection,
     rollout_path: Option<&str>,
+    rollout_index: &RolloutIndex,
     start_date: Option<i64>,
     end_date: Option<i64>,
 ) -> HashMap<String, CodexSubagentUsageBucket> {
@@ -961,74 +1000,13 @@ fn parse_codex_subagent_usage_from_rollout(
     else {
         return HashMap::new();
     };
-    let Ok(file) = std::fs::File::open(Path::new(path)) else {
+    let Ok(Some(events)) = read_verified_codex_rollout_usage(Path::new(path), rollout_index) else {
         return HashMap::new();
     };
-    let reader = BufReader::new(file);
-    let mut current_model = "unknown".to_string();
-    let mut previous_total: Option<CodexSubagentCumulativeTokens> = None;
     let mut buckets: HashMap<String, CodexSubagentUsageBucket> = HashMap::new();
 
-    for line in reader.lines().map_while(Result::ok) {
-        if !line.contains("\"turn_context\"") && !line.contains("\"token_count\"") {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if let Some(model) = codex_model_from_jsonl_value(&value) {
-            current_model = normalize_codex_subagent_model(&model);
-        }
-
-        if value.get("type").and_then(|item| item.as_str()) != Some("event_msg") {
-            continue;
-        }
-        let Some(payload) = value.get("payload") else {
-            continue;
-        };
-        if payload.get("type").and_then(|item| item.as_str()) != Some("token_count") {
-            continue;
-        }
-        let Some(info) = payload.get("info").filter(|item| item.is_object()) else {
-            continue;
-        };
-        if let Some(model) = info
-            .get("model")
-            .or_else(|| info.get("model_name"))
-            .or_else(|| payload.get("model"))
-            .and_then(|item| item.as_str())
-        {
-            current_model = normalize_codex_subagent_model(model);
-        }
-
-        let (tokens, is_total) = if let Some(total) = info.get("total_token_usage") {
-            (parse_codex_subagent_cumulative_tokens(total), true)
-        } else if let Some(last) = info.get("last_token_usage") {
-            (parse_codex_subagent_cumulative_tokens(last), false)
-        } else {
-            (None, false)
-        };
-        let Some(tokens) = tokens else {
-            continue;
-        };
-        let mut delta = if is_total {
-            let delta = codex_subagent_token_delta(&previous_total, &tokens);
-            previous_total = Some(tokens);
-            delta
-        } else {
-            tokens
-        };
-        delta.cached_input = delta.cached_input.min(delta.input);
-        if delta.input == 0 && delta.cached_input == 0 && delta.output == 0 {
-            continue;
-        }
-
-        let created_at = value
-            .get("timestamp")
-            .and_then(|item| item.as_str())
-            .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
-            .map(|timestamp| timestamp.timestamp())
-            .unwrap_or(0);
+    for event in events {
+        let created_at = event.timestamp.timestamp();
         if let Some(start) = start_date {
             if created_at < start {
                 continue;
@@ -1040,13 +1018,26 @@ fn parse_codex_subagent_usage_from_rollout(
             }
         }
 
-        let total_cost = estimate_codex_subagent_rollout_cost(conn, &current_model, &delta);
-        let bucket = buckets.entry(current_model.clone()).or_default();
+        let cached_input = event.cached_input_tokens.min(event.input_tokens);
+        // Calculator 的 codex 语义输入仍是 cache-inclusive raw；展示 DTO 才投影 fresh。
+        let cost_tokens = CodexSubagentCumulativeTokens {
+            input: event.input_tokens,
+            cached_input,
+            output: event.output_tokens,
+        };
+        let tokens = CodexSubagentCumulativeTokens {
+            input: event.input_tokens.saturating_sub(cached_input),
+            cached_input,
+            output: event.output_tokens,
+        };
+        let model = normalize_codex_subagent_model(&event.model);
+        let total_cost = estimate_codex_subagent_rollout_cost(conn, &model, &cost_tokens);
+        let bucket = buckets.entry(model).or_default();
         bucket.request_count += 1;
-        bucket.input_tokens += delta.input;
-        bucket.output_tokens += delta.output;
-        bucket.cache_read_tokens += delta.cached_input;
-        bucket.total_tokens += delta.input + delta.output + delta.cached_input;
+        bucket.input_tokens += tokens.input;
+        bucket.output_tokens += tokens.output;
+        bucket.cache_read_tokens += tokens.cached_input;
+        bucket.total_tokens += tokens.input + tokens.output + tokens.cached_input;
         bucket.total_cost += total_cost;
         bucket.last_used_at = bucket.last_used_at.max(Some(created_at));
     }
@@ -1055,6 +1046,7 @@ fn parse_codex_subagent_usage_from_rollout(
 }
 
 /// 读取 rollout JSONL 的元数据和第一个模型字段。
+#[cfg(test)]
 fn codex_subagent_identity_from_rollout(path: Option<&str>) -> CodexSubagentIdentity {
     let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) else {
         return CodexSubagentIdentity::default();
@@ -1196,6 +1188,7 @@ fn codex_subagent_bucket_has_tokens(bucket: &CodexSubagentUsageBucket) -> bool {
 ///
 /// 已含 token 时不必再打开 rollout JSONL 做只读回退；只有零 token 的官方 OAuth
 /// 会话才需要解析本地文件，避免高频状态轮询反复读大文件。
+#[cfg(test)]
 fn codex_subagent_usage_has_tokens(
     usage_by_model: &HashMap<String, CodexSubagentUsageBucket>,
 ) -> bool {
@@ -1205,6 +1198,7 @@ fn codex_subagent_usage_has_tokens(
 }
 
 /// 用 rollout token_count 修正数据库中只有请求数、没有 token 的子 Agent 用量。
+#[cfg(test)]
 fn merge_codex_subagent_rollout_usage(
     usage_by_model: &mut HashMap<String, CodexSubagentUsageBucket>,
     rollout_usage: HashMap<String, CodexSubagentUsageBucket>,
@@ -1237,10 +1231,86 @@ fn merge_codex_subagent_rollout_usage(
     }
 }
 
+/// 读取父会话的直接同步用量。它和 child 总计是两个可重叠的层级，调用方不得相加。
+fn query_codex_direct_session_usage(
+    conn: &Connection,
+    session_ids: &[String],
+    start_date: Option<i64>,
+    end_date: Option<i64>,
+) -> Result<HashMap<String, CodexSubagentParentDirectUsage>, AppError> {
+    let mut result = HashMap::new();
+    for ids in session_ids.chunks(CODEX_SUBAGENT_USAGE_SESSION_CHUNK) {
+        if ids.is_empty() {
+            continue;
+        }
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let data_source = data_source_expr("l");
+        let fresh_input = fresh_input_sql("l");
+        let mut conditions = vec![
+            "l.app_type = 'codex'".to_string(),
+            format!("{data_source} = 'codex_session'"),
+            format!("l.session_id IN ({placeholders})"),
+        ];
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = ids
+            .iter()
+            .cloned()
+            .map(|id| Box::new(id) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        if let Some(start) = start_date {
+            conditions.push("l.created_at >= ?".to_string());
+            params_vec.push(Box::new(start));
+        }
+        if let Some(end) = end_date {
+            conditions.push("l.created_at <= ?".to_string());
+            params_vec.push(Box::new(end));
+        }
+        let sql = format!(
+            "SELECT l.session_id, COUNT(*), COALESCE(SUM({fresh_input}),0), COALESCE(SUM(l.output_tokens),0), COALESCE(SUM(l.cache_read_tokens),0), COALESCE(SUM(l.cache_creation_tokens),0) FROM proxy_request_logs l WHERE {} GROUP BY l.session_id",
+            conditions.join(" AND ")
+        );
+        let refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|value| value.as_ref()).collect();
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| AppError::Database(format!("准备父会话直接用量查询失败: {e}")))?;
+        let rows = stmt
+            .query_map(refs.as_slice(), |row| {
+                let input_tokens = row.get::<_, i64>(2)?.max(0) as u64;
+                let output_tokens = row.get::<_, i64>(3)?.max(0) as u64;
+                let cache_read_tokens = row.get::<_, i64>(4)?.max(0) as u64;
+                let cache_creation_tokens = row.get::<_, i64>(5)?.max(0) as u64;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    CodexSubagentParentDirectUsage {
+                        request_count: row.get::<_, i64>(1)?.max(0) as u64,
+                        total_tokens: input_tokens
+                            + output_tokens
+                            + cache_read_tokens
+                            + cache_creation_tokens,
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens,
+                        cache_creation_tokens,
+                    },
+                ))
+            })
+            .map_err(|e| AppError::Database(format!("查询父会话直接用量失败: {e}")))?;
+        for row in rows {
+            let (id, usage) =
+                row.map_err(|e| AppError::Database(format!("解析父会话直接用量失败: {e}")))?;
+            result.insert(id, usage);
+        }
+    }
+    Ok(result)
+}
+
 /// 判断历史摘要是否明确来自 Codex 子 Agent。
 ///
 /// 新版 Codex 会写 `thread_source=subagent`；旧数据或兼容数据可能只在 source
 /// JSON 文本中保留 subagent 标记，因此这里保守接受这两种证据。
+#[cfg(test)]
 fn is_codex_subagent_summary(item: &CodexHistorySessionSummary) -> bool {
     item.thread_source.as_deref() == Some("subagent")
         || item
@@ -1256,6 +1326,7 @@ fn is_codex_subagent_summary(item: &CodexHistorySessionSummary) -> bool {
 ///
 /// 代理转发日志本身不携带子 Agent 身份；这里必须先用 Codex active SQLite/JSONL
 /// 证明某个 session 是 subagent，再只聚合该 session 的 `codex_session` 同步用量。
+#[cfg(test)]
 fn build_codex_subagent_usage_stats_from_history(
     conn: &Connection,
     history: CodexHistorySessionListOutcome,
@@ -1264,6 +1335,14 @@ fn build_codex_subagent_usage_stats_from_history(
     limit: usize,
 ) -> Result<CodexSubagentUsageStats, AppError> {
     let display_limit = limit.max(1);
+    let history_truncated = history.total_matched > history.items.len();
+    let rollout_index = build_rollout_index(
+        &history
+            .items
+            .iter()
+            .filter_map(|item| item.rollout_path.as_ref().map(PathBuf::from))
+            .collect::<Vec<_>>(),
+    );
     let subagents: Vec<CodexHistorySessionSummary> = history
         .items
         .into_iter()
@@ -1275,11 +1354,13 @@ fn build_codex_subagent_usage_stats_from_history(
         HashMap::new();
     let mut model_buckets: HashMap<String, (CodexSubagentUsageBucket, HashSet<String>)> =
         HashMap::new();
+    let mut missing_model_agents: HashMap<String, HashSet<String>> = HashMap::new();
     let session_ids: Vec<String> = subagents.iter().map(|item| item.id.clone()).collect();
 
     if !session_ids.is_empty() {
         let data_source = data_source_expr("l");
         let effective_model = effective_model_sql("l");
+        let fresh_input = fresh_input_sql("l");
 
         for session_id_chunk in session_ids.chunks(CODEX_SUBAGENT_USAGE_SESSION_CHUNK) {
             let placeholders = std::iter::repeat_n("?", session_id_chunk.len())
@@ -1312,7 +1393,7 @@ fn build_codex_subagent_usage_stats_from_history(
                     l.session_id,
                     {effective_model} AS effective_model,
                     COUNT(*) AS request_count,
-                    COALESCE(SUM(l.input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM({fresh_input}), 0) AS input_tokens,
                     COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
                     COALESCE(SUM(l.cache_read_tokens), 0) AS cache_read_tokens,
                     COALESCE(SUM(l.cache_creation_tokens), 0) AS cache_creation_tokens,
@@ -1374,29 +1455,51 @@ fn build_codex_subagent_usage_stats_from_history(
         }
     }
 
+    let mut observed_usage_agents = 0_u64;
+    let mut missing_usage_agents = 0_u64;
+    let mut unknown_range_agents = 0_u64;
     let mut agents_with_sort_key: Vec<(u64, i64, CodexSubagentUsageAgent)> = subagents
         .into_iter()
         .map(|item| {
             let mut usage_by_model = session_buckets.remove(&item.id).unwrap_or_default();
-            if codex_subagent_history_may_overlap_range(&item, start_date, end_date)
-                && !codex_subagent_usage_has_tokens(&usage_by_model)
-            {
+            let mut usage_source = if codex_subagent_usage_has_tokens(&usage_by_model) {
+                "session_sync"
+            } else {
+                "none"
+            };
+            // `updated_at` 是历史摘要的最后活动时间，不是 token_count 的事件时间；
+            // 不能用它把“范围内有 token、但随后继续运行”的会话排除在 fallback 外。
+            if !codex_subagent_usage_has_tokens(&usage_by_model) {
                 let rollout_usage = parse_codex_subagent_usage_from_rollout(
                     conn,
                     item.rollout_path.as_deref(),
+                    &rollout_index,
                     start_date,
                     end_date,
                 );
+                if !rollout_usage.is_empty() {
+                    usage_source = "rollout";
+                }
                 merge_codex_subagent_rollout_usage(&mut usage_by_model, rollout_usage);
             }
-            for (model, bucket) in &usage_by_model {
-                add_codex_subagent_model_bucket(
-                    &mut model_buckets,
-                    &item.id,
-                    model.as_str(),
-                    bucket,
-                );
-            }
+            let usage_status = if usage_source == "none" {
+                missing_usage_agents += 1;
+                if codex_subagent_history_may_overlap_range(&item, start_date, end_date) {
+                    unknown_range_agents += 1;
+                }
+                "missing"
+            } else {
+                observed_usage_agents += 1;
+                for (model, bucket) in &usage_by_model {
+                    add_codex_subagent_model_bucket(
+                        &mut model_buckets,
+                        &item.id,
+                        model.as_str(),
+                        bucket,
+                    );
+                }
+                "observed"
+            };
             let mut models: Vec<String> = usage_by_model.keys().cloned().collect();
             models.sort();
             let mut total = CodexSubagentUsageBucket::default();
@@ -1416,6 +1519,14 @@ fn build_codex_subagent_usage_stats_from_history(
                 let normalized_model = normalize_codex_subagent_model(&primary_model);
                 if !models.iter().any(|model| model == &normalized_model) {
                     models.insert(0, normalized_model.clone());
+                }
+            }
+            if usage_status == "missing" {
+                for model in &models {
+                    missing_model_agents
+                        .entry(model.clone())
+                        .or_default()
+                        .insert(item.id.clone());
                 }
             }
 
@@ -1443,12 +1554,17 @@ fn build_codex_subagent_usage_stats_from_history(
                 last_used_at: total.last_used_at,
                 updated_at: item.updated_at,
                 rollout_path: item.rollout_path,
+                usage_status: usage_status.to_string(),
+                usage_source: usage_source.to_string(),
             };
             (agent.total_tokens, item.updated_at_ms, agent)
         })
         .collect();
 
     for (_, _, agent) in &agents_with_sort_key {
+        if agent.usage_status != "observed" {
+            continue;
+        }
         for model in &agent.models {
             model_buckets
                 .entry(model.clone())
@@ -1466,24 +1582,92 @@ fn build_codex_subagent_usage_stats_from_history(
             .then_with(|| left.2.session_id.cmp(&right.2.session_id))
     });
 
+    // 分组口径覆盖本次扫描到的全部范围候选，不受 UI 列表 limit 截断影响。
+    let all_agents: Vec<CodexSubagentUsageAgent> = agents_with_sort_key
+        .iter()
+        .map(|(_, _, agent)| agent.clone())
+        .collect();
+
     let agents: Vec<CodexSubagentUsageAgent> = agents_with_sort_key
         .into_iter()
         .take(display_limit)
         .map(|(_, _, agent)| agent)
         .collect();
 
-    let mut model_stats: Vec<CodexSubagentModelUsage> = model_buckets
+    let parent_ids: Vec<String> = all_agents
+        .iter()
+        .filter_map(|agent| agent.parent_thread_id.clone())
+        .collect::<HashSet<_>>()
         .into_iter()
-        .map(|(model, (bucket, agents))| CodexSubagentModelUsage {
-            model,
-            agent_count: agents.len() as u64,
-            request_count: bucket.request_count,
-            input_tokens: bucket.input_tokens,
-            output_tokens: bucket.output_tokens,
-            cache_read_tokens: bucket.cache_read_tokens,
-            cache_creation_tokens: bucket.cache_creation_tokens,
-            total_tokens: bucket.total_tokens,
-            total_cost: format!("{:.6}", bucket.total_cost),
+        .collect();
+    let parent_direct_usage =
+        query_codex_direct_session_usage(conn, &parent_ids, start_date, end_date)?;
+    let mut parent_groups_by_id: HashMap<String, CodexSubagentParentUsageGroup> = HashMap::new();
+    for agent in &all_agents {
+        let Some(parent_session_id) = agent.parent_thread_id.as_ref() else {
+            continue;
+        };
+        let group = parent_groups_by_id
+            .entry(parent_session_id.clone())
+            .or_insert_with(|| CodexSubagentParentUsageGroup {
+                parent_session_id: parent_session_id.clone(),
+                parent_direct_usage: parent_direct_usage.get(parent_session_id).cloned(),
+                parent_direct_usage_source: if parent_direct_usage.contains_key(parent_session_id) {
+                    "session_sync".to_string()
+                } else {
+                    "none".to_string()
+                },
+                parent_usage_status: if parent_direct_usage.contains_key(parent_session_id) {
+                    "observed".to_string()
+                } else {
+                    "unknown".to_string()
+                },
+                ..Default::default()
+            });
+        group.child_session_count += 1;
+        if agent.usage_status == "observed" {
+            group.observed_usage_children += 1;
+            group.child_request_count += agent.request_count;
+            group.child_input_tokens += agent.input_tokens;
+            group.child_output_tokens += agent.output_tokens;
+            group.child_cache_read_tokens += agent.cache_read_tokens;
+            group.child_cache_creation_tokens += agent.cache_creation_tokens;
+            group.child_total_tokens += agent.total_tokens;
+            // 旧同步器曾把 child token_count 写到 parent session_id；只要本组依赖
+            // rollout 回退，parent 同步行就可能正是该 child 的遗留归属，不能称父直接用量。
+            if agent.usage_source == "rollout" {
+                group.parent_direct_usage = None;
+                group.parent_direct_usage_source = "none".to_string();
+                group.parent_usage_status = "unknown_may_overlap".to_string();
+            }
+        } else {
+            group.missing_usage_children += 1;
+        }
+    }
+    let mut parent_groups: Vec<CodexSubagentParentUsageGroup> =
+        parent_groups_by_id.into_values().collect();
+    parent_groups.sort_by(|left, right| left.parent_session_id.cmp(&right.parent_session_id));
+
+    let mut model_names: HashSet<String> = model_buckets.keys().cloned().collect();
+    model_names.extend(missing_model_agents.keys().cloned());
+    let mut model_stats: Vec<CodexSubagentModelUsage> = model_names
+        .into_iter()
+        .map(|model| {
+            let (bucket, agents) = model_buckets.remove(&model).unwrap_or_default();
+            let missing_agents = missing_model_agents.remove(&model).unwrap_or_default();
+            CodexSubagentModelUsage {
+                model,
+                agent_count: agents.len() as u64,
+                request_count: bucket.request_count,
+                input_tokens: bucket.input_tokens,
+                output_tokens: bucket.output_tokens,
+                cache_read_tokens: bucket.cache_read_tokens,
+                cache_creation_tokens: bucket.cache_creation_tokens,
+                total_tokens: bucket.total_tokens,
+                total_cost: format!("{:.6}", bucket.total_cost),
+                observed_usage_agents: agents.len() as u64,
+                missing_usage_agents: missing_agents.len() as u64,
+            }
         })
         .collect();
     model_stats.sort_by(|left, right| {
@@ -1502,6 +1686,347 @@ fn build_codex_subagent_usage_stats_from_history(
         agents,
         model_stats,
         skipped_reason: history.skipped_reason,
+        scanned_history_agents: total_agents,
+        in_range_agents: observed_usage_agents,
+        unknown_range_agents,
+        observed_usage_agents,
+        missing_usage_agents,
+        history_truncated,
+        proxy_usage_included: false,
+        parent_groups,
+    })
+}
+
+/// Build the subagent view exclusively from CCSM's synchronized metadata and
+/// `codex_session` usage rows. This read path must never reopen Codex history
+/// SQLite or rollout JSONL: collection owns those filesystem reads.
+fn build_codex_subagent_usage_stats_from_db(
+    conn: &Connection,
+    start_date: Option<i64>,
+    end_date: Option<i64>,
+    display_limit: usize,
+) -> Result<CodexSubagentUsageStats, AppError> {
+    let data_source = data_source_expr("l");
+    let effective_model = effective_model_sql("l");
+    let fresh_input = fresh_input_sql("l");
+    let mut join_conditions = vec![
+        "l.session_id = s.session_id".to_string(),
+        "l.app_type = 'codex'".to_string(),
+        format!("{data_source} = 'codex_session'"),
+    ];
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(start) = start_date {
+        join_conditions.push("l.created_at >= ?".to_string());
+        params_vec.push(Box::new(start));
+    }
+    if let Some(end) = end_date {
+        join_conditions.push("l.created_at <= ?".to_string());
+        params_vec.push(Box::new(end));
+    }
+    let sql = format!(
+        "SELECT s.session_id, s.parent_thread_id, s.model, s.first_activity_at, s.last_activity_at,
+                {effective_model} AS effective_model, COUNT(l.request_id),
+                COALESCE(SUM({fresh_input}), 0), COALESCE(SUM(l.output_tokens), 0),
+                COALESCE(SUM(l.cache_read_tokens), 0), COALESCE(SUM(l.cache_creation_tokens), 0),
+                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0), MAX(l.created_at)
+         FROM codex_usage_sessions s
+         LEFT JOIN proxy_request_logs l ON {}
+         WHERE s.is_subagent = 1
+         GROUP BY s.session_id, s.parent_thread_id, s.model, s.first_activity_at, s.last_activity_at, {effective_model}",
+        join_conditions.join(" AND ")
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> =
+        params_vec.iter().map(|param| param.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|error| {
+        AppError::Database(format!("准备 Codex 子 Agent 本地统计查询失败: {error}"))
+    })?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, f64>(11)?,
+                row.get::<_, Option<i64>>(12)?,
+            ))
+        })
+        .map_err(|error| {
+            AppError::Database(format!("查询 Codex 子 Agent 本地统计失败: {error}"))
+        })?;
+
+    let mut sessions: HashMap<
+        String,
+        (
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            HashMap<String, CodexSubagentUsageBucket>,
+        ),
+    > = HashMap::new();
+    for row in rows {
+        let (
+            session_id,
+            parent_thread_id,
+            metadata_model,
+            first_activity_at,
+            last_activity_at,
+            usage_model,
+            request_count,
+            input,
+            output,
+            cache_read,
+            cache_creation,
+            total_cost,
+            last_used_at,
+        ) = row.map_err(|error| {
+            AppError::Database(format!("读取 Codex 子 Agent 本地统计失败: {error}"))
+        })?;
+        let entry = sessions.entry(session_id.clone()).or_insert_with(|| {
+            (
+                parent_thread_id,
+                metadata_model,
+                first_activity_at,
+                last_activity_at,
+                HashMap::new(),
+            )
+        });
+        if request_count <= 0 {
+            continue;
+        }
+        let (_, metadata_model, _, _, buckets) = entry;
+        let model = usage_model.unwrap_or_else(|| {
+            metadata_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
+        });
+        buckets.insert(
+            model,
+            CodexSubagentUsageBucket {
+                request_count: request_count.max(0) as u64,
+                input_tokens: input.max(0) as u64,
+                output_tokens: output.max(0) as u64,
+                cache_read_tokens: cache_read.max(0) as u64,
+                cache_creation_tokens: cache_creation.max(0) as u64,
+                total_tokens: input.max(0) as u64
+                    + output.max(0) as u64
+                    + cache_read.max(0) as u64
+                    + cache_creation.max(0) as u64,
+                total_cost,
+                last_used_at,
+            },
+        );
+    }
+
+    let mut model_buckets: HashMap<String, (CodexSubagentUsageBucket, HashSet<String>)> =
+        HashMap::new();
+    let mut missing_model_agents: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut all_agents = Vec::new();
+    let mut observed_usage_agents = 0_u64;
+    let mut missing_usage_agents = 0_u64;
+    let mut unknown_range_agents = 0_u64;
+    let metadata_inventory_agents = sessions.len() as u64;
+    let range_requested = start_date.is_some() || end_date.is_some();
+    for (
+        session_id,
+        (parent_thread_id, metadata_model, first_activity_at, last_activity_at, buckets),
+    ) in sessions
+    {
+        // Only fact rows filtered by `created_at` establish range membership.
+        // `last_seen_at` is an ingestion clock, not an activity timestamp.
+        let observed = !buckets.is_empty();
+        let mut models: Vec<String> = buckets.keys().cloned().collect();
+        if let Some(model) = metadata_model
+            .as_ref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            if !models.contains(model) {
+                models.push(model.clone());
+            }
+        }
+        models.sort();
+        let mut total = CodexSubagentUsageBucket::default();
+        for (model, bucket) in &buckets {
+            total.request_count += bucket.request_count;
+            total.input_tokens += bucket.input_tokens;
+            total.output_tokens += bucket.output_tokens;
+            total.cache_read_tokens += bucket.cache_read_tokens;
+            total.cache_creation_tokens += bucket.cache_creation_tokens;
+            total.total_tokens += bucket.total_tokens;
+            total.total_cost += bucket.total_cost;
+            total.last_used_at = total.last_used_at.max(bucket.last_used_at);
+            add_codex_subagent_model_bucket(&mut model_buckets, &session_id, model, bucket);
+        }
+        let usage_status = if observed {
+            observed_usage_agents += 1;
+            "observed"
+        } else {
+            if range_requested {
+                let in_selected_range = |timestamp: i64| {
+                    start_date.is_none_or(|start| timestamp >= start)
+                        && end_date.is_none_or(|end| timestamp <= end)
+                };
+                match (first_activity_at, last_activity_at) {
+                    // An endpoint is a real token event in the selected range,
+                    // so absence of a fact row is explicitly uncollected data.
+                    (Some(first), Some(last))
+                        if in_selected_range(first) || in_selected_range(last) => {}
+                    // Both endpoints lie on the same known side of the range.
+                    (Some(_), Some(_))
+                        if !(start_date
+                            .is_some_and(|start| first_activity_at.unwrap() < start)
+                            && end_date.is_some_and(|end| last_activity_at.unwrap() > end)) =>
+                    {
+                        continue;
+                    }
+                    // No event timestamps, or an interval spanning the range
+                    // without an endpoint inside it, cannot prove membership.
+                    _ => {
+                        unknown_range_agents += 1;
+                        continue;
+                    }
+                }
+            }
+            missing_usage_agents += 1;
+            for model in &models {
+                missing_model_agents
+                    .entry(model.clone())
+                    .or_default()
+                    .insert(session_id.clone());
+            }
+            "missing"
+        };
+        all_agents.push(CodexSubagentUsageAgent {
+            session_id: session_id.clone(),
+            title: session_id.clone(),
+            agent_nickname: None,
+            agent_role: None,
+            parent_thread_id,
+            depth: None,
+            model_provider: None,
+            cwd: None,
+            primary_model: metadata_model,
+            models,
+            request_count: total.request_count,
+            input_tokens: total.input_tokens,
+            output_tokens: total.output_tokens,
+            cache_read_tokens: total.cache_read_tokens,
+            cache_creation_tokens: total.cache_creation_tokens,
+            total_tokens: total.total_tokens,
+            total_cost: format!("{:.6}", total.total_cost),
+            last_used_at: total.last_used_at,
+            updated_at: None,
+            rollout_path: None,
+            usage_status: usage_status.to_string(),
+            usage_source: if observed {
+                "session_sync".to_string()
+            } else {
+                "none".to_string()
+            },
+        });
+    }
+    all_agents.sort_by(|left, right| {
+        right
+            .total_tokens
+            .cmp(&left.total_tokens)
+            .then_with(|| right.last_used_at.cmp(&left.last_used_at))
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    let parent_ids: Vec<String> = all_agents
+        .iter()
+        .filter_map(|agent| agent.parent_thread_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let parent_direct_usage =
+        query_codex_direct_session_usage(conn, &parent_ids, start_date, end_date)?;
+    let mut parent_groups_by_id = HashMap::new();
+    for agent in &all_agents {
+        let Some(parent_id) = agent.parent_thread_id.as_ref() else {
+            continue;
+        };
+        let group = parent_groups_by_id
+            .entry(parent_id.clone())
+            .or_insert_with(|| CodexSubagentParentUsageGroup {
+                parent_session_id: parent_id.clone(),
+                parent_direct_usage: None,
+                parent_direct_usage_source: "none".to_string(),
+                parent_usage_status: if parent_direct_usage.contains_key(parent_id) {
+                    "unknown_may_overlap".to_string()
+                } else {
+                    "not_observed".to_string()
+                },
+                ..Default::default()
+            });
+        group.child_session_count += 1;
+        if agent.usage_status == "observed" {
+            group.observed_usage_children += 1;
+            group.child_request_count += agent.request_count;
+            group.child_input_tokens += agent.input_tokens;
+            group.child_output_tokens += agent.output_tokens;
+            group.child_cache_read_tokens += agent.cache_read_tokens;
+            group.child_cache_creation_tokens += agent.cache_creation_tokens;
+            group.child_total_tokens += agent.total_tokens;
+        } else {
+            group.missing_usage_children += 1;
+        }
+    }
+    let mut parent_groups: Vec<CodexSubagentParentUsageGroup> =
+        parent_groups_by_id.into_values().collect();
+    parent_groups.sort_by(|left, right| left.parent_session_id.cmp(&right.parent_session_id));
+    let mut model_names: HashSet<String> = model_buckets.keys().cloned().collect();
+    model_names.extend(missing_model_agents.keys().cloned());
+    let mut model_stats: Vec<CodexSubagentModelUsage> = model_names
+        .into_iter()
+        .map(|model| {
+            let (bucket, agents) = model_buckets.remove(&model).unwrap_or_default();
+            let missing = missing_model_agents.remove(&model).unwrap_or_default();
+            CodexSubagentModelUsage {
+                model,
+                agent_count: agents.len() as u64,
+                request_count: bucket.request_count,
+                input_tokens: bucket.input_tokens,
+                output_tokens: bucket.output_tokens,
+                cache_read_tokens: bucket.cache_read_tokens,
+                cache_creation_tokens: bucket.cache_creation_tokens,
+                total_tokens: bucket.total_tokens,
+                total_cost: format!("{:.6}", bucket.total_cost),
+                observed_usage_agents: agents.len() as u64,
+                missing_usage_agents: missing.len() as u64,
+            }
+        })
+        .collect();
+    model_stats.sort_by(|left, right| {
+        right
+            .total_tokens
+            .cmp(&left.total_tokens)
+            .then_with(|| left.model.cmp(&right.model))
+    });
+    let total_agents = all_agents.len() as u64;
+    Ok(CodexSubagentUsageStats {
+        codex_home: String::new(),
+        state_db_path: None,
+        active_db_kind: None,
+        total_agents,
+        agents: all_agents.into_iter().take(display_limit).collect(),
+        model_stats,
+        skipped_reason: None,
+        scanned_history_agents: metadata_inventory_agents,
+        in_range_agents: observed_usage_agents,
+        unknown_range_agents,
+        observed_usage_agents,
+        missing_usage_agents,
+        history_truncated: false,
+        proxy_usage_included: false,
+        parent_groups,
     })
 }
 
@@ -1517,24 +2042,8 @@ impl Database {
         limit: Option<usize>,
     ) -> Result<CodexSubagentUsageStats, AppError> {
         let display_limit = limit.unwrap_or(80).clamp(1, 500);
-        // 历史列表没有 thread_source 专用过滤参数，因此扩大只读窗口后再本地筛 subagent。
-        let fetch_limit = display_limit.saturating_mul(20).clamp(500, 5000);
-        let history = list_codex_history_sessions(CodexHistorySessionListOptions {
-            limit: Some(fetch_limit),
-            include_archived: Some(false),
-            include_subagents: Some(true),
-            source_filter: Some("all".to_string()),
-            skip_rollout_metadata_scan: Some(true),
-            ..Default::default()
-        })?;
         let conn = lock_conn!(self.conn);
-        build_codex_subagent_usage_stats_from_history(
-            &conn,
-            history,
-            start_date,
-            end_date,
-            display_limit,
-        )
+        build_codex_subagent_usage_stats_from_db(&conn, start_date, end_date, display_limit)
     }
 
     /// 获取使用量汇总
@@ -3410,6 +3919,157 @@ mod tests {
     }
 
     #[test]
+    fn db_subagent_stats_uses_collected_metadata_and_excludes_proxy_rows() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS codex_usage_sessions (
+                session_id TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                is_subagent INTEGER NOT NULL,
+                parent_thread_id TEXT,
+                model TEXT,
+                first_activity_at INTEGER,
+                last_activity_at INTEGER,
+                last_seen_at INTEGER NOT NULL
+             );",
+        )?;
+        conn.execute(
+            "INSERT INTO codex_usage_sessions
+                (session_id, file_path, is_subagent, parent_thread_id, model, last_seen_at)
+             VALUES ('child-1', 'fixture.jsonl', 1, 'parent-1', 'gpt-6-astra', 100)",
+            [],
+        )?;
+        insert_usage_log(
+            &conn,
+            "codex-session-row",
+            "codex",
+            "session",
+            "gpt-6-astra",
+            "codex_session",
+            100,
+            10,
+            5,
+            2,
+            0,
+            200,
+            "0.1",
+        )?;
+        conn.execute(
+            "UPDATE proxy_request_logs SET session_id = 'child-1' WHERE request_id = 'codex-session-row'",
+            [],
+        )?;
+        insert_usage_log(
+            &conn,
+            "proxy-row",
+            "codex",
+            "proxy",
+            "gpt-6-astra",
+            "proxy",
+            100,
+            99,
+            99,
+            0,
+            0,
+            200,
+            "9.9",
+        )?;
+        conn.execute(
+            "UPDATE proxy_request_logs SET session_id = 'child-1' WHERE request_id = 'proxy-row'",
+            [],
+        )?;
+        insert_usage_log(
+            &conn,
+            "legacy-parent-row",
+            "codex",
+            "session",
+            "gpt-6-astra",
+            "codex_session",
+            100,
+            7,
+            3,
+            0,
+            0,
+            200,
+            "0.1",
+        )?;
+        conn.execute(
+            "UPDATE proxy_request_logs SET session_id = 'parent-1' WHERE request_id = 'legacy-parent-row'",
+            [],
+        )?;
+
+        let stats = build_codex_subagent_usage_stats_from_db(&conn, Some(90), Some(110), 80)?;
+
+        assert_eq!(stats.total_agents, 1);
+        assert!(!stats.proxy_usage_included);
+        // `input_tokens` is cache-inclusive raw input. The DTO total uses
+        // fresh input (10 - 2) + cache read (2) + output (5), not 10 + 2 + 5.
+        assert_eq!(stats.agents[0].total_tokens, 15);
+        assert_eq!(
+            stats.agents[0].parent_thread_id.as_deref(),
+            Some("parent-1")
+        );
+        assert_eq!(stats.agents[0].usage_source, "session_sync");
+        assert!(stats.parent_groups[0].parent_direct_usage.is_none());
+        assert_eq!(
+            stats.parent_groups[0].parent_usage_status,
+            "unknown_may_overlap"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn db_subagent_stats_does_not_label_old_metadata_as_range_missing() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS codex_usage_sessions (
+                session_id TEXT PRIMARY KEY, file_path TEXT NOT NULL, is_subagent INTEGER NOT NULL,
+                parent_thread_id TEXT, model TEXT, first_activity_at INTEGER, last_activity_at INTEGER,
+                last_seen_at INTEGER NOT NULL
+             );
+             INSERT INTO codex_usage_sessions
+                (session_id, file_path, is_subagent, model, first_activity_at, last_activity_at, last_seen_at)
+             VALUES ('old-child', 'fixture.jsonl', 1, 'gpt-6-astra', 10, 20, 100);",
+        )?;
+
+        let stats = build_codex_subagent_usage_stats_from_db(&conn, Some(90), Some(110), 80)?;
+
+        // Known token-event endpoints are both before the selected range, so
+        // this metadata inventory row is excluded rather than range-unknown.
+        assert_eq!(stats.total_agents, 0);
+        assert_eq!(stats.missing_usage_agents, 0);
+        assert!(stats.agents.is_empty());
+        assert_eq!(stats.unknown_range_agents, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn db_subagent_stats_does_not_treat_a_spanning_activity_interval_as_in_range(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS codex_usage_sessions (
+                session_id TEXT PRIMARY KEY, file_path TEXT NOT NULL, is_subagent INTEGER NOT NULL,
+                parent_thread_id TEXT, model TEXT, first_activity_at INTEGER, last_activity_at INTEGER,
+                last_seen_at INTEGER NOT NULL
+             );
+             INSERT INTO codex_usage_sessions
+                (session_id, file_path, is_subagent, model, first_activity_at, last_activity_at, last_seen_at)
+             VALUES ('spanning-child', 'fixture.jsonl', 1, 'gpt-6-astra', 80, 120, 120);",
+        )?;
+
+        let stats = build_codex_subagent_usage_stats_from_db(&conn, Some(90), Some(110), 80)?;
+
+        assert_eq!(stats.total_agents, 0);
+        assert_eq!(stats.scanned_history_agents, 1);
+        assert_eq!(stats.missing_usage_agents, 0);
+        assert_eq!(stats.unknown_range_agents, 1);
+        Ok(())
+    }
+
+    #[test]
     fn test_codex_subagent_usage_stats_only_counts_subagent_session_rows() -> Result<(), AppError> {
         let db = Database::memory()?;
         let conn = lock_conn!(db.conn);
@@ -3460,18 +4120,28 @@ mod tests {
         )?;
 
         assert_eq!(stats.total_agents, 1);
+        assert_eq!(stats.scanned_history_agents, 1);
+        assert_eq!(stats.in_range_agents, 1);
+        assert_eq!(stats.unknown_range_agents, 0);
+        assert_eq!(stats.observed_usage_agents, 1);
+        assert_eq!(stats.missing_usage_agents, 0);
+        assert!(!stats.proxy_usage_included);
         assert_eq!(stats.agents.len(), 1);
         assert_eq!(stats.agents[0].session_id, "sub-1");
+        assert_eq!(stats.agents[0].usage_status, "observed");
+        assert_eq!(stats.agents[0].usage_source, "session_sync");
         assert_eq!(stats.agents[0].request_count, 1);
         assert_eq!(stats.agents[0].models, vec!["qwen3.6".to_string()]);
-        assert_eq!(stats.agents[0].total_tokens, 160);
+        assert_eq!(stats.agents[0].total_tokens, 150);
         assert_eq!(stats.agents[0].total_cost, "0.120000");
 
         assert_eq!(stats.model_stats.len(), 1);
         assert_eq!(stats.model_stats[0].model, "qwen3.6");
         assert_eq!(stats.model_stats[0].agent_count, 1);
+        assert_eq!(stats.model_stats[0].observed_usage_agents, 1);
+        assert_eq!(stats.model_stats[0].missing_usage_agents, 0);
         assert_eq!(stats.model_stats[0].request_count, 1);
-        assert_eq!(stats.model_stats[0].total_tokens, 160);
+        assert_eq!(stats.model_stats[0].total_tokens, 150);
 
         Ok(())
     }
@@ -3492,7 +4162,6 @@ mod tests {
                     "source": {
                         "subagent": {
                             "thread_spawn": {
-                                "parent_thread_id": "parent-thread",
                                 "agent_nickname": "Flash Worker",
                                 "agent_role": "deepseek-flash"
                             }
@@ -3567,7 +4236,7 @@ mod tests {
 
         assert_eq!(stats.total_agents, 1);
         assert_eq!(stats.agents[0].request_count, 2);
-        assert_eq!(stats.agents[0].total_tokens, 225);
+        assert_eq!(stats.agents[0].total_tokens, 195);
         assert_eq!(
             stats.agents[0].models,
             vec!["deepseek-v4-flash".to_string()]
@@ -3576,7 +4245,7 @@ mod tests {
         assert_eq!(stats.model_stats[0].model, "deepseek-v4-flash");
         assert_eq!(stats.model_stats[0].agent_count, 1);
         assert_eq!(stats.model_stats[0].request_count, 2);
-        assert_eq!(stats.model_stats[0].total_tokens, 225);
+        assert_eq!(stats.model_stats[0].total_tokens, 195);
 
         Ok(())
     }
@@ -3598,7 +4267,6 @@ mod tests {
                     "source": {
                         "subagent": {
                             "thread_spawn": {
-                                "parent_thread_id": "parent-thread",
                                 "agent_nickname": "Official Worker",
                                 "agent_role": "codex-spark-worker"
                             }
@@ -3670,16 +4338,17 @@ mod tests {
 
         assert_eq!(stats.total_agents, 1);
         assert_eq!(stats.agents[0].request_count, 2);
-        assert_eq!(stats.agents[0].input_tokens, 1000);
+        // Codex token snapshots include cached reads in input; DTO exposes fresh input.
+        assert_eq!(stats.agents[0].input_tokens, 750);
         assert_eq!(stats.agents[0].cache_read_tokens, 250);
         assert_eq!(stats.agents[0].output_tokens, 300);
-        assert_eq!(stats.agents[0].total_tokens, 1550);
+        assert_eq!(stats.agents[0].total_tokens, 1300);
         assert_eq!(stats.agents[0].models, vec!["gpt-5.5".to_string()]);
         assert_eq!(stats.model_stats.len(), 1);
         assert_eq!(stats.model_stats[0].model, "gpt-5.5");
         assert_eq!(stats.model_stats[0].agent_count, 1);
         assert_eq!(stats.model_stats[0].request_count, 2);
-        assert_eq!(stats.model_stats[0].total_tokens, 1550);
+        assert_eq!(stats.model_stats[0].total_tokens, 1300);
 
         Ok(())
     }
@@ -3700,7 +4369,6 @@ mod tests {
                     "source": {
                         "subagent": {
                             "thread_spawn": {
-                                "parent_thread_id": "parent-thread",
                                 "agent_role": "qwen-local"
                             }
                         }
@@ -3743,10 +4411,13 @@ mod tests {
         )?;
 
         assert_eq!(stats.agents[0].request_count, 0);
+        assert_eq!(stats.agents[0].usage_status, "missing");
         assert_eq!(stats.agents[0].models, vec!["qwen3.6".to_string()]);
         assert_eq!(stats.model_stats.len(), 1);
         assert_eq!(stats.model_stats[0].model, "qwen3.6");
-        assert_eq!(stats.model_stats[0].agent_count, 1);
+        assert_eq!(stats.model_stats[0].agent_count, 0);
+        assert_eq!(stats.model_stats[0].observed_usage_agents, 0);
+        assert_eq!(stats.model_stats[0].missing_usage_agents, 1);
         assert_eq!(stats.model_stats[0].request_count, 0);
         assert_eq!(stats.model_stats[0].total_tokens, 0);
 
@@ -3823,7 +4494,7 @@ mod tests {
         );
         assert_eq!(stats.model_stats.len(), 2);
         assert_eq!(stats.model_stats[0].model, "deepseek-v4-flash");
-        assert_eq!(stats.model_stats[0].total_tokens, 28);
+        assert_eq!(stats.model_stats[0].total_tokens, 27);
         assert_eq!(stats.model_stats[1].model, "qwen3.6");
         assert_eq!(stats.model_stats[1].total_tokens, 15);
 

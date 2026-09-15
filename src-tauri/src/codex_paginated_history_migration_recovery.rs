@@ -709,6 +709,54 @@ mod tests {
             .expect("projection cursor");
     }
 
+    /// 真实数据回归：provider 改写（`openai` → `codex_model_router_v2`，每条 +15 字节）
+    /// 之后的投影游标字节偏移会落在记录中间。其可核验映射只存在于
+    /// `codex-history-current-desktop-visibility-repair-v1` 快照世代里；该世代原先
+    /// 不在扫描列表中，导致 1129 个会话长期停留在“分页历史：保持原样”。
+    #[test]
+    fn visibility_repair_snapshot_generation_is_scanned_and_repairs_shifted_cursor() {
+        let backup_parents =
+            crate::codex_history_migration::codex_history_provider_migration_backup_parents();
+        assert!(
+            backup_parents
+                .iter()
+                .any(|path| path.file_name().and_then(|name| name.to_str())
+                    == Some("codex-history-current-desktop-visibility-repair-v1")),
+            "visibility repair snapshot must be a scanned backup parent: {backup_parents:?}"
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let thread_id = "01a00000-0000-7000-8000-000000000084";
+        let name = format!("rollout-{thread_id}.jsonl");
+        let current = temp.path().join(&name);
+        let backup_text = format!(
+            "{{\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread_id}\",\"history_mode\":\"paginated\",\"model_provider\":\"openai\"}}}}\n{{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\"}}}}\n"
+        );
+        let current_text = backup_text.replace("openai", "codex_model_router_v2");
+        assert_eq!(current_text.len(), backup_text.len() + 15);
+        fs::write(&current, current_text.as_bytes()).expect("current rollout");
+        let generation = temp
+            .path()
+            .join("codex-history-current-desktop-visibility-repair-v1/20260910_093845");
+        fs::create_dir_all(generation.join("jsonl")).expect("backup dir");
+        fs::write(generation.join("jsonl").join(&name), backup_text.as_bytes())
+            .expect("backup rollout");
+        let projection = temp.path().join("thread_history_1.sqlite");
+        write_projection(&projection, thread_id, backup_text.len() as u64, 2);
+
+        let plan = build_plan(
+            &projection,
+            &[(thread_id.to_string(), current.clone())],
+            std::slice::from_ref(&current),
+            std::slice::from_ref(&generation),
+        );
+
+        assert!(plan.blocked.is_empty(), "{:?}", plan.blocked);
+        assert_eq!(plan.cursor_repairs.len(), 1);
+        assert_eq!(plan.cursor_repairs[0].old_offset, backup_text.len() as u64);
+        assert_eq!(plan.cursor_repairs[0].new_offset, current_text.len() as u64);
+    }
+
     #[test]
     fn recovery_plan_repairs_provider_shifted_cursor_and_history_base_together() {
         let temp = tempfile::tempdir().expect("tempdir");

@@ -323,6 +323,30 @@ pub struct ProxyService {
     switch_locks: SwitchLockManager,
     pub(crate) codex_guardian: Arc<Mutex<Option<GuardianHandle>>>,
     pub(crate) codex_guardian_status: Arc<Mutex<codex_guardian::CodexGuardianStatus>>,
+    /// 启动恢复失败但端口只是被临时占用时保留的接管意图。
+    ///
+    /// 覆盖安装/强杀会在监听端口上留下一个当前用户无法核验的占用者；旧实现
+    /// 直接清除 takeover 状态，于是占用者消失后也没有任何重试，用户只能手动
+    /// 重新启用。这里保留一个有期限的待恢复意图，交给 5 秒监听守护重试。
+    pending_takeover_restore: Arc<Mutex<Option<PendingTakeoverRestore>>>,
+}
+
+/// 有期限的「端口释放后自动恢复接管」意图。
+#[derive(Debug, Clone)]
+pub(crate) struct PendingTakeoverRestore {
+    pub app_type: String,
+    pub deadline: std::time::Instant,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+}
+
+/// 自动重试窗口。覆盖安装后残留占用通常在一两分钟内消失；超时后交回用户。
+pub(crate) const PENDING_TAKEOVER_RESTORE_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
+
+/// 端口占用守卫的前缀，用于把「端口被占用」与其它恢复失败区分开。
+pub(crate) fn is_port_ownership_guard_error(error: &str) -> bool {
+    error.trim_start().starts_with(PORT_OWNERSHIP_GUARD_PREFIX)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -358,6 +382,7 @@ impl ProxyService {
                 last_event: String::new(),
                 message: String::new(),
             })),
+            pending_takeover_restore: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1129,32 +1154,76 @@ impl ProxyService {
                         .await
                         .map_err(|e| format!("获取代理端口失败: {e}"))?
                         .listen_port;
-                    match probe_proxy_port(listen_port).await {
-                        PortOwnership::CompatibleInstance => {
-                            log::warn!(
+                    // 已死 PID 的 LISTEN 行说明端口被残留 socket 占着：先释放本产品
+                    // 自己的残留子进程，再重试一次启动。
+                    if let Some(stale_owner) = Self::stale_listener_owner_pid(listen_port) {
+                        match self
+                            .release_stale_listener_holders(stale_owner, listen_port)
+                            .await
+                        {
+                            Ok(released) if released > 0 => {
+                                if self.start().await.is_ok() {
+                                    log::info!(
+                                        "已释放端口 {listen_port} 的残留监听持有者（{released} 个进程），代理服务重新启动成功"
+                                    );
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                log::warn!("释放端口 {listen_port} 的残留监听持有者失败: {error}")
+                            }
+                        }
+                    }
+                    if self.is_running().await {
+                        log::info!("代理服务已在端口 {listen_port} 上运行，跳过端口占用判定");
+                    } else {
+                        match probe_proxy_port(listen_port).await {
+                            PortOwnership::CompatibleInstance => {
+                                log::warn!(
                                 "端口 {listen_port} 已由同配置作用域、同运行协议的 CCSwitchMulti 实例占用；本实例仅复用该监听，不会终止其进程"
                             );
-                            let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                                let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
                                 "proxy_listener_ownership",
                                 crate::services::recovery_outcome::RecoveryOutcomeKind::PortOwnedByCompatibleInstance,
                                 crate::services::recovery_outcome::RecoverySeverity::Info,
                                 app_type_str,
                             );
-                            outcome.kept_fields = vec!["listener".to_string()];
-                            crate::services::recovery_outcome::record_best_effort(outcome);
-                        }
-                        PortOwnership::UnknownOwner | PortOwnership::Unreachable => {
-                            let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                                outcome.kept_fields = vec!["listener".to_string()];
+                                crate::services::recovery_outcome::record_best_effort(outcome);
+                            }
+                            PortOwnership::UnknownOwner | PortOwnership::Unreachable => {
+                                // 端口只被本进程自己的残留连接占着（没有外部监听者）：这不是
+                                // “身份不明的程序”，不给用户报错、也不记录恢复结果，等连接释放
+                                // 后由重试自动恢复即可（stop() 也会主动中止这些连接）。
+                                if let Some(current) =
+                                    crate::process_identity::current_process_identity()
+                                {
+                                    if crate::process_identity::port_rows_all_owned_by(
+                                        listen_port,
+                                        current.pid,
+                                    ) {
+                                        log::warn!(
+                                        "端口 {listen_port} 当前只被本进程的残留连接占用，等待其释放后重试"
+                                    );
+                                        return Err(format!(
+                                        "{PORT_OWNERSHIP_GUARD_PREFIX}: 端口 {listen_port} 只被本进程的残留连接占用，正在等待释放（原始错误: {start_error}）"
+                                    ));
+                                    }
+                                }
+                                let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
                                 "proxy_listener_ownership",
                                 crate::services::recovery_outcome::RecoveryOutcomeKind::PortOwnedByUnknownOwner,
                                 crate::services::recovery_outcome::RecoverySeverity::Error,
                                 app_type_str,
                             );
-                            outcome.next_step = Some("changeProxyPortOrInspectOwner".to_string());
-                            crate::services::recovery_outcome::record_best_effort(outcome);
-                            return Err(format!(
-                                "{PORT_OWNERSHIP_GUARD_PREFIX}: 代理端口 {listen_port} 的监听进程身份无法完整验证；CCSwitchMulti 不会结束或接管该进程（原始错误: {start_error}）"
+                                outcome.next_step =
+                                    Some("changeProxyPortOrInspectOwner".to_string());
+                                crate::services::recovery_outcome::record_best_effort(outcome);
+                                return Err(format!(
+                                "{PORT_OWNERSHIP_GUARD_PREFIX}: 代理端口 {listen_port} 的监听进程身份无法完整验证；CCSwitchMulti 不会结束或接管该进程（原始错误: {start_error}）。{}",
+                                crate::process_identity::describe_port_blockers(listen_port)
                             ));
+                            }
                         }
                     }
                 }
@@ -1357,6 +1426,101 @@ impl ProxyService {
     /// This is intentionally stricter than a generic "kill port owner" action: the
     /// listener must still belong to the exact same executable as this process, and
     /// its PID/start time are revalidated immediately before termination.
+    /// 一个监听 socket 可能在创建它的进程退出后仍然存活：另一个存活进程持有该
+    /// handle 的复制品（本机已复现：把监听 socket 复制给子进程后杀掉父进程，TCP 表
+    /// 里的 LISTEN 行仍指向已死的父 PID，bind 报 10048）。此时按 PID 既无法核验也
+    /// 无法终止，只能释放**本产品自己的**残留子进程，其它进程继续 fail-closed。
+    pub(crate) async fn release_stale_listener_holders(
+        &self,
+        owner_pid: u32,
+        port: u16,
+    ) -> Result<u32, String> {
+        let install_dir = crate::process_identity::current_executable_path().and_then(|path| {
+            path.parent()
+                .map(|parent| parent.to_string_lossy().to_string())
+        });
+        let children = crate::process_identity::child_processes_of(owner_pid);
+        let mut released = 0u32;
+        for child in children {
+            if !crate::process_identity::is_product_helper_image(
+                &child.name,
+                &child.executable_path,
+                install_dir.as_deref(),
+            ) {
+                log::warn!(
+                    "残留监听 PID {owner_pid} 的子进程 {}（{}）不属于本产品，拒绝终止",
+                    child.pid,
+                    child.name
+                );
+                continue;
+            }
+            let Some(identity) = crate::process_identity::process_identity(child.pid) else {
+                continue;
+            };
+            if identity.pid != child.pid {
+                continue;
+            }
+            match crate::process_identity::terminate_verified_process(&identity) {
+                Ok(()) => {
+                    released = released.saturating_add(1);
+                    log::warn!(
+                        "已终止残留监听持有子进程 {}（{}），用于释放端口 {port}",
+                        child.pid,
+                        child.name
+                    );
+                }
+                Err(error) => log::warn!("终止残留监听持有子进程 {} 失败: {error}", child.pid),
+            }
+        }
+        if released > 0 {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match crate::process_identity::tcp_listener_owner_pid(port) {
+                    None => break,
+                    Some(pid) if pid != owner_pid => break,
+                    _ if tokio::time::Instant::now() < deadline => {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                    }
+                    _ => break,
+                }
+            }
+        }
+        Ok(released)
+    }
+
+    /// 端口当前的 LISTEN 行是否指向一个已经退出的 PID（残留监听）。
+    pub(crate) fn stale_listener_owner_pid(port: u16) -> Option<u32> {
+        let owner = crate::process_identity::tcp_listener_owner_pid(port)?;
+        // 判定标准是“这个 PID 是否还存在”，而不是 OpenProcess 的错误码：进程刚被终止时
+        // 可能返回 ERROR_GEN_FAILURE(31)，实测就是这样漏掉了一次残留释放。
+        if crate::process_identity::process_exists(owner) {
+            None
+        } else {
+            Some(owner)
+        }
+    }
+
+    /// 残留监听被释放后端口已经变空：直接完成接管恢复。
+    async fn complete_forced_recovery_without_owner(
+        &self,
+        app: &AppType,
+        port: u16,
+    ) -> Result<ForcedPortRecoveryResult, String> {
+        self.set_takeover_for_app(app.as_str(), true).await?;
+        let running = self.is_running().await;
+        let live_matches = self.live_takeover_matches_current_proxy(app).await?;
+        if !running || !live_matches {
+            return Err(format!(
+                "端口 {port} 已释放，但接管校验失败：proxy_running={running}, live_matches={live_matches}"
+            ));
+        }
+        Ok(ForcedPortRecoveryResult {
+            app_type: app.as_str().to_string(),
+            port,
+            released_pid: None,
+            takeover_restored: true,
+        })
+    }
     pub async fn force_release_proxy_port_and_restore_takeover(
         &self,
         app_type: &str,
@@ -1373,8 +1537,60 @@ impl ProxyService {
         if let Some(owner_pid) = crate::process_identity::tcp_listener_owner_pid(port) {
             let current = crate::process_identity::current_process_identity()
                 .ok_or_else(|| "无法读取当前 CCSM 进程身份，已拒绝强制恢复".to_string())?;
-            let owner = crate::process_identity::process_identity(owner_pid)
-                .ok_or_else(|| format!("无法读取端口 {port} 的监听进程身份，已拒绝强制恢复"))?;
+            let owner = match crate::process_identity::process_identity_result(owner_pid) {
+                Ok(owner) => owner,
+                Err(identity_error) => {
+                    // 创建者已退出、LISTEN 行仍在 = socket 句柄活在别的进程里。
+                    // 先释放本产品自己的残留子进程；端口真正空出来后按“端口已释放”
+                    // 继续恢复接管，不再把用户卡在无法解除的错误上。
+                    if !crate::process_identity::process_exists(owner_pid) {
+                        match self.release_stale_listener_holders(owner_pid, port).await {
+                            Ok(released)
+                                if released > 0
+                                    && crate::process_identity::tcp_listener_owner_pid(port)
+                                        .is_none() =>
+                            {
+                                log::warn!(
+                                    "端口 {port} 的残留监听（PID {owner_pid} 已退出）已释放：终止了 {released} 个本产品残留子进程"
+                                );
+                                return self
+                                    .complete_forced_recovery_without_owner(&app, port)
+                                    .await;
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                log::warn!("释放端口 {port} 的残留监听持有者失败: {error}")
+                            }
+                        }
+                    }
+                    // 读不到对端进程身份时必须保持 fail-closed（既不能核验、也
+                    // 没有权限终止），但要把「到底是谁、为什么读不到」讲清楚，
+                    // 否则现场只能看到一个无法排查的错误。
+                    let status_note = match read_proxy_status_payload(port).await {
+                        Some(payload) => format!(
+                            "该端口仍在响应 CCSM /status（app={}, version={}, listener_role={}）",
+                            payload
+                                .get("app")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown"),
+                            payload
+                                .get("version")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown"),
+                            payload
+                                .get("listener_role")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown"),
+                        ),
+                        None => "该端口没有响应 CCSM /status".to_string(),
+                    };
+                    return Err(format!(
+                        "无法读取端口 {port} 的监听进程身份（PID {owner_pid}：{}），已拒绝强制恢复；{status_note}。{}",
+                        identity_error.detail(),
+                        crate::process_identity::describe_port_blockers(port)
+                    ));
+                }
+            };
 
             let expected_config_scope = crate::process_identity::config_scope_fingerprint();
             let verified_previous_ccswitch_listener = match read_proxy_status_payload(port).await {
@@ -1519,8 +1735,117 @@ impl ProxyService {
                         }
                     }
                 }
+                service.retry_pending_takeover_restore().await;
             }
         });
+    }
+
+    /// 记录一个「端口释放后自动恢复接管」意图。
+    ///
+    /// 只有端口占用类失败才会走到这里：其它失败（配置损坏、备份缺失等）重复
+    /// 重试没有意义，仍然由启动流程一次性报错。
+    pub async fn schedule_pending_takeover_restore(
+        &self,
+        app_type: &str,
+        window: std::time::Duration,
+    ) {
+        let mut pending = self.pending_takeover_restore.lock().await;
+        let deadline = std::time::Instant::now() + window;
+        match pending.as_mut() {
+            Some(existing) if existing.app_type == app_type => {
+                existing.deadline = deadline;
+                existing.last_error = None;
+            }
+            _ => {
+                *pending = Some(PendingTakeoverRestore {
+                    app_type: app_type.to_string(),
+                    deadline,
+                    attempts: 0,
+                    last_error: None,
+                });
+            }
+        }
+        log::warn!(
+            "端口被占用：已登记 {app_type} 的自动恢复接管意图，窗口 {:?}",
+            window
+        );
+    }
+
+    async fn clear_pending_takeover_restore(&self) -> Option<String> {
+        self.pending_takeover_restore
+            .lock()
+            .await
+            .take()
+            .map(|pending| pending.app_type)
+    }
+
+    /// 每 5 秒由监听守护调用一次；在窗口期内重试端口占用导致的启动恢复失败。
+    async fn retry_pending_takeover_restore(&self) {
+        let pending = { self.pending_takeover_restore.lock().await.clone() };
+        let Some(pending) = pending else {
+            return;
+        };
+
+        if self.is_running().await {
+            self.clear_pending_takeover_restore().await;
+            return;
+        }
+
+        if std::time::Instant::now() >= pending.deadline {
+            self.clear_pending_takeover_restore().await;
+            log::error!(
+                "{} 的自动恢复接管已超时（累计尝试 {} 次），停止重试；最后一次错误: {}",
+                pending.app_type,
+                pending.attempts,
+                pending.last_error.as_deref().unwrap_or("unknown")
+            );
+            let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                "startup_takeover_restore",
+                crate::services::recovery_outcome::RecoveryOutcomeKind::StartupTakeoverFailed,
+                crate::services::recovery_outcome::RecoverySeverity::Error,
+                pending.app_type,
+            );
+            outcome.lost_fields = vec!["takeover".to_string()];
+            outcome.next_step = Some("openLogsOrRetryTakeover".to_string());
+            crate::services::recovery_outcome::record_best_effort(outcome);
+            return;
+        }
+
+        match self.set_takeover_for_app(&pending.app_type, true).await {
+            Ok(()) => {
+                self.clear_pending_takeover_restore().await;
+                log::info!(
+                    "端口释放后已自动恢复 {} 的代理接管（累计尝试 {} 次）",
+                    pending.app_type,
+                    pending.attempts + 1
+                );
+                let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                    "startup_takeover_restore",
+                    crate::services::recovery_outcome::RecoveryOutcomeKind::StartupTakeoverRestored,
+                    crate::services::recovery_outcome::RecoverySeverity::Info,
+                    pending.app_type.clone(),
+                );
+                outcome.kept_fields = vec!["takeover".to_string()];
+                crate::services::recovery_outcome::record_best_effort(outcome);
+                crate::services::recovery_outcome::resolve_port_busy_outcomes(&pending.app_type);
+            }
+            Err(error) => {
+                let mut slot = self.pending_takeover_restore.lock().await;
+                if let Some(existing) = slot.as_mut() {
+                    if existing.app_type == pending.app_type {
+                        existing.attempts = existing.attempts.saturating_add(1);
+                        let first_seen = existing.last_error.is_none();
+                        existing.last_error = Some(error.clone());
+                        if first_seen {
+                            log::warn!(
+                                "自动恢复 {} 的代理接管仍然失败，将继续重试: {error}",
+                                pending.app_type
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// 在 provider 切换锁内关闭单个 app 的代理接管。
@@ -1537,12 +1862,12 @@ impl ProxyService {
             .db
             .get_proxy_config_for_app(app_type_str)
             .await
-            .map_err(|e| format!("鑾峰彇 {app_type_str} 閰嶇疆澶辫触: {e}"))?;
+            .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
         let has_backup = self
             .db
             .get_live_backup(app_type_str)
             .await
-            .map_err(|e| format!("璇诲彇 {app_type_str} Live 澶囦唤澶辫触: {e}"))?
+            .map_err(|e| format!("读取 {app_type_str} Live 备份失败: {e}"))?
             .is_some();
         let live_taken_over = self.detect_takeover_in_live_config_for_app(app);
 
@@ -1563,23 +1888,23 @@ impl ProxyService {
         self.db
             .delete_live_backup(app_type_str)
             .await
-            .map_err(|e| format!("鍒犻櫎 {app_type_str} Live 澶囦唤澶辫触: {e}"))?;
+            .map_err(|e| format!("删除 {app_type_str} Live 备份失败: {e}"))?;
 
         let mut updated_config = self
             .db
             .get_proxy_config_for_app(app_type_str)
             .await
-            .map_err(|e| format!("鑾峰彇 {app_type_str} 閰嶇疆澶辫触: {e}"))?;
+            .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
         updated_config.enabled = false;
         self.db
             .update_proxy_config_for_app(updated_config)
             .await
-            .map_err(|e| format!("娓呴櫎 {app_type_str} enabled 鐘舵€佸け璐? {e}"))?;
+            .map_err(|e| format!("清除 {app_type_str} enabled 状态失败: {e}"))?;
 
         self.db
             .clear_provider_health_for_app(app_type_str)
             .await
-            .map_err(|e| format!("娓呴櫎 {app_type_str} 鍋ュ悍鐘舵€佸け璐? {e}"))?;
+            .map_err(|e| format!("清除 {app_type_str} 健康状态失败: {e}"))?;
 
         let any_enabled = self
             .db
@@ -5292,6 +5617,196 @@ mod tests {
 
     fn assert_env_str(env: &Map<String, Value>, key: &str, expected: Option<&str>) {
         assert_eq!(env.get(key).and_then(|value| value.as_str()), expected);
+    }
+
+    #[test]
+    fn stale_listener_owner_pid_ignores_a_live_owner() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let port = listener.local_addr().expect("listener address").port();
+        assert_eq!(ProxyService::stale_listener_owner_pid(port), None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn release_stale_listener_holders_never_touches_foreign_children() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping", "-n", "11", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn foreign child");
+
+        let released = service
+            .release_stale_listener_holders(std::process::id(), 15999)
+            .await
+            .expect("release helper");
+        assert_eq!(released, 0, "foreign children must never be terminated");
+        let alive = crate::process_identity::process_identity(child.id()).is_some();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            alive,
+            "foreign child must survive the stale-listener release"
+        );
+    }
+
+    #[test]
+    fn port_ownership_guard_errors_are_distinguishable_from_other_failures() {
+        assert!(is_port_ownership_guard_error(
+            "PORT_OWNERSHIP_GUARD: 代理端口 15721 的监听进程身份无法完整验证"
+        ));
+        assert!(is_port_ownership_guard_error(
+            "   PORT_OWNERSHIP_GUARD: 端口已处理但接管校验失败"
+        ));
+        assert!(!is_port_ownership_guard_error(
+            "启动代理服务器失败: 地址绑定失败: 127.0.0.1:15721 已被占用"
+        ));
+        assert!(!is_port_ownership_guard_error(""));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pending_takeover_restore_keeps_one_bounded_intent() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+
+        assert!(service.pending_takeover_restore.lock().await.is_none());
+
+        service
+            .schedule_pending_takeover_restore("codex", std::time::Duration::from_secs(60))
+            .await;
+        {
+            let slot = service.pending_takeover_restore.lock().await;
+            let pending = slot.as_ref().expect("pending intent registered");
+            assert_eq!(pending.app_type, "codex");
+            assert_eq!(pending.attempts, 0);
+            assert!(pending.last_error.is_none());
+        }
+
+        // 同一 app 重复登记只刷新截止时间，不叠加多个意图。
+        service
+            .schedule_pending_takeover_restore("codex", std::time::Duration::from_secs(90))
+            .await;
+        assert_eq!(
+            service
+                .pending_takeover_restore
+                .lock()
+                .await
+                .as_ref()
+                .map(|pending| pending.app_type.as_str()),
+            Some("codex")
+        );
+
+        service
+            .schedule_pending_takeover_restore("claude", std::time::Duration::from_secs(30))
+            .await;
+        assert_eq!(
+            service
+                .pending_takeover_restore
+                .lock()
+                .await
+                .as_ref()
+                .map(|pending| pending.app_type.as_str()),
+            Some("claude")
+        );
+
+        // 超时后停止重试并丢弃意图，交回用户处理。
+        service
+            .schedule_pending_takeover_restore("codex", std::time::Duration::from_millis(0))
+            .await;
+        service.retry_pending_takeover_restore().await;
+        assert!(service.pending_takeover_restore.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pending_takeover_restore_recovers_once_the_blocking_port_frees_up() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+
+        // 用普通监听占住配置端口，模拟覆盖安装后残留的、无法核验的占用者。
+        let blocker = std::net::TcpListener::bind("127.0.0.1:0").expect("bind blocker");
+        let blocked_port = blocker.local_addr().expect("blocker address").port();
+        let mut proxy_config = db.get_proxy_config().await.expect("get proxy config");
+        proxy_config.listen_port = blocked_port;
+        db.update_proxy_config(proxy_config)
+            .await
+            .expect("set blocked listen port");
+
+        let service = ProxyService::new(db.clone());
+        crate::codex_config::write_codex_live_atomic(&json!({}), Some("model = \"gpt-5.4\"\n"))
+            .expect("seed codex live config");
+        let mut provider = Provider::with_id(
+            "codex-third".to_string(),
+            "Third".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "third-key" },
+                "config": "model_provider = \"third\"\n\n[model_providers.third]\nname = \"Third\"\nbase_url = \"https://third.example/v1\"\nwire_api = \"responses\"\n"
+            }),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        db.save_provider("codex", &provider)
+            .expect("save codex provider");
+        db.set_current_provider("codex", "codex-third")
+            .expect("set db current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("codex-third"))
+            .expect("set local current provider");
+
+        let error = service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect_err("a blocked port must fail closed");
+        assert!(
+            is_port_ownership_guard_error(&error),
+            "unexpected startup error: {error}"
+        );
+        assert!(!service.is_running().await);
+
+        service
+            .schedule_pending_takeover_restore("codex", std::time::Duration::from_secs(60))
+            .await;
+        service.retry_pending_takeover_restore().await;
+        {
+            let slot = service.pending_takeover_restore.lock().await;
+            let pending = slot.as_ref().expect("intent kept while still blocked");
+            assert_eq!(pending.attempts, 1);
+            assert!(
+                pending
+                    .last_error
+                    .as_deref()
+                    .is_some_and(is_port_ownership_guard_error),
+                "retry must record the port-ownership failure"
+            );
+        }
+
+        drop(blocker);
+        service.retry_pending_takeover_restore().await;
+
+        assert!(service.pending_takeover_restore.lock().await.is_none());
+        assert!(
+            service.is_running().await,
+            "proxy must be serving again after the port frees up"
+        );
+        assert!(
+            service
+                .get_takeover_status()
+                .await
+                .expect("takeover status")
+                .codex,
+            "codex takeover must be restored automatically"
+        );
     }
 
     #[test]

@@ -9,6 +9,10 @@ param(
     [string]$MaintenanceMarker = "$env:LOCALAPPDATA\CCSwitchMultiGuardian\maintenance.lock",
     [string]$LogPath = "$env:LOCALAPPDATA\CCSwitchMultiGuardian\guardian.jsonl",
     [string]$LockPath = "$env:LOCALAPPDATA\CCSwitchMultiGuardian\guardian.lock",
+    [string]$ConfigPath = "$env:USERPROFILE\.cc-switch",
+    [int]$MaxRestartsPerWindow = 6,
+    [int]$RestartWindowMinutes = 30,
+    [switch]$RestartOnCleanExit,
     [int]$MaxCycles = 0,
     [switch]$NoRestart,
     [switch]$PlanOnly
@@ -134,6 +138,10 @@ $plan = [ordered]@{
     MaintenanceMarker = ConvertTo-CcsmGuardianCanonicalPath -Path $MaintenanceMarker
     LogPath = ConvertTo-CcsmGuardianCanonicalPath -Path $LogPath
     LockPath = ConvertTo-CcsmGuardianCanonicalPath -Path $LockPath
+    ConfigPath = ConvertTo-CcsmGuardianCanonicalPath -Path $ConfigPath
+    MaxRestartsPerWindow = $MaxRestartsPerWindow
+    RestartWindowMinutes = $RestartWindowMinutes
+    RestartOnCleanExit = [bool]$RestartOnCleanExit
     NoRestart = [bool]$NoRestart
 }
 if ($PlanOnly) {
@@ -151,8 +159,10 @@ try {
         [System.IO.FileShare]::None
     )
     $state = [pscustomobject]@{ FailureSinceUtc = $null }
+    $restartTimesUtc = New-Object "System.Collections.Generic.List[datetime]"
     $cycles = 0
     Write-CcsmGuardianEvent -Level "info" -Event "guardian-started" -Detail $plan
+    try {
     while ($true) {
         $cycles++
         $isMaintenance = { Test-CcsmGuardianMaintenance }
@@ -173,6 +183,29 @@ try {
                 Write-CcsmGuardianEvent -Level "warning" -Event "restart-suppressed" -Detail @{ Port = $Port }
                 return
             }
+            # 只重启“异常死亡”的实例：应用正常退出（含托盘退出）时会自己移除运行标记，
+            # 此时不重启，避免用户主动退出后被守护反复拉起。
+            if (-not $RestartOnCleanExit) {
+                $uncleanExit = Test-CcsmGuardianUncleanExit -ConfigPath $ConfigPath -GetProcessIdentity {
+                    param($ProcessId) Get-CcsmGuardianProcessIdentity -ProcessId $ProcessId
+                }
+                if (-not $uncleanExit) {
+                    Write-CcsmGuardianEvent -Level "info" -Event "restart-skipped-clean-exit" -Detail @{ Port = $Port }
+                    return
+                }
+            }
+            $budgetOk = Test-CcsmGuardianRestartBudget -RestartTimesUtc $restartTimesUtc.ToArray() `
+                -NowUtc ([datetime]::UtcNow) -WindowMinutes $RestartWindowMinutes -MaxRestarts $MaxRestartsPerWindow
+            if (-not $budgetOk) {
+                Write-CcsmGuardianEvent -Level "warning" -Event "restart-rate-limited" -Detail @{
+                    Port = $Port
+                    WindowMinutes = $RestartWindowMinutes
+                    MaxRestarts = $MaxRestartsPerWindow
+                    RestartsInWindow = $restartTimesUtc.Count
+                }
+                return
+            }
+            $restartTimesUtc.Add([datetime]::UtcNow)
             Invoke-CcsmGuardianRecovery -InstalledExecutable $InstalledExecutable `
                 -IsMaintenance $isMaintenance `
                 -InstalledExecutableExists { Test-Path -LiteralPath $InstalledExecutable -PathType Leaf } `
@@ -195,11 +228,17 @@ try {
                 -WaitReady { param($ProcessId) Wait-CcsmGuardianReady -ExpectedPid $ProcessId } `
                 -WriteEvent $writeEvent
         }
-        Invoke-CcsmGuardianIteration -State $state -NowUtc ([datetime]::UtcNow) `
-            -FailureThresholdSeconds $FailureThresholdSeconds -IsMaintenance $isMaintenance `
-            -InspectRuntime $inspectRuntime -Recover $recover -WriteEvent $writeEvent
+        Invoke-CcsmGuardianSafeIteration -WriteEvent $writeEvent -Action {
+            Invoke-CcsmGuardianIteration -State $state -NowUtc ([datetime]::UtcNow) `
+                -FailureThresholdSeconds $FailureThresholdSeconds -IsMaintenance $isMaintenance `
+                -InspectRuntime $inspectRuntime -Recover $recover -WriteEvent $writeEvent
+        } | Out-Null
         if ($MaxCycles -gt 0 -and $cycles -ge $MaxCycles) { break }
         Start-Sleep -Seconds $PollSeconds
+    }
+    } catch {
+        Write-CcsmGuardianEvent -Level "error" -Event "guardian-exiting" -Detail @{ Error = $_.Exception.Message; Cycles = $cycles }
+        throw
     }
 } catch [System.IO.IOException] {
     throw "another CCSwitchMulti guardian instance already owns $LockPath"

@@ -19,6 +19,7 @@ import {
   buildMultiRouterRuntimeStatus,
   buildCodexProxyBaseUrl,
   buildModelCatalogForRoutes,
+  buildRouteTrafficRows,
   CodexRouterWorkspacePage,
   createRoutePolicyDraft,
   createDraftRoutingPlan,
@@ -72,6 +73,17 @@ vi.mock("@/lib/query/usage", () => ({
       providerModels: [],
     },
     isLoading: false,
+    error: null,
+  }),
+  useSessionCollectionStatus: () => ({
+    data: {
+      revision: 0,
+      phase: "not_started",
+      imported: 0,
+      deferred: 0,
+      errorsCount: 0,
+      intervalSecs: 60,
+    },
     error: null,
   }),
   useRequestLogs: () => requestLogsFixture.value,
@@ -369,6 +381,80 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("puts session consumption before diagnostic request samples in the traffic view", async () => {
+    const provider: Provider = {
+      id: "traffic-layout",
+      name: "Traffic layout",
+      settingsConfig: { modelCatalog: { models: [{ model: "model-a" }] } },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: /流量.*组统计/ }),
+    );
+    const samples = await screen.findByText(
+      "今日最近请求样本（子 Provider / Model）",
+    );
+    const sync = screen.getByRole("button", { name: /立即同步/ });
+    expect(
+      sync.compareDocumentPosition(samples) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+  it("keeps proxy input, cache, and output token dimensions separate", () => {
+    const provider: Provider = {
+      id: "traffic-provider",
+      name: "Traffic Provider",
+      settingsConfig: { modelCatalog: { models: [{ model: "model-a" }] } },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
+    const routing = readCodexRouting(plan);
+    const routes = routing?.routes ?? [];
+    const rows = buildRouteTrafficRows({
+      logs: [
+        createCodexProxyLog({
+          providerId: provider.id,
+          model: "model-a",
+          requestModel: "model-a",
+          inputTokens: 120,
+          cacheReadTokens: 80,
+          cacheCreationTokens: 20,
+          outputTokens: 40,
+        }),
+      ],
+      routes: routes.map((route, index) => ({
+        provider: plan,
+        route,
+        index,
+      })),
+      selectedPlan: plan,
+      providersById: new Map([[provider.id, provider]]),
+    });
+
+    expect(rows[0]!).toMatchObject({
+      inputTokens: 40,
+      cacheReadTokens: 80,
+      cacheCreationTokens: 20,
+      outputTokens: 40,
+    });
+  });
   it.each(["deepseek-flash", "deepseek-flash-opencode-go"])(
     "preserves declared reasoning for saved route %s when another provider has the same model",
     async (visibleModel) => {

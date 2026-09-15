@@ -94,10 +94,12 @@ import {
   writeHostedToolsConfig,
 } from "@/lib/hostedTools";
 import { usageApi } from "@/lib/api/usage";
+import { getUsageRangePresetLabel } from "@/lib/usageRange";
 import {
   usageKeys,
   useCodexSubagentUsageStats,
   useRequestLogs,
+  useSessionCollectionStatus,
 } from "@/lib/query/usage";
 import { cn } from "@/lib/utils";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
@@ -124,6 +126,7 @@ import { normalizeCodexSubagentVersion } from "@/utils/codexSubagentVersion";
 import { HostedToolsSwitchPanel } from "./HostedToolsSwitchPanel";
 import { CodexSubagentProfileEditor } from "./CodexSubagentProfileEditor";
 import { CodexEgressTimezoneStatusCard } from "./CodexEgressTimezoneStatusCard";
+import { CodexSessionTrafficPanel } from "./CodexSessionTrafficPanel";
 import type {
   CodexOfficialAuthConfig,
   CodexRoutingAuth,
@@ -133,7 +136,7 @@ import type {
   CodexSubagentVersion,
   Provider,
 } from "@/types";
-import type { RequestLog } from "@/types/usage";
+import { getFreshInputTokens, type RequestLog } from "@/types/usage";
 import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import type {
   CodexDiagnosticCheck,
@@ -249,6 +252,11 @@ type RouteTrafficRow = {
   requestCount: number;
   successCount: number;
   failedCount: number;
+  /** Cache-normalized fresh input; raw Codex input includes cache reads. */
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  outputTokens: number;
   totalTokens: number;
   avgLatencyMs: number;
 };
@@ -2587,7 +2595,7 @@ function updateRouteObservedProtocol(
 }
 
 /// 从请求日志聚合 MultiRouter 子 provider / model 流量；无法归属的日志留给状态页单独提示。
-function buildRouteTrafficRows({
+export function buildRouteTrafficRows({
   logs,
   routerEvents = [],
   routes,
@@ -2615,7 +2623,14 @@ function buildRouteTrafficRows({
     target: RouteTrafficTarget,
     model: string,
     statusCode: number,
-    tokens: number,
+    tokenUsage: Pick<
+      RequestLog,
+      | "appType"
+      | "inputTokens"
+      | "cacheReadTokens"
+      | "cacheCreationTokens"
+      | "outputTokens"
+    >,
     latencyMs: number,
     matchedRoute?: RouteEntry,
   ) {
@@ -2638,6 +2653,10 @@ function buildRouteTrafficRows({
         requestCount: 0,
         successCount: 0,
         failedCount: 0,
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: 0,
         totalTokens: 0,
         avgLatencyMs: 0,
         latencyTotalMs: 0,
@@ -2650,7 +2669,16 @@ function buildRouteTrafficRows({
     } else if (statusCode >= 400) {
       current.failedCount += 1;
     }
-    current.totalTokens += tokens;
+    const freshInputTokens = getFreshInputTokens(tokenUsage);
+    current.inputTokens += freshInputTokens;
+    current.cacheReadTokens += tokenUsage.cacheReadTokens;
+    current.cacheCreationTokens += tokenUsage.cacheCreationTokens;
+    current.outputTokens += tokenUsage.outputTokens;
+    current.totalTokens +=
+      freshInputTokens +
+      tokenUsage.cacheReadTokens +
+      tokenUsage.cacheCreationTokens +
+      tokenUsage.outputTokens;
     current.latencyTotalMs += latencyMs;
     current.avgLatencyMs = Math.round(
       current.latencyTotalMs / current.requestCount,
@@ -2683,10 +2711,7 @@ function buildRouteTrafficRows({
       target,
       model,
       log.statusCode,
-      log.inputTokens +
-        log.outputTokens +
-        log.cacheReadTokens +
-        log.cacheCreationTokens,
+      log,
       log.latencyMs,
       matchedRoute,
     );
@@ -2711,7 +2736,13 @@ function buildRouteTrafficRows({
       routeTrafficTarget(matchedRoute, providersById),
       event.model || matchedRoute.route.match?.models?.[0] || "unknown",
       routerEventStatusCode(event),
-      0,
+      {
+        appType: "codex",
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: 0,
+      },
       0,
       matchedRoute,
     );
@@ -2744,6 +2775,10 @@ function buildRouteTrafficRows({
         requestCount: 0,
         successCount: 0,
         failedCount: 0,
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: 0,
         totalTokens: 0,
         avgLatencyMs: 0,
         latencyTotalMs: 0,
@@ -7043,6 +7078,8 @@ function StatusTab({
 }) {
   const queryClient = useQueryClient();
   const range = useMemo(() => ({ preset: "today" as const }), []);
+  const [statusView, setStatusView] = useState<StatusView>("link");
+  const trafficViewActive = statusView === "traffic";
   const { data: requestLogs, isLoading } = useRequestLogs({
     filters: { appType: "codex" },
     range,
@@ -7055,8 +7092,14 @@ function StatusTab({
     isLoading: isLoadingSubagentUsage,
     error: subagentUsageError,
   } = useCodexSubagentUsageStats(range, 80, {
-    refetchInterval: 60000,
+    // History/rollout parsing can be expensive. No periodic scan until the
+    // backend exposes a cached-lightweight revision endpoint; manual sync
+    // remains the explicit freshness control.
+    refetchInterval: false,
+    enabled: trafficViewActive,
   });
+  const { data: collectionStatus, error: collectionStatusError } =
+    useSessionCollectionStatus({ enabled: trafficViewActive });
   const [diagnostics, setDiagnostics] =
     useState<CodexMultiRouterDiagnostics | null>(null);
   const [diagnoseError, setDiagnoseError] = useState<string | null>(null);
@@ -7089,7 +7132,6 @@ function StatusTab({
     string | null
   >(null);
   const [isUnlockingModelPicker, setIsUnlockingModelPicker] = useState(false);
-  const [statusView, setStatusView] = useState<StatusView>("link");
   const [isRefreshingValidation, setIsRefreshingValidation] = useState(false);
   const [validationRefreshMessage, setValidationRefreshMessage] = useState<
     string | null
@@ -7131,6 +7173,17 @@ function StatusTab({
   const trafficRows = buildRouteTrafficRows({
     logs: proxyLogs,
     routerEvents,
+    routes: routeEntries,
+    selectedPlan,
+    providersById,
+    routeSummaries: routeSummaryMap,
+  });
+  // 流量分段的请求/Token/延迟只可由 request_log 支撑；诊断事件没有
+  // usage 或 latency，混入会把最近样本的请求数抬高、平均延迟压低。
+  // Keep the diagnostic-backed rows above for link/protocol evidence.
+  const requestTrafficRows = buildRouteTrafficRows({
+    logs: proxyLogs,
+    routerEvents: [],
     routes: routeEntries,
     selectedPlan,
     providersById,
@@ -7315,7 +7368,7 @@ function StatusTab({
         diagnostics={diagnostics}
         protocolCount={protocolRows.length}
         trafficCount={
-          trafficRows.length + (subagentUsage?.modelStats.length ?? 0)
+          requestTrafficRows.length + (subagentUsage?.modelStats.length ?? 0)
         }
         providerCount={selectedRoutes.length}
         onChange={setStatusView}
@@ -7800,37 +7853,60 @@ function StatusTab({
 
       {statusView === "traffic" && (
         <div className="space-y-4">
+          <CodexSessionTrafficPanel
+            stats={subagentUsage}
+            isLoading={isLoadingSubagentUsage}
+            error={subagentUsageError}
+            rangeLabel={`${getUsageRangePresetLabel(range.preset, (_key, options) => options?.defaultValue ?? "当天")}（本地日历日）`}
+            isSyncing={isSyncingSessionUsage}
+            onSync={() => void syncCodexSessionUsage()}
+            syncMessage={sessionSyncMessage}
+            collectionStatus={collectionStatus}
+            collectionStatusError={collectionStatusError}
+          />
           <section className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-4 dark:border-emerald-700/40 dark:bg-emerald-950/10">
             <SectionHeader
               icon={Database}
-              title="今日子 Provider / Model 流量"
-              detail="基于真实 Codex 代理请求日志聚合；若后端只记录外层 MultiRouter，页面会按 requestModel 尝试回归属到 route target。"
+              title="今日最近请求样本（子 Provider / Model）"
+              detail="仅展示今日最近 50 条已加载 Codex 请求样本，不是全天总量；requestModel 匹配的归属仅供参考，不代表实际上游已确认。"
             />
             <div className="mt-3 overflow-hidden rounded-lg border border-border dark:border-slate-700">
-              <div className="grid grid-cols-[1.2fr_1.2fr_0.7fr_0.7fr_0.8fr_0.8fr] gap-2 bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground dark:bg-slate-900/80 dark:text-slate-300">
+              <div className="grid grid-cols-[1.1fr_1.1fr_0.55fr_0.55fr_0.7fr_0.7fr_0.7fr_0.7fr_0.65fr] gap-2 bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground dark:bg-slate-900/80 dark:text-slate-300">
                 <span>Provider</span>
                 <span>Model</span>
                 <span className="text-right">请求</span>
                 <span className="text-right">失败</span>
-                <span className="text-right">Tokens</span>
+                <span className="text-right">非缓存输入</span>
+                <span className="text-right">缓存读取</span>
+                <span className="text-right">缓存写入</span>
+                <span className="text-right">输出</span>
                 <span className="text-right">延迟</span>
               </div>
               {isLoading ? (
                 <div className="p-4 text-sm text-muted-foreground">
                   正在读取统计...
                 </div>
-              ) : trafficRows.length > 0 ? (
-                trafficRows.map((row) => (
+              ) : requestTrafficRows.length > 0 ? (
+                requestTrafficRows.map((row) => (
                   <div
                     key={`${row.providerId}-${row.model}`}
-                    className="grid grid-cols-[1.2fr_1.2fr_0.7fr_0.7fr_0.8fr_0.8fr] gap-2 border-t border-border px-3 py-2 text-xs text-foreground dark:border-slate-800 dark:text-slate-300"
+                    className="grid grid-cols-[1.1fr_1.1fr_0.55fr_0.55fr_0.7fr_0.7fr_0.7fr_0.7fr_0.65fr] gap-2 border-t border-border px-3 py-2 text-xs text-foreground dark:border-slate-800 dark:text-slate-300"
                   >
                     <span className="truncate">{row.providerName}</span>
                     <span className="truncate font-mono">{row.model}</span>
                     <span className="text-right">{row.requestCount}</span>
                     <span className="text-right">{row.failedCount}</span>
                     <span className="text-right">
-                      {row.totalTokens.toLocaleString()}
+                      {row.inputTokens.toLocaleString()}
+                    </span>
+                    <span className="text-right">
+                      {row.cacheReadTokens.toLocaleString()}
+                    </span>
+                    <span className="text-right">
+                      {row.cacheCreationTokens.toLocaleString()}
+                    </span>
+                    <span className="text-right">
+                      {row.outputTokens.toLocaleString()}
                     </span>
                     <span className="text-right">{row.avgLatencyMs}ms</span>
                   </div>
@@ -7846,109 +7922,18 @@ function StatusTab({
               )}
             </div>
             <div className="mt-3 text-xs text-muted-foreground">
-              已尝试归属真实代理日志 {routedLogs.length} 条、router 诊断事件{" "}
-              {routerRequestEvents.length} 条；这里不把 codex_session
-              历史同步当作转发。
-            </div>
-          </section>
-
-          <section className="rounded-lg border border-violet-200 bg-violet-50/70 p-4 dark:border-violet-700/40 dark:bg-violet-950/10">
-            <SectionHeader
-              icon={GitFork}
-              title="今日子 Agent 会话流量"
-              detail="基于 Codex 本地 JSONL/SQLite 的 subagent 会话列表和 token_count 用量；按模型汇总子 Agent 数、请求和 token。"
-              action={
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void syncCodexSessionUsage()}
-                  disabled={isSyncingSessionUsage}
-                  className="gap-2 border-violet-300 bg-background/70 text-violet-700 hover:bg-violet-100 dark:border-violet-500/50 dark:bg-violet-500/10 dark:text-violet-100 dark:hover:bg-violet-500/20"
-                >
-                  {isSyncingSessionUsage ? (
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="h-4 w-4" />
-                  )}
-                  同步会话用量
-                </Button>
-              }
-            />
-            {sessionSyncMessage && (
-              <div className="mt-3 rounded-md border border-violet-200 bg-background/70 px-3 py-2 text-xs text-muted-foreground dark:border-violet-700/50 dark:bg-violet-950/30 dark:text-violet-100">
-                {sessionSyncMessage}
-              </div>
-            )}
-            {subagentUsageError && (
-              <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100">
-                子 Agent 用量读取失败：
-                {subagentUsageError instanceof Error
-                  ? subagentUsageError.message
-                  : String(subagentUsageError)}
-              </div>
-            )}
-            {subagentUsage?.skippedReason && (
-              <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/30 dark:text-amber-100">
-                Codex 历史读取跳过：{subagentUsage.skippedReason}
-              </div>
-            )}
-
-            <div className="mt-3 overflow-hidden rounded-lg border border-border dark:border-slate-700">
-              <div className="grid grid-cols-[1.4fr_0.7fr_0.7fr_0.9fr_0.7fr] gap-2 bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground dark:bg-slate-900/80 dark:text-slate-300">
-                <span>模型</span>
-                <span className="text-right">子 Agent</span>
-                <span className="text-right">请求</span>
-                <span className="text-right">Tokens</span>
-                <span className="text-right">费用</span>
-              </div>
-              {isLoadingSubagentUsage ? (
-                <div className="p-4 text-sm text-muted-foreground">
-                  正在读取子 Agent 统计...
-                </div>
-              ) : subagentUsage?.modelStats.length ? (
-                subagentUsage.modelStats.map((row) => (
-                  <div
-                    key={row.model}
-                    className="grid grid-cols-[1.4fr_0.7fr_0.7fr_0.9fr_0.7fr] gap-2 border-t border-border px-3 py-2 text-xs text-foreground dark:border-slate-800 dark:text-slate-300"
-                  >
-                    <span className="truncate font-mono">{row.model}</span>
-                    <span className="text-right">{row.agentCount}</span>
-                    <span className="text-right">{row.requestCount}</span>
-                    <span className="text-right">
-                      {row.totalTokens.toLocaleString()}
-                    </span>
-                    <span className="text-right">
-                      {formatUsageCost(row.totalCost)}
-                    </span>
-                  </div>
-                ))
-              ) : (
-                <div className="p-4 text-sm leading-6 text-muted-foreground">
-                  暂无子 Agent 会话用量。已读取{" "}
-                  {subagentUsage?.totalAgents ?? 0} 个本地子 Agent
-                  会话；如果刚刚运行过子 Agent，请先点击“同步会话用量”。
-                </div>
-              )}
-            </div>
-
-            <div className="mt-3 rounded-lg border border-border bg-background/70 px-3 py-2 text-xs leading-6 text-muted-foreground dark:border-slate-700 dark:bg-slate-950/20 dark:text-slate-300">
-              已读取 {subagentUsage?.totalAgents ?? 0} 个本地子 Agent 会话，
-              归并为 {subagentUsage?.modelStats.length ?? 0}{" "}
-              个模型分组。状态库：
-              {subagentUsage?.stateDbPath ?? "未定位"}。
+              当前已加载 {logs.length} 条（接口共{" "}
+              {requestLogs?.total ?? logs.length} 条）今日 Codex
+              请求样本；其中尝试归属真实代理日志 {routedLogs.length} 条、router
+              诊断事件 {routerRequestEvents.length}{" "}
+              条。诊断事件不是用量记录；这里不把 codex_session
+              历史同步当作转发，也不与会话统计相加。
             </div>
           </section>
         </div>
       )}
     </div>
   );
-}
-
-/// 格式化美元成本，保留小额用量的可见精度。
-function formatUsageCost(value?: string): string {
-  const parsed = Number.parseFloat(value ?? "");
-  if (!Number.isFinite(parsed)) return "$0.000000";
-  return `$${parsed.toFixed(parsed > 0 && parsed < 0.01 ? 6 : 4)}`;
 }
 
 /// 测试发布页只做本地匹配预览，并展示下一步如何发布到 Codex。

@@ -73,7 +73,15 @@ export interface CodexRuntimeRefreshPreflight {
     affectedBytes: number;
     blockedRolloutCount: number;
     blockedReason: string | null;
+    blockedReasonGroups?: CodexBlockedHistoryReasonGroup[];
   };
+}
+
+export interface CodexBlockedHistoryReasonGroup {
+  code: string;
+  detail: string;
+  count: number;
+  samples: string[];
 }
 
 export interface CodexRuntimeRefreshResult {

@@ -1,6 +1,13 @@
 import { useTranslation } from "react-i18next";
 import type { SettingsFormState } from "@/hooks/useSettings";
-import { AppWindow, MonitorUp, Power, EyeOff, Rocket } from "lucide-react";
+import {
+  AppWindow,
+  MonitorUp,
+  Power,
+  EyeOff,
+  Rocket,
+  ShieldCheck,
+} from "lucide-react";
 import { ToggleRow } from "@/components/ui/toggle-row";
 import { AnimatePresence, motion } from "framer-motion";
 import { isLinux } from "@/lib/platform";
@@ -27,6 +34,14 @@ export function WindowSettings({ settings, onChange }: WindowSettingsProps) {
           description={t("settings.launchOnStartupDescription")}
           checked={!!settings.launchOnStartup}
           onCheckedChange={(value) => onChange({ launchOnStartup: value })}
+        />
+
+        <ToggleRow
+          icon={<ShieldCheck className="h-4 w-4 text-emerald-500" />}
+          title={t("settings.watchdogEnabled")}
+          description={t("settings.watchdogEnabledDescription")}
+          checked={settings.watchdogEnabled !== false}
+          onCheckedChange={(value) => onChange({ watchdogEnabled: value })}
         />
 
         <ToggleRow

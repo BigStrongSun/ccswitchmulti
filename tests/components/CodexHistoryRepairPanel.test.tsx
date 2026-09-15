@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexHistoryRepairPanel } from "@/components/sessions/CodexHistoryRepairPanel";
 import { proxyApi } from "@/lib/api/proxy";
+import { toast } from "sonner";
 
 vi.mock("@/lib/api/proxy", () => ({
   proxyApi: {
@@ -125,6 +126,54 @@ beforeEach(() => {
 });
 
 describe("CodexHistoryRepairPanel", () => {
+  it.each([
+    [
+      "codex_paginated_history_immutable: C:\\sessions\\rollout.jsonl: non-legacy history envelope; provider migration cannot safely rewrite byte-addressed history",
+      true,
+    ],
+    ["打开 Codex active state DB 失败: access denied", false],
+    ["Codex app-server request failed", false],
+    ["读取 C:\\running\\codex.jsonl 失败", false],
+    ["运行历史扫描失败: invalid JSON", false],
+  ])(
+    "does not turn a non-process repair failure into a quit-and-retry instruction: %s",
+    async (error, immutable) => {
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+      vi.mocked(proxyApi.repairCodexHistoryVisibility)
+        .mockReset()
+        .mockRejectedValue(error);
+      render(<CodexHistoryRepairPanel />);
+      fireEvent.click(screen.getByRole("button", { name: "确认修复" }));
+      await waitFor(() => expect(toast.error).toHaveBeenCalled());
+      const message = vi.mocked(toast.error).mock.calls.at(-1)?.[0];
+      expect(message).toContain(error);
+      expect(message).not.toContain("后再点");
+      if (immutable) {
+        expect(message).toContain("不支持");
+        expect(message).toContain("退出或重启");
+      } else {
+        expect(message).toBe(error);
+      }
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(proxyApi.repairCodexHistoryVisibility).toHaveBeenCalledTimes(1);
+      expect(proxyApi.repairCodexHistoryVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ dryRun: true }),
+      );
+      confirmSpy.mockRestore();
+    },
+  );
+
+  it("preserves the backend process guard instruction without duplicating it", async () => {
+    const error =
+      "Codex Desktop/app-server 仍在运行。请先完全退出 Codex 后再写入。检测到: ChatGPT.exe";
+    vi.mocked(proxyApi.repairCodexHistoryVisibility)
+      .mockReset()
+      .mockRejectedValue(error);
+    render(<CodexHistoryRepairPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "确认修复" }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(error));
+  });
+
   it("renders the numeric epoch using the device timezone even when the ISO display field is missing", async () => {
     vi.mocked(proxyApi.listCodexHistorySessions).mockResolvedValue(
       historyListFixture({

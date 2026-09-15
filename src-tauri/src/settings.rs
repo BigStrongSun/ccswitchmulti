@@ -514,6 +514,10 @@ pub struct AppSettings {
     /// Optional, process-local timezone injection for Codex Desktop.
     #[serde(default)]
     pub codex_egress_timezone: CodexEgressTimezoneSettings,
+    /// 是否启用内置看门狗（supervisor）：同一二进制以守护模式盯住主进程，
+    /// 主进程异常退出后自动拉起。跨平台，不需要计划任务或脚本。
+    #[serde(default = "default_watchdog_enabled")]
+    pub watchdog_enabled: bool,
     /// 静默启动（程序启动时不显示主窗口，仅托盘运行）
     #[serde(default)]
     pub silent_startup: bool,
@@ -663,6 +667,10 @@ pub struct AppSettings {
     pub local_migrations: Option<LocalMigrations>,
 }
 
+fn default_watchdog_enabled() -> bool {
+    true
+}
+
 fn default_show_in_tray() -> bool {
     true
 }
@@ -684,6 +692,7 @@ impl Default for AppSettings {
             enable_claude_plugin_integration: false,
             skip_claude_onboarding: false,
             launch_on_startup: false,
+            watchdog_enabled: default_watchdog_enabled(),
             launch_codex_desktop_with_ccswitch: false,
             codex_egress_timezone: CodexEgressTimezoneSettings::default(),
             silent_startup: false,

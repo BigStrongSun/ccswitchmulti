@@ -302,6 +302,38 @@ impl CodexPoolRuntimeState {
         runtime.soft_avoid_until_ms = None;
         true
     }
+
+    /// 账号“除冷却/软避让外一切正常”时的剩余等待时间（毫秒）。
+    ///
+    /// 用于账号池的兜底探测：软避让和额度冷却只是“优先换别人”的排序偏好，
+    /// 不应该在池内全部命中时把整条线路变成硬失败（客户端会看到 3ms 的
+    /// `503 无可用 Provider`，且因为从不尝试上游而永远无法自愈）。
+    ///
+    /// 只有「代际匹配、不需要重新登录、额度高于保留值」的账号才会返回 `Some`；
+    /// 凭据失效或额度不足仍然返回 `None`，保持 fail-closed。
+    pub(crate) fn account_avoid_remaining_ms(
+        &self,
+        account_id: &str,
+        credential_generation: u64,
+        now_ms: i64,
+    ) -> Option<i64> {
+        let runtime = self.accounts.get(account_id)?;
+        if runtime.credential_generation != credential_generation || runtime.reauth_required {
+            return None;
+        }
+        let cooldown_remaining = runtime
+            .cooldown_until_ms
+            .filter(|until| *until > now_ms)
+            .map(|until| until.saturating_sub(now_ms));
+        let soft_avoid_remaining = runtime
+            .soft_avoid_until_ms
+            .filter(|until| *until > now_ms)
+            .map(|until| until.saturating_sub(now_ms));
+        cooldown_remaining
+            .into_iter()
+            .chain(soft_avoid_remaining)
+            .max()
+    }
 }
 
 #[cfg(test)]

@@ -1180,7 +1180,8 @@ impl CodexOAuthManager {
         let bound = runtime.bound_account(session_id, now);
         let mut entries: Vec<_> = policy
             .entries
-            .into_iter()
+            .iter()
+            .cloned()
             .filter_map(|entry| {
                 let credential_generation = enabled_account_generations.get(&entry.account_id)?;
                 (entry.enabled
@@ -1199,6 +1200,52 @@ impl CodexOAuthManager {
                 })
             })
             .collect();
+        // 全池都被软避让/额度冷却挡住时不能直接返回空：调用方会把它变成
+        // “无可用 Provider”的即时 503，而且由于从不尝试上游，账号永远等不到
+        // 成功记录来清除软避让，一次网络抖动就会升级成整段线路长时间不可用。
+        // 这里按“最早恢复”的顺序兜底放行，让路由回到真实的上游结果。
+        if entries.is_empty() {
+            let mut fallback: Vec<(i64, CodexPoolCandidate)> = policy
+                .entries
+                .iter()
+                .filter(|entry| entry.enabled)
+                .filter_map(|entry| {
+                    let credential_generation =
+                        *enabled_account_generations.get(&entry.account_id)?;
+                    let within_reserve = bound.as_deref() == Some(entry.account_id.as_str())
+                        || runtime
+                            .remaining_percent(&entry.account_id)
+                            .is_none_or(|value| value > entry.reserve_percent);
+                    if !within_reserve {
+                        return None;
+                    }
+                    let remaining = runtime.account_avoid_remaining_ms(
+                        &entry.account_id,
+                        credential_generation,
+                        now,
+                    )?;
+                    Some((
+                        remaining,
+                        CodexPoolCandidate {
+                            entry: entry.clone(),
+                            credential_generation,
+                        },
+                    ))
+                })
+                .collect();
+            fallback.sort_by_key(|(remaining, _)| *remaining);
+            if !fallback.is_empty() {
+                log::warn!(
+                    "[CodexOAuthPool] 账号池全部处于软避让/冷却，回退到最早恢复的账号进行探测：最早 {} 秒后恢复，候选 {} 个",
+                    fallback[0].0 / 1000,
+                    fallback.len()
+                );
+                entries = fallback
+                    .into_iter()
+                    .map(|(_, candidate)| candidate)
+                    .collect();
+            }
+        }
         if let Some(bound) = bound {
             if let Some(index) = entries
                 .iter()
@@ -3060,6 +3107,82 @@ mod tests {
             .ordered_pool_entries("thread-new", None)
             .await
             .is_empty());
+    }
+
+    /// 真实事故回归：2026-09-15 09:17 chatgpt.com 的 TLS 握手连续失败
+    /// （`unexpected EOF during handshake`）被记成每个账号各自的上游瞬时失败，
+    /// 两个 OAuth 账号因此各自升级到最高一档 30 分钟软避让。旧实现此时
+    /// `ordered_pool_entries` 返回空 → 每次请求 3ms 直接 503「无可用 Provider」，
+    /// 而且因为从不尝试上游，永远拿不到成功记录来清除软避让，网络恢复后仍有
+    /// 近半小时完全不可用。软避让必须只是“优先换别人”的排序偏好。
+    #[tokio::test]
+    async fn all_soft_avoided_accounts_still_probe_earliest_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        add_pool_test_account(&manager, "acc-a", "refresh-a").await;
+        add_pool_test_account(&manager, "acc-b", "refresh-b").await;
+        manager
+            .set_account_pool_policy(CodexAccountPoolPolicy {
+                enabled: true,
+                entries: vec![
+                    CodexAccountPoolEntry {
+                        account_id: "acc-a".to_string(),
+                        enabled: true,
+                        reserve_percent: 0.0,
+                    },
+                    CodexAccountPoolEntry {
+                        account_id: "acc-b".to_string(),
+                        enabled: true,
+                        reserve_percent: 0.0,
+                    },
+                ],
+                desktop_account_id: None,
+            })
+            .await
+            .unwrap();
+        let generation_a = manager.accounts.read().await["acc-a"].credential_generation;
+        let generation_b = manager.accounts.read().await["acc-b"].credential_generation;
+        let generation_native = manager
+            .ordered_pool_entries("thread-pre", None)
+            .await
+            .into_iter()
+            .find(|candidate| candidate.entry.account_id == NATIVE_CODEX_ACCOUNT_ID)
+            .expect("native candidate")
+            .credential_generation;
+        let initial_ids = manager
+            .ordered_pool_entries("thread-pre", None)
+            .await
+            .into_iter()
+            .map(|candidate| candidate.entry.account_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(initial_ids.len(), 3, "抖动前池内三个账号都应可试探");
+
+        for (account_id, generation) in [
+            ("acc-a", generation_a),
+            ("acc-b", generation_b),
+            (NATIVE_CODEX_ACCOUNT_ID, generation_native),
+        ] {
+            for _ in 0..3 {
+                manager
+                    .record_pool_attempt(
+                        account_id,
+                        generation,
+                        "thread-busy",
+                        CodexPoolAttemptOutcome::Transient { status: None },
+                    )
+                    .await;
+            }
+        }
+
+        let entries = manager.ordered_pool_entries("thread-new", None).await;
+        let entries_ids = entries
+            .iter()
+            .map(|candidate| candidate.entry.account_id.clone())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            entries_ids, initial_ids,
+            "软避让不能让整条线路变成空候选（否则请求永远不会尝试上游）"
+        );
     }
 
     #[tokio::test]
