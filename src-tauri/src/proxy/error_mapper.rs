@@ -83,7 +83,12 @@ pub fn get_error_message(error: &ProxyError) -> String {
         ProxyError::Timeout(msg) => format!("请求超时: {msg}"),
         ProxyError::ResponsePending(msg) => format!("上游请求可能仍在处理中: {msg}"),
         ProxyError::ForwardFailed(msg) => format!("转发失败: {msg}"),
-        ProxyError::NoAvailableProvider => "无可用 Provider".to_string(),
+        // 这条消息是用户唯一能看到的“为什么这次请求根本没发出去”。旧的
+        // “无可用 Provider”既像配置错误又没有任何可操作信息：候选为空可能是
+        // 账号池全部不可用，也可能是全部候选被熔断器拒绝。
+        ProxyError::NoAvailableProvider => {
+            "无可用 Provider（没有可尝试的上游候选：账号池全部不可用或全部被熔断拒绝）".to_string()
+        }
         ProxyError::AllProvidersCircuitOpen => "所有供应商已熔断，无可用渠道".to_string(),
         ProxyError::NoProvidersConfigured => "未配置供应商".to_string(),
         ProxyError::MaxRetriesExceeded => "所有 Provider 都失败，重试耗尽".to_string(),
