@@ -184,10 +184,15 @@ pub async fn handle_raw_openai_passthrough(
         .await
         .map_err(|e| ProxyError::Internal(format!("Failed to read request body: {e}")))?
         .to_bytes();
-    let route_body = parse_raw_openai_passthrough_route_body(&headers, body_bytes.clone());
     let endpoint = raw_openai_passthrough_endpoint_with_query(&uri);
+    let is_image_request =
+        method == axum::http::Method::POST && codex_image_edit_endpoint(&endpoint);
     let is_external_openai_client = !should_handle_as_codex_client(&headers);
-
+    let route_body = if is_image_request && !is_external_openai_client {
+        parse_image_passthrough_route_body(&headers, body_bytes.clone()).await?
+    } else {
+        parse_raw_openai_passthrough_route_body(&headers, body_bytes.clone())
+    };
     let mut ctx = if is_external_openai_client {
         let external_api_profile = match external_openai_api::validate_request(&state.db, &headers)
         {
@@ -229,6 +234,16 @@ pub async fn handle_raw_openai_passthrough(
     };
 
     let is_stream = raw_openai_passthrough_request_is_streaming(&route_body, &headers);
+    // Image edits use raw forwarding to preserve JSON/multipart uploads, but need the
+    // same endpoint-specific official fallback as image generations. Do not relax
+    // schema-v2 fail-closed routing for unrelated raw endpoints or external clients.
+    let providers = if is_image_request && !is_external_openai_client {
+        resolve_codex_image_generation_provider(&state, &ctx.provider, &route_body)?
+            .map(|provider| vec![provider])
+            .unwrap_or_else(|| ctx.get_providers())
+    } else {
+        ctx.get_providers()
+    };
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
         .forward_raw_with_retry(
@@ -239,7 +254,7 @@ pub async fn handle_raw_openai_passthrough(
             body_bytes,
             headers,
             extensions,
-            ctx.get_providers(),
+            providers,
         )
         .await
     {
@@ -421,6 +436,62 @@ fn parse_raw_openai_passthrough_route_body(headers: &HeaderMap, body_bytes: Byte
     }
 }
 
+/// Read only the multipart routing fields; never rebuild the uploaded image or mask.
+/// Reject ambiguous model fields instead of sending an explicitly routed image to
+/// the official fallback because its multipart model was invisible to JSON parsing.
+async fn parse_image_passthrough_route_body(
+    headers: &HeaderMap,
+    body_bytes: Bytes,
+) -> Result<Value, ProxyError> {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .eq_ignore_ascii_case("multipart/form-data")
+    {
+        return Ok(parse_raw_openai_passthrough_route_body(headers, body_bytes));
+    }
+    let invalid =
+        || ProxyError::InvalidRequest("Invalid image multipart routing fields".to_string());
+    let boundary = multer::parse_boundary(content_type).map_err(|_| invalid())?;
+    let mut route_headers = headers.clone();
+    let decoded = decode_codex_request_body(&mut route_headers, body_bytes)?;
+    let stream = futures::stream::once(async move { Ok::<_, std::convert::Infallible>(decoded) });
+    let constraints = multer::Constraints::new().size_limit(
+        multer::SizeLimit::new()
+            .for_field("model", 1024)
+            .for_field("stream", 16),
+    );
+    let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
+    let mut route_body = json!({});
+    while let Some(field) = multipart.next_field().await.map_err(|_| invalid())? {
+        let name = match field.name() {
+            Some("model") => "model",
+            Some("stream") => "stream",
+            _ => continue,
+        };
+        if field.file_name().is_some() || route_body.get(name).is_some() {
+            return Err(invalid());
+        }
+        let value = field.bytes().await.map_err(|_| invalid())?;
+        let value = std::str::from_utf8(&value).map_err(|_| invalid())?.trim();
+        if name == "model" {
+            if value.is_empty() {
+                return Err(invalid());
+            }
+            route_body[name] = json!(value);
+        } else {
+            route_body[name] = json!(value.parse::<bool>().map_err(|_| invalid())?);
+        }
+    }
+    Ok(route_body)
+}
+
 /// 判断 raw passthrough 是否请求 SSE 流式响应。
 fn raw_openai_passthrough_request_is_streaming(route_body: &Value, headers: &HeaderMap) -> bool {
     route_body
@@ -444,7 +515,10 @@ fn raw_openai_passthrough_endpoint_with_query(uri: &axum::http::Uri) -> String {
         .strip_prefix("/codex/v1/")
         .map(|suffix| format!("/v1/{suffix}"))
         .or_else(|| (path == "/codex/v1").then(|| "/v1".to_string()))
-        .unwrap_or_else(|| path.to_string());
+        .unwrap_or_else(|| match path {
+            "/v1/v1/images/edits" => "/v1/images/edits".to_string(),
+            _ => path.to_string(),
+        });
     match uri.query() {
         Some(query) => format!("{normalized_path}?{query}"),
         None => normalized_path,
@@ -1873,6 +1947,11 @@ fn codex_route_provider_matched_request_model(provider: &crate::provider::Provid
 
 /// 判断 provider 是否能代表 ChatGPT/Codex 官方 OAuth 图片通道。
 fn provider_is_codex_image_generation_oauth_target(provider: &crate::provider::Provider) -> bool {
+    // Managed authentication also covers xAI and Copilot; neither is an official
+    // OpenAI Images fallback, even when exposed under an OpenAI-looking alias.
+    if provider.is_xai_oauth() || provider.is_github_copilot() {
+        return false;
+    }
     provider.is_codex_oauth()
         || provider.uses_managed_account_auth()
         || is_codex_official_managed_oauth_provider(provider)
@@ -4954,6 +5033,10 @@ fn codex_image_endpoint(endpoint: &str) -> bool {
     path.ends_with("/images/generations") || path.ends_with("/images/edits")
 }
 
+fn codex_image_edit_endpoint(endpoint: &str) -> bool {
+    endpoint.split('?').next() == Some("/v1/images/edits")
+}
+
 fn codex_proxy_error_json(
     provider_name: &str,
     request_model: &str,
@@ -6058,6 +6141,10 @@ async fn log_usage(
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }
 }
+
+#[cfg(test)]
+#[path = "handlers/image_edits_tests.rs"]
+mod image_edits_tests;
 
 #[cfg(test)]
 mod tests {
