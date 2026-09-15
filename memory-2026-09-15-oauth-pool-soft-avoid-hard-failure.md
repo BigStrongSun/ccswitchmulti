@@ -65,8 +65,19 @@ Codex endpoint /responses. Provider: OpenAI Official; model: gpt-5.6-sol; cause:
   PID 55260 → 58556；安装态 hash 与声明一致，`/health` 200、`/status` `running=true`
   `listener_role=takeover`、内置守护 64640 `--ccsm-supervise 58556`、run marker 版本 3.20.2-16。
 - 安装态二进制含新字符串 `POOL-001`、`没有可尝试的上游候选`、`账号池全部处于软避让`。
-- 仍未做：官方线路在安装态下的真实请求验证（重启后账号池内存态清空，需要真实 Codex
-  流量才会出现官方线路记录；本轮重启后只有 DeepSeek 路由的 200）。
+- 安装态真实链路验证（3.20.2-16，11:01:50）：用 Codex 形状的最小合成请求
+  （`User-Agent: codex_cli_rs/…`、`originator: codex_cli_rs`、`session_id`，
+  `POST /v1/responses`，`model=gpt-5.6-terra`）打通官方线路，`codex-router.log` 记录：
+  `route_resolved → provider=…::account::4044e7ae-…` →
+  `auth_prepared auth_strategy=CodexOAuth` →
+  `upstream_send upstream_url=https://chatgpt.com/backend-api/codex/responses` →
+  `upstream_status status=400 (624ms)`；`proxy_request_logs` 同一条为
+  `status=400 lat=629 provider=…::account::4044e7ae-…`。
+  对照故障形态（3–6ms、完全没有 `upstream_send`）：账号池现在能给出候选并把请求真正
+  发到上游，拿到的是上游真实响应而不是本地的即时 503。
+  该 400 是上游对合成请求的回应（`The 'gpt-5.6-terra' model requires a newer version
+  of Codex`），原因是合成请求缺少真实 Codex 客户端的版本指纹，不是 CCSM 缺陷；
+  同一天 09:16–09:17 的真实 Codex 请求在该线路上是 200。
 
 ## 教训
 
