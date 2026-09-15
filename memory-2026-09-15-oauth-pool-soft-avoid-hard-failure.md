@@ -85,3 +85,24 @@ Codex endpoint /responses. Provider: OpenAI Official; model: gpt-5.6-sol; cause:
   候选为空意味着请求不会发出去，也就永远无法通过成功结果自愈。
 - 任何“即时失败且不访问上游”的分支都必须留下一条能定位的日志，
   否则现场只剩一个 3ms 的 503。
+
+## 附记：10:56 的 UncleanExit 是整机重启，不是 CCSM 崩溃
+
+安装 v3.20.2-16 后（10:13 启动，PID 58556），10:56:18 的启动日志记录
+`检测到上次运行 marker: classification=UncleanExit, pid=58556, crash_log_modified_at=None`，
+`app-exit-events.jsonl` 也写了一条 `abnormal_exit_detected / unclean_exit`。
+第一眼像崩溃，实际是系统事件：
+
+- System 日志：`10:53:52 User32 1074`（进程发起关机）+ `10:53:59 Winlogon 注销` +
+  `10:54:04 Kernel-General 13`（系统关闭）+ `10:54:27 Kernel-General 12`（系统启动），
+  `LastBootUpTime = 2026-09-15 10:54:27`；10:57:03 还有 Windows 更新开始下载。
+- 因此 10:13 那个进程是被整机关机带走的，来不及写 clean-exit marker；
+  开机后 CCSM 自动启动为 PID 31320（supervisor 34520），run marker 与 `/status`
+  都显示 3.20.2-16，`/health` 200。
+- `watchdog-state.json` 的 restarts 只有 00:01 / 00:41 两条，说明这次不是守护自动拉起，
+  而是登录后自启；WER 在 10:54–10:57 出现的 LiveKernelEvent/BlueScreen 记录是
+  开机后处理既有转储，不是新的 CCSM 崩溃。
+
+结论：**OS 关机/重启会让运行 marker 残留并被判为 UncleanExit**，这是当前分类口径的
+已知误报来源。以后看到 `UncleanExit + crash_log_modified_at=None` 要先查
+`LastBootUpTime` 与 System 日志的 1074/13/12 事件，再考虑 CCSM 崩溃。
