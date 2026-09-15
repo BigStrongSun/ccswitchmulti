@@ -3662,6 +3662,13 @@ async fn handle_codex_xai_native_responses_rewrite(
         })
 }
 
+/// Client-facing and upstream model identities for a Codex chat request.
+#[derive(Clone, Copy)]
+struct CodexChatModelNames<'a> {
+    public: &'a str,
+    upstream: &'a str,
+}
+
 #[cfg(test)]
 fn create_codex_chat_sse_stream_from_verified_profile<E: std::error::Error + Send + 'static>(
     stream: impl futures::Stream<Item = Result<Bytes, E>> + Send + 'static,
@@ -3676,8 +3683,10 @@ fn create_codex_chat_sse_stream_from_verified_profile<E: std::error::Error + Sen
         stream,
         tool_context,
         provider,
-        public_model,
-        upstream_model,
+        CodexChatModelNames {
+            public: public_model,
+            upstream: upstream_model,
+        },
         db,
         now,
         false,
@@ -3690,8 +3699,7 @@ fn create_codex_chat_sse_stream_from_verified_profile_for_client<
     stream: impl futures::Stream<Item = Result<Bytes, E>> + Send + 'static,
     tool_context: transform_codex_chat::CodexToolContext,
     provider: &crate::provider::Provider,
-    public_model: &str,
-    upstream_model: &str,
+    models: CodexChatModelNames<'_>,
     db: std::sync::Arc<crate::database::Database>,
     now: i64,
     desktop_client: bool,
@@ -3699,16 +3707,21 @@ fn create_codex_chat_sse_stream_from_verified_profile_for_client<
     let reasoning_projection = super::providers::adapt_codex_reasoning_projection_for_desktop(
         super::providers::resolve_codex_chat_reasoning_projection(
             provider,
-            public_model,
-            upstream_model,
+            models.public,
+            models.upstream,
             db.as_ref(),
             now,
         ),
         desktop_client,
     );
-    let observation =
-        load_runtime_observation_profile(provider, public_model, upstream_model, db.as_ref(), now)
-            .map(|(target, profile)| (target, profile, db));
+    let observation = load_runtime_observation_profile(
+        provider,
+        models.public,
+        models.upstream,
+        db.as_ref(),
+        now,
+    )
+    .map(|(target, profile)| (target, profile, db));
     let stream = capture_chat_sse_stream(stream, move |observed| {
         if let Some((target, profile, db)) = observation {
             observe_and_expire_protocol_profile(db.as_ref(), &target, &profile, &observed, now);
@@ -3735,8 +3748,10 @@ fn chat_completion_to_response_from_verified_profile(
         body,
         tool_context,
         provider,
-        public_model,
-        upstream_model,
+        CodexChatModelNames {
+            public: public_model,
+            upstream: upstream_model,
+        },
         db,
         now,
         false,
@@ -3747,18 +3762,17 @@ fn chat_completion_to_response_from_verified_profile_for_client(
     body: Value,
     tool_context: &transform_codex_chat::CodexToolContext,
     provider: &crate::provider::Provider,
-    public_model: &str,
-    upstream_model: &str,
+    models: CodexChatModelNames<'_>,
     db: &crate::database::Database,
     now: i64,
     desktop_client: bool,
 ) -> Result<Value, ProxyError> {
-    observe_codex_chat_json_profile(provider, public_model, upstream_model, db, &body, now);
+    observe_codex_chat_json_profile(provider, models.public, models.upstream, db, &body, now);
     let reasoning_projection = super::providers::adapt_codex_reasoning_projection_for_desktop(
         super::providers::resolve_codex_chat_reasoning_projection(
             provider,
-            public_model,
-            upstream_model,
+            models.public,
+            models.upstream,
             db,
             now,
         ),
@@ -4048,8 +4062,10 @@ async fn handle_codex_chat_to_responses_transform(
             stream,
             tool_context,
             &ctx.provider,
-            &ctx.request_model,
-            upstream_model,
+            CodexChatModelNames {
+                public: &ctx.request_model,
+                upstream: upstream_model,
+            },
             state.db.clone(),
             projection_now,
             ctx.codex_desktop_reasoning,
@@ -4190,8 +4206,10 @@ async fn handle_codex_chat_to_responses_transform(
         chat_response,
         &tool_context,
         &ctx.provider,
-        &ctx.request_model,
-        upstream_model,
+        CodexChatModelNames {
+            public: &ctx.request_model,
+            upstream: upstream_model,
+        },
         state.db.as_ref(),
         projection_now,
         ctx.codex_desktop_reasoning,

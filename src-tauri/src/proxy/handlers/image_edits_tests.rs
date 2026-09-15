@@ -436,6 +436,25 @@ fn image_edits_v2_text_only_official_route_falls_back_without_text_model_overrid
     );
     db.save_provider("codex", &router).expect("save router");
     db.save_provider("codex", &official).expect("save official");
+    let providers = HashMap::from([(official.id.clone(), official.clone())]);
+    let image_body = json!({"model": "gpt-image-2"});
+    assert!(
+        crate::proxy::providers::resolve_codex_v2_routed_provider(&router, &image_body, &providers)
+            .unwrap()
+            .is_none(),
+        "ordinary Responses routing remains catalog-only"
+    );
+    assert!(
+        crate::proxy::providers::resolve_codex_v2_raw_passthrough_provider(
+            &router,
+            &image_body,
+            &providers,
+            None
+        )
+        .unwrap()
+        .is_none(),
+        "generic raw routing remains catalog-only"
+    );
     let state = build_state(db);
 
     let resolved = resolve_codex_image_generation_provider(
@@ -663,6 +682,48 @@ async fn image_edits_handler_reaches_official_auth_instead_of_router_self_loop()
         );
         assert_eq!(body["error"]["model"], "gpt-image-2");
     }
+    for (method, endpoint) in [
+        ("POST", "/v1/vendor/images/edits"),
+        ("POST", "/v1/responses/compact"),
+        ("GET", "/v1/images/edits"),
+    ] {
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(endpoint)
+            .header("originator", "codex_cli_rs")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"model":"gpt-image-2"}"#))
+            .unwrap();
+        let response = handle_raw_openai_passthrough(State(state.clone()), request)
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("Refusing to forward recursively"),
+            "{method} {endpoint}: {body}"
+        );
+        assert!(
+            !message.contains("Codex OAuth"),
+            "unrelated requests must not acquire an official route"
+        );
+    }
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/images/edits")
+        .header("x-cc-switch-external-openai-api", "1")
+        .header("content-type", "multipart/form-data")
+        .body(axum::body::Body::from("malformed external body"))
+        .unwrap();
+    let response = handle_raw_openai_passthrough(State(state), request)
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::FORBIDDEN,
+        "external authentication remains ahead of native image parsing and fallback"
+    );
 }
 
 #[test]
