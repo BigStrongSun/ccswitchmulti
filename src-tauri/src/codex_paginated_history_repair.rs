@@ -1497,29 +1497,96 @@ pub(crate) fn repair_paginated_history_after_codex_exit(
     Ok(outcome)
 }
 
-pub(crate) fn repaired_projections_caught_up(
+/// 已修复投影游标的追平状态。
+///
+/// 必须区分两件完全不同的事：
+/// - `damaged`：游标**仍落在记录中间**，也就是我们修的那个损坏形态还在 —— 这才是失败。
+/// - `pending`：游标已经是合法记录边界，只是还没推进到修复时的文件末尾。Codex Desktop
+///   只在打开/继续某个任务时才物化它的历史，绝大多数历史线程永远不会被触碰，所以
+///   “所有游标都要追平到 EOF”是**不可达**条件：旧实现会一直轮询到超时（现场 450 秒）
+///   然后报 `codex_paginated_history_projection_not_caught_up`，而修复其实早已生效。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RepairedProjectionStatus {
+    pub(crate) damaged: usize,
+    pub(crate) pending: usize,
+}
+
+impl RepairedProjectionStatus {
+    /// 只有“仍然停在记录中间”才算追平失败；pending 属于 Codex 的懒物化，不算失败。
+    pub(crate) fn is_caught_up(&self) -> bool {
+        self.damaged == 0
+    }
+}
+
+pub(crate) fn repaired_projection_status(
     outcome: &PaginatedHistoryRepairOutcome,
-) -> Result<bool, String> {
+) -> Result<RepairedProjectionStatus, String> {
     if outcome.targets.is_empty() {
-        return Ok(true);
+        return Ok(RepairedProjectionStatus::default());
     }
     let config_dir = crate::codex_config::get_codex_config_dir();
     let Some(projection_db) = projection_db_path(&config_dir) else {
-        return Ok(false);
+        // 读不到投影库时保持 fail-closed：按损坏处理，让调用方继续等待/报错。
+        return Ok(RepairedProjectionStatus {
+            damaged: outcome.targets.len(),
+            pending: 0,
+        });
     };
+    repaired_projection_status_at(&projection_db, outcome)
+}
+
+fn repaired_projection_status_at(
+    projection_db: &Path,
+    outcome: &PaginatedHistoryRepairOutcome,
+) -> Result<RepairedProjectionStatus, String> {
+    let mut status = RepairedProjectionStatus::default();
     for target in &outcome.targets {
         let Some((next_offset, next_ordinal)) =
-            projection_cursor(Some(&projection_db), &target.source_id)?
+            projection_cursor(Some(projection_db), &target.source_id)?
         else {
-            return Ok(false);
+            status.damaged += 1;
+            continue;
         };
-        if next_ordinal < target.minimum_next_ordinal
-            || next_offset < target.minimum_next_byte_offset
+        if next_offset >= target.minimum_next_byte_offset
+            && next_ordinal >= target.minimum_next_ordinal
         {
-            return Ok(false);
+            continue;
+        }
+        if projection_cursor_on_record_boundary(&target.rollout_path, next_offset)? {
+            status.pending += 1;
+        } else {
+            status.damaged += 1;
         }
     }
-    Ok(true)
+    Ok(status)
+}
+
+pub(crate) fn repaired_projections_caught_up(
+    outcome: &PaginatedHistoryRepairOutcome,
+) -> Result<bool, String> {
+    Ok(repaired_projection_status(outcome)?.is_caught_up())
+}
+
+/// 游标是否停在一个合法的记录边界上（0 与文件末尾都算合法）。
+///
+/// 这正是我们修复的损坏判据的反面：损坏的游标指向记录内部，Codex 从这里读不出完整
+/// JSON 记录，历史物化就会停住；只要落在边界上，Codex 就能按自己的节奏继续推进。
+fn projection_cursor_on_record_boundary(path: &Path, offset: u64) -> Result<bool, String> {
+    let mut file = File::open(path)
+        .map_err(|error| format!("open_projection_boundary_check_failed: {error}"))?;
+    let len = file
+        .metadata()
+        .map_err(|error| format!("read_projection_boundary_metadata_failed: {error}"))?
+        .len();
+    if offset == 0 || offset >= len {
+        return Ok(true);
+    }
+    file.seek(SeekFrom::Start(offset - 1))
+        .map_err(|error| format!("seek_projection_boundary_check_failed: {error}"))?;
+    let mut byte = [0_u8; 1];
+    file.read_exact(&mut byte)
+        .map_err(|error| format!("read_projection_boundary_check_failed: {error}"))?;
+    Ok(byte[0] == b'\n')
 }
 
 pub(crate) fn repair_newly_stalled_projection_cursors(
@@ -1896,6 +1963,121 @@ mod tests {
                 .expect("repaired later cursor"),
             (duplicate_start, 11)
         );
+    }
+
+    fn write_projection_cursor_rows(db: &Path, rows: &[(&str, u64, u64)]) {
+        let connection = Connection::open(db).expect("projection db");
+        connection
+            .execute_batch(
+                "CREATE TABLE thread_history_projection_state (
+                    thread_id TEXT PRIMARY KEY,
+                    next_rollout_byte_offset INTEGER NOT NULL,
+                    next_rollout_ordinal INTEGER NOT NULL
+                 );",
+            )
+            .expect("projection schema");
+        for (thread_id, offset, ordinal) in rows {
+            connection
+                .execute(
+                    "INSERT INTO thread_history_projection_state VALUES (?1, ?2, ?3)",
+                    rusqlite::params![thread_id, offset, ordinal],
+                )
+                .expect("projection cursor row");
+        }
+    }
+
+    fn three_record_rollout(temp: &Path) -> (PathBuf, u64, u64) {
+        let rollout =
+            temp.join("rollout-2026-09-15T00-00-00-01a00000-0000-7000-8000-0000000000a1.jsonl");
+        write_rollout(
+            &rollout,
+            &[(0, "event_msg"), (1, "event_msg"), (2, "event_msg")],
+        );
+        let bytes = std::fs::read(&rollout).expect("read rollout");
+        let len = bytes.len() as u64;
+        let line_starts = bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte == b'\n')
+            .map(|(index, _)| index as u64 + 1)
+            .collect::<Vec<_>>();
+        assert_eq!(line_starts.len(), 3, "fixture must have three records");
+        (rollout, len, line_starts[2])
+    }
+
+    /// 现场回归（2026-09-15 10:59 的「刷新 Codex 状态」）：修复阶段成功（恢复快照里
+    /// 1114 条游标全部改好），但校验阶段死等 450 秒后报
+    /// `codex_paginated_history_projection_not_caught_up`。真实数据里这些游标都已
+    /// 落在合法记录边界上，只是没有被 Codex 重新物化到文件末尾——Codex 按需物化历史，
+    /// 绝大多数历史线程永远不会被触碰，所以旧判据「必须 >= 修复时的文件长度」不可达。
+    #[test]
+    fn repaired_cursor_on_a_record_boundary_counts_as_caught_up_pending_lazy_materialization() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (rollout, len, third_record_start) = three_record_rollout(temp.path());
+        let db = temp.path().join("thread_history_1.sqlite");
+        write_projection_cursor_rows(
+            &db,
+            &[
+                ("caught-up", len, 4),
+                ("lazy-pending", third_record_start, 3),
+            ],
+        );
+        let outcome = PaginatedHistoryRepairOutcome {
+            targets: vec![
+                ProjectionCatchUpTarget {
+                    source_id: "caught-up".to_string(),
+                    rollout_path: rollout.clone(),
+                    minimum_next_ordinal: 4,
+                    minimum_next_byte_offset: len,
+                },
+                ProjectionCatchUpTarget {
+                    source_id: "lazy-pending".to_string(),
+                    rollout_path: rollout.clone(),
+                    minimum_next_ordinal: 4,
+                    minimum_next_byte_offset: len,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let status = repaired_projection_status_at(&db, &outcome).expect("projection status");
+
+        assert_eq!(status.damaged, 0, "合法记录边界不能被判成损坏");
+        assert_eq!(status.pending, 1, "尚未被 Codex 物化的游标应记为 pending");
+        assert!(status.is_caught_up(), "pending 不能阻塞校验");
+    }
+
+    /// 反向断言：真的还停在记录中间的游标必须继续被判为损坏（fail-closed 不变）。
+    #[test]
+    fn repaired_cursor_inside_a_record_is_still_damaged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (rollout, len, _) = three_record_rollout(temp.path());
+        let inside_last_record = len - 2;
+        let db = temp.path().join("thread_history_1.sqlite");
+        write_projection_cursor_rows(&db, &[("damaged", inside_last_record, 3)]);
+        let outcome = PaginatedHistoryRepairOutcome {
+            targets: vec![
+                ProjectionCatchUpTarget {
+                    source_id: "damaged".to_string(),
+                    rollout_path: rollout.clone(),
+                    minimum_next_ordinal: 4,
+                    minimum_next_byte_offset: len,
+                },
+                ProjectionCatchUpTarget {
+                    source_id: "missing-row".to_string(),
+                    rollout_path: rollout.clone(),
+                    minimum_next_ordinal: 4,
+                    minimum_next_byte_offset: len,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let status = repaired_projection_status_at(&db, &outcome).expect("projection status");
+
+        assert_eq!(status.damaged, 2, "记录内部游标与缺失行都必须算损坏");
+        assert_eq!(status.pending, 0);
+        assert!(!status.is_caught_up());
     }
 
     #[test]

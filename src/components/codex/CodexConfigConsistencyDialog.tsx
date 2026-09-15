@@ -469,6 +469,33 @@ export function CodexConfigConsistencyDialog({
                     {t("codexConfigConsistency.codexHistoryBugNotice")}
                   </div>
                 ) : null}
+                {/* 确认页必须先说清“这次到底有没有问题、要做什么”，
+                    否则用户看到破坏性按钮却看不出为什么要点它。 */}
+                <div className="rounded-md border bg-muted/20 p-3">
+                  <p className="font-medium">
+                    {t("codexConfigConsistency.confirmSituationTitle")}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {repairableHistoryCount > 0
+                      ? t("codexConfigConsistency.confirmSituationRepair", {
+                          count: repairableHistoryCount,
+                          duplicates:
+                            refresh.preflight.paginatedHistory
+                              .duplicateOrdinalCount,
+                          cursors:
+                            refresh.preflight.paginatedHistory
+                              .providerMigrationCursorCount ?? 0,
+                          historyBases:
+                            refresh.preflight.paginatedHistory
+                              .providerMigrationHistoryBaseCount ?? 0,
+                        })
+                      : skippedHistoryCount > 0
+                        ? t("codexConfigConsistency.confirmSituationSkipped", {
+                            count: skippedHistoryCount,
+                          })
+                        : t("codexConfigConsistency.confirmSituationNone")}
+                  </p>
+                </div>
                 <div className="grid grid-cols-2 gap-3">
                   <p className="rounded-md border bg-muted/20 p-3">
                     {t("codexConfigConsistency.desktopProcesses")}{" "}
@@ -534,9 +561,14 @@ export function CodexConfigConsistencyDialog({
                     />
                   </div>
                 ) : null}
-                <p className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-blue-800 dark:text-blue-200">
-                  {t("codexConfigConsistency.historyCompatibilityCheck")}
-                </p>
+                <div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-blue-800 dark:text-blue-200">
+                  <p className="font-medium">
+                    {t("codexConfigConsistency.confirmScopeTitle")}
+                  </p>
+                  <p className="mt-1 text-xs">
+                    {t("codexConfigConsistency.historyCompatibilityCheck")}
+                  </p>
+                </div>
                 <p className="break-all text-xs text-muted-foreground">
                   {t("codexConfigConsistency.launchTarget")}{" "}
                   {refresh.preflight.launchTarget || t("common.unknown")}
@@ -683,7 +715,9 @@ export function CodexConfigConsistencyDialog({
                   {t("codexConfigConsistency.cancelRefresh")}
                 </Button>
                 <Button onClick={onConfirmRefresh}>
-                  {t("codexConfigConsistency.confirmRefresh")}
+                  {repairableHistoryCount > 0
+                    ? t("codexConfigConsistency.confirmRefresh")
+                    : t("codexConfigConsistency.confirmRefreshWithoutRepair")}
                 </Button>
               </>
             ) : failed ? (

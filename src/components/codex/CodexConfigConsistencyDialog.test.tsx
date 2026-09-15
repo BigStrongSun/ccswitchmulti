@@ -79,6 +79,16 @@ vi.mock("react-i18next", () => ({
         "codexConfigConsistency.historyCompatibilityCheck":
           "会备份原始 JSONL、保留全部对话并恢复分页投影。",
         "codexConfigConsistency.confirmRefresh": "关闭、重写并重新打开",
+        "codexConfigConsistency.confirmRefreshWithoutRepair":
+          "重新应用配置并打开",
+        "codexConfigConsistency.confirmSituationTitle": "本次刷新会做什么",
+        "codexConfigConsistency.confirmSituationRepair":
+          "需要修复的历史：{{count}} 个文件（重复序号 {{duplicates}} · 迁移游标 {{cursors}} · 父段引用 {{historyBases}}）。",
+        "codexConfigConsistency.confirmSituationSkipped":
+          "没有需要修复的历史文件；{{count}} 个文件保持原样，不会被自动改写。",
+        "codexConfigConsistency.confirmSituationNone":
+          "没有发现需要修复的历史文件。",
+        "codexConfigConsistency.confirmScopeTitle": "修复范围与边界",
         "codexConfigConsistency.cancelRefresh": "取消",
         "codexConfigConsistency.refreshingTitle": "正在刷新 Codex 状态",
         "codexConfigConsistency.refreshingDescription":
@@ -356,12 +366,85 @@ describe("CodexConfigConsistencyDialog", () => {
     expect(
       within(confirmation).getByText(/保持原样、不会自动修改的历史文件.*1/),
     ).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText("本次刷新会做什么"),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText(/需要修复的历史：\{\{count\}\} 个文件/),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText("修复范围与边界"),
+    ).toBeInTheDocument();
     fireEvent.click(
       within(confirmation).getByRole("button", {
         name: "关闭、重写并重新打开",
       }),
     );
     expect(onConfirmRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("states that nothing needs repair and renames the confirm button accordingly", () => {
+    render(
+      <CodexConfigConsistencyDialog
+        report={null}
+        pending={false}
+        error={null}
+        refresh={{
+          phase: "confirm",
+          progress: null,
+          preflight: {
+            supported: true,
+            canRefresh: true,
+            snapshotToken: "confirm-no-repair",
+            desktopProcessCount: 1,
+            appServerProcessCount: 1,
+            processCount: 2,
+            launchTarget: "OpenAI.Codex_2p2nqsd0c76g0!App",
+            warning: "active_tasks_will_be_interrupted",
+            paginatedHistory: {
+              affectedRolloutCount: 0,
+              duplicateOrdinalCount: 0,
+              providerMigrationCursorCount: 0,
+              providerMigrationHistoryBaseCount: 0,
+              affectedBytes: 0,
+              blockedRolloutCount: 38,
+              blockedReason:
+                "history_base_offset_not_record_boundary: rollout_id=01a00000-0000-7000-8000-000000000003",
+              blockedReasonGroups: [],
+            },
+          },
+        }}
+        onApply={vi.fn()}
+        onKeep={vi.fn()}
+        onLater={vi.fn()}
+        onRetry={vi.fn()}
+        onInspectRefresh={vi.fn()}
+        onConfirmRefresh={vi.fn()}
+        onCancelRefresh={vi.fn()}
+      />,
+    );
+
+    const confirmation = screen.getByRole("dialog", {
+      name: "确认刷新 Codex 状态",
+    });
+    expect(
+      within(confirmation).getByText(
+        /没有需要修复的历史文件；\{\{count\}\} 个文件保持原样/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).queryByText(/需要修复的历史：/),
+    ).not.toBeInTheDocument();
+    expect(
+      within(confirmation).getByRole("button", {
+        name: "重新应用配置并打开",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).queryByRole("button", {
+        name: "关闭、重写并重新打开",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows all five refresh stages in one modal instead of stacking another dialog", () => {
