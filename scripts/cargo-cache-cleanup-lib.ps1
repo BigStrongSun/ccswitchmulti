@@ -23,23 +23,45 @@ function Assert-CcswitchmultiCargoTargetPath {
     $srcTauriFull = [System.IO.Path]::GetFullPath((Join-Path $worktreeFull "src-tauri"))
     $targetFull = [System.IO.Path]::GetFullPath($TargetDir)
     $targetParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $targetFull))
-    if (-not [string]::Equals(
-            $targetParent,
-            $srcTauriFull,
-            [System.StringComparison]::OrdinalIgnoreCase
-        )) {
-        throw "Cargo cleanup target must be a direct child of the worktree src-tauri directory: $targetFull"
-    }
-
     $targetName = [System.IO.Path]::GetFileName($targetFull.TrimEnd('\', '/'))
-    if ($targetName -ne "target" -and -not $targetName.StartsWith(
+    $isTargetName = $targetName -eq "target" -or $targetName.StartsWith(
             "target-",
             [System.StringComparison]::OrdinalIgnoreCase
-        )) {
+        )
+    $isSrcTauriTarget = $isTargetName -and [string]::Equals(
+        $targetParent,
+        $srcTauriFull,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+    $isReleaseTarget = $targetName -eq ".release-target" -and [string]::Equals(
+        $targetParent,
+        $worktreeFull,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+    $sddRoot = [System.IO.Path]::GetFullPath((Join-Path $worktreeFull ".superpowers\sdd"))
+    $sddTaskRoot = [System.IO.Path]::GetFullPath($targetParent)
+    $sddTaskParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $sddTaskRoot))
+    $isSddTarget = $isTargetName -and [string]::Equals(
+        $sddTaskParent,
+        $sddRoot,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+    if (-not ($isSrcTauriTarget -or $isReleaseTarget -or $isSddTarget)) {
+        throw "Cargo cleanup target must be a direct child of the worktree src-tauri directory or a supported release/SDD Cargo target: $targetFull"
+    }
+    if (-not $isReleaseTarget -and -not $isTargetName) {
         throw "Cargo cleanup target name must be target or target-*: $targetFull"
     }
     if (-not (Test-Path -LiteralPath $targetFull -PathType Container)) {
         throw "Cargo cleanup target directory is missing: $targetFull"
+    }
+    if ($isSddTarget) {
+        foreach ($containerPath in @($sddRoot, $sddTaskRoot)) {
+            $containerItem = Get-Item -LiteralPath $containerPath -Force
+            if (($containerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Cargo cleanup SDD parent must not be a reparse point: $containerPath"
+            }
+        }
     }
     $targetItem = Get-Item -LiteralPath $targetFull -Force
     if (($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -63,18 +85,46 @@ function Get-CcswitchmultiStaleCargoTargetDirectories {
     $cutoff = $Now.AddHours(-$MinimumAgeHours)
     $candidates = foreach ($worktreeRoot in $WorktreeRoots) {
         $worktreeFull = [System.IO.Path]::GetFullPath($worktreeRoot)
+        $supportedTargets = New-Object System.Collections.Generic.List[object]
         $srcTauri = Join-Path $worktreeFull "src-tauri"
-        if (-not (Test-Path -LiteralPath $srcTauri -PathType Container)) {
-            continue
+        if (Test-Path -LiteralPath $srcTauri -PathType Container) {
+            foreach ($target in (Get-ChildItem -LiteralPath $srcTauri -Directory -Force -ErrorAction SilentlyContinue)) {
+                if ($target.Name -eq "target" -or $target.Name.StartsWith(
+                        "target-",
+                        [System.StringComparison]::OrdinalIgnoreCase
+                    )) {
+                    $supportedTargets.Add($target)
+                }
+            }
         }
 
-        foreach ($target in (Get-ChildItem -LiteralPath $srcTauri -Directory -Force -ErrorAction SilentlyContinue)) {
-            if ($target.Name -ne "target" -and -not $target.Name.StartsWith(
-                    "target-",
-                    [System.StringComparison]::OrdinalIgnoreCase
-                )) {
+        $releaseTarget = Join-Path $worktreeFull ".release-target"
+        if (Test-Path -LiteralPath $releaseTarget -PathType Container) {
+            $supportedTargets.Add((Get-Item -LiteralPath $releaseTarget -Force))
+        }
+
+        $sddRoot = Join-Path $worktreeFull ".superpowers\sdd"
+        if (Test-Path -LiteralPath $sddRoot -PathType Container) {
+            $sddRootItem = Get-Item -LiteralPath $sddRoot -Force
+            if (($sddRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
                 continue
             }
+            foreach ($taskRoot in (Get-ChildItem -LiteralPath $sddRoot -Directory -Force -ErrorAction SilentlyContinue)) {
+                if (($taskRoot.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    continue
+                }
+                foreach ($target in (Get-ChildItem -LiteralPath $taskRoot.FullName -Directory -Force -ErrorAction SilentlyContinue)) {
+                    if ($target.Name -eq "target" -or $target.Name.StartsWith(
+                            "target-",
+                            [System.StringComparison]::OrdinalIgnoreCase
+                        )) {
+                        $supportedTargets.Add($target)
+                    }
+                }
+            }
+        }
+
+        foreach ($target in $supportedTargets) {
             if ($target.LastWriteTime -gt $cutoff) {
                 continue
             }

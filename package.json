@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm tauri dev",
-    "build": "pnpm tauri build",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/local-build-pipeline.ps1",
     "tauri": "tauri",
     "dev:renderer": "vite",
     "build:renderer": "vite build",

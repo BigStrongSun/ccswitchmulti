@@ -23,7 +23,7 @@ Describe "CCSwitchMulti Cargo cache cleanup" {
         $roots[1] | Should Be ([System.IO.Path]::GetFullPath('C:/workspace/feature worktree'))
     }
 
-    It "discovers only stale direct target and target-dash directories" {
+    It "discovers stale Cargo targets from supported build and diagnostic locations" {
         (Test-Path -LiteralPath $libraryPath -PathType Leaf) | Should Be $true
         if (-not (Test-Path -LiteralPath $libraryPath -PathType Leaf)) {
             return
@@ -37,21 +37,69 @@ Describe "CCSwitchMulti Cargo cache cleanup" {
             $staleDefault = [System.IO.Directory]::CreateDirectory((Join-Path $srcTauri "target"))
             $staleCustom = [System.IO.Directory]::CreateDirectory((Join-Path $srcTauri "target-history-exclusive"))
             $recent = [System.IO.Directory]::CreateDirectory((Join-Path $srcTauri "target-recent"))
+            $releaseTarget = [System.IO.Directory]::CreateDirectory((Join-Path $fixtureRoot ".release-target"))
+            $sddTaskRoot = Join-Path $fixtureRoot ".superpowers\sdd\2026-09-09-diagnostic"
+            $sddTarget = [System.IO.Directory]::CreateDirectory((Join-Path $sddTaskRoot "target"))
+            $sddCustom = [System.IO.Directory]::CreateDirectory((Join-Path $sddTaskRoot "target-flake-diagnosis"))
+            $sddTooDeep = [System.IO.Directory]::CreateDirectory((Join-Path $sddTaskRoot "nested\target"))
+            [System.IO.Directory]::CreateDirectory((Join-Path $sddTaskRoot "evidence")) | Out-Null
+            $rootTarget = [System.IO.Directory]::CreateDirectory((Join-Path $fixtureRoot "target"))
             [System.IO.Directory]::CreateDirectory((Join-Path $srcTauri "targeted")) | Out-Null
             [System.IO.Directory]::CreateDirectory((Join-Path $srcTauri "nested\target-old")) | Out-Null
             $now = [datetime]'2026-09-09T18:00:00'
             $staleDefault.LastWriteTime = $now.AddHours(-8)
             $staleCustom.LastWriteTime = $now.AddHours(-7)
             $recent.LastWriteTime = $now.AddHours(-1)
+            $releaseTarget.LastWriteTime = $now.AddHours(-8)
+            $sddTarget.LastWriteTime = $now.AddHours(-8)
+            $sddCustom.LastWriteTime = $now.AddHours(-8)
+            $sddTooDeep.LastWriteTime = $now.AddHours(-8)
+            $rootTarget.LastWriteTime = $now.AddHours(-8)
 
             $found = @(Get-CcswitchmultiStaleCargoTargetDirectories `
                     -WorktreeRoots @($fixtureRoot) `
                     -MinimumAgeHours 6 `
                     -Now $now)
 
-            $found.Count | Should Be 2
-            $found[0].FullName | Should Be ([System.IO.Path]::GetFullPath($staleDefault.FullName))
-            $found[1].FullName | Should Be ([System.IO.Path]::GetFullPath($staleCustom.FullName))
+            $found.Count | Should Be 5
+            (@($found.FullName) -contains ([System.IO.Path]::GetFullPath($staleDefault.FullName))) | Should Be $true
+            (@($found.FullName) -contains ([System.IO.Path]::GetFullPath($staleCustom.FullName))) | Should Be $true
+            (@($found.FullName) -contains ([System.IO.Path]::GetFullPath($releaseTarget.FullName))) | Should Be $true
+            (@($found.FullName) -contains ([System.IO.Path]::GetFullPath($sddTarget.FullName))) | Should Be $true
+            (@($found.FullName) -contains ([System.IO.Path]::GetFullPath($sddCustom.FullName))) | Should Be $true
+            (@($found.FullName) -contains ([System.IO.Path]::GetFullPath($sddTooDeep.FullName))) | Should Be $false
+            (@($found.FullName) -contains ([System.IO.Path]::GetFullPath($rootTarget.FullName))) | Should Be $false
+        } finally {
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                [System.IO.Directory]::Delete($fixtureRoot, $true)
+            }
+        }
+    }
+
+    It "accepts only the exact worktree release target and one-level SDD target shapes" {
+        (Test-Path -LiteralPath $libraryPath -PathType Leaf) | Should Be $true
+        if (-not (Test-Path -LiteralPath $libraryPath -PathType Leaf)) {
+            return
+        }
+        . $libraryPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-cache-supported-boundary-" + [guid]::NewGuid().ToString("N"))
+        $releaseTarget = Join-Path $fixtureRoot ".release-target"
+        $sddTarget = Join-Path $fixtureRoot ".superpowers\sdd\diagnostic\target-flake"
+        $tooDeep = Join-Path $fixtureRoot ".superpowers\sdd\diagnostic\nested\target"
+        $rootTarget = Join-Path $fixtureRoot "target"
+        foreach ($path in @($releaseTarget, $sddTarget, $tooDeep, $rootTarget)) {
+            [System.IO.Directory]::CreateDirectory($path) | Out-Null
+        }
+        try {
+            Assert-CcswitchmultiCargoTargetPath -WorktreeRoot $fixtureRoot -TargetDir $releaseTarget |
+                Should Be ([System.IO.Path]::GetFullPath($releaseTarget))
+            Assert-CcswitchmultiCargoTargetPath -WorktreeRoot $fixtureRoot -TargetDir $sddTarget |
+                Should Be ([System.IO.Path]::GetFullPath($sddTarget))
+            { Assert-CcswitchmultiCargoTargetPath -WorktreeRoot $fixtureRoot -TargetDir $tooDeep } |
+                Should Throw "supported release/SDD Cargo target"
+            { Assert-CcswitchmultiCargoTargetPath -WorktreeRoot $fixtureRoot -TargetDir $rootTarget } |
+                Should Throw "supported release/SDD Cargo target"
         } finally {
             if (Test-Path -LiteralPath $fixtureRoot) {
                 [System.IO.Directory]::Delete($fixtureRoot, $true)

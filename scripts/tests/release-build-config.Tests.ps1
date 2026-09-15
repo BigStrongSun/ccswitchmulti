@@ -545,6 +545,80 @@ Remove-LocalReleaseCargoTargetDir -RepoRoot '$($fixtureRoot.Replace("'", "''"))'
         $lifecycleCalls.Count | Should Be 1
     }
 
+    It "cleans the isolated Cargo target and restores the caller environment after success" {
+        . $helperPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-build-lifecycle-success-" + [guid]::NewGuid().ToString("N"))
+        [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        [System.IO.Directory]::CreateDirectory((Join-Path $fixtureRoot "src-tauri\src")) | Out-Null
+        [System.IO.File]::WriteAllText(
+            (Join-Path $fixtureRoot "src-tauri\Cargo.toml"),
+            "[package]`nname = `"build-lifecycle-fixture`"`nversion = `"0.1.0`"`nedition = `"2021`"`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        [System.IO.File]::WriteAllText((Join-Path $fixtureRoot "src-tauri\src\lib.rs"), "pub fn fixture() {}")
+        $hadPrevious = Test-Path Env:CARGO_TARGET_DIR
+        $previous = $env:CARGO_TARGET_DIR
+        $env:CARGO_TARGET_DIR = 'D:\caller-owned-cargo-target'
+        $script:capturedBuildTarget = $null
+        try {
+            $result = Invoke-WithLocalReleaseCargoTarget -RepoRoot $fixtureRoot -Enabled $true -Action {
+                param($targetDir)
+                $script:capturedBuildTarget = $targetDir
+                [System.IO.File]::WriteAllText((Join-Path $targetDir "complete.bin"), "complete")
+                return "build-complete"
+            }
+
+            $result | Should Be "build-complete"
+            (Test-Path -LiteralPath $script:capturedBuildTarget) | Should Be $false
+            $env:CARGO_TARGET_DIR | Should Be 'D:\caller-owned-cargo-target'
+        } finally {
+            if ($hadPrevious) {
+                $env:CARGO_TARGET_DIR = $previous
+            } else {
+                Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+            }
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                [System.IO.Directory]::Delete($fixtureRoot, $true)
+            }
+        }
+    }
+
+    It "routes normal builds through the isolated Cargo target lifecycle" {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $packageJson = [System.IO.File]::ReadAllText((Join-Path $repoRoot "package.json")) | ConvertFrom-Json
+        $buildScriptPath = Join-Path $repoRoot "scripts\local-build-pipeline.ps1"
+
+        $packageJson.scripts.build | Should Be "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/local-build-pipeline.ps1"
+        (Test-Path -LiteralPath $buildScriptPath -PathType Leaf) | Should Be $true
+        if (-not (Test-Path -LiteralPath $buildScriptPath -PathType Leaf)) {
+            return
+        }
+
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $buildScriptPath,
+            [ref]$tokens,
+            [ref]$errors
+        )
+        $errors.Count | Should Be 0
+        $lifecycleCalls = @($ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq "Invoke-WithLocalReleaseCargoTarget"
+                }, $true))
+        $tauriBuildCalls = @($ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq "pnpm" -and
+                    $node.Extent.Text -match 'tauri\s+build'
+                }, $true))
+
+        $lifecycleCalls.Count | Should Be 1
+        $tauriBuildCalls.Count | Should Be 1
+    }
+
     It "computes SHA256 without PowerShell utility cmdlets" {
         . $helperPath
 
