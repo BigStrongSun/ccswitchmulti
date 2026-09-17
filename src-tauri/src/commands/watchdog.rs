@@ -56,9 +56,9 @@ pub async fn get_watchdog_status(
         None
     };
     let listener_identity = listener_pid.and_then(crate::process_identity::process_identity);
-    let port_ready = listener_identity
-        .as_ref()
-        .is_some_and(|identity| crate::process_identity::executable_matches_current(&identity.executable_path));
+    let port_ready = listener_identity.as_ref().is_some_and(|identity| {
+        crate::process_identity::executable_matches_current(&identity.executable_path)
+    });
 
     Ok(WatchdogStatus {
         enabled: crate::settings::get_settings().watchdog_enabled,
