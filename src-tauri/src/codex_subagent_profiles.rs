@@ -745,6 +745,49 @@ pub fn normalize_profile_key(value: &str) -> String {
         .collect()
 }
 
+/// DeepSeek 角色模型 slug 族：官方 API 现行 slug（`deepseek-flash` / `deepseek-pro`）
+/// 与产品内 canonical slug（`deepseek-v4-flash` / `deepseek-v4-pro`，含 `-202605` /
+/// `-0731` 等日期版本）指向同一模型；`*-vision*` 是独立视觉模型，不属于文本角色族。
+///
+/// 返回 canonical 角色 slug，供角色 profile、catalog 匹配、自动生成 preset 与
+/// V1 角色文件做同一口径判定；否则官方新 slug 会被各处误判为“目录中缺失”。
+pub fn deepseek_role_identity_for_model(model: &str) -> Option<&'static str> {
+    let normalized = model.trim().to_ascii_lowercase();
+    if normalized.contains("vision") {
+        return None;
+    }
+    if normalized == "deepseek-flash"
+        || normalized == "deepseek-v4-flash"
+        || normalized.starts_with("deepseek-flash-")
+        || normalized.starts_with("deepseek-v4-flash-")
+    {
+        return Some("deepseek-v4-flash");
+    }
+    if normalized == "deepseek-pro"
+        || normalized == "deepseek-v4-pro"
+        || normalized.starts_with("deepseek-pro-")
+        || normalized.starts_with("deepseek-v4-pro-")
+    {
+        return Some("deepseek-v4-pro");
+    }
+    None
+}
+
+/// 判断两个模型 slug 是否指向同一可路由模型：精确匹配（忽略大小写）
+/// 或同属一个 DeepSeek 角色族（别名等价）。
+pub fn deepseek_role_models_match(a: &str, b: &str) -> bool {
+    if a.trim().eq_ignore_ascii_case(b.trim()) {
+        return true;
+    }
+    matches!(
+        (
+            deepseek_role_identity_for_model(a),
+            deepseek_role_identity_for_model(b)
+        ),
+        (Some(role_a), Some(role_b)) if role_a == role_b
+    )
+}
+
 /// Runtime loader that preserves malformed profile values while retaining strict top-level
 /// schema validation. This lets the UI surface and repair one bad entry without losing peers.
 pub fn parse_persisted_subagent_v2_tolerant(raw: &Value) -> Result<CodexSubagentV2, CompileError> {
@@ -1341,7 +1384,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
         let catalog = request
             .catalog_models
             .iter()
-            .find(|m| m.model.eq_ignore_ascii_case(&p.model) && m.routable);
+            .find(|m| deepseek_role_models_match(&m.model, &p.model) && m.routable);
         let Some(catalog) = catalog else {
             push_status(
                 &mut output,
@@ -1349,6 +1392,13 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
                 Some(DiagnosticReasonCode::Unroutable),
             );
             continue;
+        };
+        // 别名匹配（deepseek-flash ≡ deepseek-v4-flash）时，把角色钉到 catalog
+        // 实际存在的 slug，保证 live 模型目录能解析角色文件里的模型。
+        let role_model = if p.model.eq_ignore_ascii_case(&catalog.model) {
+            p.model.clone()
+        } else {
+            catalog.model.clone()
         };
         let requested = p
             .overrides
@@ -1401,7 +1451,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
                 catalog.provider_kind,
             ),
             nickname_candidates: nicknames,
-            model: p.model.clone(),
+            model: role_model,
             model_provider: "codex_model_router_v2".to_string(),
             effort,
             context_window: catalog.context_window,
@@ -3528,13 +3578,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_subagent_v2_catalog_alias_change_preserves_profile_and_marks_it_unroutable() {
+    fn codex_subagent_v2_catalog_renamed_to_unrelated_model_stays_unroutable() {
         let saved = config(
             SelectionPolicy::Balanced,
             vec![valid(profile("flash", "DeepSeek-V4-Flash"))],
         );
         let mut request = request(Some(saved.clone()));
-        request.catalog_models = vec![catalog("deepseek-flash-alias", true)];
+        // 换成真正不属于 DeepSeek flash 角色族的模型（未来的 v5）。
+        // 真实的官方别名（deepseek-flash）现在按设计应匹配为可路由。
+        request.catalog_models = vec![catalog("deepseek-v5-flash", true)];
         let actual = compile_subagent_v2_profiles(&request);
         assert_eq!(request.persisted_subagent_v2, Some(saved));
         assert_eq!(
@@ -3641,5 +3693,136 @@ mod tests {
                 vec![valid(flash), valid(pro)],
             ))
         );
+    }
+
+    #[test]
+    fn deepseek_role_identity_covers_official_alias_and_dated_slugs() {
+        assert_eq!(
+            deepseek_role_identity_for_model("deepseek-flash"),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            deepseek_role_identity_for_model("DeepSeek-Flash"),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            deepseek_role_identity_for_model("deepseek-v4-flash"),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            deepseek_role_identity_for_model("deepseek-v4-flash-202605"),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            deepseek_role_identity_for_model("deepseek-flash-0731"),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            deepseek_role_identity_for_model("deepseek-pro"),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(
+            deepseek_role_identity_for_model("deepseek-v4-pro"),
+            Some("deepseek-v4-pro")
+        );
+        // *-vision* 是独立视觉模型，不属于文本角色族。
+        assert_eq!(deepseek_role_identity_for_model("deepseek-v4-flash-vision-exp"), None);
+        assert_eq!(deepseek_role_identity_for_model("deepseek-flash-vision"), None);
+        // 其它 DeepSeek 模型不属于 flash/pro 角色族。
+        assert_eq!(deepseek_role_identity_for_model("deepseek-chat"), None);
+        assert_eq!(deepseek_role_identity_for_model("gpt-5.6-sol"), None);
+    }
+
+    #[test]
+    fn deepseek_role_models_match_treats_aliases_as_same_model() {
+        assert!(deepseek_role_models_match("deepseek-flash", "deepseek-v4-flash"));
+        assert!(deepseek_role_models_match("deepseek-v4-flash", "deepseek-flash"));
+        assert!(deepseek_role_models_match("DEEPSEEK-FLASH", "deepseek-v4-flash"));
+        assert!(deepseek_role_models_match("deepseek-pro", "deepseek-v4-pro"));
+        assert!(deepseek_role_models_match("qwen3.8", "QWEN3.8"));
+        // 同族不跨角色，不同模型不匹配。
+        assert!(!deepseek_role_models_match("deepseek-flash", "deepseek-v4-pro"));
+        assert!(!deepseek_role_models_match("deepseek-v4-flash-vision-exp", "deepseek-flash"));
+        assert!(!deepseek_role_models_match("qwen3.8", "qwen3.6"));
+    }
+
+    #[test]
+    fn v2_profile_compiles_when_catalog_uses_official_alias_slug() {
+        let mut compile_request = request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(profile("deepseek-v4-flash", "deepseek-v4-flash"))],
+        )));
+        compile_request.catalog_models = vec![catalog("deepseek-flash", true)];
+        let output = compile_subagent_v2_profiles(&compile_request)
+            .expect("compile alias-matched flash profile");
+        let status = output
+            .profile_statuses
+            .first()
+            .expect("flash profile status");
+        assert_eq!(status.status, ProfileStatusCode::Routable);
+        let role = output
+            .generated_roles
+            .first()
+            .expect("flash role generated");
+        // 角色模型钉到 catalog 实际存在的 slug，保证 live 目录可解析。
+        assert_eq!(role.model, "deepseek-flash");
+    }
+
+    #[test]
+    fn v2_profile_compiles_when_profile_uses_official_alias_slug() {
+        let mut compile_request = request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(profile("deepseek-flash", "deepseek-flash"))],
+        )));
+        compile_request.catalog_models = vec![catalog("deepseek-v4-flash", true)];
+        let output = compile_subagent_v2_profiles(&compile_request)
+            .expect("compile alias-matched flash profile");
+        assert_eq!(
+            output.profile_statuses.first().expect("status").status,
+            ProfileStatusCode::Routable
+        );
+        let role = output
+            .generated_roles
+            .first()
+            .expect("flash role generated");
+        assert_eq!(role.model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn v2_pro_profile_compiles_via_official_alias_slug() {
+        let mut compile_request = request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(profile("deepseek-v4-pro", "deepseek-v4-pro"))],
+        )));
+        compile_request.catalog_models = vec![catalog("deepseek-pro", true)];
+        let output = compile_subagent_v2_profiles(&compile_request)
+            .expect("compile alias-matched pro profile");
+        assert_eq!(
+            output.profile_statuses.first().expect("status").status,
+            ProfileStatusCode::Routable
+        );
+        assert_eq!(
+            output.generated_roles.first().expect("pro role").model,
+            "deepseek-pro"
+        );
+    }
+
+    #[test]
+    fn v2_flash_profile_stays_unroutable_for_vision_only_catalog() {
+        let mut compile_request = request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(profile("deepseek-v4-flash", "deepseek-v4-flash"))],
+        )));
+        // 只保留视觉模型：文本 flash 角色不得被视觉型号顶替。
+        compile_request.catalog_models =
+            vec![catalog("deepseek-v4-flash-vision-exp", true)];
+        let output = compile_subagent_v2_profiles(&compile_request)
+            .expect("compile vision-only catalog");
+        let flash_status = output
+            .profile_statuses
+            .iter()
+            .find(|status| status.key == "deepseek-v4-flash")
+            .expect("flash profile status");
+        assert_eq!(flash_status.status, ProfileStatusCode::Unroutable);
     }
 }

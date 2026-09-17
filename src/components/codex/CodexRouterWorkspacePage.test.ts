@@ -2960,6 +2960,78 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(screen.queryByText("目录中缺失")).not.toBeInTheDocument();
   });
 
+  it("treats the official deepseek-flash/deepseek-pro slugs as the role models", async () => {
+    const source: Provider = {
+      id: "codex-deepseek-official-slugs",
+      name: "DeepSeek official slugs",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "deepseek-flash" }, { model: "deepseek-pro" }],
+        },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([source], [source]),
+      source,
+    );
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await userEvent.click(screen.getByRole("tab", { name: "子 Agent" }));
+
+    expect(screen.getAllByText("可路由")).toHaveLength(2);
+    expect(screen.queryByText("目录中缺失")).not.toBeInTheDocument();
+  });
+
+  it("keeps the missing badge for the pro role when only the flash alias exists", async () => {
+    const source: Provider = {
+      id: "codex-deepseek-flash-alias-only",
+      name: "DeepSeek flash alias only",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "deepseek-flash" }],
+        },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([source], [source]),
+      source,
+    );
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await userEvent.click(screen.getByRole("tab", { name: "子 Agent" }));
+
+    expect(screen.getByText("可路由")).toBeInTheDocument();
+    expect(screen.getByText("目录中缺失")).toBeInTheDocument();
+  });
+
   it("exposes a delete action for routing plans inside the workspace", async () => {
     const source: Provider = {
       id: "codex-qwen",

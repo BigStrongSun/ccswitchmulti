@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::app_config::AppType;
 use crate::codex_subagent_profiles::{
-    compile_subagent_v2_profiles, initialize_legacy_subagent_v2, normalize_profile_key,
+    compile_subagent_v2_profiles, deepseek_role_identity_for_model, deepseek_role_models_match,
+    initialize_legacy_subagent_v2, normalize_profile_key,
     parse_persisted_subagent_v2, parse_persisted_subagent_v2_tolerant, render_generated_role_toml,
     CatalogModel as SubagentCatalogModel, CodexSubagentProfileConfig,
     CompileError as SubagentCompileError, CompileOutput as SubagentCompileOutput,
@@ -1126,7 +1127,7 @@ fn codex_catalog_model_name_is_text_only(model: &str) -> bool {
 
     matches!(
         normalized.as_str(),
-        "gpt53codexspark" | "deepseekv4flash" | "deepseekv4pro"
+        "gpt53codexspark" | "deepseekv4flash" | "deepseekflash" | "deepseekv4pro" | "deepseekpro"
     )
 }
 
@@ -3278,10 +3279,10 @@ fn codex_agent_role_name_for_model(model: &str) -> String {
     if normalized == "qwen3.6" || normalized.starts_with("qwen") {
         return "qwen-local".to_string();
     }
-    if normalized.contains("deepseek-v4-flash") {
+    if deepseek_role_identity_for_model(&normalized) == Some("deepseek-v4-flash") {
         return "deepseek-flash".to_string();
     }
-    if normalized.contains("deepseek-v4-pro") {
+    if deepseek_role_identity_for_model(&normalized) == Some("deepseek-v4-pro") {
         return "deepseek-pro".to_string();
     }
     if normalized.contains("codex-spark") || normalized.contains("spark") {
@@ -3310,10 +3311,10 @@ fn codex_agent_description_for_model(model: &str) -> String {
     if lower.starts_with("qwen") {
         return "Low-cost Qwen worker for read-heavy exploration, summaries, and bounded helper tasks.".to_string();
     }
-    if lower.contains("deepseek-v4-flash") {
+    if deepseek_role_identity_for_model(&lower) == Some("deepseek-v4-flash") {
         return "DeepSeek V4 Flash worker for long-context code reading, read-heavy exploration, architecture tracing, parallel evidence collection, and lightweight verification.".to_string();
     }
-    if lower.contains("deepseek-v4-pro") {
+    if deepseek_role_identity_for_model(&lower) == Some("deepseek-v4-pro") {
         return "DeepSeek V4 Pro worker for complex debugging, cross-module reasoning, architecture decisions, high-risk review, and complex implementation.".to_string();
     }
     if lower.contains("codex-spark") || lower.contains("spark") {
@@ -3332,7 +3333,7 @@ fn codex_agent_reasoning_effort_for_model(model: &str) -> Option<&'static str> {
     if lower.starts_with("qwen") {
         return None;
     }
-    if lower.contains("deepseek-v4-flash") || lower.contains("deepseek-v4-pro") {
+    if deepseek_role_identity_for_model(&lower).is_some() {
         return Some("high");
     }
     if lower.contains("spark") {
@@ -3346,7 +3347,7 @@ fn codex_agent_reasoning_effort_for_model(model: &str) -> Option<&'static str> {
 
 fn codex_agent_execution_guidance_for_model(model: &str) -> Option<&'static str> {
     let lower = model.to_ascii_lowercase();
-    if lower.contains("deepseek-v4-flash") || lower.contains("deepseek-v4-pro") {
+    if deepseek_role_identity_for_model(&lower).is_some() {
         Some(DEEPSEEK_WINDOWS_EXECUTION_GUIDANCE)
     } else {
         None
@@ -3837,7 +3838,13 @@ fn compile_configured_codex_subagent_roles(
                 );
             }
             if let Some(classification) = classification.clone() {
-                route_classifications.insert(spec.model.to_ascii_lowercase(), classification);
+                route_classifications.insert(spec.model.to_ascii_lowercase(), classification.clone());
+                // 别名键：profile 用旧 slug（deepseek-v4-flash）时也能查到
+                // catalog 新 slug（deepseek-flash）的路由分类。
+                if let Some(role_identity) = deepseek_role_identity_for_model(&spec.model) {
+                    route_classifications
+                        .insert(role_identity.to_string(), classification);
+                }
             }
             SubagentCatalogModel {
                 model: spec.model.clone(),
@@ -3854,10 +3861,19 @@ fn compile_configured_codex_subagent_roles(
             }
         })
         .collect();
-    let reasoning_capabilities = catalog_models
-        .iter()
-        .map(|model| (model.model.to_ascii_lowercase(), model.reasoning.clone()))
-        .collect();
+    let mut reasoning_capabilities: HashMap<String, _> = HashMap::new();
+    for model in &catalog_models {
+        reasoning_capabilities
+            .entry(model.model.to_ascii_lowercase())
+            .or_insert_with(|| model.reasoning.clone());
+        // 别名键：profile 用旧 slug（deepseek-v4-flash）时也能查到
+        // catalog 新 slug（deepseek-flash）的 reasoning 能力。
+        if let Some(role_identity) = deepseek_role_identity_for_model(&model.model) {
+            reasoning_capabilities
+                .entry(role_identity.to_string())
+                .or_insert_with(|| model.reasoning.clone());
+        }
+    }
     let mut compile_persisted = persisted.clone();
     for entry in &mut compile_persisted.profiles {
         let crate::codex_subagent_profiles::ParsedProfileEntry::Valid(profile) = entry else {
@@ -3868,9 +3884,7 @@ fn compile_configured_codex_subagent_roles(
         }
         profile.input_modalities = specs
             .iter()
-            .find(|spec| {
-                normalize_profile_key(&spec.model) == normalize_profile_key(&profile.model)
-            })
+            .find(|spec| deepseek_role_models_match(&spec.model, &profile.model))
             .and_then(codex_subagent_profile_input_modalities)
             .map(|modalities| {
                 modalities
@@ -4110,7 +4124,13 @@ fn catalog_profile_draft(
         ))
     })?)
     .map_err(|error| AppError::Message(format!("Unable to serialize defaults: {error}")))?;
-    if let Some(mut preset) = defaults.pointer(&format!("/profiles/{identity}")).cloned() {
+    // DeepSeek 角色 slug 别名（deepseek-flash ≡ deepseek-v4-flash）指向同一角色：
+    // 用 canonical 角色 slug 取默认 preset，再钉回 catalog 实际 slug。
+    let preset_key: &str = match deepseek_role_identity_for_model(model) {
+        Some(canonical) => canonical,
+        None => identity.as_str(),
+    };
+    if let Some(mut preset) = defaults.pointer(&format!("/profiles/{preset_key}")).cloned() {
         preset["model"] = Value::String(model.to_string());
         preset["enabled"] = Value::Bool(enabled_preferred);
         if !enabled_preferred {
@@ -4150,7 +4170,7 @@ pub(crate) fn initialize_codex_subagent_v2_for_candidate(
     for (identity, model, input_modalities) in
         routable_codex_subagent_catalog(settings, provider_context)
     {
-        let preferred = matches!(identity.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro");
+        let preferred = deepseek_role_identity_for_model(&model).is_some();
         profiles.insert(
             identity,
             catalog_profile_draft(&model, preferred, input_modalities.as_deref())?,
@@ -4217,12 +4237,21 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Reconciled profiles are not an object".to_string()))?;
     let routable = routable_codex_subagent_catalog(settings, provider_context);
-    let routable_by_identity = routable
+    let mut routable_by_identity = routable
         .iter()
         .map(|(identity, model, modalities)| {
             (identity.clone(), (model.clone(), modalities.clone()))
         })
         .collect::<HashMap<_, _>>();
+    // DeepSeek 角色 slug 别名（deepseek-flash ≡ deepseek-v4-flash）：prune/recover
+    // 必须与 V2 编译器的别名匹配口径一致，否则 alias profile 会被误删或恢复失败。
+    for (_identity, model, modalities) in &routable {
+        if let Some(role_identity) = deepseek_role_identity_for_model(model) {
+            routable_by_identity
+                .entry(role_identity.to_string())
+                .or_insert_with(|| (model.clone(), modalities.clone()));
+        }
+    }
 
     match action {
         CodexSubagentV2ReconcileAction::SyncCatalog => {
@@ -4253,8 +4282,7 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
                 }) {
                     continue;
                 }
-                let preferred =
-                    matches!(identity.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro");
+                let preferred = deepseek_role_identity_for_model(&model).is_some();
                 profiles.insert(
                     identity,
                     catalog_profile_draft(&model, preferred, input_modalities.as_deref())?,
@@ -5622,7 +5650,7 @@ fn preview_codex_subagent_profile_with_context(
     if profile.input_modalities.is_none() {
         profile.input_modalities = codex_catalog_model_specs(&settings_config, "")
             .iter()
-            .find(|spec| normalize_profile_key(&spec.model) == profile_key)
+            .find(|spec| deepseek_role_models_match(&spec.model, &model))
             .and_then(codex_subagent_profile_input_modalities)
             .map(|modalities| {
                 modalities
@@ -5657,7 +5685,7 @@ fn preview_codex_subagent_profile_with_context(
     let specs = codex_catalog_model_specs(&settings_config, "");
     let spec = specs
         .iter()
-        .find(|spec| normalize_profile_key(&spec.model) == profile_key)
+        .find(|spec| deepseek_role_models_match(&spec.model, &model))
         .ok_or_else(|| format!("Profile model is not routable: {model}"))?;
     let reasoning_capability =
         crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(
@@ -5684,7 +5712,10 @@ fn preview_codex_subagent_profile_with_context(
         .output
         .generated_roles
         .into_iter()
-        .find(|role| normalize_profile_key(&role.model) == profile_key)
+        .find(|role| {
+            normalize_profile_key(&role.model) == profile_key
+                || deepseek_role_models_match(&role.model, &model)
+        })
         .ok_or_else(|| "Profile did not produce a preview role".to_string())?;
     let toml_preview = render_generated_role_toml(&role, CC_SWITCH_MANAGED_AGENT_MARKER)
         .map_err(|error| format!("Unable to render profile preview: {error:?}"))?;
@@ -8402,9 +8433,57 @@ wire_api = "responses"
     fn only_known_deepseek_v4_text_models_are_forced_to_text() {
         assert!(codex_catalog_model_name_is_text_only("deepseek-v4-flash"));
         assert!(codex_catalog_model_name_is_text_only("deepseek-v4-pro"));
+        // 官方 API 现行别名 slug 走同一精确口径。
+        assert!(codex_catalog_model_name_is_text_only("deepseek-flash"));
+        assert!(codex_catalog_model_name_is_text_only("deepseek-pro"));
         assert!(!codex_catalog_model_name_is_text_only(
             "deepseek-v4-flash-vision-exp"
         ));
+        assert!(!codex_catalog_model_name_is_text_only("deepseek-flash-vision"));
+    }
+
+    #[test]
+    fn v1_role_helpers_recognize_official_alias_slugs() {
+        assert_eq!(
+            codex_agent_role_name_for_model("deepseek-flash"),
+            "deepseek-flash"
+        );
+        assert_eq!(codex_agent_role_name_for_model("deepseek-pro"), "deepseek-pro");
+        assert!(codex_agent_description_for_model("deepseek-flash")
+            .contains("DeepSeek V4 Flash worker"));
+        assert_eq!(
+            codex_agent_reasoning_effort_for_model("deepseek-flash"),
+            Some("high")
+        );
+        assert_eq!(
+            codex_agent_reasoning_effort_for_model("deepseek-pro"),
+            Some("high")
+        );
+        assert_eq!(
+            codex_agent_execution_guidance_for_model("deepseek-flash"),
+            Some(DEEPSEEK_WINDOWS_EXECUTION_GUIDANCE)
+        );
+    }
+
+    #[test]
+    fn catalog_profile_draft_uses_flash_preset_for_official_alias() {
+        let draft = catalog_profile_draft("deepseek-flash", true, None)
+            .expect("flash alias draft");
+        assert_eq!(draft["model"], "deepseek-flash");
+        assert_eq!(draft["enabled"], true);
+        let strengths = draft["questionnaire"]["taskStrengths"]
+            .as_array()
+            .expect("taskStrengths");
+        assert!(strengths.iter().any(|value| value == "long_context_reading"));
+    }
+
+    #[test]
+    fn catalog_profile_draft_keeps_generic_stub_for_unknown_models() {
+        let draft = catalog_profile_draft("some-model", false, None)
+            .expect("unknown model draft");
+        assert_eq!(draft["model"], "some-model");
+        assert_eq!(draft["enabled"], false);
+        assert_eq!(draft["questionnaire"]["preference"], "eligible");
     }
 
     fn reasoning_inspect_provider() -> Provider {

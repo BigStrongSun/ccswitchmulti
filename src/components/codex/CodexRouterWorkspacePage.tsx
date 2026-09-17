@@ -103,6 +103,7 @@ import {
 } from "@/lib/query/usage";
 import { cn } from "@/lib/utils";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
+import { catalogHasRoleModel, deepSeekRoleForModel } from "@/utils/deepseekRoleModels";
 import {
   catalogModelLabel,
   CODEX_SPAWN_AGENT_PRIORITY_MODELS,
@@ -1366,7 +1367,6 @@ function normalizeModelTailForCapability(model: string): string {
 /// 少量内置纯文本模型兜底；只在 provider/catalog 没有显式能力声明时使用，避免把未知多模态模型误降级。
 function modelNameLooksTextOnly(model: string): boolean {
   const tail = normalizeModelTailForCapability(model);
-  const compactTail = tail.replace(/[^a-z0-9]/g, "");
   const exactTextOnlyModels = new Set([
     "ark-code-latest",
     "deepseek-chat",
@@ -1384,7 +1384,9 @@ function modelNameLooksTextOnly(model: string): boolean {
     "us.deepseek.r1-v1",
   ]);
   return (
-    compactTail.startsWith("deepseekv4") ||
+    // DeepSeek 文本角色族（flash/pro，含日期版本），与 Rust 侧口径一致；
+    // *-vision* 是视觉模型，不走该文本兜底。
+    deepSeekRoleForModel(tail) !== null ||
     exactTextOnlyModels.has(tail) ||
     tail.startsWith("minimax-m2.7") ||
     tail.startsWith("qwen3-coder") ||
@@ -6303,8 +6305,10 @@ function SpawnAgentCandidatesPanel({
   const candidateSourceModels = {
     selected: draftSpawnAgentModels,
     routed: routedCatalogModelIds,
+    // “重点”名单按角色别名口径：catalog 有 deepseek-flash 时同样覆盖
+    // deepseek-v4-flash 重点项。
     priority: CODEX_SPAWN_AGENT_PRIORITY_MODELS.filter((model) =>
-      selectedCatalogByModel.has(model),
+      catalogHasRoleModel(selectedCatalog.models, model),
     ),
     all: selectedCatalog.models
       .map((model) => model.model?.trim())
@@ -6316,21 +6320,14 @@ function SpawnAgentCandidatesPanel({
     selectedCatalog.spawnAgentModels.join("\n");
   const spawnAgentMissingPriorityModels =
     diagnostics?.liveConfig.spawnAgentMissingPriorityModels ?? [];
-  const isFlashRoleModel = (name: string) => {
-    const normalized = name.trim().toLowerCase();
-    return (
-      (normalized === "deepseek-v4-flash" ||
-        normalized.startsWith("deepseek-v4-flash-")) &&
-      !normalized.includes("vision")
-    );
-  };
-  const hasFlashRoleModel = selectedCatalog.models.some((model) =>
-    isFlashRoleModel(model.model?.trim() ?? ""),
+  // DeepSeek 角色 slug 别名（deepseek-flash ≡ deepseek-v4-flash）与 src-tauri
+  // 同一口径判定，避免官方新 slug 被误报“目录中缺失”。
+  const hasFlashRoleModel = selectedCatalog.models.some(
+    (model) => deepSeekRoleForModel(model.model?.trim() ?? "") === "flash",
   );
-  const hasProRoleModel = selectedCatalog.models.some((model) => {
-    const name = model.model?.trim().toLowerCase() ?? "";
-    return name === "deepseek-v4-pro" || name.startsWith("deepseek-v4-pro-");
-  });
+  const hasProRoleModel = selectedCatalog.models.some(
+    (model) => deepSeekRoleForModel(model.model?.trim() ?? "") === "pro",
+  );
 
   useEffect(() => {
     setActiveSubagentVersion(persistedSubagentVersion);
