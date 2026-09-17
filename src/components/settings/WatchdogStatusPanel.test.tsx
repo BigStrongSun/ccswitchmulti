@@ -27,7 +27,11 @@ const healthy: WatchdogStatus = {
   portReady: true,
   portDiagnosis: "端口 15721 占用诊断：LISTEN ipv4 127.0.0.1:15721 pid=4242",
   recentEvents: [
-    { timestamp: "2026-09-15T00:00:00.000+08:00", level: "info", event: "supervisor-watching" },
+    {
+      timestamp: "2026-09-15T00:00:00.000+08:00",
+      level: "info",
+      event: "supervisor-watching",
+    },
   ],
 };
 
