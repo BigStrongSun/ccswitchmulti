@@ -6,7 +6,7 @@
  *   面板只展示它们「由谁填写、是否落盘」，绝不提供输入框。
  * - 模型能力缺失表示「未知」，不等于「不支持」；面板允许留空，并在校验失败时给出确定性错误码。
  */
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -29,6 +29,10 @@ import {
   TE_PROVIDER_DEFAULT_TIMEOUT_SECONDS,
   validateTeProviderSettings,
 } from "@/utils/teProvider";
+import {
+  getTeProviderRuntimeStatus,
+  type TeProviderRuntimeStatus,
+} from "@/lib/api/teProvider";
 
 const INPUT_MODALITIES = ["text", "image", "audio", "video", "file"] as const;
 const OUTPUT_MODALITIES = ["text", "embedding", "audio", "image"] as const;
@@ -81,6 +85,36 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
   const runtimeFields = TE_PROVIDER_BINDING_FIELDS.filter(
     (field) => !field.persisted,
   );
+  const [runtimeStatus, setRuntimeStatus] = useState<TeProviderRuntimeStatus | null>(
+    null,
+  );
+  const [runtimeError, setRuntimeError] = useState("");
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
+
+  /**
+   * 读取运行态只做只读探针：失败时把稳定错误显示出来，不把失败伪装成「未运行」，
+   * 也不因为探针失败改动任何保存中的设置。
+   */
+  const refreshRuntimeStatus = useCallback(async () => {
+    setRuntimeBusy(true);
+    setRuntimeError("");
+    try {
+      const status = await getTeProviderRuntimeStatus(value.sidecarUrl);
+      setRuntimeStatus(status);
+    } catch (error) {
+      setRuntimeStatus(null);
+      setRuntimeError(error instanceof Error ? error.message : "运行态读取失败");
+    } finally {
+      setRuntimeBusy(false);
+    }
+  }, [value.sidecarUrl]);
+
+  function providerStatusText(status: TeProviderRuntimeStatus): string {
+    if (!status.provider) return "上游探针未返回结果";
+    if (status.provider.online === true) return "上游在线";
+    if (status.provider.online === false) return "上游离线";
+    return `上游状态未知（${status.provider.reason ?? "provider_probe_not_configured"}）`;
+  }
 
   function update(patch: Partial<OpenClawTeProviderSettings>) {
     onChange({ ...value, ...patch });
@@ -474,6 +508,62 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
             </li>
           ))}
         </ul>
+      </div>
+
+      <div className="rounded-lg border p-4 space-y-3" data-testid="te-runtime-status">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium">
+              {t("openclaw.teProvider.runtimeStatus", {
+                defaultValue: "运行态（只读探针）",
+              })}
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              {t("openclaw.teProvider.runtimeStatusHint", {
+                defaultValue:
+                  "只查询注入器存活与上游在线状态；不会读取、显示或落盘 Task、lease、session 与 binding。",
+              })}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="text-xs underline"
+            data-testid="te-refresh-runtime"
+            disabled={runtimeBusy}
+            onClick={() => void refreshRuntimeStatus()}
+          >
+            {runtimeBusy
+              ? t("openclaw.teProvider.runtimeChecking", { defaultValue: "检查中…" })
+              : t("openclaw.teProvider.runtimeRefresh", { defaultValue: "刷新运行态" })}
+          </button>
+        </div>
+
+        {runtimeError ? (
+          <p className="text-xs text-destructive" data-testid="te-runtime-error">
+            {runtimeError}
+          </p>
+        ) : null}
+
+        {runtimeStatus ? (
+          <ul className="space-y-1 text-xs" data-testid="te-runtime-summary">
+            <li>
+              注入器：
+              {runtimeStatus.sidecarReachable
+                ? `存活（${runtimeStatus.sidecarStatus ?? "ok"}，${runtimeStatus.latencyMs}ms）`
+                : `不可达（${runtimeStatus.sidecarError ?? "connect_failed"}）`}
+            </li>
+            <li>{providerStatusText(runtimeStatus)}</li>
+            <li>
+              检查时间：{runtimeStatus.checkedAt}
+              {runtimeStatus.provider?.checkedAt
+                ? ` · 探针时间 ${runtimeStatus.provider.checkedAt}`
+                : ""}
+            </li>
+            <li data-testid="te-runtime-binding-note">
+              运行时绑定：{runtimeStatus.runtimeBindingExposed ? "可读" : "不通过 HTTP 暴露（按设计）"}
+            </li>
+          </ul>
+        ) : null}
       </div>
     </div>
   );

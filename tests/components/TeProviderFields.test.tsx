@@ -1,12 +1,20 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TeProviderFields } from "@/components/providers/forms/TeProviderFields";
 import type { OpenClawTeProviderSettings } from "@/types";
 import {
   TE_PROVIDER_PLACEHOLDER_API_KEY,
   buildOpenClawTeProviderConfig,
 } from "@/utils/teProvider";
+
+const teProviderApiMock = vi.hoisted(() => ({
+  getTeProviderRuntimeStatus: vi.fn(),
+}));
+
+vi.mock("@/lib/api/teProvider", () => ({
+  getTeProviderRuntimeStatus: teProviderApiMock.getTeProviderRuntimeStatus,
+}));
 
 function baseSettings(): OpenClawTeProviderSettings {
   return {
@@ -33,6 +41,10 @@ function Harness({ initial }: { initial: OpenClawTeProviderSettings }) {
 }
 
 describe("TeProviderFields", () => {
+  beforeEach(() => {
+    teProviderApiMock.getTeProviderRuntimeStatus.mockReset();
+  });
+
   it("edits non-secret binding fields and never offers a Proxy Key input", () => {
     render(<Harness initial={baseSettings()} />);
 
@@ -114,5 +126,56 @@ describe("TeProviderFields", () => {
     expect(screen.getByTestId("te-provider-errors").textContent).toContain(
       "模型 ID 不能重复",
     );
+  });
+
+  it("reads the runtime status without ever showing task/lease/binding values", async () => {
+    teProviderApiMock.getTeProviderRuntimeStatus.mockResolvedValue({
+      sidecarUrl: "http://127.0.0.1:9814",
+      sidecarReachable: true,
+      sidecarStatus: "ok",
+      sidecarError: null,
+      provider: {
+        online: null,
+        reason: "provider_probe_not_configured",
+        checkedAt: null,
+        httpStatus: null,
+      },
+      latencyMs: 7,
+      checkedAt: "2026-09-18T04:00:00Z",
+      runtimeBindingExposed: false,
+    });
+    render(<Harness initial={baseSettings()} />);
+
+    fireEvent.click(screen.getByTestId("te-refresh-runtime"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("te-runtime-summary")).toBeTruthy(),
+    );
+    expect(teProviderApiMock.getTeProviderRuntimeStatus).toHaveBeenCalledWith(
+      "http://127.0.0.1:9814",
+    );
+    const summary = screen.getByTestId("te-runtime-summary").textContent ?? "";
+    expect(summary).toContain("存活");
+    // 未知不等于离线：未配置探针时必须显示“状态未知”。
+    expect(summary).toContain("上游状态未知");
+    expect(summary).toContain("不通过 HTTP 暴露");
+    expect(summary).not.toContain("lease");
+    expect(summary).not.toContain("sessionKey");
+  });
+
+  it("shows probe failures instead of pretending the sidecar is down", async () => {
+    teProviderApiMock.getTeProviderRuntimeStatus.mockRejectedValue(
+      new Error("TE Provider endpoint must be a numeric loopback host"),
+    );
+    render(<Harness initial={baseSettings()} />);
+
+    fireEvent.click(screen.getByTestId("te-refresh-runtime"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("te-runtime-error").textContent).toContain(
+        "numeric loopback",
+      ),
+    );
+    expect(screen.queryByTestId("te-runtime-summary")).toBeNull();
   });
 });

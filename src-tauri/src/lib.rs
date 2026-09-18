@@ -1890,6 +1890,8 @@ pub fn run() {
             commands::test_proxy_url,
             commands::get_upstream_proxy_status,
             commands::scan_local_proxies,
+            // Token Exchange Provider 运行态（只读）
+            commands::te_provider_runtime_status,
             // Window theme control
             commands::set_window_theme,
             // Generic managed auth commands
@@ -2732,6 +2734,25 @@ mod tests {
         assert!(
             handler.contains("commands::restore_configured_proxy_listener,"),
             "the fixed listener recovery button must have a registered Tauri command"
+        );
+    }
+
+    #[test]
+    fn te_provider_runtime_status_command_is_registered_for_frontend_invocation() {
+        // TE Provider 面板的运行态读取同样只在运行时绑定：漏注册时前端能通过类型检查，
+        // 但 invoke() 会在运行期被拒绝。
+        let source = include_str!("lib.rs");
+        let handler_start = source
+            .find(".invoke_handler(tauri::generate_handler![")
+            .expect("application has a Tauri invoke handler");
+        let handler_end = source[handler_start..]
+            .find("\n        ])")
+            .expect("Tauri invoke handler is closed");
+        let handler = &source[handler_start..handler_start + handler_end];
+
+        assert!(
+            handler.contains("commands::te_provider_runtime_status,"),
+            "the TE Provider runtime panel must have a registered Tauri command"
         );
     }
 }
