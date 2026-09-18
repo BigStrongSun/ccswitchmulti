@@ -942,6 +942,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn port_rows_are_attributed_to_the_listening_process() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let port = listener.local_addr().expect("addr").port();

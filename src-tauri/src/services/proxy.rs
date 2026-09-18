@@ -5626,6 +5626,7 @@ mod tests {
         assert_eq!(ProxyService::stale_listener_owner_pid(port), None);
     }
 
+    #[cfg(target_os = "windows")]
     #[tokio::test]
     #[serial]
     async fn release_stale_listener_holders_never_touches_foreign_children() {
