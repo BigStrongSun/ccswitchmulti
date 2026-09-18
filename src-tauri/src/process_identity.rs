@@ -31,11 +31,13 @@ impl ProcessIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProcessIdentityError {
     NotFound,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     AccessDenied,
     Unavailable(u32),
 }
 
 impl ProcessIdentityError {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn from_win32(code: u32) -> Self {
         const ERROR_ACCESS_DENIED: u32 = 5;
         const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -96,6 +98,7 @@ pub(crate) struct TcpPortRow {
     pub pid: u32,
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn tcp_state_label(state: u32) -> &'static str {
     match state {
         1 => "CLOSED",
@@ -439,6 +442,7 @@ pub(crate) fn harden_socket_handle_not_inheritable(raw_socket: usize) {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
 pub(crate) fn harden_socket_handle_not_inheritable(_raw_socket: usize) {}
 
 pub(crate) fn current_executable_path() -> Option<PathBuf> {
