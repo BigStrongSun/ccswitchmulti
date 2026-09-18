@@ -2934,6 +2934,13 @@ impl Database {
         let rollup_model = effective_model_sql("r");
         let detail_provider = provider_name_coalesce("l", "p");
         let rollup_provider = provider_name_coalesce("r", "p2");
+
+        // HAVING 过滤「路由残留」的 (model, provider) 分组：Codex MultiRouter 在回退/
+        // 错配时可能把某模型发到一个并不服务该模型的 provider（例如 deepseek-flash
+        // 被路由到 Qwen），这些请求不产生任何 token/成本，但在 provider_name 维度上
+        // 会聚成一个 0 token、0 成本的幽灵行，把同一模型拆散到多个 provider 名下。
+        // 只保留有真实用量（token>0 或成本>0）的 (model, provider) 组合，幽灵行丢弃；
+        // 真实跨 provider 用量（两边都有 token/成本）不受影响。
         let sql = format!(
             "SELECT
                 model,
@@ -2963,6 +2970,7 @@ impl Database {
                 GROUP BY {rollup_model}, {rollup_provider}
             )
             GROUP BY model, provider_name
+            HAVING SUM(total_tokens) > 0 OR SUM(total_cost) > 0
             ORDER BY total_cost DESC"
         );
 
@@ -6134,6 +6142,62 @@ mod tests {
             vec!["Provider B", "Provider A"]
         );
         assert!(stats.iter().all(|stat| stat.model == "shared-model"));
+
+        Ok(())
+    }
+
+    /// 回归：Codex MultiRouter 路由残留产生的 (model, provider) 幽灵行——同一模型被
+    /// 发到一个并不服务它的 provider，不产生 token/成本——不应出现在模型统计里，
+    /// 避免把同一模型拆散到多个 provider 名下分开统计。真实跨 provider 用量不受影响。
+    #[test]
+    fn test_get_model_stats_drops_zero_usage_cross_provider_routing_ghosts() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config)
+                 VALUES (?, ?, ?, ?)",
+                params!["provider-real", "codex", "DeepSeek-responses", "{}"],
+            )?;
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config)
+                 VALUES (?, ?, ?, ?)",
+                params!["provider-ghost", "codex", "Qwen", "{}"],
+            )?;
+            // 真实用量：deepseek-flash 在 DeepSeek-responses 下产生 token/成本。
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, total_cost_usd,
+                    latency_ms, status_code, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    "real-deepseek", "provider-real", "codex", "deepseek-flash",
+                    100, 50, "0.01", 100, 200, 1000
+                ],
+            )?;
+            // 路由残留：同一个 deepseek-flash 被错配到 Qwen，0 token、0 成本。
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, total_cost_usd,
+                    latency_ms, status_code, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    "ghost-deepseek-qwen", "provider-ghost", "codex", "deepseek-flash",
+                    0, 0, "0", 100, 200, 1001
+                ],
+            )?;
+        }
+
+        let stats = db.get_model_stats(None, None, Some("codex"), None, None)?;
+        // 只保留有真实用量的 (model, provider)：DeepSeek-responses；
+        // 幽灵行 deepseek-flash / Qwen（0 token、0 成本）被过滤掉。
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].model, "deepseek-flash");
+        assert_eq!(stats[0].provider_name, "DeepSeek-responses");
+        assert_eq!(stats[0].total_tokens, 150);
+        assert_eq!(stats[0].request_count, 1);
 
         Ok(())
     }
