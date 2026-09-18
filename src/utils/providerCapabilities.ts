@@ -1,6 +1,6 @@
 import type { AppId } from "@/lib/api";
 import type { Provider } from "@/types";
-import { isOAuthProviderType } from "@/config/constants";
+import { isOAuthProviderType, isTeProviderType } from "@/config/constants";
 import {
   extractCodexWireApi,
   isCodexAnthropicWireApi,
@@ -52,6 +52,10 @@ export function providerNeedsRouting(
       }
     }
   }
+
+  // TE Provider 没有 direct 逃生口：静态配置里只有公开占位 key，真实 Proxy Key 只在运行时
+  // 由本机注入端点注入。因此它先于「官方类别」判定，永远需要路由接管。
+  if (isTeProviderType(provider.meta?.providerType)) return true;
 
   if (provider.category === "official") return false;
 

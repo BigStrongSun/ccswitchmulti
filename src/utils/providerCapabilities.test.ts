@@ -12,6 +12,34 @@ const codexConfig = (wireApi: "chat_completions" | "responses") =>
   `model_provider = "custom"\n\n[model_providers.custom]\nname = "X"\nbase_url = "https://x.example/v1"\nwire_api = "${wireApi}"\n`;
 
 describe("providerNeedsRouting", () => {
+  it("TE Provider 必须经过本机注入端点，因此始终需要路由接管", () => {
+    // 与托管 OAuth 相同的接管语义，但注入的是短时 Task 授权而不是长期凭据。
+    const apps: AppId[] = ["claude", "codex", "openclaw", "claude-desktop"];
+    for (const app of apps) {
+      expect(
+        providerNeedsRouting(
+          app,
+          mkProvider({
+            meta: { providerType: "token_exchange" },
+            settingsConfig: { api: "openai-completions" },
+          }),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("TE Provider 没有 direct 逃生口：官方类别也必须经过注入端点", () => {
+    expect(
+      providerNeedsRouting(
+        "openclaw",
+        mkProvider({
+          category: "official",
+          meta: { providerType: "token_exchange" },
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("Codex MultiRouter 即使使用官方类别也必须经过本地路由", () => {
     expect(
       providerNeedsRouting(

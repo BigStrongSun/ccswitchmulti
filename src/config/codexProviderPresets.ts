@@ -2,6 +2,7 @@
  * Codex 预设供应商配置模板
  */
 import { ProviderCategory } from "../types";
+import type { ProviderTypeId } from "./constants";
 import type {
   CodexApiFormat,
   CodexCatalogModel,
@@ -44,7 +45,7 @@ export interface CodexProviderPreset {
   // Codex API 格式
   apiFormat?: CodexApiFormat;
   // 托管账号预设：目前仅 xAI OAuth（Grok 订阅经本地代理注入 token 直连 api.x.ai）
-  providerType?: "xai_oauth";
+  providerType?: ProviderTypeId;
   // OAuth 预设：隐藏 API Key 输入，保存前要求已登录托管账号
   requiresOAuth?: boolean;
   // Codex Chat 本地路由模式下的模型目录

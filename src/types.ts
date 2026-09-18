@@ -1030,6 +1030,8 @@ export interface OpenClawModel {
   maxTokens?: number; // 最大输出 token 数
   compat?: {
     maxTokensField?: string;
+    // OpenClaw 用该标记决定是否为该模型装配工具；TE Provider 用它表达「本 Task 未授权工具」。
+    supportsTools?: boolean;
   };
 }
 
@@ -1066,6 +1068,57 @@ export interface OpenClawProviderConfig {
   models?: OpenClawModel[]; // 可用模型列表
   headers?: Record<string, string>; // 自定义请求头（如 User-Agent）
   authHeader?: boolean; // 供应商自定义认证开关（如 Longcat）
+  // TE Provider 专用静态设置（providerType === "token_exchange" 时存在）。
+  // 这里只允许非秘密字段：Proxy Key 由注入端点按 Task/session 注入，绝不进入本配置。
+  teProvider?: OpenClawTeProviderSettings;
+}
+
+// ============================================================================
+// Token Exchange（TE）Provider
+// ============================================================================
+
+/** 绑定投递方式：写 Agent 配置头，或经 OpenClaw Gateway 调插件方法。 */
+export type OpenClawTeBindingDelivery = "config-headers" | "gateway-plugin";
+
+/**
+ * 模型能力元数据（仅当平台已验证时填写）。
+ *
+ * 缺失表示「未知」，既不是支持也不是不支持；CCSM 里人工填写的值属于 user_declared，
+ * 不得被当作已验证能力，也不允许据此猜模型能力。
+ */
+export interface OpenClawTeProviderModel {
+  id: string;
+  name: string;
+  inputModalities?: string[]; // text | image | audio | video | file
+  outputModalities?: string[]; // text | embedding | audio | image
+  contextWindowTokens?: number;
+  maxOutputTokens?: number;
+  supportsTools?: boolean;
+  supportsReasoning?: boolean;
+  reasoningEfforts?: string[]; // none|minimal|low|medium|high|xhigh|max|ultra
+  cost?: {
+    input: number;
+    output: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
+}
+
+/**
+ * TE Provider 的静态设置（可持久化、无秘密）。
+ *
+ * 运行时字段（taskId/leaseId/sessionKey/sessionId/bindingId/expiresAt）由 SDK/宿主填写，
+ * 只在内存与运行时注入面出现，永不落盘、也不在本表单里编辑。
+ */
+export interface OpenClawTeProviderSettings {
+  sidecarUrl: string; // 只能数值回环 http://127.0.0.1[:port] / http://[::1][:port]
+  expectedPartnerAic: string; // 本 host 服务的 ACPs Partner AIC
+  protocolVersion: "te-provider.v1";
+  bindingDelivery: OpenClawTeBindingDelivery;
+  providerProbeUrl?: string; // 上游模型提供商只读保活探针（loopback）
+  providerTimeoutSeconds?: number; // 默认 300；注入器自动 +30s，Agent 侧再 +90s
+  keepAliveIntervalSeconds?: number; // 默认 30
+  models: OpenClawTeProviderModel[];
 }
 
 // OpenClaw agents.defaults 完整配置

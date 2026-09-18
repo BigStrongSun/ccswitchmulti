@@ -7,6 +7,8 @@ import type {
   OpenClawProviderConfig,
   OpenClawDefaultModel,
 } from "../types";
+import { TE_PROVIDER_PLACEHOLDER_API_KEY } from "../utils/teProvider";
+import type { ProviderTypeId } from "./constants";
 import type { PresetTheme, TemplateValueConfig } from "./claudeProviderPresets";
 
 /** Suggested default model configuration for a preset */
@@ -20,6 +22,13 @@ export interface OpenClawSuggestedDefaults {
 export interface OpenClawProviderPreset {
   name: string;
   nameKey?: string; // i18n key for localized display name
+  /**
+   * 一等 providerType（例如 "token_exchange"）。
+   *
+   * 与 codex 预设同义：新建供应商时由 ProviderForm 写入 `meta.providerType`，
+   * 进而决定是否需要本机路由接管（见 providerNeedsRouting）。
+   */
+  providerType?: ProviderTypeId;
   websiteUrl: string;
   apiKeyUrl?: string;
   /** OpenClaw settings_config structure */
@@ -3643,6 +3652,33 @@ export const openclawProviderPresets: OpenClawProviderPreset[] = [
       modelCatalog: {
         "tencent-tokenplan-elite-intl/auto": { alias: "Auto" },
       },
+    },
+  },
+  {
+    // Token Exchange Provider：静态配置里只有本机注入端点与公开占位 key；
+    // 真实 Proxy Key 由注入器按 Task/session 注入，绝不进入本配置。
+    name: "TE Provider",
+    providerType: "token_exchange",
+    websiteUrl: "https://docs.openclaw.ai/cli/plugins",
+    settingsConfig: {
+      api: "openai-completions",
+      baseUrl: "http://127.0.0.1:9814/v1",
+      apiKey: TE_PROVIDER_PLACEHOLDER_API_KEY,
+      models: [{ id: "approved-model-id", name: "approved-model-id" }],
+      teProvider: {
+        sidecarUrl: "http://127.0.0.1:9814",
+        expectedPartnerAic: "",
+        protocolVersion: "te-provider.v1",
+        bindingDelivery: "config-headers",
+        providerTimeoutSeconds: 300,
+        keepAliveIntervalSeconds: 30,
+        models: [{ id: "approved-model-id", name: "approved-model-id" }],
+      },
+    },
+    category: "third_party",
+    suggestedDefaults: {
+      model: { primary: "token-exchange/approved-model-id" },
+      modelCatalog: { "token-exchange/approved-model-id": { alias: "TE" } },
     },
   },
 ];
