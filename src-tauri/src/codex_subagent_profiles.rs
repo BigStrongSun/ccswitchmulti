@@ -3726,8 +3726,14 @@ mod tests {
             Some("deepseek-v4-pro")
         );
         // *-vision* 是独立视觉模型，不属于文本角色族。
-        assert_eq!(deepseek_role_identity_for_model("deepseek-v4-flash-vision-exp"), None);
-        assert_eq!(deepseek_role_identity_for_model("deepseek-flash-vision"), None);
+        assert_eq!(
+            deepseek_role_identity_for_model("deepseek-v4-flash-vision-exp"),
+            None
+        );
+        assert_eq!(
+            deepseek_role_identity_for_model("deepseek-flash-vision"),
+            None
+        );
         // 其它 DeepSeek 模型不属于 flash/pro 角色族。
         assert_eq!(deepseek_role_identity_for_model("deepseek-chat"), None);
         assert_eq!(deepseek_role_identity_for_model("gpt-5.6-sol"), None);
@@ -3735,14 +3741,32 @@ mod tests {
 
     #[test]
     fn deepseek_role_models_match_treats_aliases_as_same_model() {
-        assert!(deepseek_role_models_match("deepseek-flash", "deepseek-v4-flash"));
-        assert!(deepseek_role_models_match("deepseek-v4-flash", "deepseek-flash"));
-        assert!(deepseek_role_models_match("DEEPSEEK-FLASH", "deepseek-v4-flash"));
-        assert!(deepseek_role_models_match("deepseek-pro", "deepseek-v4-pro"));
+        assert!(deepseek_role_models_match(
+            "deepseek-flash",
+            "deepseek-v4-flash"
+        ));
+        assert!(deepseek_role_models_match(
+            "deepseek-v4-flash",
+            "deepseek-flash"
+        ));
+        assert!(deepseek_role_models_match(
+            "DEEPSEEK-FLASH",
+            "deepseek-v4-flash"
+        ));
+        assert!(deepseek_role_models_match(
+            "deepseek-pro",
+            "deepseek-v4-pro"
+        ));
         assert!(deepseek_role_models_match("qwen3.8", "QWEN3.8"));
         // 同族不跨角色，不同模型不匹配。
-        assert!(!deepseek_role_models_match("deepseek-flash", "deepseek-v4-pro"));
-        assert!(!deepseek_role_models_match("deepseek-v4-flash-vision-exp", "deepseek-flash"));
+        assert!(!deepseek_role_models_match(
+            "deepseek-flash",
+            "deepseek-v4-pro"
+        ));
+        assert!(!deepseek_role_models_match(
+            "deepseek-v4-flash-vision-exp",
+            "deepseek-flash"
+        ));
         assert!(!deepseek_role_models_match("qwen3.8", "qwen3.6"));
     }
 
@@ -3814,10 +3838,9 @@ mod tests {
             vec![valid(profile("deepseek-v4-flash", "deepseek-v4-flash"))],
         )));
         // 只保留视觉模型：文本 flash 角色不得被视觉型号顶替。
-        compile_request.catalog_models =
-            vec![catalog("deepseek-v4-flash-vision-exp", true)];
-        let output = compile_subagent_v2_profiles(&compile_request)
-            .expect("compile vision-only catalog");
+        compile_request.catalog_models = vec![catalog("deepseek-v4-flash-vision-exp", true)];
+        let output =
+            compile_subagent_v2_profiles(&compile_request).expect("compile vision-only catalog");
         let flash_status = output
             .profile_statuses
             .iter()

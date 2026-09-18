@@ -13,6 +13,7 @@ const queryClientMocks = vi.hoisted(() => ({
 }));
 const universalProtocolMocks = vi.hoisted(() => ({
   preflightCodex: vi.fn(),
+  restoreCodex: vi.fn().mockResolvedValue(null),
   prepareCodex: vi.fn(),
   commitCodex: vi.fn(),
   preflight: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => {
     ...actual,
     preflightCodexProviderProtocolCompatibility:
       universalProtocolMocks.preflightCodex,
+    restoreCodexProviderProtocolEvidence: universalProtocolMocks.restoreCodex,
     prepareCodexProviderSet: universalProtocolMocks.prepareCodex,
     commitCodexProviderSet: universalProtocolMocks.commitCodex,
     preflightUniversalCodexProtocolCompatibility:

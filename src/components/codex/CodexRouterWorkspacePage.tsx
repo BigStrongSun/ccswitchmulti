@@ -103,7 +103,10 @@ import {
 } from "@/lib/query/usage";
 import { cn } from "@/lib/utils";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
-import { catalogHasRoleModel, deepSeekRoleForModel } from "@/utils/deepseekRoleModels";
+import {
+  catalogHasRoleModel,
+  deepSeekRoleForModel,
+} from "@/utils/deepseekRoleModels";
 import {
   catalogModelLabel,
   CODEX_SPAWN_AGENT_PRIORITY_MODELS,

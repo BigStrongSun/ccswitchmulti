@@ -1107,6 +1107,14 @@ struct CodexSubagentUsageBucket {
     last_used_at: Option<i64>,
 }
 
+type CodexSubagentSessionRollup = (
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    HashMap<String, CodexSubagentUsageBucket>,
+);
+
 /// 子 Agent 用量查询的 session_id 分块大小。
 ///
 /// 有些 SQLite 构建仍然使用 999 左右的绑定变量上限；这里保持 500 的保守分块，
@@ -1115,6 +1123,7 @@ const CODEX_SUBAGENT_USAGE_SESSION_CHUNK: usize = 500;
 
 /// 把 SQL 聚合行累计到会话和模型桶中。
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn add_codex_subagent_usage_sample(
     session_buckets: &mut HashMap<String, HashMap<String, CodexSubagentUsageBucket>>,
     session_id: String,
@@ -1176,6 +1185,7 @@ fn add_codex_subagent_model_bucket(
 }
 
 /// 判断一个用量桶是否已经包含真实 token。
+#[cfg(test)]
 fn codex_subagent_bucket_has_tokens(bucket: &CodexSubagentUsageBucket) -> bool {
     bucket.total_tokens > 0
         || bucket.input_tokens > 0
@@ -1762,16 +1772,7 @@ fn build_codex_subagent_usage_stats_from_db(
             AppError::Database(format!("查询 Codex 子 Agent 本地统计失败: {error}"))
         })?;
 
-    let mut sessions: HashMap<
-        String,
-        (
-            Option<String>,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-            HashMap<String, CodexSubagentUsageBucket>,
-        ),
-    > = HashMap::new();
+    let mut sessions: HashMap<String, CodexSubagentSessionRollup> = HashMap::new();
     for row in rows {
         let (
             session_id,
@@ -6150,7 +6151,8 @@ mod tests {
     /// 发到一个并不服务它的 provider，不产生 token/成本——不应出现在模型统计里，
     /// 避免把同一模型拆散到多个 provider 名下分开统计。真实跨 provider 用量不受影响。
     #[test]
-    fn test_get_model_stats_drops_zero_usage_cross_provider_routing_ghosts() -> Result<(), AppError> {
+    fn test_get_model_stats_drops_zero_usage_cross_provider_routing_ghosts() -> Result<(), AppError>
+    {
         let db = Database::memory()?;
         {
             let conn = lock_conn!(db.conn);
@@ -6172,8 +6174,16 @@ mod tests {
                     latency_ms, status_code, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
-                    "real-deepseek", "provider-real", "codex", "deepseek-flash",
-                    100, 50, "0.01", 100, 200, 1000
+                    "real-deepseek",
+                    "provider-real",
+                    "codex",
+                    "deepseek-flash",
+                    100,
+                    50,
+                    "0.01",
+                    100,
+                    200,
+                    1000
                 ],
             )?;
             // 路由残留：同一个 deepseek-flash 被错配到 Qwen，0 token、0 成本。
@@ -6184,8 +6194,16 @@ mod tests {
                     latency_ms, status_code, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
-                    "ghost-deepseek-qwen", "provider-ghost", "codex", "deepseek-flash",
-                    0, 0, "0", 100, 200, 1001
+                    "ghost-deepseek-qwen",
+                    "provider-ghost",
+                    "codex",
+                    "deepseek-flash",
+                    0,
+                    0,
+                    "0",
+                    100,
+                    200,
+                    1001
                 ],
             )?;
         }

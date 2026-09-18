@@ -61,7 +61,6 @@ fn take_codex_append_bytes_read() -> u64 {
 struct CodexCheckpoint {
     last_byte_offset: i64,
     file_size: i64,
-    file_modified: i64,
     head_window_len: Option<i64>,
     head_fingerprint: Option<i64>,
     tail_fingerprint: Option<i64>,
@@ -362,6 +361,7 @@ struct CodexParseSnapshot {
 /// 只读的、已完成 parent replay 剥离的 rollout token 事件。
 ///
 /// 状态页必须复用此解析器，而不能把 `total_token_usage` 当成可直接相加的请求用量。
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct VerifiedCodexRolloutUsageEvent {
     pub model: String,
@@ -373,6 +373,7 @@ pub(crate) struct VerifiedCodexRolloutUsageEvent {
 
 /// 解析失败、父 replay 无法验证、或某个可计费用量缺少时间戳时返回 `None`。
 /// 这让读侧把它表示成未知，而不是把累计快照猜成真实用量。
+#[cfg(test)]
 pub(crate) fn read_verified_codex_rollout_usage(
     file_path: &Path,
     rollout_index: &RolloutIndex,
@@ -759,7 +760,7 @@ fn load_codex_checkpoint(
         Ok((
             last_byte_offset,
             file_size,
-            file_modified,
+            _file_modified,
             head_window_len,
             head_fingerprint,
             tail_fingerprint,
@@ -771,7 +772,6 @@ fn load_codex_checkpoint(
                 .map(|state| CodexCheckpoint {
                     last_byte_offset,
                     file_size,
-                    file_modified,
                     head_window_len,
                     head_fingerprint,
                     tail_fingerprint,
@@ -785,6 +785,7 @@ fn load_codex_checkpoint(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_codex_checkpoint_on_conn(
     conn: &rusqlite::Connection,
     file_path: &Path,
@@ -1046,6 +1047,7 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
 }
 
 /// 收集所有 Codex 会话 JSONL 文件
+#[cfg(test)]
 fn collect_codex_session_files(codex_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
@@ -1086,6 +1088,7 @@ pub(crate) fn build_rollout_index(files: &[PathBuf]) -> RolloutIndex {
 }
 
 /// 递归扫描目录下的 .jsonl 文件（限制最大深度）
+#[cfg(test)]
 fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max_depth: u32) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -1102,6 +1105,7 @@ fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max
     }
 }
 
+#[cfg(test)]
 fn parse_codex_file(
     file_path: &Path,
     root_thread_id: Option<String>,
@@ -1783,6 +1787,7 @@ fn save_codex_session_metadata_on_conn(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sync_codex_append(
     db: &Database,
     file_path: &Path,

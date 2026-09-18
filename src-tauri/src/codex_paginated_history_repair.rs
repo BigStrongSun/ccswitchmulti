@@ -1561,12 +1561,6 @@ fn repaired_projection_status_at(
     Ok(status)
 }
 
-pub(crate) fn repaired_projections_caught_up(
-    outcome: &PaginatedHistoryRepairOutcome,
-) -> Result<bool, String> {
-    Ok(repaired_projection_status(outcome)?.is_caught_up())
-}
-
 /// 游标是否停在一个合法的记录边界上（0 与文件末尾都算合法）。
 ///
 /// 这正是我们修复的损坏判据的反面：损坏的游标指向记录内部，Codex 从这里读不出完整

@@ -29,7 +29,9 @@ pub struct CodexDiscoveryRoot {
 #[derive(Debug, Clone, Default)]
 pub struct CodexDiscoveryBatch {
     pub paths: Vec<PathBuf>,
+    #[allow(dead_code)]
     pub full_scan: bool,
+    #[allow(dead_code)]
     pub next_full_scan_at: Option<i64>,
 }
 

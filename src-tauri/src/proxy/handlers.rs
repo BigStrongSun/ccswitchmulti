@@ -3605,6 +3605,7 @@ fn create_codex_chat_sse_stream_from_verified_profile<E: std::error::Error + Sen
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_codex_chat_sse_stream_from_verified_profile_for_client<
     E: std::error::Error + Send + 'static,
 >(
@@ -3664,6 +3665,7 @@ fn chat_completion_to_response_from_verified_profile(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn chat_completion_to_response_from_verified_profile_for_client(
     body: Value,
     tool_context: &transform_codex_chat::CodexToolContext,

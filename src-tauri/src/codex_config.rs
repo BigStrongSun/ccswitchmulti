@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use crate::app_config::AppType;
 use crate::codex_subagent_profiles::{
     compile_subagent_v2_profiles, deepseek_role_identity_for_model, deepseek_role_models_match,
-    initialize_legacy_subagent_v2, normalize_profile_key,
-    parse_persisted_subagent_v2, parse_persisted_subagent_v2_tolerant, render_generated_role_toml,
+    initialize_legacy_subagent_v2, normalize_profile_key, parse_persisted_subagent_v2,
+    parse_persisted_subagent_v2_tolerant, render_generated_role_toml,
     CatalogModel as SubagentCatalogModel, CodexSubagentProfileConfig,
     CompileError as SubagentCompileError, CompileOutput as SubagentCompileOutput,
     CompileRequest as SubagentCompileRequest, DiagnosticReasonCode as SubagentDiagnosticReasonCode,
@@ -3551,12 +3551,12 @@ fn compile_configured_codex_subagent_roles(
                 );
             }
             if let Some(classification) = classification.clone() {
-                route_classifications.insert(spec.model.to_ascii_lowercase(), classification.clone());
+                route_classifications
+                    .insert(spec.model.to_ascii_lowercase(), classification.clone());
                 // 别名键：profile 用旧 slug（deepseek-v4-flash）时也能查到
                 // catalog 新 slug（deepseek-flash）的路由分类。
                 if let Some(role_identity) = deepseek_role_identity_for_model(&spec.model) {
-                    route_classifications
-                        .insert(role_identity.to_string(), classification);
+                    route_classifications.insert(role_identity.to_string(), classification);
                 }
             }
             SubagentCatalogModel {
@@ -3843,7 +3843,10 @@ fn catalog_profile_draft(
         Some(canonical) => canonical,
         None => identity.as_str(),
     };
-    if let Some(mut preset) = defaults.pointer(&format!("/profiles/{preset_key}")).cloned() {
+    if let Some(mut preset) = defaults
+        .pointer(&format!("/profiles/{preset_key}"))
+        .cloned()
+    {
         preset["model"] = Value::String(model.to_string());
         preset["enabled"] = Value::Bool(enabled_preferred);
         if !enabled_preferred {
@@ -8148,7 +8151,9 @@ wire_api = "responses"
         assert!(!codex_catalog_model_name_is_text_only(
             "deepseek-v4-flash-vision-exp"
         ));
-        assert!(!codex_catalog_model_name_is_text_only("deepseek-flash-vision"));
+        assert!(!codex_catalog_model_name_is_text_only(
+            "deepseek-flash-vision"
+        ));
     }
 
     #[test]
@@ -8157,7 +8162,10 @@ wire_api = "responses"
             codex_agent_role_name_for_model("deepseek-flash"),
             "deepseek-flash"
         );
-        assert_eq!(codex_agent_role_name_for_model("deepseek-pro"), "deepseek-pro");
+        assert_eq!(
+            codex_agent_role_name_for_model("deepseek-pro"),
+            "deepseek-pro"
+        );
         assert!(codex_agent_description_for_model("deepseek-flash")
             .contains("DeepSeek V4 Flash worker"));
         assert_eq!(
@@ -8176,20 +8184,20 @@ wire_api = "responses"
 
     #[test]
     fn catalog_profile_draft_uses_flash_preset_for_official_alias() {
-        let draft = catalog_profile_draft("deepseek-flash", true, None)
-            .expect("flash alias draft");
+        let draft = catalog_profile_draft("deepseek-flash", true, None).expect("flash alias draft");
         assert_eq!(draft["model"], "deepseek-flash");
         assert_eq!(draft["enabled"], true);
         let strengths = draft["questionnaire"]["taskStrengths"]
             .as_array()
             .expect("taskStrengths");
-        assert!(strengths.iter().any(|value| value == "long_context_reading"));
+        assert!(strengths
+            .iter()
+            .any(|value| value == "long_context_reading"));
     }
 
     #[test]
     fn catalog_profile_draft_keeps_generic_stub_for_unknown_models() {
-        let draft = catalog_profile_draft("some-model", false, None)
-            .expect("unknown model draft");
+        let draft = catalog_profile_draft("some-model", false, None).expect("unknown model draft");
         assert_eq!(draft["model"], "some-model");
         assert_eq!(draft["enabled"], false);
         assert_eq!(draft["questionnaire"]["preference"], "eligible");
