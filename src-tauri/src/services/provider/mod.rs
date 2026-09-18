@@ -3484,16 +3484,10 @@ experimental_bearer_token = "PROXY_MANAGED"
                 Some("PROXY_MANAGED"),
                 "{label}: CCSM-managed routes must use the local placeholder"
             );
-            let provider_models = live_toml
-                .get("model_providers")
-                .and_then(|providers| providers.get("codex_model_router_v2"))
-                .and_then(|provider| provider.get("models"))
-                .and_then(|models| models.as_array())
-                .expect("router provider should expose inline models for Desktop custom picker");
-            let provider_model_ids: Vec<&str> = provider_models
-                .iter()
-                .filter_map(|model| model.get("model").and_then(|value| value.as_str()))
-                .collect();
+            assert!(
+                router_facade.get("models").is_none(),
+                "{label}: router provider must not expose the unsupported legacy models field"
+            );
 
             let catalog_text =
                 std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
@@ -3558,10 +3552,6 @@ experimental_bearer_token = "PROXY_MANAGED"
                 assert!(
                     cache_model_fields.contains(&expected),
                     "{label}: cache should include model field {expected}, got: {cache_model_fields:?}"
-                );
-                assert!(
-                    provider_model_ids.contains(&expected),
-                    "{label}: provider inline models should include {expected}, got: {provider_model_ids:?}"
                 );
             }
         };

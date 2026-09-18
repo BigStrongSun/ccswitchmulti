@@ -270,7 +270,7 @@ pub(crate) fn load_cc_switch_model_catalog_projection(
     }
 
     Err(format!(
-        "No routed models were found in {}, the CCSwitchMulti models cache, or the active provider inline catalog",
+        "No routed models were found in {}, the CCSwitchMulti models cache, or a legacy active provider inline catalog",
         catalog_path.display()
     ))
 }
@@ -293,11 +293,11 @@ fn codex_model_catalog_projection_from_value(
     })
 }
 
-/// 从当前活动 provider 的 TOML 内联 `models` 读取最后一道模型菜单回退。
+/// 从旧版配置的活动 provider TOML 内联 `models` 读取最后一道模型菜单回退。
 ///
-/// 生成 live config 时，CCSM 会把同一份路由目录同时投射到 JSON catalog、models cache
-/// 和活动 provider 内联数组。任一 JSON 文件短暂不可读时，内联数组仍能避免整次 Desktop
-/// 会话安装空白名单；这里仅读取活动 provider，不能把未启用 provider 的模型重新注入。
+/// 新版 CCSM 不再写入 Codex 已不支持的 provider `models` 字段；这里保留只读兼容，
+/// 让尚未完成下一次配置同步的旧安装仍能恢复模型菜单。这里只读取活动 provider，
+/// 不能把未启用 provider 的模型重新注入。
 fn read_active_codex_provider_inline_model_catalog() -> Option<Value> {
     let text = crate::codex_config::read_codex_config_text().ok()?;
     let parsed = text.parse::<toml::Value>().ok()?;

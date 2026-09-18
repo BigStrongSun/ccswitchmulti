@@ -37,7 +37,7 @@ use std::fs;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use tauri::State;
-use toml_edit::{Array, DocumentMut, InlineTable, Item, TableLike};
+use toml_edit::{DocumentMut, Item, TableLike};
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 /// Codex MultiRouter 专用的本地 provider id。
@@ -104,16 +104,6 @@ const CC_SWITCH_SUBAGENT_V2_POLICY_BEGIN: &str = "[CCSWITCHMULTI_SUBAGENT_V2_POL
 const CC_SWITCH_SUBAGENT_V2_POLICY_END: &str = "[CCSWITCHMULTI_SUBAGENT_V2_POLICY_END]";
 const CC_SWITCH_CODEX_AGENT_THREADS: i64 = 10;
 const CC_SWITCH_CODEX_AGENT_DEPTH: i64 = 1;
-const CODEX_REASONING_EFFORTS: &[(&str, &str)] = &[
-    ("low", "Fast responses with lighter reasoning"),
-    (
-        "medium",
-        "Balances speed and reasoning depth for everyday tasks",
-    ),
-    ("high", "Greater reasoning depth for complex problems"),
-    ("xhigh", "Extra high reasoning depth for complex problems"),
-];
-const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
 const DEEPSEEK_WINDOWS_EXECUTION_GUIDANCE: &str = "On Windows, use PowerShell syntax and minimal directed commands. For content, use `rg <pattern> <named-path>`; for file discovery, use `rg --files <named-path>`. Use narrow `-g` includes and excludes, including `-g '!node_modules/**'`, `-g '!.git/**'`, `-g '!target/**'`, `-g '!dist/**'`, and `-g '!generated/**'`. First identify a narrow source or test subtree; never recursively scan a user profile/home, drive root, or broad repository root.\nDo not use Unix-only commands such as `wc`, and do not assume `Select-String -Recurse` exists; if `rg` is unavailable, only after identifying a narrow target use `Get-ChildItem -LiteralPath <narrow-target> -File -Recurse | Select-String`.\nFor ordinary read-only inspection, call tools without escalation metadata or a justification.\nStop and report as soon as the requested evidence is sufficient; do not keep scanning merely to be exhaustive.";
 
 /// Codex model catalog 的工具配置画像。
@@ -2496,95 +2486,6 @@ fn codex_model_catalog_from_specs(
     json!({ "models": entries })
 }
 
-/// 生成 provider inline `models` 使用的 reasoning effort 数组。
-///
-/// Codex Desktop 的不同读取路径对 TOML provider model 的字段兼容度不同；
-/// 因此 inline model 同时写 snake_case 和 camelCase 两组字段，后续 app-server
-/// 无论是按 config schema 解析还是直接转成前端对象，都能保留 reasoning 菜单。
-fn codex_provider_reasoning_efforts_toml_array(
-    levels: Option<&Value>,
-    key: &str,
-) -> toml_edit::Value {
-    let mut array = Array::default();
-    let normalized_levels = levels
-        .and_then(Value::as_array)
-        .map(|levels| {
-            levels
-                .iter()
-                .filter_map(|level| {
-                    let effort = level
-                        .get("effort")
-                        .or_else(|| level.get("reasoningEffort"))
-                        .and_then(Value::as_str)?
-                        .trim();
-                    if effort.is_empty() {
-                        return None;
-                    }
-                    let description = level
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|description| !description.is_empty())
-                        .unwrap_or(effort);
-                    Some((effort.to_string(), description.to_string()))
-                })
-                .collect::<Vec<_>>()
-        })
-        .filter(|levels| !levels.is_empty())
-        .unwrap_or_else(|| {
-            CODEX_REASONING_EFFORTS
-                .iter()
-                .map(|(effort, description)| (effort.to_string(), description.to_string()))
-                .collect()
-        });
-    for (effort, description) in normalized_levels {
-        let mut level = InlineTable::new();
-        level.insert(key, effort.into());
-        level.insert("description", description.into());
-        array.push(toml_edit::Value::InlineTable(level));
-    }
-    toml_edit::Value::Array(array)
-}
-
-/// 把 catalog 中的字符串数组投影到 provider inline model。
-fn codex_provider_string_toml_array(value: Option<&Value>) -> Option<toml_edit::Value> {
-    let values = value?.as_array()?;
-    let mut array = Array::default();
-    for value in values {
-        let value = value.as_str()?.trim();
-        if !value.is_empty() {
-            array.push(value);
-        }
-    }
-    Some(toml_edit::Value::Array(array))
-}
-
-/// 把官方 service tier 对象数组无损投影到 provider inline model。
-///
-/// Codex 当前字段均为标量；遇到未来新增的复合字段时返回 None，让 JSON catalog
-/// 继续作为权威来源，避免生成一个结构错误的 TOML 条目。
-fn codex_provider_service_tiers_toml_array(value: Option<&Value>) -> Option<toml_edit::Value> {
-    let tiers = value?.as_array()?;
-    let mut array = Array::default();
-    for tier in tiers {
-        let tier = tier.as_object()?;
-        let mut inline = InlineTable::new();
-        for (field, value) in tier {
-            let value = match value {
-                Value::String(value) => value.as_str().into(),
-                Value::Bool(value) => (*value).into(),
-                Value::Number(value) if value.is_i64() => value.as_i64()?.into(),
-                Value::Number(value) if value.is_f64() => value.as_f64()?.into(),
-                Value::Null => continue,
-                _ => return None,
-            };
-            inline.insert(field, value);
-        }
-        array.push(toml_edit::Value::InlineTable(inline));
-    }
-    Some(toml_edit::Value::Array(array))
-}
-
 fn codex_model_catalog_from_settings(
     settings: &Value,
     config_text: &str,
@@ -2629,197 +2530,8 @@ fn codex_model_catalog_from_settings(
     )))
 }
 
-/// 为当前活动 custom provider 生成 Codex Desktop 可枚举的内联模型数组。
-fn codex_provider_models_toml_array(
-    specs: &[CodexCatalogModelSpec],
-    catalog: Option<&Value>,
-) -> Item {
-    let mut array = Array::default();
-    for spec in specs {
-        let model_id = spec.model.to_ascii_lowercase();
-        let catalog_entry = catalog
-            .and_then(|catalog| catalog.get("models"))
-            .and_then(Value::as_array)
-            .and_then(|models| {
-                models.iter().find(|model| {
-                    codex_model_stable_id(model).as_deref() == Some(model_id.as_str())
-                })
-            });
-        let display_name = catalog_entry
-            .and_then(|entry| {
-                entry
-                    .get("display_name")
-                    .or_else(|| entry.get("displayName"))
-            })
-            .and_then(Value::as_str)
-            .unwrap_or(&spec.display_name);
-        let default_reasoning_effort = catalog_entry
-            .and_then(|entry| {
-                entry
-                    .get("default_reasoning_level")
-                    .or_else(|| entry.get("defaultReasoningEffort"))
-            })
-            .and_then(Value::as_str)
-            .unwrap_or(CODEX_DEFAULT_REASONING_EFFORT);
-        let supported_reasoning_levels =
-            catalog_entry.and_then(|entry| entry.get("supported_reasoning_levels"));
-        let mut model = InlineTable::new();
-        model.insert("model", spec.model.as_str().into());
-        model.insert("slug", spec.model.as_str().into());
-        model.insert("id", spec.model.as_str().into());
-        if let Some(upstream_model) = &spec.upstream_model {
-            model.insert("upstreamModel", upstream_model.as_str().into());
-            model.insert("upstream_model", upstream_model.as_str().into());
-        }
-        model.insert("display_name", display_name.into());
-        model.insert("displayName", display_name.into());
-        model.insert("description", display_name.into());
-        model.insert(
-            "context_window",
-            i64::try_from(spec.context_window)
-                .unwrap_or(i64::MAX)
-                .into(),
-        );
-        model.insert(
-            "contextWindow",
-            i64::try_from(spec.context_window)
-                .unwrap_or(i64::MAX)
-                .into(),
-        );
-        model.insert("default_reasoning_effort", default_reasoning_effort.into());
-        model.insert("default_reasoning_level", default_reasoning_effort.into());
-        model.insert("defaultReasoningEffort", default_reasoning_effort.into());
-        model.insert(
-            "supported_reasoning_levels",
-            codex_provider_reasoning_efforts_toml_array(supported_reasoning_levels, "effort"),
-        );
-        model.insert(
-            "supported_reasoning_efforts",
-            codex_provider_reasoning_efforts_toml_array(
-                supported_reasoning_levels,
-                "reasoning_effort",
-            ),
-        );
-        model.insert(
-            "supportedReasoningEfforts",
-            codex_provider_reasoning_efforts_toml_array(
-                supported_reasoning_levels,
-                "reasoningEffort",
-            ),
-        );
-        if let Some(speed_tiers) = codex_provider_string_toml_array(
-            catalog_entry.and_then(|entry| entry.get("additional_speed_tiers")),
-        ) {
-            model.insert("additional_speed_tiers", speed_tiers.clone());
-            model.insert("additionalSpeedTiers", speed_tiers);
-        }
-        if let Some(service_tiers) = codex_provider_service_tiers_toml_array(
-            catalog_entry.and_then(|entry| entry.get("service_tiers")),
-        ) {
-            model.insert("service_tiers", service_tiers.clone());
-            model.insert("serviceTiers", service_tiers);
-        }
-        if let Some(default_service_tier) = catalog_entry
-            .and_then(|entry| entry.get("default_service_tier"))
-            .and_then(Value::as_str)
-        {
-            model.insert("default_service_tier", default_service_tier.into());
-            model.insert("defaultServiceTier", default_service_tier.into());
-        }
-        if let Some(input_modalities) =
-            codex_provider_string_toml_array(catalog_entry.and_then(|entry| {
-                entry
-                    .get("input_modalities")
-                    .or_else(|| entry.get("inputModalities"))
-            }))
-        {
-            model.insert("input_modalities", input_modalities.clone());
-            model.insert("inputModalities", input_modalities);
-        }
-        if let Some(multi_agent_version) = catalog_entry
-            .and_then(|entry| {
-                entry
-                    .get("multi_agent_version")
-                    .or_else(|| entry.get("multiAgentVersion"))
-            })
-            .and_then(Value::as_str)
-        {
-            model.insert("multi_agent_version", multi_agent_version.into());
-            model.insert("multiAgentVersion", multi_agent_version.into());
-        }
-        if let Some(supports_personality) = catalog_entry
-            .and_then(|entry| {
-                entry
-                    .get("supports_personality")
-                    .or_else(|| entry.get("supportsPersonality"))
-            })
-            .and_then(Value::as_bool)
-        {
-            model.insert("supports_personality", supports_personality.into());
-            model.insert("supportsPersonality", supports_personality.into());
-        }
-        if let Some(model_specialty) = catalog_entry
-            .and_then(|entry| {
-                entry
-                    .get("model_specialty")
-                    .or_else(|| entry.get("modelSpecialty"))
-            })
-            .and_then(Value::as_str)
-        {
-            model.insert("model_specialty", model_specialty.into());
-            model.insert("modelSpecialty", model_specialty.into());
-        }
-        model.insert("visibility", "list".into());
-        model.insert("show_in_picker", true.into());
-        model.insert("supported_in_api", true.into());
-        model.insert("hidden", false.into());
-        model.insert("isDefault", spec.is_default.into());
-        array.push(toml_edit::Value::InlineTable(model));
-    }
-    Item::Value(toml_edit::Value::Array(array))
-}
-
-/// 将模型目录同步到活动 provider 的 `models` 字段。
-///
-/// Codex Desktop 的 app-server 会把 custom provider 标为“自定义”，但候选菜单仍需要
-/// provider 内部能枚举模型；只写顶层 `model_catalog_json` 对部分 Desktop 版本不够。
-fn set_active_codex_provider_models(
-    doc: &mut DocumentMut,
-    specs: &[CodexCatalogModelSpec],
-    catalog: Option<&Value>,
-) {
-    if specs.is_empty() {
-        return;
-    }
-    let Some(provider_id) = active_codex_model_provider_id(doc) else {
-        return;
-    };
-    if !is_custom_codex_model_provider_id(&provider_id) {
-        return;
-    }
-
-    if doc.get("model_providers").is_none() {
-        doc["model_providers"] = toml_edit::table();
-    }
-    let Some(model_providers) = doc
-        .get_mut("model_providers")
-        .and_then(|item| item.as_table_mut())
-    else {
-        return;
-    };
-    if !model_providers.contains_key(&provider_id) {
-        model_providers[&provider_id] = toml_edit::table();
-    }
-    if let Some(provider_table) = model_providers
-        .get_mut(provider_id.as_str())
-        .and_then(|item| item.as_table_mut())
-    {
-        provider_table["models"] = codex_provider_models_toml_array(specs, catalog);
-    }
-}
-
-/// 移除当前活动 custom provider 下由 CCSwitch catalog 投影出的模型数组。
-fn remove_active_codex_provider_models(doc: &mut DocumentMut) {
+/// 移除旧版 CCSwitchMulti 投影到活动 custom provider 的非官方 `models` 字段。
+fn remove_legacy_active_codex_provider_models(doc: &mut DocumentMut) {
     let Some(provider_id) = active_codex_model_provider_id(doc) else {
         return;
     };
@@ -2864,21 +2576,22 @@ fn set_codex_model_catalog_json_field(
     Ok(doc.to_string())
 }
 
-/// 同步 Codex Desktop 需要的 catalog 指针和 provider 内联模型。
+/// 同步 Codex Desktop 支持的 catalog 指针，并清理旧版 provider 内联模型。
+///
+/// 当前 Codex 只支持顶层 `model_catalog_json`。旧版 CCSwitchMulti 写入的
+/// `model_providers.<id>.models` 会被当作未知配置，因此每次投影时一并迁移掉。
 fn set_codex_model_catalog_projection_fields(
     config_text: &str,
     catalog_path: Option<&Path>,
-    specs: Option<&[CodexCatalogModelSpec]>,
-    catalog: Option<&Value>,
 ) -> Result<String, AppError> {
     let mut doc = config_text
         .parse::<DocumentMut>()
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
 
-    match (catalog_path, specs) {
-        (Some(path), Some(specs)) => {
+    match catalog_path {
+        Some(path) => {
             doc["model_catalog_json"] = toml_edit::value(path.to_string_lossy().as_ref());
-            set_active_codex_provider_models(&mut doc, specs, catalog);
+            remove_legacy_active_codex_provider_models(&mut doc);
             ensure_codex_agents_defaults(&mut doc);
             ensure_codex_multi_agent_reserved_schema_compatible(
                 &mut doc,
@@ -2894,7 +2607,7 @@ fn set_codex_model_catalog_projection_fields(
                 .unwrap_or(false);
             if should_remove {
                 doc.as_table_mut().remove("model_catalog_json");
-                remove_active_codex_provider_models(&mut doc);
+                remove_legacy_active_codex_provider_models(&mut doc);
             }
         }
     }
@@ -6279,12 +5992,8 @@ fn prepare_codex_config_text_with_model_catalog_impl(
                 Value::String(fingerprint.to_string());
         }
         apply_codex_multi_agent_transport_policy(&mut catalog, settings);
-        let config_text = set_codex_model_catalog_projection_fields(
-            config_text,
-            Some(&catalog_path),
-            Some(&specs),
-            Some(&catalog),
-        )?;
+        let config_text =
+            set_codex_model_catalog_projection_fields(config_text, Some(&catalog_path))?;
         let mut doc = config_text
             .parse::<DocumentMut>()
             .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
@@ -6327,7 +6036,7 @@ fn prepare_codex_config_text_with_model_catalog_impl(
     } else {
         restore_codex_models_cache_if_cc_switch_owned()?;
         prune_stale_codex_managed_agent_files(&get_codex_agents_dir(), &HashSet::new())?;
-        let config_text = set_codex_model_catalog_projection_fields(config_text, None, None, None)?;
+        let config_text = set_codex_model_catalog_projection_fields(config_text, None)?;
         let config_text = set_codex_native_web_search_field(
             &config_text,
             profile == CodexCatalogToolProfile::Anthropic,
@@ -14504,21 +14213,6 @@ openai_base_url = "http://127.0.0.1:15721/v1"
 
     #[test]
     fn codex_agent_defaults_migrate_legacy_alias_without_overwriting_user_limits() {
-        let specs = vec![CodexCatalogModelSpec {
-            model: "qwen3.6".to_string(),
-            upstream_model: None,
-            display_name: "Qwen 3.6".to_string(),
-            context_window: 262_144,
-            text_only: false,
-            is_default: false,
-            supports_parallel_tool_calls: None,
-            input_modalities: None,
-            base_instructions: None,
-            reasoning: None,
-            reasoning_fingerprint: String::new(),
-            reasoning_source: "unknown".to_string(),
-            sort_index: None,
-        }];
         let config = r#"model_provider = "codex_model_router_v2"
 
 [agents]
@@ -14528,13 +14222,9 @@ max_threads = 8
 base_url = "http://127.0.0.1:15721/v1"
 "#;
 
-        let projected = set_codex_model_catalog_projection_fields(
-            config,
-            Some(Path::new("catalog")),
-            Some(&specs),
-            None,
-        )
-        .expect("project catalog fields");
+        let projected =
+            set_codex_model_catalog_projection_fields(config, Some(Path::new("catalog")))
+                .expect("project catalog fields");
         let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
         let agents = parsed.get("agents").expect("agents section should exist");
 
@@ -14552,193 +14242,7 @@ base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
-    /// 活动 custom provider 的内联模型也必须使用 enriched catalog 的官方推理档位。
-    fn codex_provider_inline_models_use_enriched_reasoning_levels() {
-        let specs = vec![CodexCatalogModelSpec {
-            model: "gpt-5.6-sol".to_string(),
-            upstream_model: None,
-            display_name: "gpt-5.6-sol".to_string(),
-            context_window: 272_000,
-            text_only: false,
-            is_default: true,
-            supports_parallel_tool_calls: None,
-            input_modalities: None,
-            base_instructions: None,
-            reasoning: None,
-            reasoning_fingerprint: String::new(),
-            reasoning_source: "unknown".to_string(),
-            sort_index: None,
-        }];
-        let catalog = json!({
-            "models": [{
-                "slug": "gpt-5.6-sol",
-                "display_name": "GPT-5.6-Sol",
-                "default_reasoning_level": "medium",
-                "supported_reasoning_levels": [
-                    { "effort": "low", "description": "Low" },
-                    { "effort": "medium", "description": "Medium" },
-                    { "effort": "high", "description": "High" },
-                    { "effort": "xhigh", "description": "Extra High" },
-                    { "effort": "max", "description": "Max" },
-                    { "effort": "ultra", "description": "Ultra" }
-                ]
-            }]
-        });
-        let config = r#"model_provider = "codex_model_router_v2"
-
-[model_providers.codex_model_router_v2]
-base_url = "http://127.0.0.1:15721/v1"
-"#;
-
-        let projected = set_codex_model_catalog_projection_fields(
-            config,
-            Some(Path::new("catalog")),
-            Some(&specs),
-            Some(&catalog),
-        )
-        .expect("project catalog fields");
-        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
-        let model = parsed
-            .get("model_providers")
-            .and_then(|providers| providers.get("codex_model_router_v2"))
-            .and_then(|provider| provider.get("models"))
-            .and_then(|models| models.as_array())
-            .and_then(|models| models.first())
-            .expect("inline model");
-        let efforts = model
-            .get("supported_reasoning_levels")
-            .and_then(|levels| levels.as_array())
-            .expect("inline reasoning levels")
-            .iter()
-            .filter_map(|level| level.get("effort").and_then(|effort| effort.as_str()))
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            model.get("display_name").and_then(|value| value.as_str()),
-            Some("GPT-5.6-Sol")
-        );
-        assert_eq!(
-            efforts,
-            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
-        );
-    }
-
-    #[test]
-    fn codex_provider_inline_models_keep_deepseek_v4_reasoning_capabilities() {
-        let specs = vec![CodexCatalogModelSpec {
-            model: "deepseek-v4-pro".to_string(),
-            upstream_model: None,
-            display_name: "DeepSeek V4 Pro".to_string(),
-            context_window: 1_048_576,
-            text_only: true,
-            is_default: true,
-            supports_parallel_tool_calls: Some(true),
-            input_modalities: Some(vec!["text".to_string()]),
-            base_instructions: None,
-            reasoning: Some(
-                crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
-                    schema_version: None,
-                    support_status: None,
-                    control_kind: None,
-                    supported: Some(true),
-                    supported_efforts: vec!["low".into(), "high".into(), "max".into()],
-                    default_effort: Some("high".into()),
-                    disable_allowed: false,
-                    upstream:
-                        crate::proxy::providers::codex_reasoning::CodexModelReasoningUpstream {
-                            format: "reasoning_object".into(),
-                            parameter: "reasoning.effort".into(),
-                            effort_map: Default::default(),
-                        },
-                    output_format: None,
-                    source: Some("builtin".into()),
-                    confidence: None,
-                    fetched_at: None,
-                    provider_key: None,
-                    model_revision: None,
-                    codex_ultra_orchestration: None,
-                },
-            ),
-            reasoning_fingerprint: String::new(),
-            reasoning_source: "unknown".to_string(),
-            sort_index: None,
-        }];
-        let catalog = codex_model_catalog_from_specs(
-            &specs,
-            &json!({
-                "slug": "gpt-5.5",
-                "display_name": "GPT-5.5",
-                "default_reasoning_level": "medium",
-                "supported_reasoning_levels": [
-                    { "effort": "low" },
-                    { "effort": "medium" },
-                    { "effort": "high" },
-                    { "effort": "xhigh" }
-                ]
-            }),
-            CodexCatalogToolProfile::ProxyChat,
-            128_000,
-        );
-        let config = r#"model_provider = "codex_model_router_v2"
-
-[model_providers.codex_model_router_v2]
-base_url = "http://127.0.0.1:15721/v1"
-"#;
-
-        let projected = set_codex_model_catalog_projection_fields(
-            config,
-            Some(Path::new("catalog")),
-            Some(&specs),
-            Some(&catalog),
-        )
-        .expect("project catalog fields");
-        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
-        let model = parsed["model_providers"]["codex_model_router_v2"]["models"]
-            .as_array()
-            .and_then(|models| models.first())
-            .expect("inline model");
-
-        for field in [
-            "supported_reasoning_levels",
-            "supported_reasoning_efforts",
-            "supportedReasoningEfforts",
-        ] {
-            let efforts = model[field]
-                .as_array()
-                .expect("inline reasoning levels")
-                .iter()
-                .filter_map(|level| {
-                    level
-                        .get("effort")
-                        .or_else(|| level.get("reasoning_effort"))
-                        .or_else(|| level.get("reasoningEffort"))
-                        .and_then(|effort| effort.as_str())
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(efforts, vec!["low", "high", "max"], "field {field}");
-        }
-        assert_eq!(model["default_reasoning_level"].as_str(), Some("high"));
-        assert_eq!(model["default_reasoning_effort"].as_str(), Some("high"));
-        assert_eq!(model["defaultReasoningEffort"].as_str(), Some("high"));
-    }
-
-    #[test]
     fn codex_multi_agent_v2_keeps_spawn_agent_reserved_schema_compatible() {
-        let specs = vec![CodexCatalogModelSpec {
-            model: "qwen3.6".to_string(),
-            upstream_model: None,
-            display_name: "Qwen 3.6".to_string(),
-            context_window: 262_144,
-            text_only: false,
-            is_default: false,
-            supports_parallel_tool_calls: None,
-            input_modalities: None,
-            base_instructions: None,
-            reasoning: None,
-            reasoning_fingerprint: String::new(),
-            reasoning_source: "unknown".to_string(),
-            sort_index: None,
-        }];
         let config = r#"model_provider = "codex_model_router_v2"
 
 [features]
@@ -14748,13 +14252,9 @@ multi_agent_v2 = true
 base_url = "http://127.0.0.1:15721/v1"
 "#;
 
-        let projected = set_codex_model_catalog_projection_fields(
-            config,
-            Some(Path::new("catalog")),
-            Some(&specs),
-            None,
-        )
-        .expect("project catalog fields");
+        let projected =
+            set_codex_model_catalog_projection_fields(config, Some(Path::new("catalog")))
+                .expect("project catalog fields");
         let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
         let multi_agent_v2 = parsed
             .get("features")
@@ -15958,30 +15458,10 @@ max_threads = 10
 max_concurrent_threads_per_session = 8
 max_depth = 2
 "#;
-        let specs = vec![CodexCatalogModelSpec {
-            model: "gpt-5.6-sol".to_string(),
-            upstream_model: None,
-            display_name: "GPT-5.6-Sol".to_string(),
-            context_window: 1_000_000,
-            text_only: false,
-            is_default: true,
-            supports_parallel_tool_calls: None,
-            input_modalities: None,
-            base_instructions: None,
-            reasoning: None,
-            reasoning_fingerprint: String::new(),
-            reasoning_source: "unknown".to_string(),
-            sort_index: None,
-        }];
         let catalog_path = get_codex_model_catalog_path();
 
-        let projected = set_codex_model_catalog_projection_fields(
-            input,
-            Some(&catalog_path),
-            Some(&specs),
-            None,
-        )
-        .expect("project catalog fields");
+        let projected = set_codex_model_catalog_projection_fields(input, Some(&catalog_path))
+            .expect("project catalog fields");
         let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
         let agents = parsed.get("agents").expect("agents table");
 
@@ -15999,6 +15479,53 @@ max_depth = 2
         assert_eq!(
             agents.get("max_depth").and_then(|value| value.as_integer()),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn catalog_projection_removes_legacy_active_provider_models_only() {
+        let input = r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+name = "CCSwitch MultiRouter"
+base_url = "http://127.0.0.1:15721/v1"
+models = [{ model = "gpt-5.6-sol", slug = "gpt-5.6-sol" }]
+
+[model_providers.user_owned]
+name = "User Provider"
+base_url = "https://example.com/v1"
+models = [{ model = "user-model" }]
+
+[mcp_servers.user_owned]
+command = "example-mcp"
+"#;
+        let catalog_path = get_codex_model_catalog_path();
+
+        let projected = set_codex_model_catalog_projection_fields(input, Some(&catalog_path))
+            .expect("project catalog fields");
+        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
+
+        assert_eq!(
+            parsed
+                .get("model_catalog_json")
+                .and_then(toml::Value::as_str),
+            Some(catalog_path.to_string_lossy().as_ref())
+        );
+        assert!(
+            parsed["model_providers"]["codex_model_router_v2"]
+                .get("models")
+                .is_none(),
+            "the active provider must not retain the unsupported legacy models field"
+        );
+        assert_eq!(
+            parsed["model_providers"]["user_owned"]["models"][0]["model"].as_str(),
+            Some("user-model"),
+            "inactive user-owned provider settings must be preserved"
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["user_owned"]["command"].as_str(),
+            Some("example-mcp"),
+            "unrelated configuration must be preserved"
         );
     }
 
@@ -16952,98 +16479,11 @@ base_url = "http://127.0.0.1:15721/v1"
                 .is_none(),
             "a fixed compact limit would mask the selected model's own budget"
         );
-        let provider_models = prepared_toml
-            .get("model_providers")
-            .and_then(|providers| providers.get("custom"))
-            .and_then(|provider| provider.get("models"))
-            .and_then(|models| models.as_array())
-            .expect("custom provider should expose inline models for Codex Desktop");
-        let provider_model_ids: Vec<_> = provider_models
-            .iter()
-            .filter_map(|model| model.get("model").and_then(|value| value.as_str()))
-            .collect();
         assert!(
-            provider_model_ids.contains(&"qwen3.6"),
-            "inline provider models must include Qwen so the Desktop menu is not just 自定义"
-        );
-        assert!(
-            provider_model_ids.contains(&"deepseek-v4-flash"),
-            "inline provider models must include DeepSeek so the Desktop menu can enumerate it"
-        );
-        let inline_official_model = provider_models
-            .iter()
-            .find(|model| model.get("model").and_then(|value| value.as_str()) == Some("gpt-5.5"))
-            .expect("inline provider models should include the routed official model");
-        assert_eq!(
-            inline_official_model
-                .get("supported_reasoning_levels")
-                .and_then(|value| value.as_array())
-                .map(Vec::len),
-            Some(4),
-            "inline official models must retain the same reasoning choices as the merged catalog"
-        );
-        assert_eq!(
-            inline_official_model
-                .get("additional_speed_tiers")
-                .and_then(|value| value.as_array())
-                .map(Vec::len),
-            Some(1),
-            "inline official models must retain speed tiers when Desktop reloads provider models"
-        );
-        assert_eq!(
-            inline_official_model
-                .get("service_tiers")
-                .and_then(|value| value.as_array())
-                .map(Vec::len),
-            Some(1),
-            "inline official models must retain service tiers together with reasoning levels"
-        );
-        assert_eq!(
-            inline_official_model
-                .get("supportsPersonality")
-                .and_then(toml::Value::as_bool),
-            Some(true),
-            "inline official models must retain personality support"
-        );
-        assert_eq!(
-            inline_official_model
-                .get("modelSpecialty")
-                .and_then(toml::Value::as_str),
-            Some("coding"),
-            "inline official models must retain picker specialty"
-        );
-        let inline_qwen_model = provider_models
-            .iter()
-            .find(|model| model.get("model").and_then(|value| value.as_str()) == Some("qwen3.6"))
-            .expect("inline provider models should include Qwen");
-        assert_eq!(
-            inline_qwen_model
-                .get("service_tiers")
-                .and_then(|value| value.as_array())
-                .map(Vec::len),
-            Some(0),
-            "third-party models must not inherit OpenAI service tiers from the template"
-        );
-
-        let inline_qwen_modalities = inline_qwen_model
-            .get("input_modalities")
-            .expect("inline provider models must retain explicit input modalities");
-        assert_eq!(
-            inline_qwen_model.get("inputModalities"),
-            Some(inline_qwen_modalities),
-            "inline snake/camel modality aliases must stay equivalent"
-        );
-        assert_eq!(
-            inline_qwen_model
-                .get("multi_agent_version")
-                .and_then(toml::Value::as_str),
-            Some("v2"),
-            "inline models must retain the active Sub-Agent transport version"
-        );
-        assert_eq!(
-            inline_qwen_model.get("multiAgentVersion"),
-            inline_qwen_model.get("multi_agent_version"),
-            "inline snake/camel multi-agent aliases must stay equivalent"
+            prepared_toml["model_providers"]["custom"]
+                .get("models")
+                .is_none(),
+            "Codex provider config must not contain the unsupported legacy models field"
         );
 
         let cache: Value = read_json_file(&get_codex_models_cache_path()).expect("read cache");
