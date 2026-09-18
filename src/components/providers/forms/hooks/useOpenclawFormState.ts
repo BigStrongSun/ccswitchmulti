@@ -1,8 +1,16 @@
 import { useState, useCallback, useMemo } from "react";
-import type { OpenClawModel, OpenClawProviderConfig } from "@/types";
+import type {
+  OpenClawModel,
+  OpenClawProviderConfig,
+  OpenClawTeProviderSettings,
+} from "@/types";
 import type { AppId } from "@/lib/api";
 import { useProvidersQuery } from "@/lib/query/queries";
 import { OPENCLAW_DEFAULT_CONFIG } from "../helpers/opencodeFormUtils";
+import {
+  buildOpenClawTeProviderConfig,
+  validateTeProviderSettings,
+} from "@/utils/teProvider";
 
 interface UseOpenclawFormStateParams {
   initialData?: {
@@ -25,12 +33,16 @@ export interface OpenclawFormState {
   openclawApi: string;
   openclawModels: OpenClawModel[];
   openclawUserAgent: boolean;
+  openclawTeProvider: OpenClawTeProviderSettings | null;
   existingOpenclawKeys: string[];
   handleOpenclawBaseUrlChange: (baseUrl: string) => void;
   handleOpenclawApiKeyChange: (apiKey: string) => void;
   handleOpenclawApiChange: (api: string) => void;
   handleOpenclawModelsChange: (models: OpenClawModel[]) => void;
   handleOpenclawUserAgentChange: (enabled: boolean) => void;
+  handleOpenclawTeProviderChange: (
+    settings: OpenClawTeProviderSettings | null,
+  ) => void;
   resetOpenclawState: (config?: OpenClawProviderConfig) => void;
 }
 
@@ -102,6 +114,18 @@ export function useOpenclawFormState({
     return "User-Agent" in headers;
   });
 
+  const [openclawTeProvider, setOpenclawTeProvider] =
+    useState<OpenClawTeProviderSettings | null>(() => {
+      if (appId !== "openclaw") return null;
+      const stored = parseOpenclawField<OpenClawTeProviderSettings | null>(
+        initialData,
+        "teProvider",
+        null,
+      );
+      // 只接受对象形态；历史/手写配置里的异常值不进入表单，避免半成品被继续编辑。
+      return stored && typeof stored === "object" ? stored : null;
+    });
+
   const updateOpenclawConfig = useCallback(
     (updater: (config: Record<string, any>) => void) => {
       try {
@@ -171,6 +195,42 @@ export function useOpenclawFormState({
     [updateOpenclawConfig],
   );
 
+  /**
+   * 更新 TE Provider 静态设置。
+   *
+   * 两件事必须同时成立：
+   * 1. `teProvider` 原样持久化，便于用户保存中间态而不丢输入；
+   * 2. 只有校验通过时才把 `sidecarUrl/models` 投影成 Agent 真正读取的 `baseUrl/apiKey/models`，
+   *    避免把非法端点或非法模型能力写进 OpenClaw 配置。校验失败时保持原投影不变。
+   */
+  const handleOpenclawTeProviderChange = useCallback(
+    (settings: OpenClawTeProviderSettings | null) => {
+      setOpenclawTeProvider(settings);
+      updateOpenclawConfig((config) => {
+        if (!settings) {
+          delete config.teProvider;
+          return;
+        }
+        config.teProvider = settings;
+        if (validateTeProviderSettings(settings).length > 0) return;
+        const projected = buildOpenClawTeProviderConfig(settings);
+        // 投影结果里 baseUrl/apiKey/models 由 builder 固定生成；这里显式判空，避免把 undefined
+        // 写回配置覆盖掉用户既有值。
+        if (projected.baseUrl) {
+          config.baseUrl = projected.baseUrl;
+          setOpenclawBaseUrl(projected.baseUrl);
+        }
+        if (projected.apiKey) {
+          config.apiKey = projected.apiKey;
+          setOpenclawApiKey(projected.apiKey);
+        }
+        config.models = projected.models ?? [];
+        setOpenclawModels(projected.models ?? []);
+      });
+    },
+    [updateOpenclawConfig],
+  );
+
   const resetOpenclawState = useCallback((config?: OpenClawProviderConfig) => {
     setOpenclawProviderKey("");
     setOpenclawBaseUrl(config?.baseUrl || "");
@@ -179,6 +239,7 @@ export function useOpenclawFormState({
     setOpenclawModels(config?.models || []);
     const ua = config?.headers ? "User-Agent" in config.headers : false;
     setOpenclawUserAgent(ua);
+    setOpenclawTeProvider(config?.teProvider ?? null);
   }, []);
 
   return {
@@ -189,12 +250,14 @@ export function useOpenclawFormState({
     openclawApi,
     openclawModels,
     openclawUserAgent,
+    openclawTeProvider,
     existingOpenclawKeys,
     handleOpenclawBaseUrlChange,
     handleOpenclawApiKeyChange,
     handleOpenclawApiChange,
     handleOpenclawModelsChange,
     handleOpenclawUserAgentChange,
+    handleOpenclawTeProviderChange,
     resetOpenclawState,
   };
 }

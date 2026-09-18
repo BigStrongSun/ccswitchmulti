@@ -41,6 +41,8 @@ import {
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import { openclawApiProtocols } from "@/config/openclawProviderPresets";
+import { TeProviderFields } from "./TeProviderFields";
+import type { OpenClawTeProviderSettings } from "@/types";
 import type { ProviderCategory, OpenClawModel } from "@/types";
 
 interface OpenClawFormFieldsProps {
@@ -68,6 +70,10 @@ interface OpenClawFormFieldsProps {
   // User-Agent
   userAgent: boolean;
   onUserAgentChange: (checked: boolean) => void;
+
+  // Token Exchange Provider 专用设置（仅在 teProvider 存在时出现）
+  teProvider?: OpenClawTeProviderSettings | null;
+  onTeProviderChange?: (settings: OpenClawTeProviderSettings) => void;
 }
 
 export function OpenClawFormFields({
@@ -86,6 +92,8 @@ export function OpenClawFormFields({
   onModelsChange,
   userAgent,
   onUserAgentChange,
+  teProvider,
+  onTeProviderChange,
 }: OpenClawFormFieldsProps) {
   const { t } = useTranslation();
   const [expandedModels, setExpandedModels] = useState<Record<number, boolean>>(
@@ -667,6 +675,14 @@ export function OpenClawFormFields({
           })}
         </p>
       </div>
+
+      {/* TE Provider 专属面板：只有配置里存在 teProvider 时才出现，普通 Provider 不受影响。 */}
+      {teProvider ? (
+        <TeProviderFields
+          value={teProvider}
+          onChange={(next) => onTeProviderChange?.(next)}
+        />
+      ) : null}
     </>
   );
 }

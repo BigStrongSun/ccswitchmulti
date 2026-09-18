@@ -2923,6 +2923,8 @@ function ProviderFormFull({
               onModelsChange={openclawForm.handleOpenclawModelsChange}
               userAgent={openclawForm.openclawUserAgent}
               onUserAgentChange={openclawForm.handleOpenclawUserAgentChange}
+              teProvider={openclawForm.openclawTeProvider}
+              onTeProviderChange={openclawForm.handleOpenclawTeProviderChange}
             />
           )}
 
