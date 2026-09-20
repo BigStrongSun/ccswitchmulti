@@ -107,6 +107,7 @@ import { parseOmoOtherFieldsObject } from "@/types/omo";
 import {
   buildOpenClawTeProviderConfig,
   canonicalizeTeProviderSettings,
+  hasTokenExchangeDescriptor,
 } from "@/utils/teProvider";
 import {
   ProviderAdvancedConfig,
@@ -998,7 +999,8 @@ function ProviderFormFull({
   const isTokenExchangeProvider =
     appId === "openclaw" &&
     (presetProviderType === "token_exchange" ||
-      initialData?.meta?.providerType === "token_exchange");
+      initialData?.meta?.providerType === "token_exchange" ||
+      hasTokenExchangeDescriptor(initialData?.settingsConfig));
 
   const maintainedCodexPreset = useMemo(() => {
     if (appId !== "codex") return undefined;
@@ -1926,7 +1928,11 @@ function ProviderFormFull({
       payload.meta ?? (initialData?.meta ? { ...initialData.meta } : undefined);
 
     // 确定 providerType（新建时从预设获取，编辑时从现有数据获取）
-    const providerType = presetProviderType || initialData?.meta?.providerType;
+    // 旧版 DB 行可能只有 teProvider descriptor；保存时统一回填权威 providerType，
+    // 但最终配置仍必须经过 TE canonicalizer，不能让任意 JSON 借此冒充合法 Provider。
+    const providerType = isTokenExchangeProvider
+      ? "token_exchange"
+      : presetProviderType || initialData?.meta?.providerType;
 
     let nextMeta: ProviderMeta = {
       ...(baseMeta ?? {}),

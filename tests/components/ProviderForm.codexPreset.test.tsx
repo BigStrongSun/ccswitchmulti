@@ -70,6 +70,24 @@ vi.mock("@/components/providers/forms/CodexConfigEditor", () => ({
   ),
 }));
 
+vi.mock("@/components/providers/forms/OpenClawFormFields", () => ({
+  OpenClawFormFields: ({
+    isTokenExchangeProvider,
+  }: {
+    isTokenExchangeProvider?: boolean;
+  }) => (
+    <section data-testid="openclaw-provider-fields">
+      <span data-testid="openclaw-provider-type">
+        {isTokenExchangeProvider ? "token_exchange" : "ordinary"}
+      </span>
+    </section>
+  ),
+}));
+
+vi.mock("@/components/JsonEditor", () => ({
+  default: () => <section data-testid="provider-json-editor" />,
+}));
+
 vi.mock("@/components/providers/forms/CodexFormFields", () => ({
   CodexFormFields: ({
     codexApiKey,
@@ -195,6 +213,20 @@ function renderProviderForm(
     </QueryClientProvider>,
   );
 }
+
+const legacyTeProviderSettings = {
+  api: "openai-completions",
+  baseUrl: "http://127.0.0.1:9814/v1",
+  apiKey: "te-provider-placeholder-not-a-secret",
+  models: [{ id: "qwen3.8", name: "Qwen 3.8" }],
+  teProvider: {
+    sidecarUrl: "http://127.0.0.1:9814",
+    expectedPartnerAic: "partner-aic",
+    protocolVersion: "te-provider.v1",
+    bindingDelivery: "config-headers",
+    models: [{ id: "qwen3.8", name: "Qwen 3.8" }],
+  },
+};
 
 describe("ProviderForm Codex preset selection", () => {
   beforeEach(() => {
@@ -772,5 +804,106 @@ describe("ProviderForm Codex preset selection", () => {
     expect(
       screen.getByTestId("codex-preset-reasoning-models"),
     ).toBeEmptyDOMElement();
+  });
+});
+
+describe("ProviderForm legacy Token Exchange migration", () => {
+  it("treats a DB descriptor as TE when live OpenClaw settings are unavailable", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      appId: "openclaw",
+      providerId: "legacy-te",
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Legacy Token Exchange",
+        category: "custom",
+        settingsConfig: legacyTeProviderSettings,
+      },
+    });
+
+    expect(
+      await screen.findByTestId("openclaw-provider-fields"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("openclaw-provider-type")).toHaveTextContent(
+      "token_exchange",
+    );
+    expect(
+      screen.queryByTestId("provider-json-editor"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    const submitted = onSubmit.mock.calls[0][0];
+    expect(submitted.meta.providerType).toBe("token_exchange");
+    expect(JSON.parse(submitted.settingsConfig)).toMatchObject(
+      legacyTeProviderSettings,
+    );
+    expect(JSON.parse(submitted.settingsConfig).teProvider).toMatchObject({
+      providerTimeoutSeconds: 300,
+      keepAliveIntervalSeconds: 30,
+    });
+  });
+
+  it("cannot fall back to ordinary JSON save for a legacy descriptor with forbidden fields", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      appId: "openclaw",
+      providerId: "legacy-te-runtime",
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Legacy Token Exchange with runtime fields",
+        settingsConfig: {
+          ...legacyTeProviderSettings,
+          teProvider: {
+            ...legacyTeProviderSettings.teProvider,
+            taskId: "runtime-task",
+            proxyKey: "secret-proxy-key",
+            unknownField: "must-not-persist",
+          },
+        },
+      },
+    });
+
+    expect(
+      await screen.findByTestId("openclaw-provider-fields"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("provider-json-editor"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    const submitted = onSubmit.mock.calls[0][0];
+    const persisted = JSON.parse(submitted.settingsConfig);
+    expect(submitted.meta.providerType).toBe("token_exchange");
+    expect(persisted.teProvider).not.toHaveProperty("taskId");
+    expect(persisted.teProvider).not.toHaveProperty("proxyKey");
+    expect(persisted.teProvider).not.toHaveProperty("unknownField");
+  });
+
+  it("does not classify an ordinary provider without a descriptor as TE", async () => {
+    renderProviderForm({
+      appId: "openclaw",
+      initialData: {
+        name: "Ordinary OpenClaw",
+        settingsConfig: {
+          api: "openai-completions",
+          baseUrl: "https://api.example.com/v1",
+          apiKey: "ordinary-key",
+          models: [{ id: "ordinary-model", name: "Ordinary Model" }],
+        },
+      },
+    });
+
+    expect(
+      await screen.findByTestId("openclaw-provider-fields"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("openclaw-provider-type")).toHaveTextContent(
+      "ordinary",
+    );
+    expect(screen.getByTestId("provider-json-editor")).toBeInTheDocument();
   });
 });

@@ -57,6 +57,16 @@ const TE_RUNTIME_FIELDS = new Set([
 ]);
 const TE_SECRET_FIELDS = new Set(["proxyKey", "agentCredential"]);
 
+/**
+ * 识别旧版 OpenClaw TE 描述符。该判断只负责进入 TE 安全壳，不能替代
+ * canonicalizeTeProviderSettings 的严格校验；因此任意损坏描述符都会进入
+ * fail-closed 保存路径，而没有 descriptor 的普通 Provider 不会被误判。
+ */
+export function hasTokenExchangeDescriptor(settings: unknown): boolean {
+  if (!isRecord(settings)) return false;
+  return Object.prototype.hasOwnProperty.call(settings, "teProvider");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

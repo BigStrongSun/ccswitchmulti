@@ -330,6 +330,53 @@ describe("EditProviderDialog", () => {
     });
   });
 
+  it("OpenClaw live 不可读时回退到数据库中的 legacy TE descriptor", async () => {
+    const legacySettings = {
+      api: "openai-completions",
+      baseUrl: "http://127.0.0.1:9814/v1",
+      apiKey: "te-provider-placeholder-not-a-secret",
+      models: [{ id: "qwen3.8", name: "Qwen 3.8" }],
+      teProvider: {
+        sidecarUrl: "http://127.0.0.1:9814",
+        expectedPartnerAic: "partner-aic",
+        protocolVersion: "te-provider.v1",
+        bindingDelivery: "config-headers",
+        models: [{ id: "qwen3.8", name: "Qwen 3.8" }],
+        taskId: "runtime-task",
+        proxyKey: "secret-proxy-key",
+        unknownField: "must-not-persist",
+      },
+    };
+    const provider: Provider = {
+      id: "legacy-te",
+      name: "Legacy Token Exchange",
+      category: "custom",
+      settingsConfig: legacySettings,
+    };
+    apiMocks.getOpenClawLiveProvider.mockRejectedValueOnce(
+      new Error("live unavailable"),
+    );
+
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="openclaw"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.getOpenClawLiveProvider).toHaveBeenCalledWith(
+        "legacy-te",
+      );
+    });
+    expect(
+      JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
+    ).toEqual(legacySettings);
+  });
+
   it("代理接管中编辑 Codex 供应商时展示数据库配置而不是读取 live 代理配置", async () => {
     const provider: Provider = {
       id: "deepseek",

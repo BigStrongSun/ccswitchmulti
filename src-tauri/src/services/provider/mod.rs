@@ -2029,6 +2029,99 @@ command = "example-mcp"
     }
 
     #[test]
+    #[serial]
+    fn legacy_token_exchange_descriptor_loads_as_te_and_cannot_bypass_mutation() {
+        with_test_home(|state, _| {
+            let mut valid = token_exchange_openclaw_provider(
+                "te-legacy-valid",
+                json!({
+                    "api": "openai-completions",
+                    "baseUrl": "http://127.0.0.1:9814/v1",
+                    "apiKey": "te-provider-placeholder-not-a-secret",
+                    "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}],
+                    "teProvider": {
+                        "sidecarUrl": "http://127.0.0.1:9814",
+                        "expectedPartnerAic": "partner-aic",
+                        "protocolVersion": "te-provider.v1",
+                        "bindingDelivery": "config-headers",
+                        "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}]
+                    }
+                }),
+            );
+            valid.meta = None;
+            state
+                .db
+                .save_provider(AppType::OpenClaw.as_str(), &valid)
+                .expect("seed legacy valid descriptor");
+
+            let mut malicious = valid.clone();
+            malicious.id = "te-legacy-malicious".to_string();
+            malicious.settings_config["teProvider"]["taskId"] = json!("runtime-task");
+            malicious.settings_config["teProvider"]["proxyKey"] = json!("secret-proxy-key");
+            malicious.settings_config["teProvider"]["unknownField"] = json!("must-not-persist");
+            state
+                .db
+                .save_provider(AppType::OpenClaw.as_str(), &malicious)
+                .expect("seed legacy malicious descriptor");
+
+            let listed = ProviderService::list(state, AppType::OpenClaw)
+                .expect("list legacy OpenClaw providers");
+            assert_eq!(
+                listed["te-legacy-valid"]
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.provider_type.as_deref()),
+                Some("token_exchange")
+            );
+            assert_eq!(
+                listed["te-legacy-malicious"]
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.provider_type.as_deref()),
+                Some("token_exchange")
+            );
+
+            ProviderService::update(state, AppType::OpenClaw, Some("te-legacy-valid"), valid)
+                .expect("valid legacy descriptor should normalize and persist");
+            let stored_valid = state
+                .db
+                .get_provider_by_id("te-legacy-valid", AppType::OpenClaw.as_str())
+                .expect("query normalized legacy provider")
+                .expect("normalized legacy provider remains stored");
+            assert_eq!(
+                stored_valid
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.provider_type.as_deref()),
+                Some("token_exchange")
+            );
+
+            let error = ProviderService::update(
+                state,
+                AppType::OpenClaw,
+                Some("te-legacy-malicious"),
+                malicious,
+            )
+            .expect_err("legacy malicious descriptor must not use ordinary save");
+            assert!(error.to_string().contains("token_exchange"));
+            let stored = state
+                .db
+                .get_provider_by_id("te-legacy-malicious", AppType::OpenClaw.as_str())
+                .expect("query legacy malicious provider")
+                .expect("legacy malicious provider remains unchanged");
+            assert!(stored
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref())
+                .is_none());
+            assert_eq!(
+                stored.settings_config["teProvider"]["taskId"],
+                "runtime-task"
+            );
+        });
+    }
+
+    #[test]
     fn validate_provider_settings_rejects_invalid_manual_codex_protocol_combinations() {
         let make_provider = |api_format: &str,
                              projection: Option<&str>,
@@ -5943,6 +6036,18 @@ impl ProviderService {
             return pi::list(state);
         }
         let mut providers = state.db.get_all_providers(app_type.as_str())?;
+        if app_type == AppType::OpenClaw {
+            // 兼容 live 不可读时仍从 DB 回退编辑的历史行：先在返回快照中补齐
+            // providerType，随后保存仍必须经过 normalize_token_exchange_* 的严格校验。
+            for provider in providers.values_mut() {
+                if provider.has_token_exchange_descriptor() {
+                    let meta = provider
+                        .meta
+                        .get_or_insert_with(crate::provider::ProviderMeta::default);
+                    meta.provider_type = Some("token_exchange".to_string());
+                }
+            }
+        }
         if app_type == AppType::Codex {
             providers.retain(|_, provider| {
                 !crate::codex_multirouter::provider_set::is_codex_provider_set_generated_leaf(
@@ -6798,6 +6903,12 @@ impl ProviderService {
         canonical_settings.insert("models".to_string(), Value::Array(openclaw_models));
         canonical_settings.insert("teProvider".to_string(), Value::Object(canonical_te));
         provider.settings_config = Value::Object(canonical_settings);
+        // 旧版 OpenClaw 行可能只有 descriptor；规范化成功后回填唯一权威类型，
+        // 让后续列表、路由和前端编辑都不再依赖 descriptor 反推。
+        let meta = provider
+            .meta
+            .get_or_insert_with(crate::provider::ProviderMeta::default);
+        meta.provider_type = Some("token_exchange".to_string());
         Ok(())
     }
 

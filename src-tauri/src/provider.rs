@@ -77,7 +77,17 @@ impl Provider {
 
     /// Token Exchange 走本机注入器，但不是 OAuth 托管账号，避免误进入账号凭据注入路径。
     pub fn is_token_exchange(&self) -> bool {
-        self.provider_type() == Some("token_exchange")
+        self.provider_type() == Some("token_exchange") || self.has_token_exchange_descriptor()
+    }
+
+    /// 兼容旧版 OpenClaw 行：历史导入可能只保存了 teProvider descriptor，尚未写入
+    /// meta.providerType。该存在性判断只用于进入 TE 的 fail-closed 路径，不能放宽
+    /// canonical descriptor 校验；没有 descriptor 的普通 Provider 仍保持普通行为。
+    pub fn has_token_exchange_descriptor(&self) -> bool {
+        self.settings_config
+            .as_object()
+            .and_then(|settings| settings.get("teProvider"))
+            .is_some()
     }
 
     /// 需要本地路由/代理的供应商必须由各应用配置入口显式处理，不能按普通直连写入。
@@ -1460,6 +1470,9 @@ mod tests {
             json!({"teProvider": {}}),
             None,
         );
+        assert!(provider.is_token_exchange());
+        assert!(provider.requires_local_routing());
+        assert!(!provider.uses_managed_account_auth());
         provider.meta = Some(ProviderMeta {
             provider_type: Some("token_exchange".to_string()),
             ..Default::default()
