@@ -75,6 +75,16 @@ impl Provider {
         self.provider_type() == Some("xai_oauth")
     }
 
+    /// Token Exchange 走本机注入器，但不是 OAuth 托管账号，避免误进入账号凭据注入路径。
+    pub fn is_token_exchange(&self) -> bool {
+        self.provider_type() == Some("token_exchange")
+    }
+
+    /// 需要本地路由/代理的供应商必须由各应用配置入口显式处理，不能按普通直连写入。
+    pub fn requires_local_routing(&self) -> bool {
+        self.is_token_exchange() || self.uses_managed_account_auth()
+    }
+
     pub fn is_github_copilot(&self) -> bool {
         self.provider_type() == Some("github_copilot")
             || self.claude_base_url_contains("githubcopilot.com")
@@ -1440,6 +1450,23 @@ mod tests {
             ..Default::default()
         });
         assert!(copilot.is_github_copilot());
+    }
+
+    #[test]
+    fn token_exchange_requires_local_routing_without_becoming_oauth_auth() {
+        let mut provider = Provider::with_id(
+            "te".to_string(),
+            "Token Exchange".to_string(),
+            json!({"teProvider": {}}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("token_exchange".to_string()),
+            ..Default::default()
+        });
+        assert!(provider.is_token_exchange());
+        assert!(provider.requires_local_routing());
+        assert!(!provider.uses_managed_account_auth());
     }
 
     #[test]

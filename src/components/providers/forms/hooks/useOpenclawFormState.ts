@@ -9,6 +9,8 @@ import { useProvidersQuery } from "@/lib/query/queries";
 import { OPENCLAW_DEFAULT_CONFIG } from "../helpers/opencodeFormUtils";
 import {
   buildOpenClawTeProviderConfig,
+  canonicalizeTeProviderSettings,
+  sanitizeTeProviderDraft,
   validateTeProviderSettings,
 } from "@/utils/teProvider";
 
@@ -117,13 +119,13 @@ export function useOpenclawFormState({
   const [openclawTeProvider, setOpenclawTeProvider] =
     useState<OpenClawTeProviderSettings | null>(() => {
       if (appId !== "openclaw") return null;
-      const stored = parseOpenclawField<OpenClawTeProviderSettings | null>(
+      const stored = parseOpenclawField<unknown>(
         initialData,
         "teProvider",
         null,
       );
-      // 只接受对象形态；历史/手写配置里的异常值不进入表单，避免半成品被继续编辑。
-      return stored && typeof stored === "object" ? stored : null;
+      // 只保留静态字段；历史/手写配置里的 runtime/secret/unknown 字段不进入表单。
+      return sanitizeTeProviderDraft(stored);
     });
 
   const updateOpenclawConfig = useCallback(
@@ -198,22 +200,25 @@ export function useOpenclawFormState({
   /**
    * 更新 TE Provider 静态设置。
    *
-   * 两件事必须同时成立：
-   * 1. `teProvider` 原样持久化，便于用户保存中间态而不丢输入；
-   * 2. 只有校验通过时才把 `sidecarUrl/models` 投影成 Agent 真正读取的 `baseUrl/apiKey/models`，
-   *    避免把非法端点或非法模型能力写进 OpenClaw 配置。校验失败时保持原投影不变。
+   * 草稿始终可编辑，但只有 canonical descriptor 才能写入 OpenClaw 配置；
+   * 这样保存中间态不会把 runtime/secret/unknown 字段或非法端点带入持久化层。
    */
   const handleOpenclawTeProviderChange = useCallback(
     (settings: OpenClawTeProviderSettings | null) => {
-      setOpenclawTeProvider(settings);
+      const draft = sanitizeTeProviderDraft(settings);
+      setOpenclawTeProvider(draft);
       updateOpenclawConfig((config) => {
-        if (!settings) {
+        if (!draft) {
           delete config.teProvider;
           return;
         }
-        config.teProvider = settings;
-        if (validateTeProviderSettings(settings).length > 0) return;
-        const projected = buildOpenClawTeProviderConfig(settings);
+        const canonical = canonicalizeTeProviderSettings(draft);
+        if (!canonical || validateTeProviderSettings(canonical).length > 0) {
+          delete config.teProvider;
+          return;
+        }
+        const projected = buildOpenClawTeProviderConfig(canonical);
+        config.teProvider = canonical;
         // 投影结果里 baseUrl/apiKey/models 由 builder 固定生成；这里显式判空，避免把 undefined
         // 写回配置覆盖掉用户既有值。
         if (projected.baseUrl) {
@@ -239,7 +244,14 @@ export function useOpenclawFormState({
     setOpenclawModels(config?.models || []);
     const ua = config?.headers ? "User-Agent" in config.headers : false;
     setOpenclawUserAgent(ua);
-    setOpenclawTeProvider(config?.teProvider ?? null);
+    const draft = sanitizeTeProviderDraft(config?.teProvider);
+    setOpenclawTeProvider(draft);
+    if (draft && canonicalizeTeProviderSettings(draft)) {
+      const projected = buildOpenClawTeProviderConfig(draft);
+      setOpenclawBaseUrl(projected.baseUrl ?? "");
+      setOpenclawApiKey(projected.apiKey ?? "");
+      setOpenclawModels(projected.models ?? []);
+    }
   }, []);
 
   return {

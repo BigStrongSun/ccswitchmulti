@@ -29,7 +29,9 @@ describe("validateTeProviderSettings", () => {
 
   it("rejects non-numeric loopback, credentials in URL and missing AIC", () => {
     expect(
-      validateTeProviderSettings(settings({ sidecarUrl: "http://localhost:9814" })),
+      validateTeProviderSettings(
+        settings({ sidecarUrl: "http://localhost:9814" }),
+      ),
     ).toContain("te_provider_sidecar_url_must_be_loopback");
     expect(
       validateTeProviderSettings(
@@ -37,11 +39,13 @@ describe("validateTeProviderSettings", () => {
       ),
     ).toContain("te_provider_sidecar_url_must_be_loopback");
     expect(
-      validateTeProviderSettings(settings({ sidecarUrl: "https://127.0.0.1:9814" })),
+      validateTeProviderSettings(
+        settings({ sidecarUrl: "https://127.0.0.1:9814" }),
+      ),
     ).toContain("te_provider_sidecar_url_must_be_loopback");
-    expect(validateTeProviderSettings(settings({ expectedPartnerAic: "  " }))).toContain(
-      "te_provider_expected_aic_required",
-    );
+    expect(
+      validateTeProviderSettings(settings({ expectedPartnerAic: "  " })),
+    ).toContain("te_provider_expected_aic_required");
   });
 
   it("rejects unsupported modality, reasoning effort and invalid sizes", () => {
@@ -80,6 +84,39 @@ describe("validateTeProviderSettings", () => {
       "te_provider_models_required",
     );
   });
+
+  it("returns stable validation errors for malformed runtime JSON instead of throwing", () => {
+    const malformed = {
+      sidecarUrl: 42,
+      expectedPartnerAic: {},
+      protocolVersion: "te-provider.v1",
+      bindingDelivery: "config-headers",
+      models: [{ id: [], name: null }],
+    } as never;
+    expect(() => validateTeProviderSettings(malformed)).not.toThrow();
+    expect(validateTeProviderSettings(malformed)).toEqual(
+      expect.arrayContaining([
+        "te_provider_sidecar_url_required",
+        "te_provider_expected_aic_required",
+        "te_provider_model_0_id_required",
+        "te_provider_model_0_name_required",
+      ]),
+    );
+  });
+
+  it("rejects runtime, secret, and unknown fields instead of trusting object spreads", () => {
+    const malicious = settings() as unknown as Record<string, unknown>;
+    malicious.proxyKey = "secret-proxy-key";
+    malicious.taskId = "runtime-task";
+    malicious.unknownRuntimeField = "should-not-persist";
+    expect(validateTeProviderSettings(malicious as never)).toEqual(
+      expect.arrayContaining([
+        "te_provider_secret_field_forbidden",
+        "te_provider_runtime_field_forbidden",
+        "te_provider_unknown_field_forbidden",
+      ]),
+    );
+  });
 });
 
 describe("buildOpenClawTeProviderConfig", () => {
@@ -102,9 +139,38 @@ describe("buildOpenClawTeProviderConfig", () => {
     expect(config.teProvider?.keepAliveIntervalSeconds).toBe(30);
   });
 
+  it("emits only the canonical static descriptor and never copies runtime fields", () => {
+    const malicious = {
+      ...settings(),
+      taskId: "runtime-task",
+      leaseId: "runtime-lease",
+      proxyKey: "secret-proxy-key",
+      agentCredential: "secret-agent-credential",
+      unknownRuntimeField: "unknown",
+    } as never;
+    expect(() => buildOpenClawTeProviderConfig(malicious)).toThrow(
+      /invalid TE provider settings/,
+    );
+    expect(
+      Object.keys(
+        buildOpenClawTeProviderConfig(settings()).teProvider ?? {},
+      ).sort(),
+    ).toEqual([
+      "bindingDelivery",
+      "expectedPartnerAic",
+      "keepAliveIntervalSeconds",
+      "models",
+      "protocolVersion",
+      "providerTimeoutSeconds",
+      "sidecarUrl",
+    ]);
+  });
+
   it("refuses to build a config from invalid settings", () => {
     expect(() =>
-      buildOpenClawTeProviderConfig(settings({ sidecarUrl: "http://example.com" })),
+      buildOpenClawTeProviderConfig(
+        settings({ sidecarUrl: "http://example.com" }),
+      ),
     ).toThrow(/invalid TE provider settings/);
   });
 });
@@ -144,7 +210,9 @@ describe("toOpenClawModel", () => {
 
 describe("binding fields", () => {
   it("separates user-filled static fields from runtime-only fields", () => {
-    const runtimeFields = TE_PROVIDER_BINDING_FIELDS.filter((field) => !field.persisted);
+    const runtimeFields = TE_PROVIDER_BINDING_FIELDS.filter(
+      (field) => !field.persisted,
+    );
     expect(runtimeFields.map((field) => field.field)).toEqual([
       "taskId",
       "leaseId",
@@ -152,12 +220,23 @@ describe("binding fields", () => {
       "sessionKey",
       "sessionId",
       "bindingId",
+      "proxyKey",
+      "agentCredential",
       "expiresAt",
     ]);
     // 运行时字段绝不能被标成用户填写或可持久化。
-    expect(runtimeFields.every((field) => field.filledBy !== "user")).toBe(true);
+    expect(runtimeFields.every((field) => field.filledBy !== "user")).toBe(
+      true,
+    );
     expect(
-      TE_PROVIDER_BINDING_FIELDS.filter((field) => field.persisted).map((f) => f.field),
-    ).toEqual(["sidecarUrl", "expectedPartnerAic", "models", "bindingDelivery"]);
+      TE_PROVIDER_BINDING_FIELDS.filter((field) => field.persisted).map(
+        (f) => f.field,
+      ),
+    ).toEqual([
+      "sidecarUrl",
+      "expectedPartnerAic",
+      "models",
+      "bindingDelivery",
+    ]);
   });
 });

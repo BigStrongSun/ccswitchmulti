@@ -105,6 +105,10 @@ import { PiProviderForm } from "./PiProviderForm";
 import { OmoFormFields } from "./OmoFormFields";
 import { parseOmoOtherFieldsObject } from "@/types/omo";
 import {
+  buildOpenClawTeProviderConfig,
+  canonicalizeTeProviderSettings,
+} from "@/utils/teProvider";
+import {
   ProviderAdvancedConfig,
   type PricingModelSourceOption,
 } from "./ProviderAdvancedConfig";
@@ -991,6 +995,10 @@ function ProviderFormFull({
     )?.preset;
     return preset && "providerType" in preset ? preset.providerType : undefined;
   }, [presetEntries, selectedPresetId]);
+  const isTokenExchangeProvider =
+    appId === "openclaw" &&
+    (presetProviderType === "token_exchange" ||
+      initialData?.meta?.providerType === "token_exchange");
 
   const maintainedCodexPreset = useMemo(() => {
     if (appId !== "codex") return undefined;
@@ -1668,7 +1676,21 @@ function ProviderFormFull({
 
     let settingsConfig: string;
 
-    if (appId === "codex") {
+    if (isTokenExchangeProvider) {
+      const canonical = canonicalizeTeProviderSettings(
+        openclawForm.openclawTeProvider,
+      );
+      if (!canonical) {
+        toast.error(
+          "TE Provider 配置不完整或包含不允许的运行时字段，未保存。\n请补齐端点、Partner AIC 和模型。",
+          {
+            duration: 5000,
+          },
+        );
+        return;
+      }
+      settingsConfig = JSON.stringify(buildOpenClawTeProviderConfig(canonical));
+    } else if (appId === "codex") {
       try {
         const authJson = JSON.parse(codexAuth);
         // Codex router 自身使用 Responses 接入本地代理，但仍需要保存 catalog/routing。
@@ -3032,7 +3054,8 @@ function ProviderFormFull({
               </div>
               {settingsConfigErrorField}
             </>
-          ) : appId === "openclaw" || appId === "hermes" ? (
+          ) : appId === "openclaw" && isTokenExchangeProvider ? null : appId ===
+              "openclaw" || appId === "hermes" ? (
             <>
               <div className="space-y-2">
                 <Label htmlFor="settingsConfig">

@@ -738,6 +738,21 @@ mod tests {
         }
     }
 
+    fn token_exchange_openclaw_provider(id: &str, settings_config: Value) -> Provider {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            format!("Provider {id}"),
+            settings_config,
+            None,
+        );
+        provider.category = Some("third_party".to_string());
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("token_exchange".to_string()),
+            ..ProviderMeta::default()
+        });
+        provider
+    }
+
     fn hermes_provider(id: &str) -> Provider {
         Provider {
             id: id.to_string(),
@@ -1919,6 +1934,98 @@ command = "example-mcp"
             err.to_string().contains("auth"),
             "expected auth error, got {err:?}"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn token_exchange_mutation_rejects_runtime_and_secret_fields_before_persistence() {
+        with_test_home(|state, _| {
+            let candidate = token_exchange_openclaw_provider(
+                "te-invalid-fields",
+                json!({
+                    "api": "openai-completions",
+                    "baseUrl": "http://127.0.0.1:9814/v1",
+                    "apiKey": "te-provider-placeholder-not-a-secret",
+                    "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}],
+                    "teProvider": {
+                        "sidecarUrl": "http://127.0.0.1:9814",
+                        "expectedPartnerAic": "1.2.156.3088.1.0001.00001.MNR0MH.TFWI94.00W7",
+                        "protocolVersion": "te-provider.v1",
+                        "bindingDelivery": "config-headers",
+                        "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}],
+                        "proxyKey": "secret-proxy-key",
+                        "taskId": "runtime-task"
+                    }
+                }),
+            );
+            let error = ProviderService::add(state, AppType::OpenClaw, candidate, false)
+                .expect_err("runtime and secret fields must fail closed");
+            assert!(error.to_string().contains("token_exchange"));
+            assert!(state
+                .db
+                .get_provider_by_id("te-invalid-fields", AppType::OpenClaw.as_str())
+                .expect("query rejected provider")
+                .is_none());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn token_exchange_mutation_persists_only_canonical_descriptor() {
+        with_test_home(|state, _| {
+            let candidate = token_exchange_openclaw_provider(
+                "te-canonical",
+                json!({
+                    "api": "openai-completions",
+                    "baseUrl": "http://127.0.0.1:9814/v1",
+                    "apiKey": "te-provider-placeholder-not-a-secret",
+                    "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}],
+                    "teProvider": {
+                        "sidecarUrl": "http://127.0.0.1:9814/",
+                        "expectedPartnerAic": "  partner-aic  ",
+                        "protocolVersion": "te-provider.v1",
+                        "bindingDelivery": "config-headers",
+                        "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}],
+                        "taskId": null
+                    }
+                }),
+            );
+            // 即使 runtime 字段值为 null，也必须拒绝，不能靠 serde 类型偶然过滤。
+            assert!(ProviderService::add(state, AppType::OpenClaw, candidate, false).is_err());
+
+            let valid = token_exchange_openclaw_provider(
+                "te-canonical-valid",
+                json!({
+                    "api": "openai-completions",
+                    "baseUrl": "http://127.0.0.1:9814/v1",
+                    "apiKey": "te-provider-placeholder-not-a-secret",
+                    "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}],
+                    "teProvider": {
+                        "sidecarUrl": "http://127.0.0.1:9814/",
+                        "expectedPartnerAic": "partner-aic",
+                        "protocolVersion": "te-provider.v1",
+                        "bindingDelivery": "config-headers",
+                        "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}]
+                    }
+                }),
+            );
+            ProviderService::add(state, AppType::OpenClaw, valid, false)
+                .expect("valid TE provider");
+            let stored = state
+                .db
+                .get_provider_by_id("te-canonical-valid", AppType::OpenClaw.as_str())
+                .expect("query stored")
+                .expect("stored provider");
+            assert_eq!(
+                stored.settings_config["teProvider"]["sidecarUrl"],
+                json!("http://127.0.0.1:9814")
+            );
+            assert_eq!(
+                stored.settings_config["teProvider"]["providerTimeoutSeconds"],
+                json!(300)
+            );
+            assert!(stored.settings_config["teProvider"].get("taskId").is_none());
+        });
     }
 
     #[test]
@@ -6285,6 +6392,444 @@ impl ProviderService {
         Ok(provider)
     }
 
+    /// Canonicalize TE OpenClaw settings at the persistence boundary.
+    ///
+    /// UI 校验只是体验层；这里重新做类型、字段和秘密边界校验，并从零构造
+    /// settings_config，防止直接 IPC 或旧版本 UI 通过对象展开写入运行时字段。
+    fn normalize_token_exchange_openclaw_settings(provider: &mut Provider) -> Result<(), AppError> {
+        const PLACEHOLDER: &str = "te-provider-placeholder-not-a-secret";
+        const STATIC_FIELDS: &[&str] = &[
+            "sidecarUrl",
+            "expectedPartnerAic",
+            "protocolVersion",
+            "bindingDelivery",
+            "providerProbeUrl",
+            "providerTimeoutSeconds",
+            "keepAliveIntervalSeconds",
+            "models",
+        ];
+        const MODEL_FIELDS: &[&str] = &[
+            "id",
+            "name",
+            "inputModalities",
+            "outputModalities",
+            "contextWindowTokens",
+            "maxOutputTokens",
+            "supportsTools",
+            "supportsReasoning",
+            "reasoningEfforts",
+            "cost",
+        ];
+        const COST_FIELDS: &[&str] = &["input", "output", "cacheRead", "cacheWrite"];
+        let settings = provider.settings_config.as_object().ok_or_else(|| {
+            AppError::InvalidInput("token_exchange_settings_must_be_object".to_string())
+        })?;
+        for key in settings.keys() {
+            if !matches!(
+                key.as_str(),
+                "api" | "baseUrl" | "apiKey" | "models" | "teProvider"
+            ) {
+                return Err(AppError::InvalidInput(
+                    "token_exchange_settings_field_not_allowed".to_string(),
+                ));
+            }
+        }
+        if let Some(value) = settings.get("api") {
+            if value.as_str() != Some("openai-completions") {
+                return Err(AppError::InvalidInput(
+                    "token_exchange_api_invalid".to_string(),
+                ));
+            }
+        }
+        if let Some(value) = settings.get("apiKey") {
+            if value.as_str() != Some(PLACEHOLDER) {
+                return Err(AppError::InvalidInput(
+                    "token_exchange_api_key_invalid".to_string(),
+                ));
+            }
+        }
+        let te = settings
+            .get("teProvider")
+            .and_then(Value::as_object)
+            .ok_or_else(|| AppError::InvalidInput("token_exchange_settings_missing".to_string()))?;
+        for key in te.keys() {
+            if !STATIC_FIELDS.contains(&key.as_str()) {
+                return Err(AppError::InvalidInput(
+                    "token_exchange_settings_field_not_allowed".to_string(),
+                ));
+            }
+        }
+        let string_field = |name: &str| -> Result<String, AppError> {
+            te.get(name)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| AppError::InvalidInput(format!("token_exchange_{name}_invalid")))
+        };
+        let sidecar_url = string_field("sidecarUrl")?;
+        let parsed_url = url::Url::parse(&sidecar_url).map_err(|_| {
+            AppError::InvalidInput("token_exchange_sidecar_url_invalid".to_string())
+        })?;
+        let host = parsed_url.host_str().unwrap_or("").trim_matches(['[', ']']);
+        if parsed_url.scheme() != "http"
+            || !matches!(host, "127.0.0.1" | "::1")
+            || !parsed_url.username().is_empty()
+            || parsed_url.password().is_some()
+            || parsed_url.query().is_some()
+            || parsed_url.fragment().is_some()
+        {
+            return Err(AppError::InvalidInput(
+                "token_exchange_sidecar_url_invalid".to_string(),
+            ));
+        }
+        let expected_aic = string_field("expectedPartnerAic")?;
+        if !expected_aic
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+        {
+            return Err(AppError::InvalidInput(
+                "token_exchange_expectedPartnerAic_invalid".to_string(),
+            ));
+        }
+        let protocol = te
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .filter(|value| *value == "te-provider.v1")
+            .ok_or_else(|| {
+                AppError::InvalidInput("token_exchange_protocol_version_invalid".to_string())
+            })?;
+        let binding = te
+            .get("bindingDelivery")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "config-headers" | "gateway-plugin"))
+            .ok_or_else(|| {
+                AppError::InvalidInput("token_exchange_binding_delivery_invalid".to_string())
+            })?;
+        let optional_url = |name: &str| -> Result<Option<String>, AppError> {
+            let Some(value) = te.get(name) else {
+                return Ok(None);
+            };
+            let value = value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+                .ok_or_else(|| AppError::InvalidInput(format!("token_exchange_{name}_invalid")))?;
+            let parsed = url::Url::parse(value)
+                .map_err(|_| AppError::InvalidInput(format!("token_exchange_{name}_invalid")))?;
+            let host = parsed.host_str().unwrap_or("").trim_matches(['[', ']']);
+            if parsed.scheme() != "http"
+                || !matches!(host, "127.0.0.1" | "::1")
+                || parsed.username() != ""
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                return Err(AppError::InvalidInput(format!(
+                    "token_exchange_{name}_invalid"
+                )));
+            }
+            Ok(Some(value.trim_end_matches('/').to_string()))
+        };
+        let provider_probe_url = optional_url("providerProbeUrl")?;
+        let timeout = match te.get("providerTimeoutSeconds") {
+            Some(value) => value.as_u64().ok_or_else(|| {
+                AppError::InvalidInput("token_exchange_providerTimeoutSeconds_invalid".to_string())
+            })?,
+            None => 300,
+        };
+        if !(30..=86_400).contains(&timeout) {
+            return Err(AppError::InvalidInput(
+                "token_exchange_providerTimeoutSeconds_invalid".to_string(),
+            ));
+        }
+        let keep_alive = match te.get("keepAliveIntervalSeconds") {
+            Some(value) => value.as_u64().ok_or_else(|| {
+                AppError::InvalidInput(
+                    "token_exchange_keepAliveIntervalSeconds_invalid".to_string(),
+                )
+            })?,
+            None => 30,
+        };
+        if !(5..=3_600).contains(&keep_alive) {
+            return Err(AppError::InvalidInput(
+                "token_exchange_keepAliveIntervalSeconds_invalid".to_string(),
+            ));
+        }
+        let models = te
+            .get("models")
+            .and_then(Value::as_array)
+            .ok_or_else(|| AppError::InvalidInput("token_exchange_models_required".to_string()))?;
+        if models.is_empty() {
+            return Err(AppError::InvalidInput(
+                "token_exchange_models_required".to_string(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut canonical_models = Vec::with_capacity(models.len());
+        let mut openclaw_models = Vec::with_capacity(models.len());
+        for model in models {
+            let model = model.as_object().ok_or_else(|| {
+                AppError::InvalidInput("token_exchange_model_invalid".to_string())
+            })?;
+            for key in model.keys() {
+                if !MODEL_FIELDS.contains(&key.as_str()) {
+                    return Err(AppError::InvalidInput(
+                        "token_exchange_model_field_not_allowed".to_string(),
+                    ));
+                }
+            }
+            let id = model
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+                .ok_or_else(|| {
+                    AppError::InvalidInput("token_exchange_model_id_invalid".to_string())
+                })?
+                .to_string();
+            if !seen.insert(id.clone()) {
+                return Err(AppError::InvalidInput(
+                    "token_exchange_model_id_duplicate".to_string(),
+                ));
+            }
+            let name = model
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+                .ok_or_else(|| {
+                    AppError::InvalidInput("token_exchange_model_name_invalid".to_string())
+                })?
+                .to_string();
+            let list = |name: &str, allowed: &[&str]| -> Result<Option<Vec<String>>, AppError> {
+                let Some(value) = model.get(name) else {
+                    return Ok(None);
+                };
+                let values = value.as_array().ok_or_else(|| {
+                    AppError::InvalidInput("token_exchange_model_capability_invalid".to_string())
+                })?;
+                let mut result = Vec::with_capacity(values.len());
+                for item in values {
+                    let item = item
+                        .as_str()
+                        .filter(|item| allowed.contains(item))
+                        .ok_or_else(|| {
+                            AppError::InvalidInput(
+                                "token_exchange_model_capability_invalid".to_string(),
+                            )
+                        })?;
+                    result.push(item.to_string());
+                }
+                Ok(Some(result))
+            };
+            let input = list(
+                "inputModalities",
+                &["text", "image", "audio", "video", "file"],
+            )?;
+            let output = list("outputModalities", &["text", "embedding", "audio", "image"])?;
+            let reasoning = list(
+                "reasoningEfforts",
+                &[
+                    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+                ],
+            )?;
+            let positive_u64 = |name: &str| -> Result<Option<u64>, AppError> {
+                let Some(value) = model.get(name) else {
+                    return Ok(None);
+                };
+                let number = value.as_u64().filter(|number| *number > 0).ok_or_else(|| {
+                    AppError::InvalidInput("token_exchange_model_size_invalid".to_string())
+                })?;
+                Ok(Some(number))
+            };
+            let context = positive_u64("contextWindowTokens")?;
+            let max_output = positive_u64("maxOutputTokens")?;
+            let bool_field = |name: &str| {
+                model
+                    .get(name)
+                    .map(|value| {
+                        value.as_bool().ok_or_else(|| {
+                            AppError::InvalidInput(
+                                "token_exchange_model_capability_invalid".to_string(),
+                            )
+                        })
+                    })
+                    .transpose()
+            };
+            let supports_tools = bool_field("supportsTools")?;
+            let supports_reasoning = bool_field("supportsReasoning")?;
+            let cost = if let Some(value) = model.get("cost") {
+                let object = value.as_object().ok_or_else(|| {
+                    AppError::InvalidInput("token_exchange_model_cost_invalid".to_string())
+                })?;
+                for key in object.keys() {
+                    if !COST_FIELDS.contains(&key.as_str()) {
+                        return Err(AppError::InvalidInput(
+                            "token_exchange_model_cost_field_not_allowed".to_string(),
+                        ));
+                    }
+                }
+                let price = |name: &str, required: bool| -> Result<Option<f64>, AppError> {
+                    let Some(value) = object.get(name) else {
+                        if required {
+                            return Err(AppError::InvalidInput(
+                                "token_exchange_model_cost_invalid".to_string(),
+                            ));
+                        }
+                        return Ok(None);
+                    };
+                    let number = value
+                        .as_f64()
+                        .filter(|number| number.is_finite() && *number >= 0.0)
+                        .ok_or_else(|| {
+                            AppError::InvalidInput("token_exchange_model_cost_invalid".to_string())
+                        })?;
+                    Ok(Some(number))
+                };
+                Some((
+                    price("input", true)?,
+                    price("output", true)?,
+                    price("cacheRead", false)?,
+                    price("cacheWrite", false)?,
+                ))
+            } else {
+                None
+            };
+            let mut canonical = serde_json::Map::new();
+            canonical.insert("id".to_string(), Value::String(id.clone()));
+            canonical.insert("name".to_string(), Value::String(name.clone()));
+            if let Some(value) = &input {
+                canonical.insert(
+                    "inputModalities".to_string(),
+                    serde_json::to_value(value).unwrap(),
+                );
+            }
+            if let Some(value) = &output {
+                canonical.insert(
+                    "outputModalities".to_string(),
+                    serde_json::to_value(value).unwrap(),
+                );
+            }
+            if let Some(value) = context {
+                canonical.insert("contextWindowTokens".to_string(), Value::from(value));
+            }
+            if let Some(value) = max_output {
+                canonical.insert("maxOutputTokens".to_string(), Value::from(value));
+            }
+            if let Some(value) = supports_tools {
+                canonical.insert("supportsTools".to_string(), Value::Bool(value));
+            }
+            if let Some(value) = supports_reasoning {
+                canonical.insert("supportsReasoning".to_string(), Value::Bool(value));
+            }
+            if let Some(value) = &reasoning {
+                canonical.insert(
+                    "reasoningEfforts".to_string(),
+                    serde_json::to_value(value).unwrap(),
+                );
+            }
+            if let Some((input_price, output_price, cache_read, cache_write)) = cost {
+                let mut object = serde_json::Map::new();
+                object.insert("input".to_string(), Value::from(input_price.unwrap()));
+                object.insert("output".to_string(), Value::from(output_price.unwrap()));
+                if let Some(value) = cache_read {
+                    object.insert("cacheRead".to_string(), Value::from(value));
+                }
+                if let Some(value) = cache_write {
+                    object.insert("cacheWrite".to_string(), Value::from(value));
+                }
+                canonical.insert("cost".to_string(), Value::Object(object));
+            }
+            canonical_models.push(Value::Object(canonical));
+            let mut openclaw = serde_json::Map::new();
+            openclaw.insert("id".to_string(), Value::String(id));
+            openclaw.insert("name".to_string(), Value::String(name));
+            if let Some(value) = input {
+                openclaw.insert("input".to_string(), serde_json::to_value(value).unwrap());
+            }
+            if let Some(value) = context {
+                openclaw.insert("contextWindow".to_string(), Value::from(value));
+            }
+            if let Some(value) = max_output {
+                openclaw.insert("maxTokens".to_string(), Value::from(value));
+            }
+            if let Some(value) = supports_reasoning {
+                openclaw.insert("reasoning".to_string(), Value::Bool(value));
+            }
+            if let Some((input_price, output_price, cache_read, cache_write)) = cost {
+                let mut object = serde_json::Map::new();
+                object.insert("input".to_string(), Value::from(input_price.unwrap()));
+                object.insert("output".to_string(), Value::from(output_price.unwrap()));
+                if let Some(value) = cache_read {
+                    object.insert("cacheRead".to_string(), Value::from(value));
+                }
+                if let Some(value) = cache_write {
+                    object.insert("cacheWrite".to_string(), Value::from(value));
+                }
+                openclaw.insert("cost".to_string(), Value::Object(object));
+            }
+            if let Some(value) = supports_tools {
+                let mut compat = serde_json::Map::new();
+                compat.insert("supportsTools".to_string(), Value::Bool(value));
+                openclaw.insert("compat".to_string(), Value::Object(compat));
+            }
+            openclaw_models.push(Value::Object(openclaw));
+        }
+        let canonical_base_url = format!("{}/v1", sidecar_url.trim_end_matches('/'));
+        if let Some(value) = settings.get("baseUrl") {
+            if value.as_str() != Some(canonical_base_url.as_str()) {
+                return Err(AppError::InvalidInput(
+                    "token_exchange_base_url_invalid".to_string(),
+                ));
+            }
+        }
+        if let Some(value) = settings.get("models") {
+            if value != &Value::Array(openclaw_models.clone()) {
+                return Err(AppError::InvalidInput(
+                    "token_exchange_models_projection_invalid".to_string(),
+                ));
+            }
+        }
+        let mut canonical_te = serde_json::Map::new();
+        canonical_te.insert(
+            "sidecarUrl".to_string(),
+            Value::String(sidecar_url.trim_end_matches('/').to_string()),
+        );
+        canonical_te.insert(
+            "expectedPartnerAic".to_string(),
+            Value::String(expected_aic),
+        );
+        canonical_te.insert(
+            "protocolVersion".to_string(),
+            Value::String(protocol.to_string()),
+        );
+        canonical_te.insert(
+            "bindingDelivery".to_string(),
+            Value::String(binding.to_string()),
+        );
+        if let Some(value) = provider_probe_url {
+            canonical_te.insert("providerProbeUrl".to_string(), Value::String(value));
+        }
+        canonical_te.insert("providerTimeoutSeconds".to_string(), Value::from(timeout));
+        canonical_te.insert(
+            "keepAliveIntervalSeconds".to_string(),
+            Value::from(keep_alive),
+        );
+        canonical_te.insert("models".to_string(), Value::Array(canonical_models));
+        let mut canonical_settings = serde_json::Map::new();
+        canonical_settings.insert(
+            "api".to_string(),
+            Value::String("openai-completions".to_string()),
+        );
+        canonical_settings.insert("baseUrl".to_string(), Value::String(canonical_base_url));
+        canonical_settings.insert("apiKey".to_string(), Value::String(PLACEHOLDER.to_string()));
+        canonical_settings.insert("models".to_string(), Value::Array(openclaw_models));
+        canonical_settings.insert("teProvider".to_string(), Value::Object(canonical_te));
+        provider.settings_config = Value::Object(canonical_settings);
+        Ok(())
+    }
+
     /// Batch Router references are validated by the batch planner after all source
     /// and leaf candidates exist. Never resolve these against the old database.
     pub(crate) fn prepare_codex_batch_router_for_mutation(
@@ -6306,6 +6851,9 @@ impl ProviderService {
     ) -> Result<Provider, AppError> {
         Self::ensure_codex_provider_is_user_operable(app_type, &provider)?;
         Self::normalize_provider_if_claude(app_type, &mut provider);
+        if *app_type == AppType::OpenClaw && provider.is_token_exchange() {
+            Self::normalize_token_exchange_openclaw_settings(&mut provider)?;
+        }
         if *app_type == AppType::Codex {
             crate::codex_multirouter::provider_set::migrate_legacy_codex_protocol_overrides_for_save(
                 &mut provider,
@@ -8506,6 +9054,10 @@ impl ProviderService {
                         "OpenClaw 配置必须是 JSON 对象",
                         "OpenClaw configuration must be a JSON object",
                     ));
+                }
+                if provider.is_token_exchange() {
+                    let mut candidate = provider.clone();
+                    Self::normalize_token_exchange_openclaw_settings(&mut candidate)?;
                 }
             }
             AppType::Hermes => {

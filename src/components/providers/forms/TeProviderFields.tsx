@@ -51,14 +51,21 @@ const REASONING_EFFORTS = [
 const ERROR_LABELS: Record<string, string> = {
   te_provider_settings_required: "缺少 TE Provider 设置对象",
   te_provider_sidecar_url_required: "必须填写本机注入端点",
-  te_provider_sidecar_url_must_be_loopback: "注入端点必须是数值回环 http://127.0.0.1 或 http://[::1]",
+  te_provider_sidecar_url_must_be_loopback:
+    "注入端点必须是数值回环 http://127.0.0.1 或 http://[::1]",
   te_provider_expected_aic_required: "必须填写本 host 服务的 Partner AIC",
+  te_provider_expected_aic_invalid: "Partner AIC 含有非法字符或过长",
   te_provider_protocol_version_invalid: "协议版本必须是 te-provider.v1",
-  te_provider_binding_delivery_invalid: "绑定投递方式必须是配置头或 Gateway 插件",
+  te_provider_binding_delivery_invalid:
+    "绑定投递方式必须是配置头或 Gateway 插件",
   te_provider_probe_url_must_be_loopback: "保活探针地址必须是数值回环",
   te_provider_timeout_invalid: "Provider 超时必须是不小于 30 的整数秒",
   te_provider_keep_alive_invalid: "保活间隔必须是不小于 5 的整数秒",
   te_provider_models_required: "至少需要一个模型条目",
+  te_provider_runtime_field_forbidden: "运行时绑定字段不能写入静态配置",
+  te_provider_secret_field_forbidden:
+    "Proxy Key 或 Agent Credential 不能写入静态配置",
+  te_provider_unknown_field_forbidden: "配置包含未允许的字段",
 };
 
 function errorLabel(code: string): string {
@@ -66,11 +73,15 @@ function errorLabel(code: string): string {
   if (code.includes("_id_required")) return "模型 ID 不能为空";
   if (code.includes("_id_duplicated")) return "模型 ID 不能重复";
   if (code.includes("_name_required")) return "模型显示名称不能为空";
-  if (code.includes("_input_invalid")) return "输入模态只能是 text/image/audio/video/file";
-  if (code.includes("_output_invalid")) return "输出模态只能是 text/embedding/audio/image";
+  if (code.includes("_input_invalid"))
+    return "输入模态只能是 text/image/audio/video/file";
+  if (code.includes("_output_invalid"))
+    return "输出模态只能是 text/embedding/audio/image";
   if (code.includes("_reasoning_invalid")) return "推理档位取值非法";
-  if (code.includes("_contextWindowTokens_invalid")) return "上下文长度必须是正整数";
-  if (code.includes("_maxOutputTokens_invalid")) return "最大输出长度必须是正整数";
+  if (code.includes("_contextWindowTokens_invalid"))
+    return "上下文长度必须是正整数";
+  if (code.includes("_maxOutputTokens_invalid"))
+    return "最大输出长度必须是正整数";
   return code;
 }
 
@@ -85,9 +96,8 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
   const runtimeFields = TE_PROVIDER_BINDING_FIELDS.filter(
     (field) => !field.persisted,
   );
-  const [runtimeStatus, setRuntimeStatus] = useState<TeProviderRuntimeStatus | null>(
-    null,
-  );
+  const [runtimeStatus, setRuntimeStatus] =
+    useState<TeProviderRuntimeStatus | null>(null);
   const [runtimeError, setRuntimeError] = useState("");
   const [runtimeBusy, setRuntimeBusy] = useState(false);
 
@@ -103,7 +113,9 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
       setRuntimeStatus(status);
     } catch (error) {
       setRuntimeStatus(null);
-      setRuntimeError(error instanceof Error ? error.message : "运行态读取失败");
+      setRuntimeError(
+        error instanceof Error ? error.message : "运行态读取失败",
+      );
     } finally {
       setRuntimeBusy(false);
     }
@@ -117,13 +129,97 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
   }
 
   function update(patch: Partial<OpenClawTeProviderSettings>) {
-    onChange({ ...value, ...patch });
+    // 显式重建静态字段，避免把未来新增的 runtime/secret 字段复制回草稿。
+    onChange({
+      sidecarUrl:
+        patch.sidecarUrl !== undefined ? patch.sidecarUrl : value.sidecarUrl,
+      expectedPartnerAic:
+        patch.expectedPartnerAic !== undefined
+          ? patch.expectedPartnerAic
+          : value.expectedPartnerAic,
+      protocolVersion:
+        patch.protocolVersion !== undefined
+          ? patch.protocolVersion
+          : value.protocolVersion,
+      bindingDelivery:
+        patch.bindingDelivery !== undefined
+          ? patch.bindingDelivery
+          : value.bindingDelivery,
+      providerProbeUrl: Object.prototype.hasOwnProperty.call(
+        patch,
+        "providerProbeUrl",
+      )
+        ? patch.providerProbeUrl
+        : value.providerProbeUrl,
+      providerTimeoutSeconds: Object.prototype.hasOwnProperty.call(
+        patch,
+        "providerTimeoutSeconds",
+      )
+        ? patch.providerTimeoutSeconds
+        : value.providerTimeoutSeconds,
+      keepAliveIntervalSeconds: Object.prototype.hasOwnProperty.call(
+        patch,
+        "keepAliveIntervalSeconds",
+      )
+        ? patch.keepAliveIntervalSeconds
+        : value.keepAliveIntervalSeconds,
+      models: patch.models !== undefined ? patch.models : value.models,
+    });
   }
 
   function updateModel(index: number, patch: Partial<OpenClawTeProviderModel>) {
-    const models = value.models.map((model, current) =>
-      current === index ? { ...model, ...patch } : model,
-    );
+    const models = value.models.map((model, current) => {
+      if (current !== index) return model;
+      return {
+        id: patch.id ?? model.id,
+        name: patch.name ?? model.name,
+        inputModalities: Object.prototype.hasOwnProperty.call(
+          patch,
+          "inputModalities",
+        )
+          ? patch.inputModalities
+          : model.inputModalities,
+        outputModalities: Object.prototype.hasOwnProperty.call(
+          patch,
+          "outputModalities",
+        )
+          ? patch.outputModalities
+          : model.outputModalities,
+        contextWindowTokens: Object.prototype.hasOwnProperty.call(
+          patch,
+          "contextWindowTokens",
+        )
+          ? patch.contextWindowTokens
+          : model.contextWindowTokens,
+        maxOutputTokens: Object.prototype.hasOwnProperty.call(
+          patch,
+          "maxOutputTokens",
+        )
+          ? patch.maxOutputTokens
+          : model.maxOutputTokens,
+        supportsTools: Object.prototype.hasOwnProperty.call(
+          patch,
+          "supportsTools",
+        )
+          ? patch.supportsTools
+          : model.supportsTools,
+        supportsReasoning: Object.prototype.hasOwnProperty.call(
+          patch,
+          "supportsReasoning",
+        )
+          ? patch.supportsReasoning
+          : model.supportsReasoning,
+        reasoningEfforts: Object.prototype.hasOwnProperty.call(
+          patch,
+          "reasoningEfforts",
+        )
+          ? patch.reasoningEfforts
+          : model.reasoningEfforts,
+        cost: Object.prototype.hasOwnProperty.call(patch, "cost")
+          ? patch.cost
+          : model.cost,
+      };
+    });
     update({ models });
   }
 
@@ -164,7 +260,9 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
             <Label htmlFor="te-sidecar-url">
-              {t("openclaw.teProvider.sidecarUrl", { defaultValue: "注入端点" })}
+              {t("openclaw.teProvider.sidecarUrl", {
+                defaultValue: "注入端点",
+              })}
             </Label>
             <Input
               id="te-sidecar-url"
@@ -202,7 +300,10 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
                 update({ bindingDelivery: next as OpenClawTeBindingDelivery })
               }
             >
-              <SelectTrigger id="te-binding-delivery" data-testid="te-binding-delivery">
+              <SelectTrigger
+                id="te-binding-delivery"
+                data-testid="te-binding-delivery"
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -319,7 +420,11 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
           >
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label>{t("openclaw.teProvider.modelId", { defaultValue: "模型 ID" })}</Label>
+                <Label>
+                  {t("openclaw.teProvider.modelId", {
+                    defaultValue: "模型 ID",
+                  })}
+                </Label>
                 <Input
                   data-testid="te-model-id"
                   value={model.id}
@@ -329,7 +434,11 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
                 />
               </div>
               <div className="space-y-2">
-                <Label>{t("openclaw.teProvider.modelName", { defaultValue: "显示名称" })}</Label>
+                <Label>
+                  {t("openclaw.teProvider.modelName", {
+                    defaultValue: "显示名称",
+                  })}
+                </Label>
                 <Input
                   data-testid="te-model-name"
                   value={model.name}
@@ -350,7 +459,9 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
                   value={model.contextWindowTokens ?? ""}
                   onChange={(event) =>
                     updateModel(index, {
-                      contextWindowTokens: numberOrUndefined(event.target.value),
+                      contextWindowTokens: numberOrUndefined(
+                        event.target.value,
+                      ),
                     })
                   }
                 />
@@ -375,7 +486,11 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
             </div>
 
             <div className="space-y-2">
-              <Label>{t("openclaw.teProvider.inputModalities", { defaultValue: "输入模态" })}</Label>
+              <Label>
+                {t("openclaw.teProvider.inputModalities", {
+                  defaultValue: "输入模态",
+                })}
+              </Label>
               <div className="flex flex-wrap gap-3">
                 {INPUT_MODALITIES.map((item) => (
                   <label key={item} className="flex items-center gap-2 text-xs">
@@ -399,7 +514,11 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
             </div>
 
             <div className="space-y-2">
-              <Label>{t("openclaw.teProvider.outputModalities", { defaultValue: "输出模态" })}</Label>
+              <Label>
+                {t("openclaw.teProvider.outputModalities", {
+                  defaultValue: "输出模态",
+                })}
+              </Label>
               <div className="flex flex-wrap gap-3">
                 {OUTPUT_MODALITIES.map((item) => (
                   <label key={item} className="flex items-center gap-2 text-xs">
@@ -423,7 +542,11 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
             </div>
 
             <div className="space-y-2">
-              <Label>{t("openclaw.teProvider.reasoningEfforts", { defaultValue: "推理档位" })}</Label>
+              <Label>
+                {t("openclaw.teProvider.reasoningEfforts", {
+                  defaultValue: "推理档位",
+                })}
+              </Label>
               <div className="flex flex-wrap gap-3">
                 {REASONING_EFFORTS.map((item) => (
                   <label key={item} className="flex items-center gap-2 text-xs">
@@ -455,7 +578,9 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
                     updateModel(index, { supportsTools: checked === true })
                   }
                 />
-                {t("openclaw.teProvider.supportsTools", { defaultValue: "支持工具调用" })}
+                {t("openclaw.teProvider.supportsTools", {
+                  defaultValue: "支持工具调用",
+                })}
               </label>
               <label className="flex items-center gap-2 text-xs">
                 <Checkbox
@@ -465,7 +590,9 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
                     updateModel(index, { supportsReasoning: checked === true })
                   }
                 />
-                {t("openclaw.teProvider.supportsReasoning", { defaultValue: "支持推理" })}
+                {t("openclaw.teProvider.supportsReasoning", {
+                  defaultValue: "支持推理",
+                })}
               </label>
             </div>
           </div>
@@ -510,7 +637,10 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
         </ul>
       </div>
 
-      <div className="rounded-lg border p-4 space-y-3" data-testid="te-runtime-status">
+      <div
+        className="rounded-lg border p-4 space-y-3"
+        data-testid="te-runtime-status"
+      >
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-sm font-medium">
@@ -533,13 +663,20 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
             onClick={() => void refreshRuntimeStatus()}
           >
             {runtimeBusy
-              ? t("openclaw.teProvider.runtimeChecking", { defaultValue: "检查中…" })
-              : t("openclaw.teProvider.runtimeRefresh", { defaultValue: "刷新运行态" })}
+              ? t("openclaw.teProvider.runtimeChecking", {
+                  defaultValue: "检查中…",
+                })
+              : t("openclaw.teProvider.runtimeRefresh", {
+                  defaultValue: "刷新运行态",
+                })}
           </button>
         </div>
 
         {runtimeError ? (
-          <p className="text-xs text-destructive" data-testid="te-runtime-error">
+          <p
+            className="text-xs text-destructive"
+            data-testid="te-runtime-error"
+          >
             {runtimeError}
           </p>
         ) : null}
@@ -560,7 +697,10 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
                 : ""}
             </li>
             <li data-testid="te-runtime-binding-note">
-              运行时绑定：{runtimeStatus.runtimeBindingExposed ? "可读" : "不通过 HTTP 暴露（按设计）"}
+              运行时绑定：
+              {runtimeStatus.runtimeBindingExposed
+                ? "可读"
+                : "不通过 HTTP 暴露（按设计）"}
             </li>
           </ul>
         ) : null}

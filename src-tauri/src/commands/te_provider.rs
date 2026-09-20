@@ -8,6 +8,7 @@
 //! - 错误信息只保留稳定分类，不回显响应正文或凭据。
 
 use crate::error::AppError;
+use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -46,7 +47,9 @@ pub struct TeProviderRuntimeStatus {
 pub fn normalize_loopback_sidecar_url(raw: &str) -> Result<String, AppError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(AppError::Message("TE Provider endpoint is empty".to_string()));
+        return Err(AppError::Message(
+            "TE Provider endpoint is empty".to_string(),
+        ));
     }
     let parsed = Url::parse(trimmed)
         .map_err(|_| AppError::Message("TE Provider endpoint is not a valid URL".to_string()))?;
@@ -80,10 +83,65 @@ fn http_client() -> Result<reqwest::Client, AppError> {
     // `no_proxy()`：loopback 探针绝不能被用户的全局出站代理改写目标。
     reqwest::Client::builder()
         .no_proxy()
+        // 探针只验证本机注入器；禁止 3xx 把请求带到外部或私网地址。
+        .redirect(Policy::none())
         .timeout(Duration::from_secs(PROBE_TIMEOUT_SECONDS))
         .connect_timeout(Duration::from_secs(PROBE_TIMEOUT_SECONDS))
         .build()
         .map_err(|_| AppError::Message("failed to build TE Provider probe client".to_string()))
+}
+
+const HEALTH_STATUSES: &[&str] = &[
+    "ok", "healthy", "ready", "running", "degraded", "offline", "unknown",
+];
+const HEALTH_REASONS: &[&str] = &[
+    "provider_probe_not_configured",
+    "provider_probe_unreachable",
+    "provider_probe_http_error",
+    "provider_probe_invalid_response",
+    "provider_offline",
+    "provider_online",
+    "unknown",
+];
+
+/// 健康响应来自本地 sidecar，仍按不可信输入处理，避免秘密/超长值进入 UI 和日志。
+fn sanitize_health_status(value: Option<&str>) -> String {
+    let value = value.unwrap_or_default();
+    if value.len() <= 32
+        && !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && HEALTH_STATUSES.contains(&value)
+    {
+        value.to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn sanitize_health_reason(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    if value.len() > 64
+        || value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+        || !HEALTH_REASONS.contains(&value)
+    {
+        return Some("provider_reason_unavailable".to_string());
+    }
+    Some(value.to_string())
+}
+
+fn sanitize_checked_at(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    if value.len() > 64 {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|_| value.to_string())
 }
 
 fn parse_provider_snapshot(body: &serde_json::Value) -> Option<TeProviderHealthSnapshot> {
@@ -93,14 +151,8 @@ fn parse_provider_snapshot(body: &serde_json::Value) -> Option<TeProviderHealthS
     }
     Some(TeProviderHealthSnapshot {
         online: provider.get("online").and_then(|value| value.as_bool()),
-        reason: provider
-            .get("reason")
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string()),
-        checked_at: provider
-            .get("checkedAt")
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string()),
+        reason: sanitize_health_reason(provider.get("reason").and_then(|value| value.as_str())),
+        checked_at: sanitize_checked_at(provider.get("checkedAt").and_then(|value| value.as_str())),
         http_status: provider
             .get("httpStatus")
             .and_then(|value| value.as_u64())
@@ -132,18 +184,22 @@ pub async fn te_provider_runtime_status(
     let healthz_url = format!("{base_url}{HEALTHZ_PATH}");
     match client.get(&healthz_url).send().await {
         Ok(response) => {
+            let http_status = response.status().as_u16();
+            status.sidecar_reachable = true;
             if !response.status().is_success() {
-                status.sidecar_error = Some(format!("unexpected_status_{}", response.status().as_u16()));
-            } else {
-                match response.json::<serde_json::Value>().await {
-                    Ok(body) => {
-                        status.sidecar_reachable = true;
-                        status.sidecar_status = body
-                            .get("status")
-                            .and_then(|value| value.as_str())
-                            .map(|value| value.to_string());
+                status.sidecar_error = Some(format!("health_degraded_{http_status}"));
+            }
+            match response.json::<serde_json::Value>().await {
+                Ok(body) => {
+                    status.sidecar_status = Some(sanitize_health_status(
+                        body.get("status").and_then(|value| value.as_str()),
+                    ));
+                }
+                Err(_) => {
+                    status.sidecar_status = Some("unknown".to_string());
+                    if status.sidecar_error.is_none() {
+                        status.sidecar_error = Some("invalid_response".to_string());
                     }
-                    Err(_) => status.sidecar_error = Some("invalid_response".to_string()),
                 }
             }
         }
@@ -153,13 +209,40 @@ pub async fn te_provider_runtime_status(
     if status.sidecar_reachable {
         let provider_url = format!("{base_url}{PROVIDER_HEALTH_PATH}");
         match client.get(&provider_url).send().await {
-            Ok(response) if response.status().is_success() => {
-                if let Ok(body) = response.json::<serde_json::Value>().await {
-                    status.provider = parse_provider_snapshot(&body);
+            Ok(response) => {
+                let http_status = response.status().as_u16();
+                if response.status().is_success() {
+                    status.provider = response
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()
+                        .and_then(|body| parse_provider_snapshot(&body))
+                        .or_else(|| {
+                            Some(TeProviderHealthSnapshot {
+                                online: None,
+                                reason: Some("provider_probe_invalid_response".to_string()),
+                                checked_at: None,
+                                http_status: Some(http_status),
+                            })
+                        });
+                } else {
+                    status.provider = Some(TeProviderHealthSnapshot {
+                        online: Some(false),
+                        reason: Some("provider_probe_http_error".to_string()),
+                        checked_at: None,
+                        http_status: Some(http_status),
+                    });
                 }
             }
-            // 上游探针不可用不影响「注入器存活」这一结论，也不伪装成在线。
-            Ok(_) | Err(_) => status.provider = None,
+            // 上游探针不可用不影响「注入器存活」这一结论，明确表示未知而非在线。
+            Err(_) => {
+                status.provider = Some(TeProviderHealthSnapshot {
+                    online: None,
+                    reason: Some("provider_probe_unreachable".to_string()),
+                    checked_at: None,
+                    http_status: None,
+                });
+            }
         }
     }
 
@@ -170,6 +253,9 @@ pub async fn te_provider_runtime_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn accepts_only_numeric_loopback_http_endpoints() {
@@ -215,5 +301,69 @@ mod tests {
             Some("provider_probe_not_configured")
         );
         assert!(parse_provider_snapshot(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn provider_snapshot_sanitizes_untrusted_status_reason_and_timestamp() {
+        let snapshot = parse_provider_snapshot(&serde_json::json!({
+            "provider": {
+                "online": false,
+                "reason": "secret-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "checkedAt": "not-a-timestamp"
+            }
+        }))
+        .expect("snapshot");
+        assert_eq!(
+            snapshot.reason.as_deref(),
+            Some("provider_reason_unavailable")
+        );
+        assert_eq!(snapshot.checked_at, None);
+        assert_eq!(sanitize_health_status(Some("arbitrary-secret")), "unknown");
+    }
+
+    #[tokio::test]
+    async fn probe_does_not_follow_redirects_and_treats_http_response_as_reachable() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("local address");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://192.0.2.1:9/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write redirect");
+        });
+
+        let result = te_provider_runtime_status(format!("http://{address}"))
+            .await
+            .expect("probe result");
+        assert!(result.sidecar_reachable);
+        assert_eq!(result.sidecar_error.as_deref(), Some("health_degraded_302"));
+        assert_eq!(result.sidecar_status.as_deref(), Some("unknown"));
+    }
+
+    #[tokio::test]
+    async fn probe_distinguishes_health_degraded_from_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("local address");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 21\r\nConnection: close\r\n\r\n{\"status\":\"degraded\"}",
+                )
+                .expect("write degraded health");
+        });
+
+        let result = te_provider_runtime_status(format!("http://{address}"))
+            .await
+            .expect("probe result");
+        assert!(result.sidecar_reachable);
+        assert_eq!(result.sidecar_status.as_deref(), Some("degraded"));
+        assert_eq!(result.sidecar_error.as_deref(), Some("health_degraded_503"));
     }
 }

@@ -89,7 +89,7 @@ describe("useOpenclawFormState TE Provider", () => {
     });
 
     const stored = readSettingsConfig();
-    expect(stored.teProvider.sidecarUrl).toBe("http://127.0.0.1:19001/");
+    expect(stored.teProvider.sidecarUrl).toBe("http://127.0.0.1:19001");
     expect(stored.baseUrl).toBe("http://127.0.0.1:19001/v1");
     expect(stored.apiKey).toBe(TE_PROVIDER_PLACEHOLDER_API_KEY);
     expect(stored.models[0]).toMatchObject({
@@ -116,8 +116,8 @@ describe("useOpenclawFormState TE Provider", () => {
     });
 
     const stored = readSettingsConfig();
-    // 中间态仍然保存，避免用户输入丢失；但 Agent 读取的端点不被非法值覆盖。
-    expect(stored.teProvider.sidecarUrl).toBe("https://example.com");
+    // UI 草稿仍可编辑，但提交配置必须 fail-closed，不能持久化非法端点。
+    expect(stored.teProvider).toBeUndefined();
     expect(stored.baseUrl).toBe("http://127.0.0.1:9814/v1");
     expect(stored.models).toEqual([
       { id: "approved-model-id", name: "approved-model-id" },

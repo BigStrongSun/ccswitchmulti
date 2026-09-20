@@ -226,6 +226,9 @@ pub fn is_official_provider(provider: &Provider) -> bool {
 }
 
 pub fn provider_mode(provider: &Provider) -> ClaudeDesktopMode {
+    if provider.is_token_exchange() {
+        return ClaudeDesktopMode::Proxy;
+    }
     provider
         .meta
         .as_ref()
@@ -371,7 +374,10 @@ pub fn validate_direct_provider(provider: &Provider) -> Result<(), AppError> {
 
         if matches!(
             meta.provider_type.as_deref(),
-            Some("github_copilot") | Some("codex_oauth") | Some("xai_oauth")
+            Some("github_copilot")
+                | Some("codex_oauth")
+                | Some("xai_oauth")
+                | Some("token_exchange")
         ) {
             return Err(AppError::localized(
                 "claude_desktop.provider.type_unsupported",
@@ -479,7 +485,7 @@ fn is_managed_oauth_proxy_provider(provider: &Provider) -> bool {
         .is_some_and(|provider_type| {
             matches!(
                 provider_type,
-                "github_copilot" | "codex_oauth" | "xai_oauth"
+                "github_copilot" | "codex_oauth" | "xai_oauth" | "token_exchange"
             )
         })
 }
@@ -1729,6 +1735,25 @@ mod tests {
                 json!([{ "name": "claude-sonnet-4-6", "labelOverride": "GPT-5.4" }])
             );
         }
+    }
+
+    #[test]
+    fn token_exchange_provider_defaults_to_local_proxy_routing() {
+        let mut provider = Provider::with_id(
+            "te-provider".to_string(),
+            "Token Exchange".to_string(),
+            json!({
+                "baseUrl": "http://127.0.0.1:9814/v1",
+                "apiKey": "te-provider-placeholder-not-a-secret"
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("token_exchange".to_string()),
+            ..Default::default()
+        });
+        assert!(matches!(provider_mode(&provider), ClaudeDesktopMode::Proxy));
+        assert!(is_managed_oauth_proxy_provider(&provider));
     }
 
     #[test]
