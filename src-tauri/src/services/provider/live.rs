@@ -2257,10 +2257,32 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
         if existing_ids.contains(&id) {
             match state.db.get_provider_by_id(&id, "openclaw") {
                 Ok(Some(existing)) => {
-                    if existing.settings_config != settings_config {
+                    let is_token_exchange =
+                        existing.is_token_exchange() || settings_config.get("teProvider").is_some();
+                    let needs_token_exchange_type =
+                        is_token_exchange && !existing.is_token_exchange();
+                    if existing.settings_config != settings_config || needs_token_exchange_type {
                         let mut provider = existing;
                         provider.settings_config = settings_config;
-                        if let Err(e) = state.db.save_provider("openclaw", &provider) {
+                        if is_token_exchange {
+                            // TE live 导入必须重走 update 的规范化管线，不能让恶意
+                            // runtime/secret/unknown 字段绕过 ProviderService 直接入库。
+                            let meta = provider
+                                .meta
+                                .get_or_insert_with(crate::provider::ProviderMeta::default);
+                            meta.provider_type = Some("token_exchange".to_string());
+                        }
+                        let result = if is_token_exchange {
+                            super::ProviderService::update(
+                                state,
+                                AppType::OpenClaw,
+                                Some(&id),
+                                provider,
+                            )
+                        } else {
+                            state.db.save_provider("openclaw", &provider).map(|_| true)
+                        };
+                        if let Err(e) = result {
                             log::warn!(
                                 "Failed to update OpenClaw provider '{id}' from live config: {e}"
                             );
@@ -2292,8 +2314,23 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
             ..Default::default()
         });
 
-        // Save to database
-        if let Err(e) = state.db.save_provider("openclaw", &provider) {
+        let is_token_exchange = provider.settings_config.get("teProvider").is_some();
+        if is_token_exchange {
+            // TE live 导入新增同样必须走 add 的 canonicalization；成功后补齐
+            // providerType，保证 UI/路由不会依赖 descriptor 是否完整来猜类型。
+            provider
+                .meta
+                .as_mut()
+                .expect("new OpenClaw provider metadata")
+                .provider_type = Some("token_exchange".to_string());
+        }
+
+        let result = if is_token_exchange {
+            super::ProviderService::add(state, AppType::OpenClaw, provider, true)
+        } else {
+            state.db.save_provider("openclaw", &provider).map(|_| true)
+        };
+        if let Err(e) = result {
             log::warn!("Failed to import OpenClaw provider '{id}': {e}");
             continue;
         }
@@ -2416,8 +2453,140 @@ mod tests {
     use super::*;
     use serde_json::json;
     use serial_test::serial;
-    use std::env;
+    use std::{env, fs, sync::Arc};
     use tempfile::TempDir;
+
+    fn write_openclaw_live_config(config: Value) {
+        let path = crate::openclaw_config::get_openclaw_config_path();
+        fs::create_dir_all(path.parent().expect("openclaw parent")).expect("create openclaw dir");
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&config).expect("serialize openclaw config"),
+        )
+        .expect("write openclaw config");
+    }
+
+    fn token_exchange_live_config(extra_te: Value) -> Value {
+        let mut te = json!({
+            "sidecarUrl": "http://127.0.0.1:9814",
+            "expectedPartnerAic": "partner-aic",
+            "protocolVersion": "te-provider.v1",
+            "bindingDelivery": "config-headers",
+            "providerTimeoutSeconds": 300,
+            "keepAliveIntervalSeconds": 30,
+            "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}]
+        });
+        if let (Some(target), Some(source)) = (te.as_object_mut(), extra_te.as_object()) {
+            target.extend(source.clone());
+        }
+        json!({
+            "models": {
+                "mode": "merge",
+                "providers": {
+                    "te-live": {
+                        "api": "openai-completions",
+                        "baseUrl": "http://127.0.0.1:9814/v1",
+                        "apiKey": "te-provider-placeholder-not-a-secret",
+                        "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}],
+                        "teProvider": te
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_live_import_rejects_malicious_token_exchange_descriptor() {
+        let _home = TempHome::new();
+        write_openclaw_live_config(token_exchange_live_config(json!({
+            "taskId": "runtime-task",
+            "proxyKey": "secret-proxy-key",
+            "unknownField": "must-not-persist"
+        })));
+        let state = AppState::new(Arc::new(crate::database::Database::memory().unwrap()));
+
+        let imported = import_openclaw_providers_from_live(&state).expect("import should finish");
+
+        assert_eq!(imported, 0);
+        assert!(state
+            .db
+            .get_provider_by_id("te-live", AppType::OpenClaw.as_str())
+            .expect("query provider")
+            .is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_live_import_canonicalizes_token_exchange_and_marks_type() {
+        let _home = TempHome::new();
+        write_openclaw_live_config(token_exchange_live_config(json!({
+            "providerProbeUrl": "https://attacker.example/provider-health"
+        })));
+        let state = AppState::new(Arc::new(crate::database::Database::memory().unwrap()));
+
+        let imported = import_openclaw_providers_from_live(&state).expect("import should finish");
+
+        assert_eq!(imported, 1);
+        let stored = state
+            .db
+            .get_provider_by_id("te-live", AppType::OpenClaw.as_str())
+            .expect("query provider")
+            .expect("stored provider");
+        assert_eq!(
+            stored
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref()),
+            Some("token_exchange")
+        );
+        assert_eq!(
+            stored.settings_config["teProvider"]["sidecarUrl"],
+            json!("http://127.0.0.1:9814")
+        );
+        assert!(stored.settings_config["teProvider"]
+            .get("providerProbeUrl")
+            .is_none());
+        assert!(stored.settings_config["teProvider"].get("taskId").is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_live_import_keeps_non_token_exchange_provider_behavior() {
+        let _home = TempHome::new();
+        write_openclaw_live_config(json!({
+            "models": {
+                "mode": "merge",
+                "providers": {
+                    "ordinary-live": {
+                        "api": "openai-completions",
+                        "baseUrl": "https://api.example.com/v1",
+                        "apiKey": "ordinary-test-key",
+                        "models": [{"id": "ordinary-model", "name": "Ordinary Model"}]
+                    }
+                }
+            }
+        }));
+        let state = AppState::new(Arc::new(crate::database::Database::memory().unwrap()));
+
+        let imported = import_openclaw_providers_from_live(&state).expect("import should finish");
+
+        assert_eq!(imported, 1);
+        let stored = state
+            .db
+            .get_provider_by_id("ordinary-live", AppType::OpenClaw.as_str())
+            .expect("query provider")
+            .expect("stored provider");
+        assert!(stored
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+            .is_none());
+        assert_eq!(
+            stored.settings_config["baseUrl"],
+            json!("https://api.example.com/v1")
+        );
+    }
 
     /// 为会触碰 `~/.codex` 的单测提供隔离主目录。
     ///

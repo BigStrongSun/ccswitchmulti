@@ -145,12 +145,6 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
         patch.bindingDelivery !== undefined
           ? patch.bindingDelivery
           : value.bindingDelivery,
-      providerProbeUrl: Object.prototype.hasOwnProperty.call(
-        patch,
-        "providerProbeUrl",
-      )
-        ? patch.providerProbeUrl
-        : value.providerProbeUrl,
       providerTimeoutSeconds: Object.prototype.hasOwnProperty.call(
         patch,
         "providerTimeoutSeconds",
@@ -319,26 +313,6 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
                 </SelectItem>
               </SelectContent>
             </Select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="te-probe-url">
-              {t("openclaw.teProvider.providerProbeUrl", {
-                defaultValue: "上游保活探针（可选）",
-              })}
-            </Label>
-            <Input
-              id="te-probe-url"
-              data-testid="te-provider-probe-url"
-              value={value.providerProbeUrl ?? ""}
-              onChange={(event) =>
-                update({
-                  providerProbeUrl: event.target.value.trim()
-                    ? event.target.value
-                    : undefined,
-                })
-              }
-              placeholder="http://127.0.0.1:5001/v1"
-            />
           </div>
           <div className="space-y-2">
             <Label htmlFor="te-provider-timeout">

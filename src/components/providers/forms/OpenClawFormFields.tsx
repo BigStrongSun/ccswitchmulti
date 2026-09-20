@@ -44,6 +44,7 @@ import { openclawApiProtocols } from "@/config/openclawProviderPresets";
 import { TeProviderFields } from "./TeProviderFields";
 import type { OpenClawTeProviderSettings } from "@/types";
 import type { ProviderCategory, OpenClawModel } from "@/types";
+import { TE_PROVIDER_PROTOCOL_VERSION } from "@/utils/teProvider";
 
 interface OpenClawFormFieldsProps {
   // Base URL
@@ -71,7 +72,8 @@ interface OpenClawFormFieldsProps {
   userAgent: boolean;
   onUserAgentChange: (checked: boolean) => void;
 
-  // Token Exchange Provider 专用设置（仅在 teProvider 存在时出现）
+  // Token Exchange Provider 专用设置。类型来自 ProviderMeta；descriptor 损坏时也必须保留安全壳。
+  isTokenExchangeProvider?: boolean;
   teProvider?: OpenClawTeProviderSettings | null;
   onTeProviderChange?: (settings: OpenClawTeProviderSettings) => void;
 }
@@ -92,6 +94,7 @@ export function OpenClawFormFields({
   onModelsChange,
   userAgent,
   onUserAgentChange,
+  isTokenExchangeProvider = false,
   teProvider,
   onTeProviderChange,
 }: OpenClawFormFieldsProps) {
@@ -116,7 +119,16 @@ export function OpenClawFormFields({
     return modelKeysRef.current;
   }, [models.length]);
   const modelKeys = getModelKeys();
-  const isTeProvider = teProvider !== null && teProvider !== undefined;
+  const isTeProvider =
+    isTokenExchangeProvider ||
+    (teProvider !== null && teProvider !== undefined);
+  const effectiveTeProvider: OpenClawTeProviderSettings = teProvider ?? {
+    sidecarUrl: "",
+    expectedPartnerAic: "",
+    protocolVersion: TE_PROVIDER_PROTOCOL_VERSION,
+    bindingDelivery: "config-headers",
+    models: [],
+  };
 
   // Toggle advanced section for a model
   const toggleModelAdvanced = (index: number) => {
@@ -693,9 +705,9 @@ export function OpenClawFormFields({
       )}
 
       {/* TE Provider 专属面板：TE 模式下不显示通用端点、API Key、模型编辑器。 */}
-      {isTeProvider && teProvider ? (
+      {isTeProvider ? (
         <TeProviderFields
-          value={teProvider}
+          value={effectiveTeProvider}
           onChange={(next) => onTeProviderChange?.(next)}
         />
       ) : null}

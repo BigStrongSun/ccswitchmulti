@@ -5,6 +5,9 @@ import {
   TE_PROVIDER_PLACEHOLDER_API_KEY,
   TE_PROVIDER_BINDING_FIELDS,
   buildOpenClawTeProviderConfig,
+  canonicalizeTeProviderSettings,
+  TE_PROVIDER_MAX_KEEP_ALIVE_SECONDS,
+  TE_PROVIDER_MAX_TIMEOUT_SECONDS,
   toOpenClawModel,
   validateTeProviderSettings,
 } from "@/utils/teProvider";
@@ -25,6 +28,29 @@ function settings(
 describe("validateTeProviderSettings", () => {
   it("accepts a minimal loopback descriptor", () => {
     expect(validateTeProviderSettings(settings())).toEqual([]);
+  });
+
+  it("rejects timeout and keep-alive values above the Rust persistence limits", () => {
+    expect(
+      validateTeProviderSettings(
+        settings({
+          providerTimeoutSeconds: TE_PROVIDER_MAX_TIMEOUT_SECONDS + 1,
+          keepAliveIntervalSeconds: TE_PROVIDER_MAX_KEEP_ALIVE_SECONDS + 1,
+        }),
+      ),
+    ).toEqual([
+      "te_provider_timeout_invalid",
+      "te_provider_keep_alive_invalid",
+    ]);
+  });
+
+  it("drops the retired provider probe URL during canonical migration", () => {
+    const migrated = canonicalizeTeProviderSettings({
+      ...settings(),
+      providerProbeUrl: "https://attacker.example/provider-health",
+    } as unknown);
+    expect(migrated).not.toBeNull();
+    expect(migrated).not.toHaveProperty("providerProbeUrl");
   });
 
   it("rejects non-numeric loopback, credentials in URL and missing AIC", () => {
@@ -235,6 +261,9 @@ describe("binding fields", () => {
     ).toEqual([
       "sidecarUrl",
       "expectedPartnerAic",
+      "protocolVersion",
+      "providerTimeoutSeconds",
+      "keepAliveIntervalSeconds",
       "models",
       "bindingDelivery",
     ]);

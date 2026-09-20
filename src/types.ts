@@ -1115,7 +1115,6 @@ export interface OpenClawTeProviderSettings {
   expectedPartnerAic: string; // 本 host 服务的 ACPs Partner AIC
   protocolVersion: "te-provider.v1";
   bindingDelivery: OpenClawTeBindingDelivery;
-  providerProbeUrl?: string; // 上游模型提供商只读保活探针（loopback）
   providerTimeoutSeconds?: number; // 默认 300；注入器自动 +30s，Agent 侧再 +90s
   keepAliveIntervalSeconds?: number; // 默认 30
   models: OpenClawTeProviderModel[];

@@ -2945,6 +2945,7 @@ function ProviderFormFull({
               onModelsChange={openclawForm.handleOpenclawModelsChange}
               userAgent={openclawForm.openclawUserAgent}
               onUserAgentChange={openclawForm.handleOpenclawUserAgentChange}
+              isTokenExchangeProvider={isTokenExchangeProvider}
               teProvider={openclawForm.openclawTeProvider}
               onTeProviderChange={openclawForm.handleOpenclawTeProviderChange}
             />

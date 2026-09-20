@@ -19,6 +19,8 @@ export const TE_PROVIDER_PLACEHOLDER_API_KEY =
 export const TE_PROVIDER_PROTOCOL_VERSION = "te-provider.v1" as const;
 export const TE_PROVIDER_DEFAULT_TIMEOUT_SECONDS = 300;
 export const TE_PROVIDER_DEFAULT_KEEP_ALIVE_SECONDS = 30;
+export const TE_PROVIDER_MAX_TIMEOUT_SECONDS = 86_400;
+export const TE_PROVIDER_MAX_KEEP_ALIVE_SECONDS = 3_600;
 
 const INPUT_MODALITIES = ["text", "image", "audio", "video", "file"];
 const OUTPUT_MODALITIES = ["text", "embedding", "audio", "image"];
@@ -38,11 +40,12 @@ const TE_STATIC_FIELDS = new Set([
   "expectedPartnerAic",
   "protocolVersion",
   "bindingDelivery",
-  "providerProbeUrl",
   "providerTimeoutSeconds",
   "keepAliveIntervalSeconds",
   "models",
 ]);
+// 旧版本曾保存过 providerProbeUrl；迁移时允许读取，但 canonicalize 会丢弃。
+const TE_LEGACY_FIELDS = new Set(["providerProbeUrl"]);
 const TE_RUNTIME_FIELDS = new Set([
   "taskId",
   "leaseId",
@@ -101,7 +104,7 @@ export function validateTeProviderSettings(settings: unknown): string[] {
       errors.push("te_provider_runtime_field_forbidden");
     else if (TE_SECRET_FIELDS.has(field))
       errors.push("te_provider_secret_field_forbidden");
-    else if (!TE_STATIC_FIELDS.has(field))
+    else if (!TE_STATIC_FIELDS.has(field) && !TE_LEGACY_FIELDS.has(field))
       errors.push("te_provider_unknown_field_forbidden");
   }
 
@@ -127,19 +130,13 @@ export function validateTeProviderSettings(settings: unknown): string[] {
     errors.push("te_provider_binding_delivery_invalid");
   }
 
-  if (
-    settings.providerProbeUrl !== undefined &&
-    typeof settings.providerProbeUrl !== "string"
-  ) {
-    errors.push("te_provider_probe_url_must_be_loopback");
-  }
-  const probe = stringValue(settings.providerProbeUrl)?.trim();
-  if (probe && !isLoopbackHttpUrl(probe))
-    errors.push("te_provider_probe_url_must_be_loopback");
   const timeout = settings.providerTimeoutSeconds;
   if (
     timeout !== undefined &&
-    (typeof timeout !== "number" || !Number.isInteger(timeout) || timeout < 30)
+    (typeof timeout !== "number" ||
+      !Number.isInteger(timeout) ||
+      timeout < 30 ||
+      timeout > TE_PROVIDER_MAX_TIMEOUT_SECONDS)
   )
     errors.push("te_provider_timeout_invalid");
   const keepAlive = settings.keepAliveIntervalSeconds;
@@ -147,7 +144,8 @@ export function validateTeProviderSettings(settings: unknown): string[] {
     keepAlive !== undefined &&
     (typeof keepAlive !== "number" ||
       !Number.isInteger(keepAlive) ||
-      keepAlive < 5)
+      keepAlive < 5 ||
+      keepAlive > TE_PROVIDER_MAX_KEEP_ALIVE_SECONDS)
   )
     errors.push("te_provider_keep_alive_invalid");
 
@@ -314,8 +312,6 @@ export function sanitizeTeProviderDraft(
         : "config-headers",
     models,
   };
-  const probe = stringValue(value.providerProbeUrl);
-  if (probe !== undefined) draft.providerProbeUrl = probe;
   const timeout = finiteNumber(value.providerTimeoutSeconds);
   if (timeout !== undefined) draft.providerTimeoutSeconds = timeout;
   const keepAlive = finiteNumber(value.keepAliveIntervalSeconds);
@@ -335,9 +331,6 @@ export function canonicalizeTeProviderSettings(
     expectedPartnerAic: draft.expectedPartnerAic.trim(),
     protocolVersion: TE_PROVIDER_PROTOCOL_VERSION,
     bindingDelivery: draft.bindingDelivery,
-    ...(draft.providerProbeUrl?.trim()
-      ? { providerProbeUrl: draft.providerProbeUrl.trim().replace(/\/+$/, "") }
-      : {}),
     providerTimeoutSeconds:
       draft.providerTimeoutSeconds ?? TE_PROVIDER_DEFAULT_TIMEOUT_SECONDS,
     keepAliveIntervalSeconds:
@@ -440,9 +433,6 @@ export function buildOpenClawTeProviderConfig(
       expectedPartnerAic: canonical.expectedPartnerAic,
       protocolVersion: canonical.protocolVersion,
       bindingDelivery: canonical.bindingDelivery,
-      ...(canonical.providerProbeUrl
-        ? { providerProbeUrl: canonical.providerProbeUrl }
-        : {}),
       providerTimeoutSeconds: canonical.providerTimeoutSeconds,
       keepAliveIntervalSeconds: canonical.keepAliveIntervalSeconds,
       models: canonical.models.map((model) => ({
@@ -511,6 +501,24 @@ export const TE_PROVIDER_BINDING_FIELDS: readonly TeProviderBindingField[] = [
     filledBy: "user",
     persisted: true,
     note: "本 host 的 Partner AIC",
+  },
+  {
+    field: "protocolVersion",
+    filledBy: "user",
+    persisted: true,
+    note: "固定的 TE Provider 协议版本",
+  },
+  {
+    field: "providerTimeoutSeconds",
+    filledBy: "user",
+    persisted: true,
+    note: "Task 超时上限（30–86400 秒）",
+  },
+  {
+    field: "keepAliveIntervalSeconds",
+    filledBy: "user",
+    persisted: true,
+    note: "注入器保活间隔（5–3600 秒）",
   },
   {
     field: "models",

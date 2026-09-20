@@ -6403,11 +6403,11 @@ impl ProviderService {
             "expectedPartnerAic",
             "protocolVersion",
             "bindingDelivery",
-            "providerProbeUrl",
             "providerTimeoutSeconds",
             "keepAliveIntervalSeconds",
             "models",
         ];
+        const LEGACY_FIELDS: &[&str] = &["providerProbeUrl"];
         const MODEL_FIELDS: &[&str] = &[
             "id",
             "name",
@@ -6453,7 +6453,7 @@ impl ProviderService {
             .and_then(Value::as_object)
             .ok_or_else(|| AppError::InvalidInput("token_exchange_settings_missing".to_string()))?;
         for key in te.keys() {
-            if !STATIC_FIELDS.contains(&key.as_str()) {
+            if !STATIC_FIELDS.contains(&key.as_str()) && !LEGACY_FIELDS.contains(&key.as_str()) {
                 return Err(AppError::InvalidInput(
                     "token_exchange_settings_field_not_allowed".to_string(),
                 ));
@@ -6506,32 +6506,6 @@ impl ProviderService {
             .ok_or_else(|| {
                 AppError::InvalidInput("token_exchange_binding_delivery_invalid".to_string())
             })?;
-        let optional_url = |name: &str| -> Result<Option<String>, AppError> {
-            let Some(value) = te.get(name) else {
-                return Ok(None);
-            };
-            let value = value
-                .as_str()
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && value.len() <= 256)
-                .ok_or_else(|| AppError::InvalidInput(format!("token_exchange_{name}_invalid")))?;
-            let parsed = url::Url::parse(value)
-                .map_err(|_| AppError::InvalidInput(format!("token_exchange_{name}_invalid")))?;
-            let host = parsed.host_str().unwrap_or("").trim_matches(['[', ']']);
-            if parsed.scheme() != "http"
-                || !matches!(host, "127.0.0.1" | "::1")
-                || parsed.username() != ""
-                || parsed.password().is_some()
-                || parsed.query().is_some()
-                || parsed.fragment().is_some()
-            {
-                return Err(AppError::InvalidInput(format!(
-                    "token_exchange_{name}_invalid"
-                )));
-            }
-            Ok(Some(value.trim_end_matches('/').to_string()))
-        };
-        let provider_probe_url = optional_url("providerProbeUrl")?;
         let timeout = match te.get("providerTimeoutSeconds") {
             Some(value) => value.as_u64().ok_or_else(|| {
                 AppError::InvalidInput("token_exchange_providerTimeoutSeconds_invalid".to_string())
@@ -6808,9 +6782,6 @@ impl ProviderService {
             "bindingDelivery".to_string(),
             Value::String(binding.to_string()),
         );
-        if let Some(value) = provider_probe_url {
-            canonical_te.insert("providerProbeUrl".to_string(), Value::String(value));
-        }
         canonical_te.insert("providerTimeoutSeconds".to_string(), Value::from(timeout));
         canonical_te.insert(
             "keepAliveIntervalSeconds".to_string(),
