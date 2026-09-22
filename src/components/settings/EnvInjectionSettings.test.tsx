@@ -166,8 +166,6 @@ describe("EnvInjectionSettings", () => {
 
     render(<EnvInjectionSettings value={value} onChange={vi.fn()} />);
 
-    expect(
-      await screen.findByText("尚未启用"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("尚未启用")).toBeInTheDocument();
   });
 });

@@ -57,7 +57,10 @@ describe("catalogHasRoleModel", () => {
       catalogHasRoleModel([{ model: "deepseek-flash" }], "deepseek-v4-flash"),
     ).toBe(true);
     expect(
-      catalogHasRoleModel([{ model: "deepseek-v4-flash" }], "deepseek-v4-flash"),
+      catalogHasRoleModel(
+        [{ model: "deepseek-v4-flash" }],
+        "deepseek-v4-flash",
+      ),
     ).toBe(true);
     expect(catalogHasRoleModel([], "deepseek-v4-flash")).toBe(false);
   });

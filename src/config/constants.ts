@@ -29,7 +29,9 @@ export function isOAuthProviderType(
 }
 
 // TE Provider 类型：凭据（Proxy Key）只在运行时由本机注入端点注入，静态配置里只有公开占位值。
-export const TE_PROVIDER_TYPES: readonly string[] = [PROVIDER_TYPES.TE_PROVIDER];
+export const TE_PROVIDER_TYPES: readonly string[] = [
+  PROVIDER_TYPES.TE_PROVIDER,
+];
 
 /** 判断某 providerType 是否为 Token Exchange Provider。 */
 export function isTeProviderType(

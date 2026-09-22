@@ -36,6 +36,7 @@ pub(crate) enum ProcessIdentityError {
 }
 
 impl ProcessIdentityError {
+    #[cfg(target_os = "windows")]
     pub(crate) fn from_win32(code: u32) -> Self {
         const ERROR_ACCESS_DENIED: u32 = 5;
         const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -96,6 +97,7 @@ pub(crate) struct TcpPortRow {
     pub pid: u32,
 }
 
+#[cfg(target_os = "windows")]
 fn tcp_state_label(state: u32) -> &'static str {
     match state {
         1 => "CLOSED",
@@ -438,9 +440,6 @@ pub(crate) fn harden_socket_handle_not_inheritable(raw_socket: usize) {
     unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
 }
 
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn harden_socket_handle_not_inheritable(_raw_socket: usize) {}
-
 pub(crate) fn current_executable_path() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
@@ -682,7 +681,7 @@ pub(crate) fn terminate_verified_process(_expected: &ProcessIdentity) -> Result<
 
 #[cfg(target_os = "macos")]
 pub(crate) fn process_identity_result(pid: u32) -> Result<ProcessIdentity, ProcessIdentityError> {
-    use libc::{proc_pidinfo, proc_pidpath, PROC_PIDTBSDINFO};
+    use libc::{errno, proc_pidinfo, proc_pidpath, EACCES, EPERM, PROC_PIDTBSDINFO};
 
     if pid == 0 {
         return Err(ProcessIdentityError::NotFound);
@@ -697,7 +696,14 @@ pub(crate) fn process_identity_result(pid: u32) -> Result<ProcessIdentity, Proce
         )
     };
     if path_len <= 0 {
-        return Err(ProcessIdentityError::NotFound);
+        // proc_pidpath 对受保护/其它账户的进程会以 EPERM/EACCES 失败：进程存在但身份不可读，
+        // 必须与“进程已不存在”区分（端口归属守卫对两者都 fail-closed，但对用户含义不同）。
+        let code = unsafe { errno() };
+        return Err(if code == EPERM || code == EACCES {
+            ProcessIdentityError::AccessDenied
+        } else {
+            ProcessIdentityError::NotFound
+        });
     }
     let executable_path = std::str::from_utf8(&path[..path_len as usize])
         .map_err(|_| ProcessIdentityError::Unavailable(0))?
@@ -858,6 +864,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn tcp_state_labels_cover_the_states_the_guard_reports() {
         assert_eq!(tcp_state_label(2), "LISTEN");
         assert_eq!(tcp_state_label(5), "ESTABLISHED");
@@ -866,6 +873,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn process_identity_error_details_distinguish_missing_from_foreign() {
         assert!(ProcessIdentityError::from_win32(5)
             .detail()

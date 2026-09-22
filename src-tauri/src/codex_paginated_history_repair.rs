@@ -61,8 +61,11 @@ pub struct BlockedRolloutReasonGroup {
     pub samples: Vec<String>,
 }
 
+#[cfg(any(target_os = "windows", test))]
 const BLOCKED_REASON_SAMPLE_LIMIT: usize = 5;
+#[cfg(any(target_os = "windows", test))]
 const IMMUTABLE_BLOCKED_PREFIX: &str = "codex_paginated_history_immutable: ";
+#[cfg(any(target_os = "windows", test))]
 const IMMUTABLE_BLOCKED_TRAILER: &str =
     "; provider migration cannot safely rewrite byte-addressed history";
 
@@ -70,6 +73,7 @@ const IMMUTABLE_BLOCKED_TRAILER: &str =
 ///
 /// 保护性跳过来自两组代码：迁移守卫的 `codex_paginated_history_immutable`
 /// 报文，以及分页谱系/投影游标检查抛出的 `code: key=value` 报文。
+#[cfg(any(target_os = "windows", test))]
 fn classify_blocked_reason(message: &str) -> (String, String, Option<String>) {
     let trimmed = message.trim();
     if let Some(rest) = trimmed.strip_prefix(IMMUTABLE_BLOCKED_PREFIX) {
@@ -118,6 +122,7 @@ fn classify_blocked_reason(message: &str) -> (String, String, Option<String>) {
     (code, String::new(), sample)
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn group_blocked_reasons(blocked: &[String]) -> Vec<BlockedRolloutReasonGroup> {
     let mut groups: Vec<BlockedRolloutReasonGroup> = Vec::new();
     for message in blocked {
@@ -1559,12 +1564,6 @@ fn repaired_projection_status_at(
         }
     }
     Ok(status)
-}
-
-pub(crate) fn repaired_projections_caught_up(
-    outcome: &PaginatedHistoryRepairOutcome,
-) -> Result<bool, String> {
-    Ok(repaired_projection_status(outcome)?.is_caught_up())
 }
 
 /// 游标是否停在一个合法的记录边界上（0 与文件末尾都算合法）。

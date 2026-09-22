@@ -29,8 +29,9 @@ pub struct CodexDiscoveryRoot {
 #[derive(Debug, Clone, Default)]
 pub struct CodexDiscoveryBatch {
     pub paths: Vec<PathBuf>,
+    /// Whether this batch came from a full repair walk (loggable by the
+    /// caller); the schedule itself is owned by `CodexDiscoveryState`.
     pub full_scan: bool,
-    pub next_full_scan_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +110,6 @@ impl CodexDiscoveryState {
         Ok(CodexDiscoveryBatch {
             paths: candidates.into_iter().collect(),
             full_scan,
-            next_full_scan_at: self.next_full_scan_at,
         })
     }
 

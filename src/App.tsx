@@ -744,7 +744,10 @@ function App() {
         );
       })
       .catch((error) => {
-        console.debug("[App] Failed to inspect Codex plugin registration", error);
+        console.debug(
+          "[App] Failed to inspect Codex plugin registration",
+          error,
+        );
       });
 
     return () => {

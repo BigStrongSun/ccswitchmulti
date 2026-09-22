@@ -1114,6 +1114,7 @@ struct CodexSubagentUsageBucket {
 const CODEX_SUBAGENT_USAGE_SESSION_CHUNK: usize = 500;
 
 /// 把 SQL 聚合行累计到会话和模型桶中。
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn add_codex_subagent_usage_sample(
     session_buckets: &mut HashMap<String, HashMap<String, CodexSubagentUsageBucket>>,
@@ -1176,6 +1177,7 @@ fn add_codex_subagent_model_bucket(
 }
 
 /// 判断一个用量桶是否已经包含真实 token。
+#[cfg(test)]
 fn codex_subagent_bucket_has_tokens(bucket: &CodexSubagentUsageBucket) -> bool {
     bucket.total_tokens > 0
         || bucket.input_tokens > 0
@@ -1697,6 +1699,15 @@ fn build_codex_subagent_usage_stats_from_history(
     })
 }
 
+/// 本地子 Agent 视图的会话元数据（`codex_usage_sessions` 行）。
+#[derive(Debug, Clone)]
+struct CodexSubagentSessionMeta {
+    parent_thread_id: Option<String>,
+    metadata_model: Option<String>,
+    first_activity_at: Option<i64>,
+    last_activity_at: Option<i64>,
+}
+
 /// Build the subagent view exclusively from CCSM's synchronized metadata and
 /// `codex_session` usage rows. This read path must never reopen Codex history
 /// SQLite or rollout JSONL: collection owns those filesystem reads.
@@ -1765,10 +1776,7 @@ fn build_codex_subagent_usage_stats_from_db(
     let mut sessions: HashMap<
         String,
         (
-            Option<String>,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
+            CodexSubagentSessionMeta,
             HashMap<String, CodexSubagentUsageBucket>,
         ),
     > = HashMap::new();
@@ -1792,19 +1800,21 @@ fn build_codex_subagent_usage_stats_from_db(
         })?;
         let entry = sessions.entry(session_id.clone()).or_insert_with(|| {
             (
-                parent_thread_id,
-                metadata_model,
-                first_activity_at,
-                last_activity_at,
+                CodexSubagentSessionMeta {
+                    parent_thread_id,
+                    metadata_model,
+                    first_activity_at,
+                    last_activity_at,
+                },
                 HashMap::new(),
             )
         });
         if request_count <= 0 {
             continue;
         }
-        let (_, metadata_model, _, _, buckets) = entry;
+        let (meta, buckets) = entry;
         let model = usage_model.unwrap_or_else(|| {
-            metadata_model
+            meta.metadata_model
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string())
         });
@@ -1835,11 +1845,13 @@ fn build_codex_subagent_usage_stats_from_db(
     let mut unknown_range_agents = 0_u64;
     let metadata_inventory_agents = sessions.len() as u64;
     let range_requested = start_date.is_some() || end_date.is_some();
-    for (
-        session_id,
-        (parent_thread_id, metadata_model, first_activity_at, last_activity_at, buckets),
-    ) in sessions
-    {
+    for (session_id, (meta, buckets)) in sessions {
+        let CodexSubagentSessionMeta {
+            parent_thread_id,
+            metadata_model,
+            first_activity_at,
+            last_activity_at,
+        } = meta;
         // Only fact rows filtered by `created_at` establish range membership.
         // `last_seen_at` is an ingestion clock, not an activity timestamp.
         let observed = !buckets.is_empty();

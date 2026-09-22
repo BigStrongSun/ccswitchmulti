@@ -61,11 +61,23 @@ fn take_codex_append_bytes_read() -> u64 {
 struct CodexCheckpoint {
     last_byte_offset: i64,
     file_size: i64,
-    file_modified: i64,
     head_window_len: Option<i64>,
     head_fingerprint: Option<i64>,
     tail_fingerprint: Option<i64>,
     state: CodexParserState,
+}
+
+/// Physical facts about the rollout file at the moment a byte checkpoint is
+/// committed. The in-memory `CodexCheckpoint` only carries what the authority
+/// decision reads (size + fingerprints); the persisted row still records mtime
+/// for diagnostics.
+#[derive(Debug, Clone, Copy)]
+struct CodexCheckpointFacts {
+    file_size: i64,
+    file_modified: i64,
+    head_window_len: i64,
+    head_fingerprint: i64,
+    tail_fingerprint: i64,
 }
 
 fn codex_fingerprint(bytes: &[u8]) -> i64 {
@@ -359,9 +371,26 @@ struct CodexParseSnapshot {
     tail_fingerprint: i64,
 }
 
+impl CodexParseSnapshot {
+    /// 提交字节 checkpoint 时应随 snapshot 一并持久化的物理事实。
+    fn checkpoint_facts(&self) -> CodexCheckpointFacts {
+        CodexCheckpointFacts {
+            file_size: self.file_size,
+            file_modified: self.file_modified,
+            head_window_len: self.head_window_len,
+            head_fingerprint: self.head_fingerprint,
+            tail_fingerprint: self.tail_fingerprint,
+        }
+    }
+}
+
 /// 只读的、已完成 parent replay 剥离的 rollout token 事件。
 ///
 /// 状态页必须复用此解析器，而不能把 `total_token_usage` 当成可直接相加的请求用量。
+///
+/// 生产读路径已改为 DB-only（`build_codex_subagent_usage_stats_from_db` 永不重开
+/// rollout JSONL）；此结构体属于遗留整文件解析链，仅测试面使用。
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct VerifiedCodexRolloutUsageEvent {
     pub model: String,
@@ -373,6 +402,9 @@ pub(crate) struct VerifiedCodexRolloutUsageEvent {
 
 /// 解析失败、父 replay 无法验证、或某个可计费用量缺少时间戳时返回 `None`。
 /// 这让读侧把它表示成未知，而不是把累计快照猜成真实用量。
+///
+/// 生产读路径已改为 DB-only；此整文件解析链仅作为测试面固定 parent-replay 语义。
+#[cfg(test)]
 pub(crate) fn read_verified_codex_rollout_usage(
     file_path: &Path,
     rollout_index: &RolloutIndex,
@@ -730,7 +762,7 @@ fn load_codex_checkpoint(
         .unwrap_or_default();
     let conn = lock_conn!(db.conn);
     let mut statement = conn.prepare(
-        "SELECT last_byte_offset, file_size, file_modified, head_window_len, head_fingerprint, tail_fingerprint, parser_state
+        "SELECT last_byte_offset, file_size, head_window_len, head_fingerprint, tail_fingerprint, parser_state
          FROM codex_usage_file_checkpoints
          WHERE file_path = ?1 OR ((file_path LIKE ?2 OR file_path LIKE ?3) AND ?4 <> '')
          ORDER BY CASE WHEN file_path = ?1 THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
@@ -743,14 +775,13 @@ fn load_codex_checkpoint(
             file_name
         ],
         |row| {
-            let state_text: String = row.get(6)?;
+            let state_text: String = row.get(5)?;
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
                 state_text,
             ))
         },
@@ -759,7 +790,6 @@ fn load_codex_checkpoint(
         Ok((
             last_byte_offset,
             file_size,
-            file_modified,
             head_window_len,
             head_fingerprint,
             tail_fingerprint,
@@ -771,7 +801,6 @@ fn load_codex_checkpoint(
                 .map(|state| CodexCheckpoint {
                     last_byte_offset,
                     file_size,
-                    file_modified,
                     head_window_len,
                     head_fingerprint,
                     tail_fingerprint,
@@ -790,11 +819,7 @@ fn save_codex_checkpoint_on_conn(
     file_path: &Path,
     state: &CodexParserState,
     byte_offset: i64,
-    file_size: i64,
-    file_modified: i64,
-    head_window_len: i64,
-    head_fingerprint: i64,
-    tail_fingerprint: i64,
+    facts: &CodexCheckpointFacts,
 ) -> Result<(), AppError> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -812,7 +837,18 @@ fn save_codex_checkpoint_on_conn(
            file_modified=excluded.file_modified, head_window_len=excluded.head_window_len, head_fingerprint=excluded.head_fingerprint,
            tail_fingerprint=excluded.tail_fingerprint, parser_state=excluded.parser_state,
            updated_at=excluded.updated_at",
-        rusqlite::params![file_path.to_string_lossy().to_string(), state.meta_thread_id.as_ref().or(state.root_thread_id.as_ref()), byte_offset, file_size, file_modified, head_window_len, head_fingerprint, tail_fingerprint, state_text, now],
+        rusqlite::params![
+            file_path.to_string_lossy().to_string(),
+            state.meta_thread_id.as_ref().or(state.root_thread_id.as_ref()),
+            byte_offset,
+            facts.file_size,
+            facts.file_modified,
+            facts.head_window_len,
+            facts.head_fingerprint,
+            facts.tail_fingerprint,
+            state_text,
+            now,
+        ],
     ).map_err(|e| AppError::Database(format!("保存 Codex checkpoint 失败: {e}")))?;
     Ok(())
 }
@@ -985,6 +1021,12 @@ fn discover_codex_session_files(codex_dir: &Path) -> Result<Vec<PathBuf>, AppErr
         .lock()
         .map_err(|error| AppError::Database(format!("Codex discovery mutex poisoned: {error}")))?;
     let batch = state.discover_at(now)?;
+    if batch.full_scan {
+        log::debug!(
+            "[CODEX-SYNC] discovery 全量扫描: {} 个候选文件",
+            batch.paths.len()
+        );
+    }
     Ok(batch.paths)
 }
 
@@ -1045,7 +1087,8 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     Ok(result)
 }
 
-/// 收集所有 Codex 会话 JSONL 文件
+/// 收集所有 Codex 会话 JSONL 文件（遗留读路径；生产采集走 `discover_codex_session_files`）
+#[cfg(test)]
 fn collect_codex_session_files(codex_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
@@ -1086,6 +1129,7 @@ pub(crate) fn build_rollout_index(files: &[PathBuf]) -> RolloutIndex {
 }
 
 /// 递归扫描目录下的 .jsonl 文件（限制最大深度）
+#[cfg(test)]
 fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max_depth: u32) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -1102,6 +1146,9 @@ fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max
     }
 }
 
+/// 整文件解析器（含 parent replay 剥离）；生产路径使用增量解析器
+/// `parse_codex_snapshot`/`parse_codex_incremental_line`，此函数仅测试面使用。
+#[cfg(test)]
 fn parse_codex_file(
     file_path: &Path,
     root_thread_id: Option<String>,
@@ -1790,7 +1837,6 @@ fn sync_codex_append(
     file_modified: i64,
     file_size: i64,
     head_fingerprint: i64,
-    _previous_tail_fingerprint: i64,
     pass: &mut CodexSyncPass,
 ) -> Result<CodexFileSyncResult, AppError> {
     let mut file = fs::File::open(file_path)
@@ -1836,6 +1882,13 @@ fn sync_codex_append(
     let mut committed_fingerprint_file = fs::File::open(file_path)
         .map_err(|e| AppError::Config(format!("打开 Codex append prefix 指纹失败: {e}")))?;
     let committed_tail_fingerprint = codex_tail_before(&mut committed_fingerprint_file, offset)?;
+    let checkpoint_facts = CodexCheckpointFacts {
+        file_size,
+        file_modified,
+        head_window_len,
+        head_fingerprint,
+        tail_fingerprint: committed_tail_fingerprint,
+    };
     let root_thread_id = state
         .root_thread_id
         .as_deref()
@@ -1873,17 +1926,7 @@ fn sync_codex_append(
         }
         if last {
             save_codex_session_metadata_on_conn(&tx, file_path, &state)?;
-            save_codex_checkpoint_on_conn(
-                &tx,
-                file_path,
-                &state,
-                offset,
-                file_size,
-                file_modified,
-                head_window_len,
-                head_fingerprint,
-                committed_tail_fingerprint,
-            )?;
+            save_codex_checkpoint_on_conn(&tx, file_path, &state, offset, &checkpoint_facts)?;
         }
         tx.commit()
             .map_err(|e| AppError::Database(format!("提交 Codex append 事务失败: {e}")))?;
@@ -1895,17 +1938,7 @@ fn sync_codex_append(
             AppError::Database(format!("开启 Codex append checkpoint 事务失败: {e}"))
         })?;
         save_codex_session_metadata_on_conn(&tx, file_path, &state)?;
-        save_codex_checkpoint_on_conn(
-            &tx,
-            file_path,
-            &state,
-            offset,
-            file_size,
-            file_modified,
-            head_window_len,
-            head_fingerprint,
-            committed_tail_fingerprint,
-        )?;
+        save_codex_checkpoint_on_conn(&tx, file_path, &state, offset, &checkpoint_facts)?;
         tx.commit().map_err(|e| {
             AppError::Database(format!("提交 Codex append checkpoint 事务失败: {e}"))
         })?;
@@ -1929,12 +1962,14 @@ fn sync_single_codex_file(
     let file_size = metadata.len();
 
     // A checkpoint is authoritative only when the physical prefix still
-    // matches. Same-size mtime changes are treated as rewrites (full rebuild),
-    // while a strictly growing file may use the append path after checking the
-    // old EOF tail and immutable head. A prefix modified *and* appended cannot
-    // be proven without a full hash; this collector therefore never claims
-    // absolute detection for that adversarial race and exposes no compensating
-    // full-hash scan in this change.
+    // matches. A same-size file whose head/tail fingerprints no longer match
+    // is a rewrite: the verified ledger is kept and the file is deferred to a
+    // controlled rebuild. A strictly growing file may use the append path
+    // after checking the old EOF tail and immutable head. mtime is
+    // deliberately not a criterion because rewrites can preserve it; a prefix
+    // modified *and* appended cannot be proven without a full hash, so this
+    // collector never claims absolute detection for that adversarial race and
+    // exposes no compensating full-hash scan here.
     let checkpoint = load_codex_checkpoint(db, file_path)?;
     let has_checkpoint = checkpoint.is_some();
     if let Some(checkpoint) = checkpoint {
@@ -1966,7 +2001,6 @@ fn sync_single_codex_file(
                 file_modified,
                 file_size as i64,
                 head_fingerprint,
-                old_tail,
                 pass,
             );
         }
@@ -2024,6 +2058,7 @@ fn sync_single_codex_file(
             "Codex rollout 在读取 snapshot 期间变化；下轮重试".to_string(),
         ));
     }
+    let checkpoint_facts = snapshot.checkpoint_facts();
     let parsed = snapshot.parsed;
     if !parsed.has_billable_tokens {
         let conn = lock_conn!(db.conn);
@@ -2037,11 +2072,7 @@ fn sync_single_codex_file(
             file_path,
             &snapshot.state,
             snapshot.complete_bytes,
-            snapshot.file_size,
-            snapshot.file_modified,
-            snapshot.head_window_len,
-            snapshot.head_fingerprint,
-            snapshot.tail_fingerprint,
+            &checkpoint_facts,
         )?;
         tx.commit().map_err(|e| {
             AppError::Database(format!("提交 Codex 空文件 checkpoint 事务失败: {e}"))
@@ -2202,11 +2233,7 @@ fn sync_single_codex_file(
                 file_path,
                 &snapshot.state,
                 snapshot.complete_bytes,
-                snapshot.file_size,
-                snapshot.file_modified,
-                snapshot.head_window_len,
-                snapshot.head_fingerprint,
-                snapshot.tail_fingerprint,
+                &checkpoint_facts,
             )?;
         }
         tx.commit()
@@ -2229,11 +2256,7 @@ fn sync_single_codex_file(
             file_path,
             &snapshot.state,
             snapshot.complete_bytes,
-            snapshot.file_size,
-            snapshot.file_modified,
-            snapshot.head_window_len,
-            snapshot.head_fingerprint,
-            snapshot.tail_fingerprint,
+            &checkpoint_facts,
         )?;
         tx.commit()
             .map_err(|e| AppError::Database(format!("提交 Codex 空事件事务失败: {e}")))?;

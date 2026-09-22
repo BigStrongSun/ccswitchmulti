@@ -28,8 +28,7 @@ fn visit_tool_values(
             // semantics because dropping unknown tool kinds would hide real
             // protocol errors.
             let mut remaining = Vec::with_capacity(items.len());
-            let mut index = 0usize;
-            for mut item in items.drain(..) {
+            for (index, mut item) in items.drain(..).enumerate() {
                 let is_function_tool = item.get("type").and_then(Value::as_str) == Some("function");
                 match visit_tool_values(&mut item, &format!("{path}[{index}]"), dialect) {
                     Ok(()) => remaining.push(item),
@@ -38,7 +37,6 @@ fn visit_tool_values(
                     }
                     Err(error) => return Err(error),
                 }
-                index += 1;
             }
             *items = remaining;
         }
