@@ -2661,6 +2661,51 @@ fn version_tuple_from_package_name(name: &str) -> Vec<u32> {
         .unwrap_or_default()
 }
 
+/// 探测已安装 Codex Desktop 的版本（MSIX 包版本，如 26.915.4065.0）。
+///
+/// 先扫 WindowsApps 包目录（纯 fs，快）；目录扫描拿不到版本时才回退
+/// `Get-AppxPackage`。探测不到版本时返回 `None`；调用方必须按"版本未知"
+/// 回落旧行为，不得当作旧版本处理。
+#[cfg(target_os = "windows")]
+pub(crate) fn installed_codex_desktop_version() -> Option<Vec<u32>> {
+    let mut candidates = Vec::new();
+    collect_windowsapps_codex_executable_candidates(&mut candidates);
+    if let Some(version) = candidates
+        .iter()
+        .filter(|(version, _)| !version.is_empty())
+        .map(|(version, _)| version.clone())
+        .max()
+    {
+        return Some(version);
+    }
+    let mut appx_candidates = Vec::new();
+    collect_appx_codex_executable_candidates(&mut appx_candidates);
+    appx_candidates
+        .iter()
+        .filter(|(version, _)| !version.is_empty())
+        .map(|(version, _)| version.clone())
+        .max()
+}
+
+/// 探测已安装 Codex Desktop 的版本（Info.plist `CFBundleShortVersionString`）。
+#[cfg(target_os = "macos")]
+pub(crate) fn installed_codex_desktop_version() -> Option<Vec<u32>> {
+    macos_codex_common_bundle_candidates()
+        .iter()
+        .find_map(|bundle| {
+            macos_bundle_info_value(bundle, "CFBundleShortVersionString").and_then(|version| {
+                let version = version_tuple_from_text(&version);
+                (!version.is_empty()).then_some(version)
+            })
+        })
+}
+
+/// 其他平台没有可靠的 Desktop 版本探测通道，返回 `None`（按版本未知处理）。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub(crate) fn installed_codex_desktop_version() -> Option<Vec<u32>> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
