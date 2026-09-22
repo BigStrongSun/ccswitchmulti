@@ -574,28 +574,27 @@ where
         candidate,
         client,
         transport,
-        ProbeCase::ForcedToolSse,
+        forced_case,
         nonce,
         None,
         probe_request_options(tool_schema_dialect, history_replay),
     )
     .await;
+    // MFJS is only known to be accepted by Moonshot / Kimi endpoints.
+    // Flip the dialect there, and only when the upstream explicitly
+    // rejects the OpenAI schema (tool-schema 400/422). Ambiguous
+    // rejections and rejections on other upstreams are recorded as stage
+    // failures without changing the dialect.
     let schema_rejection_evidence = match &forced {
         Err(ProbeCaptureError::ToolSchemaRejected {
             status_code: 400 | 422,
-        }) => Some(ToolSchemaEvidence::ExplicitRejection),
-        Err(ProbeCaptureError::HttpStatus {
-            status_code: 400 | 422,
-        }) => Some(ToolSchemaEvidence::AmbiguousRejection),
+        }) if candidate.endpoint_is_moonshot() => Some(ToolSchemaEvidence::ExplicitRejection),
         _ => None,
     };
-    if let Some(evidence_origin) = schema_rejection_evidence {
+    if schema_rejection_evidence == Some(ToolSchemaEvidence::ExplicitRejection) {
         tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
-        tool_schema_evidence = evidence_origin;
-        let trigger = match evidence_origin {
-            ToolSchemaEvidence::ExplicitRejection => AdaptationTrigger::ExplicitToolSchemaRejection,
-            _ => AdaptationTrigger::AmbiguousRequestRejection,
-        };
+        tool_schema_evidence = ToolSchemaEvidence::ExplicitRejection;
+        let trigger = AdaptationTrigger::ExplicitToolSchemaRejection;
         adaptations.push(ProtocolAdaptation {
             trigger,
             change: AdaptationChange::ToolSchemaMoonshotMfjs,
@@ -644,14 +643,20 @@ where
         )
         .await;
     }
-    let should_retry_with_moonshot = tool_schema_dialect == ToolSchemaDialect::OpenAi
+    // A completed probe without a valid tool call is retried once with
+    // `tool_choice: required` in the same dialect. The model skipping the
+    // forced tool is a behavior signal, not proof that the upstream
+    // rejects the schema, so no dialect switch or adaptation record is
+    // produced here.
+    let should_retry_with_required_after_invalid_call = tool_schema_dialect
+        == ToolSchemaDialect::OpenAi
         && forced.as_ref().is_ok_and(|exchange| {
             classify_probe_terminal(transport, exchange).is_complete
                 && extract_tool_call(transport, exchange)
                     .as_ref()
                     .is_none_or(|call| !valid_probe_tool_call(call, nonce))
         });
-    if should_retry_with_moonshot {
+    if should_retry_with_required_after_invalid_call {
         if let Ok(exchange) = &forced {
             update_shape(
                 &mut reasoning_shape,
@@ -659,22 +664,7 @@ where
             );
             evidence.push(exchange.evidence().clone());
         }
-        tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
-        tool_schema_evidence = ToolSchemaEvidence::NegotiatedToolCall;
-        let trigger = AdaptationTrigger::MissingValidToolCall;
-        adaptations.push(ProtocolAdaptation {
-            trigger,
-            change: AdaptationChange::ToolSchemaMoonshotMfjs,
-            outcome: AdaptationOutcome::Failed,
-        });
-        reporter(ProtocolProbeProgressEvent::CompatibilityRetry {
-            model: candidate.public_model.clone(),
-            transport,
-            stage: ProbeProgressStage::ForcedTool,
-            rule: CompatibilityRule::ToolSchema,
-            trigger,
-            change: AdaptationChange::ToolSchemaMoonshotMfjs,
-        });
+        forced_case = ProbeCase::ForcedToolRequiredSse;
         forced = send_case(
             candidate,
             client,

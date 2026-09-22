@@ -55,6 +55,7 @@ enum ResponsesMode {
     MoonshotToolSchemaOnly,
     GenericMoonshotToolSchemaOnly,
     GenericMoonshotToolSchemaIncompleteContinuation,
+    MoonshotToolSchemaIncompleteContinuation,
     ResponsesCustomToolUnsupported,
     SummaryReplayOnly,
     ReasoningTextReplayOnly,
@@ -214,6 +215,7 @@ async fn upstream(
             ResponsesMode::MoonshotToolSchemaOnly
                 | ResponsesMode::GenericMoonshotToolSchemaOnly
                 | ResponsesMode::GenericMoonshotToolSchemaIncompleteContinuation
+                | ResponsesMode::MoonshotToolSchemaIncompleteContinuation
         )
         && tool_parameter_schemas_contain_keyword(
             &body,
@@ -322,6 +324,7 @@ async fn upstream(
             state.responses_mode,
             ResponsesMode::IncompleteContinuation
                 | ResponsesMode::GenericMoonshotToolSchemaIncompleteContinuation
+                | ResponsesMode::MoonshotToolSchemaIncompleteContinuation
         )
     {
         return Json(json!({
@@ -786,8 +789,11 @@ async fn probes_all_four_stages_on_both_protocols_and_selects_responses_on_a_tie
 #[tokio::test]
 async fn retries_only_explicit_schema_rejections_with_moonshot_dialect_and_records_it() {
     let fixture = spawn_fixture(ResponsesMode::MoonshotToolSchemaOnly).await;
+    // 新契约：明确 schema 拒绝只在 Moonshot 端点才切扣语，
+    // 因此把 fixture 候选固定为 Moonshot 端点。
     let result = run_protocol_compatibility_probe(
-        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses)
+            .with_endpoint_moonshot_override(Some(true)),
         &reqwest::Client::new(),
     )
     .await;
@@ -820,22 +826,31 @@ async fn retries_only_explicit_schema_rejections_with_moonshot_dialect_and_recor
 }
 
 #[tokio::test]
-async fn generic_forced_tool_400_negotiates_the_moonshot_schema_dialect_once() {
+async fn generic_forced_tool_400_on_moonshot_endpoint_keeps_the_openai_dialect() {
+    // 新契约：通用 400（模糊拒绝，非 tool-schema 专属拒绝）即使
+    // 在 Moonshot 端点也不切 MFJS — 不换语、不记证据、不记 adaptation，
+    // 阶段按失败记录。
     let fixture = spawn_fixture(ResponsesMode::GenericMoonshotToolSchemaOnly).await;
     let result = run_protocol_compatibility_probe(
-        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses)
+            .with_endpoint_moonshot_override(Some(true)),
         &reqwest::Client::new(),
     )
     .await;
 
-    assert_eq!(result.readiness, ProbeReadiness::Verified);
+    assert_eq!(
+        result.readiness,
+        ProbeReadiness::Partial,
+        "probe result: {result:#?}"
+    );
     assert!(result.branches.iter().all(|branch| {
-        branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
-            && branch.tool_schema_evidence == super::ToolSchemaEvidence::AmbiguousRejection
-            && branch.assessment.forced_tool == ProbeStageStatus::Passed
-            && branch.assessment.continuation == ProbeStageStatus::Passed
+        branch.tool_schema_dialect == super::ToolSchemaDialect::OpenAi
+            && branch.tool_schema_evidence == super::ToolSchemaEvidence::Unspecified
+            && branch.assessment.forced_tool == ProbeStageStatus::Unsupported
+            && branch.assessment.continuation == ProbeStageStatus::Skipped
+            && branch.adaptations.is_empty()
     }));
-    assert_eq!(fixture.requests.lock().unwrap().len(), 12);
+    assert_eq!(fixture.requests.lock().unwrap().len(), 8);
 }
 
 #[tokio::test]
@@ -1132,19 +1147,26 @@ async fn reports_ordered_redacted_progress_for_every_deep_probe_stage() {
 
 #[tokio::test]
 async fn reports_actual_compatibility_retries_without_response_content() {
-    for (mode, expected) in [
-        (ResponsesMode::MoonshotToolSchemaOnly, vec!["tool_schema"]),
+    for (mode, moonshot, expected) in [
+        // tool_schema 重试只在 Moonshot 端点触发，该用例需固定。
+        (
+            ResponsesMode::MoonshotToolSchemaOnly,
+            Some(true),
+            vec!["tool_schema"],
+        ),
         (
             ResponsesMode::OmitReasoningReplayOnly,
+            None,
             vec!["reasoning_text_replay", "omit_reasoning"],
         ),
-        (ResponsesMode::Complete, vec![]),
+        (ResponsesMode::Complete, None, vec![]),
     ] {
         let fixture = spawn_fixture(mode).await;
         let events = Arc::new(Mutex::new(Vec::new()));
         let reported = events.clone();
         run_protocol_compatibility_probe_with_reporter(
-            candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+            candidate(&fixture.base_url, TransportKind::OpenAiResponses)
+                .with_endpoint_moonshot_override(moonshot),
             &reqwest::Client::new(),
             move |event| reported.lock().unwrap().push(event),
         )
@@ -1176,9 +1198,12 @@ async fn reports_actual_compatibility_retries_without_response_content() {
 
 #[tokio::test]
 async fn persists_only_backend_verified_adaptation_outcomes() {
-    let verified_fixture = spawn_fixture(ResponsesMode::GenericMoonshotToolSchemaOnly).await;
+    // 新契约：adaptation 记录只由明确 tool-schema 拒绝（且仅 Moonshot
+    // 端点）产甛；验证通过后 outcome 才为 Verified。
+    let verified_fixture = spawn_fixture(ResponsesMode::MoonshotToolSchemaOnly).await;
     let verified = run_protocol_compatibility_probe(
-        candidate(&verified_fixture.base_url, TransportKind::OpenAiResponses),
+        candidate(&verified_fixture.base_url, TransportKind::OpenAiResponses)
+            .with_endpoint_moonshot_override(Some(true)),
         &reqwest::Client::new(),
     )
     .await;
@@ -1188,15 +1213,16 @@ async fn persists_only_backend_verified_adaptation_outcomes() {
         .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
         .unwrap();
     assert!(verified_responses.adaptations.iter().any(|adaptation| {
-        adaptation.trigger == super::AdaptationTrigger::AmbiguousRequestRejection
+        adaptation.trigger == super::AdaptationTrigger::ExplicitToolSchemaRejection
             && adaptation.change == super::AdaptationChange::ToolSchemaMoonshotMfjs
             && adaptation.outcome == super::AdaptationOutcome::Verified
     }));
 
     let failed_fixture =
-        spawn_fixture(ResponsesMode::GenericMoonshotToolSchemaIncompleteContinuation).await;
+        spawn_fixture(ResponsesMode::MoonshotToolSchemaIncompleteContinuation).await;
     let failed = run_protocol_compatibility_probe(
-        candidate(&failed_fixture.base_url, TransportKind::OpenAiResponses),
+        candidate(&failed_fixture.base_url, TransportKind::OpenAiResponses)
+            .with_endpoint_moonshot_override(Some(true)),
         &reqwest::Client::new(),
     )
     .await;
@@ -1435,7 +1461,9 @@ async fn complete_auto_response_without_a_tool_retries_required_once_per_protoco
 }
 
 #[tokio::test]
-async fn accepted_complex_schema_without_a_tool_negotiates_moonshot_after_required() {
+async fn accepted_complex_schema_without_a_tool_retries_required_in_the_same_dialect() {
+    // 新契约：模型跳过 forced tool 是行为信号，不是上游拒绝 schema
+    // 的证据 — 同语言 tool_choice: required 重试，不切语、不记 adaptation。
     let fixture = spawn_fixture(ResponsesMode::AcceptedComplexSchemaIgnoresTools).await;
     let result = run_protocol_compatibility_probe(
         candidate(&fixture.base_url, TransportKind::OpenAiResponses),
@@ -1443,15 +1471,20 @@ async fn accepted_complex_schema_without_a_tool_negotiates_moonshot_after_requir
     )
     .await;
 
-    assert_eq!(result.readiness, ProbeReadiness::Verified, "{result:#?}");
+    assert_eq!(
+        result.readiness,
+        ProbeReadiness::Partial,
+        "probe result: {result:#?}"
+    );
     assert!(result.branches.iter().all(|branch| {
-        branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
-            && branch.tool_schema_evidence == super::ToolSchemaEvidence::NegotiatedToolCall
-            && branch.assessment.forced_tool == ProbeStageStatus::Passed
-            && branch.assessment.continuation == ProbeStageStatus::Passed
+        branch.tool_schema_dialect == super::ToolSchemaDialect::OpenAi
+            && branch.tool_schema_evidence == super::ToolSchemaEvidence::Unspecified
+            && branch.assessment.forced_tool == ProbeStageStatus::Unsupported
+            && branch.assessment.continuation == ProbeStageStatus::Skipped
+            && branch.adaptations.is_empty()
     }));
     let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests.len(), 14);
+    assert_eq!(requests.len(), 12);
     assert_eq!(
         requests
             .iter()
@@ -1462,7 +1495,9 @@ async fn accepted_complex_schema_without_a_tool_negotiates_moonshot_after_requir
 }
 
 #[tokio::test]
-async fn accepted_complex_schema_with_invalid_arguments_negotiates_without_accepting_it() {
+async fn accepted_complex_schema_with_invalid_arguments_retries_required_without_negotiating() {
+    // 新契约：工具调用参数无效同样不是 schema 拒绝证据 — 同语言
+    // tool_choice: required 重试一次，不谈判 MFJS，不记 adaptation。
     let fixture = spawn_fixture(ResponsesMode::AcceptedComplexSchemaReturnsEmptyArguments).await;
     let result = run_protocol_compatibility_probe(
         candidate(&fixture.base_url, TransportKind::OpenAiResponses),
@@ -1470,21 +1505,27 @@ async fn accepted_complex_schema_with_invalid_arguments_negotiates_without_accep
     )
     .await;
 
-    assert_eq!(result.readiness, ProbeReadiness::Verified, "{result:#?}");
+    assert_eq!(
+        result.readiness,
+        ProbeReadiness::Partial,
+        "probe result: {result:#?}"
+    );
     assert!(result.branches.iter().all(|branch| {
-        branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
-            && branch.tool_schema_evidence == super::ToolSchemaEvidence::NegotiatedToolCall
-            && branch.assessment.forced_tool == ProbeStageStatus::Passed
-            && branch.assessment.continuation == ProbeStageStatus::Passed
+        branch.tool_schema_dialect == super::ToolSchemaDialect::OpenAi
+            && branch.tool_schema_evidence == super::ToolSchemaEvidence::Unspecified
+            && branch.assessment.forced_tool == ProbeStageStatus::Unsupported
+            && branch.assessment.continuation == ProbeStageStatus::Skipped
+            && branch.adaptations.is_empty()
     }));
     let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests.len(), 12);
+    assert_eq!(requests.len(), 10);
     assert_eq!(
         requests
             .iter()
             .filter(|(_, body)| body.get("tool_choice").and_then(Value::as_str) == Some("required"))
             .count(),
-        0
+        2,
+        "each transport branch retries once with tool_choice=required"
     );
 }
 

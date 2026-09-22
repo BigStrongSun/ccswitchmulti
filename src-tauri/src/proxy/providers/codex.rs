@@ -24,8 +24,8 @@ use crate::{
     protocol_compatibility::{
         compile_provider_probe_candidate_for_model, compile_provider_probe_candidates,
         HistoryReplay, ProbeCandidate, ProbeReadiness, ProbeStageStatus, ProbeTargetKey,
-        ProtocolCompatibilityRecord, ReasoningProjection, ToolSchemaDialect, TransportKind,
-        PROBE_PROFILE_VERSION,
+        ProtocolCompatibilityRecord, ReasoningProjection, ToolSchemaDialect, ToolSchemaEvidence,
+        TransportKind, PROBE_PROFILE_VERSION,
     },
 };
 use regex::Regex;
@@ -1632,6 +1632,10 @@ pub(crate) fn resolve_codex_request_compatibility(
     db: &Database,
     now: i64,
 ) -> CodexRequestCompatibility {
+    let base_url = provider_codex_base_url(provider);
+    let endpoint_is_moonshot = base_url.as_deref().is_some_and(
+        super::transform_codex_chat_moonshot_schema::upstream_requires_ref_sibling_all_of,
+    );
     let mut compatibility = endpoint_request_compatibility(provider, transport);
 
     if !provider.uses_manual_codex_protocol()
@@ -1658,7 +1662,7 @@ pub(crate) fn resolve_codex_request_compatibility(
                     {
                         if branch.assessment.forced_tool == ProbeStageStatus::Passed
                             && branch.assessment.continuation == ProbeStageStatus::Passed
-                            && should_inherit_probe_tool_schema(branch)
+                            && should_inherit_probe_tool_schema(branch, endpoint_is_moonshot)
                         {
                             compatibility.tool_schema_dialect = branch.tool_schema_dialect;
                         }
@@ -1695,9 +1699,23 @@ pub(crate) fn resolve_codex_request_compatibility(
 
 fn should_inherit_probe_tool_schema(
     branch: &crate::protocol_compatibility::TransportBranchResult,
+    endpoint_is_moonshot: bool,
 ) -> bool {
-    branch.tool_schema_dialect == ToolSchemaDialect::OpenAi
-        || branch.tool_schema_evidence.allows_runtime_inheritance()
+    // MFJS is only inherited for Moonshot / Kimi endpoints with rejection
+    // evidence. Older probe profiles may carry a MoonshotMfjs dialect with
+    // weaker evidence (e.g. a missing valid tool call) for other
+    // upstreams; inheriting those re-introduces the #87/#101 fail-closed
+    // 422 regressions on non-Moonshot routes.
+    match branch.tool_schema_dialect {
+        ToolSchemaDialect::OpenAi => true,
+        ToolSchemaDialect::MoonshotMfjs => {
+            endpoint_is_moonshot
+                && matches!(
+                    branch.tool_schema_evidence,
+                    ToolSchemaEvidence::ExplicitRejection | ToolSchemaEvidence::AmbiguousRejection
+                )
+        }
+    }
 }
 
 fn compile_provider_probe_candidate_for_request(
@@ -9130,8 +9148,8 @@ wire_api = "responses"
         let db = Database::memory().expect("memory database");
         let mut provider = create_provider(json!({
             "auth": {"OPENAI_API_KEY": "probe-secret"},
-            "config": "model = \"k3\"\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n",
-            "base_url": "https://relay.example/v1"
+            "config": "model = \"k3\"\nbase_url = \"https://api.moonshot.cn/v1\"\nwire_api = \"responses\"\n",
+            "base_url": "https://api.moonshot.cn/v1"
         }));
         provider.id = "relay-provider".to_string();
         save_verified_responses_request_compatibility(
@@ -9141,7 +9159,7 @@ wire_api = "responses"
             "k3",
             "moonshot_mfjs",
             "responses_reasoning_text_content",
-            Some("negotiated_tool_call"),
+            Some("explicit_rejection"),
             "passed",
         );
 
@@ -9241,8 +9259,8 @@ wire_api = "responses"
         let mut provider = create_provider(json!({
             "auth": {"OPENAI_API_KEY": "probe-secret"},
             "model": "primary-upstream",
-            "config": "model = \"primary-upstream\"\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n",
-            "base_url": "https://relay.example/v1",
+            "config": "model = \"primary-upstream\"\nbase_url = \"https://api.moonshot.cn/v1\"\nwire_api = \"responses\"\n",
+            "base_url": "https://api.moonshot.cn/v1",
             "modelCatalog": {
                 "models": [
                     {
@@ -9264,7 +9282,7 @@ wire_api = "responses"
             "secondary-upstream",
             "moonshot_mfjs",
             "responses_reasoning_text_content",
-            Some("negotiated_tool_call"),
+            Some("explicit_rejection"),
             "passed",
         );
 

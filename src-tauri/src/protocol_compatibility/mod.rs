@@ -192,6 +192,10 @@ pub struct ProbeCandidate {
     is_full_url: bool,
     request_policy: Option<CodexThirdPartyRequestPolicy>,
     request_policy_fingerprint: String,
+    /// 测试专用：强制 Moonshot 端点判定，避免 fixture 的本地
+    /// 127.0.0.1 地址被误判为非 Moonshot 上游。
+    #[cfg(test)]
+    endpoint_moonshot_override: Option<bool>,
 }
 
 impl ProbeCandidate {
@@ -216,6 +220,8 @@ impl ProbeCandidate {
             is_full_url: false,
             request_policy: None,
             request_policy_fingerprint: String::new(),
+            #[cfg(test)]
+            endpoint_moonshot_override: None,
         })
     }
 
@@ -241,9 +247,32 @@ impl ProbeCandidate {
             is_full_url,
             request_policy: Some(request_policy),
             request_policy_fingerprint: String::new(),
+            #[cfg(test)]
+            endpoint_moonshot_override: None,
         };
         candidate.refresh_request_policy_fingerprint();
         Ok(candidate)
+    }
+
+    /// True when the resolved upstream host is a Moonshot / Kimi endpoint.
+    pub fn endpoint_is_moonshot(&self) -> bool {
+        use crate::proxy::providers::transform_codex_chat_moonshot_schema;
+
+        #[cfg(test)]
+        if let Some(override_value) = self.endpoint_moonshot_override {
+            return override_value;
+        }
+        transform_codex_chat_moonshot_schema::upstream_requires_ref_sibling_all_of(
+            self.endpoint.as_str(),
+        )
+    }
+
+    /// 测试专用：强制 Moonshot 端点判定（Some(true)/Some(false)）；
+    /// None（默认）按真实端点地址推导。
+    #[cfg(test)]
+    pub fn with_endpoint_moonshot_override(mut self, moonshot: Option<bool>) -> Self {
+        self.endpoint_moonshot_override = moonshot;
+        self
     }
 
     #[cfg(test)]
