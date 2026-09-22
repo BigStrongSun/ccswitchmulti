@@ -463,7 +463,7 @@ impl Observer {
                 .is_some()
         {
             use sha2::{Digest, Sha256};
-            events.push(self.evidence(if unexpected_body { "unexpected_response_body" } else { "upstream_http_error" }, json!({"body_excerpt":text.map(safe_excerpt),"captured_prefix_sha256":format!("{:x}",Sha256::digest(&self.body)),"captured_bytes":self.body.len(),"truncated":self.total>self.body.len(),"complete":transport_error.is_none(),"decode_available":text.is_some()})));
+            events.push(self.evidence(if unexpected_body { "unexpected_response_body" } else { "upstream_http_error" }, json!({"body_excerpt":text.map(safe_excerpt),"captured_prefix_sha256":hex::encode(Sha256::digest(&self.body)),"captured_bytes":self.body.len(),"truncated":self.total>self.body.len(),"complete":transport_error.is_none(),"decode_available":text.is_some()})));
         } else if self.sse && self.encoding.is_some() && transport_error.is_some() {
             events.push(self.evidence("encoded_sse_uninspected", json!({"body":null})));
         }

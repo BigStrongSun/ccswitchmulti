@@ -67,7 +67,7 @@ struct CodexMcpReconcileOutcome {
 fn codex_mcp_item_fingerprint(item: &toml_edit::Item) -> String {
     let mut hasher = Sha256::new();
     hasher.update(item.to_string().as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn codex_mcp_server_item(doc: &toml_edit::DocumentMut, id: &str) -> Option<toml_edit::Item> {

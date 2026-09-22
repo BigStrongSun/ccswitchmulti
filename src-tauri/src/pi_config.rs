@@ -349,7 +349,7 @@ fn ensure_content_version(path: &Path, expected: &str, actual: &str) -> Result<(
 }
 
 fn content_version(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
 #[cfg(test)]

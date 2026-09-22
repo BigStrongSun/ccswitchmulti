@@ -414,7 +414,7 @@ pub fn capability_fingerprint(capability: &CodexModelReasoningCapability) -> Str
             serde_json::to_value(ultra).expect("Ultra orchestration capability must serialize");
     }
     let digest = Sha256::digest(canonical.to_string().as_bytes());
-    format!("{digest:x}")
+    hex::encode(digest)
 }
 
 /// Repair persisted reasoning metadata that older CCSwitchMulti versions allowed to drift.

@@ -539,7 +539,7 @@ fn native_responses_sse_error_diagnostic(
         "upstream_error"
     };
     let digest = Sha256::digest(message.as_bytes());
-    let message_hash = format!("{digest:x}")[..16].to_string();
+    let message_hash = hex::encode(digest)[..16].to_string();
 
     Some(NativeResponsesSseErrorDiagnostic {
         event_name,

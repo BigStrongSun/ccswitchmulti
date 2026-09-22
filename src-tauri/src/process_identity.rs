@@ -462,11 +462,11 @@ pub(crate) fn executable_fingerprint(path: &str) -> String {
             hasher.update(b"windows-file:");
             hasher.update(volume.to_le_bytes());
             hasher.update(file_id);
-            return format!("{:x}", hasher.finalize())[..16].to_string();
+            return hex::encode(hasher.finalize())[..16].to_string();
         }
     }
     hasher.update(normalized_path(path).as_bytes());
-    format!("{:x}", hasher.finalize())[..16].to_string()
+    hex::encode(hasher.finalize())[..16].to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -499,7 +499,7 @@ pub(crate) fn config_scope_fingerprint() -> String {
     let normalized = std::fs::canonicalize(&path).unwrap_or(path);
     let mut hasher = Sha256::new();
     hasher.update(normalized_path(normalized.to_string_lossy().as_ref()).as_bytes());
-    format!("{:x}", hasher.finalize())[..16].to_string()
+    hex::encode(hasher.finalize())[..16].to_string()
 }
 
 fn normalized_path(path: &str) -> String {

@@ -680,7 +680,7 @@ impl<'a> MfjsCompiler<'a> {
                 }
             })
             .collect::<String>();
-        let digest = format!("{:x}", Sha256::digest(reference.as_bytes()));
+        let digest = hex::encode(Sha256::digest(reference.as_bytes()));
         let alias = format!(
             "{}_{}",
             if stem.is_empty() { "root" } else { &stem },

@@ -72,7 +72,7 @@ impl ProtocolCompatibilityRecord {
 
 pub(crate) fn storage_key_for_target(target: &ProbeTargetKey) -> String {
     let encoded = serde_json::to_vec(target).expect("probe target keys serialize");
-    format!("{:x}", Sha256::digest(encoded))
+    hex::encode(Sha256::digest(encoded))
 }
 
 #[cfg(test)]

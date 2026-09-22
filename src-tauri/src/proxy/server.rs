@@ -470,22 +470,22 @@ impl ProxyServer {
                     .post(handlers::handle_codex_realtime_http),
             )
             .route(
-                "/live/*call_id",
+                "/live/{*call_id}",
                 get(handlers::handle_codex_realtime_websocket)
                     .post(handlers::handle_codex_realtime_http),
             )
             .route(
-                "/v1/live/*call_id",
+                "/v1/live/{*call_id}",
                 get(handlers::handle_codex_realtime_websocket)
                     .post(handlers::handle_codex_realtime_http),
             )
             .route(
-                "/v1/v1/live/*call_id",
+                "/v1/v1/live/{*call_id}",
                 get(handlers::handle_codex_realtime_websocket)
                     .post(handlers::handle_codex_realtime_http),
             )
             .route(
-                "/codex/v1/live/*call_id",
+                "/codex/v1/live/{*call_id}",
                 get(handlers::handle_codex_realtime_websocket)
                     .post(handlers::handle_codex_realtime_http),
             )
@@ -531,10 +531,10 @@ impl ProxyServer {
             // `:streamGenerateContent` / `:countTokens` 之外，Gemini SDK / CLI 还会发
             // GET `/models`、GET `/models/<id>` 等只读端点。如果只挂 POST，这些 GET
             // 请求会在路由层 404，绕过本地代理的统计、整流和故障转移。
-            .route("/v1beta/*path", any(handlers::handle_gemini))
-            .route("/gemini/v1beta/*path", any(handlers::handle_gemini))
+            .route("/v1beta/{*path}", any(handlers::handle_gemini))
+            .route("/gemini/v1beta/{*path}", any(handlers::handle_gemini))
             // Gemini 的 GA 版本也叫 /v1，给原 SDK 留一条出口
-            .route("/gemini/v1/*path", any(handlers::handle_gemini))
+            .route("/gemini/v1/{*path}", any(handlers::handle_gemini))
             // 提高默认请求体大小限制（避免 413 Payload Too Large）
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
             .fallback(handlers::handle_unregistered_proxy_endpoint)

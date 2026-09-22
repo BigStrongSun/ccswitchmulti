@@ -1680,7 +1680,7 @@ fn preview_digest<T: Serialize>(
                 format!("Provider Set plan cannot be serialized: {serialize_error}"),
             )
         })?;
-    Ok(format!("{:x}", Sha256::digest(encoded)))
+    Ok(hex::encode(Sha256::digest(encoded)))
 }
 
 fn transport_value(transport: TransportKind) -> &'static str {

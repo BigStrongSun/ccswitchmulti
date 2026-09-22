@@ -15,6 +15,7 @@ const universalProtocolMocks = vi.hoisted(() => ({
   preflightCodex: vi.fn(),
   prepareCodex: vi.fn(),
   commitCodex: vi.fn(),
+  restoreCodex: vi.fn(),
   preflight: vi.fn(),
   prepare: vi.fn(),
   commit: vi.fn(),
@@ -55,6 +56,7 @@ vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => {
       universalProtocolMocks.preflightCodex,
     prepareCodexProviderSet: universalProtocolMocks.prepareCodex,
     commitCodexProviderSet: universalProtocolMocks.commitCodex,
+    restoreCodexProviderProtocolEvidence: universalProtocolMocks.restoreCodex,
     preflightUniversalCodexProtocolCompatibility:
       universalProtocolMocks.preflight,
     prepareUniversalProviderSet: universalProtocolMocks.prepare,
@@ -148,6 +150,7 @@ describe("AddProviderDialog", () => {
       },
     };
     universalApiMocks.saveAndSync.mockResolvedValue(true);
+    universalProtocolMocks.restoreCodex.mockResolvedValue(null);
     universalProtocolMocks.preflightCodex.mockResolvedValue({
       provider: {
         id: "codex-draft",

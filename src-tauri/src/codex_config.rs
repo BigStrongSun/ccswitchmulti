@@ -5270,7 +5270,7 @@ fn reasoning_revision(provider: &Provider) -> String {
     });
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_vec(&input).unwrap_or_default());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn codex_catalog_spec_for_model(settings: &Value, model: &str) -> Option<CodexCatalogModelSpec> {

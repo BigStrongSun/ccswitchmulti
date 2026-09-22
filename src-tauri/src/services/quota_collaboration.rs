@@ -62,8 +62,7 @@ pub fn codex_account_scope() -> Option<String> {
         crate::config::read_json_file(&crate::get_codex_auth_path()).ok()?;
     let account_id = auth.pointer("/tokens/account_id")?.as_str()?.trim();
     (!account_id.is_empty()).then(|| {
-        format!(
-            "{:x}",
+        hex::encode(
             Sha256::digest(format!("ccswitchmulti-quota-v1:{account_id}").as_bytes())
         )
     })

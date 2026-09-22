@@ -2332,7 +2332,7 @@ fn universal_provider_set_digest(
         current_codex,
     ))
     .map_err(|error| format!("codex_provider_set_digest_failed: {error}"))?;
-    Ok(format!("{:x}", Sha256::digest(encoded)))
+    Ok(hex::encode(Sha256::digest(encoded)))
 }
 
 async fn sync_universal_provider_internal_with_probe<F, Fut>(

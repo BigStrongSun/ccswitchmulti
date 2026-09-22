@@ -74,7 +74,7 @@ impl CodexModelCatalogProjection {
     /// 返回本次 renderer 注入实际使用的目录指纹。
     pub(crate) fn fingerprint(&self) -> String {
         let payload = serde_json::to_vec(self).unwrap_or_default();
-        format!("{:x}", Sha256::digest(payload))
+        hex::encode(Sha256::digest(payload))
     }
 }
 
@@ -780,7 +780,7 @@ where
     ) -> Result<Value, String> {
         self.socket
             .send(Message::Text(
-                json!({ "id": id, "method": method, "params": params }).to_string(),
+                json!({ "id": id, "method": method, "params": params }).to_string().into(),
             ))
             .await
             .map_err(|error| format!("failed to send CDP command {method}: {error}"))?;

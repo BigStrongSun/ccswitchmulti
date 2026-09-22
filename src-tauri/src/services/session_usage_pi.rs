@@ -699,7 +699,7 @@ fn pi_request_identity(
     }
     hash_field(&mut hasher, b"usage");
     hash_json(&mut hasher, usage);
-    let semantic_id = format!("pi_session_semantic:{:x}", hasher.finalize());
+    let semantic_id = format!("pi_session_semantic:{}", hex::encode(hasher.finalize()));
     let entry_id = nonempty_string(entry.get("id"));
     let request_id = if let Some(entry_id) = entry_id {
         let mut request_hasher = Sha256::new();
@@ -709,7 +709,7 @@ fn pi_request_identity(
         if let Some(timestamp) = entry.get("timestamp") {
             hash_json(&mut request_hasher, timestamp);
         }
-        format!("pi_session:{:x}", request_hasher.finalize())
+        format!("pi_session:{}", hex::encode(request_hasher.finalize()))
     } else {
         semantic_id.clone()
     };

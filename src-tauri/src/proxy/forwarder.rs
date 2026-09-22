@@ -13548,7 +13548,7 @@ mod tests {
                 .await
                 .expect("accept realtime websocket");
             ws.send(tokio_tungstenite::tungstenite::Message::Text(
-                "hello".to_string(),
+                "hello".into(),
             ))
             .await
             .expect("send realtime ws message");

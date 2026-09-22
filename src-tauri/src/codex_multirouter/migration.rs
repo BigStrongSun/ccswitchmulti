@@ -95,7 +95,7 @@ fn provider_revision(provider: &Provider) -> Result<String, AppError> {
     })?;
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 pub fn preview_codex_multirouter_migration(

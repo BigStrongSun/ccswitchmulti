@@ -422,7 +422,7 @@ fn write_preset_table_atomic(bytes: &[u8]) -> Result<(), AppError> {
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 pub(crate) fn detect_system_device_name() -> Option<String> {

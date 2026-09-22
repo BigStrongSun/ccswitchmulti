@@ -442,7 +442,7 @@ impl ProbeCandidate {
                     .map(|(name, value)| {
                         (
                             name.as_str().to_string(),
-                            format!("{:x}", Sha256::digest(value.as_bytes())),
+                            hex::encode(Sha256::digest(value.as_bytes())),
                         )
                     })
                     .collect::<Vec<_>>();
@@ -450,7 +450,7 @@ impl ProbeCandidate {
                 requests.push(json!({
                     "transport": transport,
                     "case": case,
-                    "urlFingerprint": format!("{:x}", Sha256::digest(prepared.url.as_bytes())),
+                    "urlFingerprint": hex::encode(Sha256::digest(prepared.url.as_bytes())),
                     "headers": header_fingerprints,
                     "body": prepared.body,
                 }));
@@ -462,7 +462,7 @@ impl ProbeCandidate {
             "requests": requests,
         });
         self.request_policy_fingerprint =
-            format!("{:x}", Sha256::digest(material.to_string().as_bytes()));
+            hex::encode(Sha256::digest(material.to_string().as_bytes()));
     }
 
     pub(crate) fn lease_key(&self) -> String {
@@ -474,7 +474,7 @@ impl ProbeCandidate {
             "requestPolicyFingerprint": self.request_policy_fingerprint(),
             "isFullUrl": self.is_full_url,
         });
-        format!("{:x}", Sha256::digest(material.to_string().as_bytes()))
+        hex::encode(Sha256::digest(material.to_string().as_bytes()))
     }
 }
 
@@ -591,7 +591,7 @@ impl ProbeTargetKey {
     ) -> Result<Self, url::ParseError> {
         let parsed = fingerprint_endpoint(endpoint)?;
 
-        let endpoint_fingerprint = format!("{:x}", Sha256::digest(parsed.as_str().as_bytes()));
+        let endpoint_fingerprint = hex::encode(Sha256::digest(parsed.as_str().as_bytes()));
 
         Ok(Self {
             provider_id: provider_id.into(),
@@ -607,10 +607,8 @@ impl ProbeTargetKey {
     }
 
     pub fn with_credential(mut self, credential: &str) -> Self {
-        self.credential_fingerprint = format!(
-            "{:x}",
-            Sha256::digest(format!("Bearer {}", credential.trim()).as_bytes())
-        );
+        self.credential_fingerprint =
+            hex::encode(Sha256::digest(format!("Bearer {}", credential.trim()).as_bytes()));
         self
     }
 

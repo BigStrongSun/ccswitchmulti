@@ -379,7 +379,7 @@ fn ws_client_message_to_upstream(
 ) -> Option<tokio_tungstenite::tungstenite::Message> {
     use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
     match message {
-        WsClientMessage::Text(text) => Some(UpstreamMessage::Text(text)),
+        WsClientMessage::Text(text) => Some(UpstreamMessage::Text(text.as_str().into())),
         WsClientMessage::Binary(binary) => Some(UpstreamMessage::Binary(binary)),
         WsClientMessage::Ping(ping) => Some(UpstreamMessage::Ping(ping)),
         WsClientMessage::Pong(pong) => Some(UpstreamMessage::Pong(pong)),
@@ -388,7 +388,7 @@ fn ws_client_message_to_upstream(
                 code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(
                     frame.code,
                 ),
-                reason: frame.reason.into_owned().into(),
+                reason: frame.reason.as_str().into(),
             },
         ))),
         WsClientMessage::Close(None) => Some(UpstreamMessage::Close(None)),
@@ -401,13 +401,13 @@ fn ws_upstream_message_to_client(
     use axum::extract::ws::CloseFrame;
     use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
     match message {
-        UpstreamMessage::Text(text) => Some(WsClientMessage::Text(text)),
+        UpstreamMessage::Text(text) => Some(WsClientMessage::Text(text.as_str().into())),
         UpstreamMessage::Binary(binary) => Some(WsClientMessage::Binary(binary)),
         UpstreamMessage::Ping(ping) => Some(WsClientMessage::Ping(ping)),
         UpstreamMessage::Pong(pong) => Some(WsClientMessage::Pong(pong)),
         UpstreamMessage::Close(Some(frame)) => Some(WsClientMessage::Close(Some(CloseFrame {
             code: frame.code.into(),
-            reason: frame.reason.into_owned().into(),
+            reason: frame.reason.as_str().into(),
         }))),
         UpstreamMessage::Close(None) => Some(WsClientMessage::Close(None)),
         UpstreamMessage::Frame(_) => None,
@@ -714,11 +714,7 @@ fn mark_external_openai_headers(headers: &mut HeaderMap) {
 /// 代理就不能再返回真正的 HTTP 426；此前在协议内伪造 426 事件再正常关闭，会被
 /// 当前 Codex 视为 `Connection closed normally`。因此这里无论是否带 Upgrade
 /// 头，都直接返回 HTTP 426，让客户端回退到已验证的 HTTP Responses 链路。
-pub async fn handle_responses_websocket(
-    State(_state): State<ProxyState>,
-    _headers: HeaderMap,
-    _ws: Option<WebSocketUpgrade>,
-) -> axum::response::Response {
+pub async fn handle_responses_websocket() -> axum::response::Response {
     handle_responses_websocket_fallback().await
 }
 

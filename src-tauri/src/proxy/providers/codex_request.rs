@@ -616,5 +616,5 @@ fn redacted_url(raw: &str) -> String {
 }
 
 fn sha256_hex(value: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(value))
+    hex::encode(Sha256::digest(value))
 }

@@ -86,7 +86,7 @@ fn try_capture(
     let record = serde_json::json!({
         "timestamp":now, "session_id":session, "capture_id":control.capture_id,
         "event":event, "error":fields,
-        "message_sha256":format!("{:x}", Sha256::digest(error.get("message").and_then(Value::as_str).unwrap_or("").as_bytes())),
+        "message_sha256":hex::encode(Sha256::digest(error.get("message").and_then(Value::as_str).unwrap_or("").as_bytes())),
         "notice":"Selected upstream error fields only; credential redaction is best effort. Review before sharing."
     });
     let directory = root

@@ -772,7 +772,7 @@ fn classify_refresh_targets(processes: &[RawCodexRuntimeProcess]) -> CodexRuntim
 
 fn refresh_target_fingerprint(targets: &CodexRuntimeRefreshTargets) -> String {
     let bytes = serde_json::to_vec(targets).unwrap_or_default();
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]

@@ -174,6 +174,6 @@ fn redact_field(path: &str, value: &Value) -> RedactedFieldEvidence {
         path: path.to_owned(),
         value_kind: value_kind.to_string(),
         byte_length: bytes.len(),
-        sha256: format!("{:x}", Sha256::digest(bytes)),
+        sha256: hex::encode(Sha256::digest(bytes)),
     }
 }

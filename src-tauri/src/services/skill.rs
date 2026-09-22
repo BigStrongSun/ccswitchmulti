@@ -1089,7 +1089,7 @@ impl SkillService {
             hasher.update(b"\0");
         }
 
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
     }
 
     /// 递归收集目录下所有非隐藏文件
@@ -1142,7 +1142,7 @@ impl SkillService {
             }
             hasher.update(b"\0");
         }
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
     }
 
     fn collect_tree_entries(current: &Path, entries: &mut Vec<PathBuf>) -> Result<()> {
