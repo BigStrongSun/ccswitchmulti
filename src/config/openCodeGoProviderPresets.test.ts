@@ -36,6 +36,8 @@ const chatModels = [
   "deepseek-v4-pro",
   "deepseek-v4-flash",
   "deepseek-v4-flash-vision-exp",
+  "mimo-v2.6-pro",
+  "mimo-v2.6-flash",
   "mimo-v2.5",
   "mimo-v2.5-pro",
   "hy4-preview",
@@ -53,7 +55,7 @@ function byName<T extends { name: string }>(items: readonly T[], name: string) {
 
 describe("OpenCode Go protocol-aware presets", () => {
   it("keeps the maintained catalog complete, unique, and free of deprecated models", () => {
-    expect(new Set(allModels).size).toBe(27);
+    expect(new Set(allModels).size).toBe(29);
     expect(allModels).not.toEqual(
       expect.arrayContaining([
         "minimax-m2.5",
@@ -188,6 +190,14 @@ describe("OpenCode Go protocol-aware presets", () => {
       modalities: { input: ["text", "image"], output: ["text"] },
       reasoning: true,
     });
+    expect(openCodeModels["mimo-v2.6-pro"]).toMatchObject({
+      limit: { context: 1_048_576, output: 131_072 },
+      modalities: {
+        input: ["text", "image", "audio", "video"],
+        output: ["text"],
+      },
+      reasoning: true,
+    });
 
     const codexResponses = byName(
       codexProviderPresets,
@@ -205,6 +215,24 @@ describe("OpenCode Go protocol-aware presets", () => {
         supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
         defaultEffort: "high",
         disableAllowed: true,
+      },
+    });
+
+    const codexChat = byName(codexProviderPresets, "OpenCode Go");
+    const mimo = codexChat.modelCatalog?.find(
+      (model) => model.model === "mimo-v2.6-pro",
+    );
+    expect(mimo).toMatchObject({
+      contextWindow: 1_048_576,
+      inputModalities: ["text", "image"],
+      supportsParallelToolCalls: false,
+      baseInstructions: expect.stringContaining("You are MiMo"),
+      reasoning: {
+        supportStatus: "confirmed_supported",
+        controlKind: "boolean",
+        disableAllowed: true,
+        upstream: { format: "boolean", parameter: "thinking" },
+        outputFormat: "reasoning_content",
       },
     });
 

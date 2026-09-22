@@ -298,6 +298,104 @@ fn chat_request_policy_prepares_literal_production_wire_request() {
 }
 
 #[test]
+fn mimo_chat_request_policy_applies_minimal_compatibility_for_any_provider() {
+    let mut provider = third_party_provider("openai_chat");
+    provider.settings_config["config"] = json!(
+        r#"model = "mimo-v2.6-pro"
+model_provider = "mimo-chat"
+[model_providers.mimo-chat]
+base_url = "https://chat.example.test/v1"
+wire_api = "chat"
+"#
+    );
+    provider.settings_config["modelCatalog"] = json!({
+        "models": [{
+            "model": "mimo-v2.6-pro",
+            "reasoning": {
+                "schemaVersion": 2,
+                "supportStatus": "confirmed_supported",
+                "controlKind": "boolean",
+                "supportedEfforts": [],
+                "disableAllowed": true,
+                "upstream": {"format": "boolean", "parameter": "thinking"},
+                "outputFormat": "reasoning_content"
+            }
+        }]
+    });
+    let policy =
+        CodexThirdPartyRequestPolicy::compile(&provider).expect("compile MiMo Chat request policy");
+
+    let prepared = policy
+        .prepare(
+            CodexRequestTransport::ChatCompletions,
+            json!({
+                "model": "mimo-v2.6-pro",
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "content": [{"type": "reasoning_text", "text": "Need to patch safely."}]
+                    },
+                    {
+                        "type": "custom_tool_call",
+                        "call_id": "call_patch",
+                        "name": "apply_patch",
+                        "input": "*** Begin Patch\n*** End Patch"
+                    },
+                    {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call_patch",
+                        "output": "patched"
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "continue"}]
+                    }
+                ],
+                "tools": [{
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply a patch to files."
+                }],
+                "tool_choice": {"type": "custom", "name": "apply_patch"},
+                "parallel_tool_calls": true,
+                "reasoning": {"effort": "high"},
+                "max_output_tokens": 128,
+                "stream": true
+            }),
+            CodexRequestOptions::default(),
+        )
+        .expect("prepare MiMo Chat request");
+
+    assert_eq!(prepared.body["model"], "mimo-v2.6-pro");
+    assert_eq!(prepared.body["max_completion_tokens"], 128);
+    assert!(prepared.body.get("max_tokens").is_none());
+    assert_eq!(prepared.body["thinking"], json!({"type": "enabled"}));
+    assert!(prepared.body.get("reasoning_effort").is_none());
+    assert_eq!(prepared.body["tool_choice"], "auto");
+    assert!(prepared.body.get("parallel_tool_calls").is_none());
+    assert_eq!(prepared.body["tools"][0]["function"]["name"], "apply_patch");
+    assert_eq!(prepared.body["tools"][0]["function"]["strict"], true);
+    assert_eq!(
+        prepared.body["tools"][0]["function"]["parameters"],
+        json!({
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description."
+                }
+            },
+            "required": ["input"],
+            "additionalProperties": false
+        })
+    );
+    assert_eq!(
+        prepared.body["messages"][0]["reasoning_content"],
+        "Need to patch safely."
+    );
+}
+
+#[test]
 fn responses_request_policy_maps_effort_model_and_provider_overrides() {
     let policy = CodexThirdPartyRequestPolicy::compile(&third_party_provider("openai_responses"))
         .expect("compile third-party request policy");

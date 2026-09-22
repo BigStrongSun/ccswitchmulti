@@ -88,6 +88,8 @@ const OPEN_CODE_GO_PI_CATALOG_KEYS = {
   "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
   "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
   "deepseek-v4-flash-vision-exp": "deepseek/deepseek-v4-flash-vision-exp",
+  "mimo-v2.6-pro": "xiaomi/mimo-v2.6-pro",
+  "mimo-v2.6-flash": "xiaomi/mimo-v2.6-flash",
   "mimo-v2.5": "xiaomi/mimo-v2.5",
   "mimo-v2.5-pro": "xiaomi/mimo-v2.5-pro",
   "hy4-preview": "tencent/hy4-preview",
