@@ -116,17 +116,22 @@ pub enum EnvInjectionTargetSyncState {
 #[serde(rename_all = "camelCase")]
 pub struct EnvInjectionTargetSyncStatus {
     pub state: EnvInjectionTargetSyncState,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    // The renderer contract (EnvInjectionTargetSyncStatus in src/types.ts)
+    // requires all six key arrays to be present in the wire payload. Empty
+    // vectors must serialize as [] instead of being skipped; skipping them
+    // made `status.conflictedKeys` undefined in the settings page and
+    // crashed the UI in the React error boundary.
+    #[serde(default)]
     pub managed_keys: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub added_keys: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub updated_keys: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub removed_keys: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub relinquished_keys: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub conflicted_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -1148,5 +1153,42 @@ mod tests {
 
         let total = EnvInjectionSyncReport::new(failed.clone(), failed, false);
         assert_eq!(total.state, EnvInjectionSyncState::Failed);
+    }
+
+    #[test]
+    fn empty_target_status_serializes_all_key_arrays() {
+        // Regression guard for the renderer contract: the settings page
+        // treats all six key arrays as required fields, so an empty status
+        // (e.g. enabled configuration with no variables) must serialize
+        // them as [] instead of omitting the keys.
+        let status = EnvInjectionTargetSyncStatus::success(
+            false,
+            &BTreeMap::new(),
+            EnvInjectionTargetReport::default(),
+        );
+        let json = serde_json::to_value(&status).expect("serialize status");
+        assert_eq!(json["state"], "disabled");
+        for key in [
+            "managedKeys",
+            "addedKeys",
+            "updatedKeys",
+            "removedKeys",
+            "relinquishedKeys",
+            "conflictedKeys",
+        ] {
+            assert_eq!(
+                json[key],
+                JsonValue::Array(vec![]),
+                "empty {key} must stay present as []"
+            );
+        }
+        assert!(
+            json.get("error").is_none(),
+            "a None error must stay omitted"
+        );
+        assert!(json.get("rollbackError").is_none());
+        let round_trip: EnvInjectionTargetSyncStatus =
+            serde_json::from_value(json).expect("deserialize status");
+        assert_eq!(round_trip, status);
     }
 }
