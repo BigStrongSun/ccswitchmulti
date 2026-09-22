@@ -5628,6 +5628,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    #[cfg(target_os = "windows")]
     async fn release_stale_listener_holders_never_touches_foreign_children() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");

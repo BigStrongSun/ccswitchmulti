@@ -681,7 +681,7 @@ pub(crate) fn terminate_verified_process(_expected: &ProcessIdentity) -> Result<
 
 #[cfg(target_os = "macos")]
 pub(crate) fn process_identity_result(pid: u32) -> Result<ProcessIdentity, ProcessIdentityError> {
-    use libc::{errno, proc_pidinfo, proc_pidpath, EACCES, EPERM, PROC_PIDTBSDINFO};
+    use libc::{proc_pidinfo, proc_pidpath, EACCES, EPERM, PROC_PIDTBSDINFO};
 
     if pid == 0 {
         return Err(ProcessIdentityError::NotFound);
@@ -698,7 +698,9 @@ pub(crate) fn process_identity_result(pid: u32) -> Result<ProcessIdentity, Proce
     if path_len <= 0 {
         // proc_pidpath 对受保护/其它账户的进程会以 EPERM/EACCES 失败：进程存在但身份不可读，
         // 必须与“进程已不存在”区分（端口归属守卫对两者都 fail-closed，但对用户含义不同）。
-        let code = unsafe { errno() };
+        let code = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or_default();
         return Err(if code == EPERM || code == EACCES {
             ProcessIdentityError::AccessDenied
         } else {
@@ -946,6 +948,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn port_rows_are_attributed_to_the_listening_process() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let port = listener.local_addr().expect("addr").port();
