@@ -1382,55 +1382,79 @@ fn append_responses_item_as_chat_message(
                 &mut pending.last_assistant_index,
             );
             let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
-            let output = if text_only_model {
-                let mut output = item.get("output").cloned().unwrap_or(Value::Null);
-                let output_was_string = output.is_string();
-                let mut discarded_media = Vec::new();
-                let replacement = json!({
-                    "type": "text",
-                    "text": TOOL_RESULT_MEDIA_OMITTED_MARKER
-                });
-                let replaced = strip_and_clamp_media_from_tool_value(
-                    &mut output,
-                    &mut discarded_media,
-                    ToolMediaScope::AllSupported,
-                    &replacement,
-                    TOOL_RESULT_MEDIA_OMITTED_MARKER,
-                );
-                if replaced > 0 {
-                    if output_was_string {
-                        output.as_str().unwrap_or_default().to_string()
+            // Codex App injected standalone synthetic events (cross-thread
+            // messages from send_message_to_thread, heartbeats from
+            // automation_update, etc.) have no preceding function_call and no
+            // call_id. Projecting them as role=tool messages missing
+            // tool_call_id permanently poisons the whole history of third-party
+            // Chat routes (#98): project them as a plain user message and keep
+            // the full output content. Tool results without a call_id in other
+            // namespaces still fail closed as before.
+            if call_id.is_empty()
+                && item.get("namespace").and_then(Value::as_str) == Some("codex_app")
+            {
+                let output = match item.get("output") {
+                    Some(Value::String(s)) => canonicalize_json_string_if_parseable(s),
+                    Some(v) => canonical_json_string(v),
+                    None => String::new(),
+                };
+                if !output.is_empty() {
+                    messages.push(json!({
+                        "role": "user",
+                        "content": output
+                    }));
+                }
+            } else {
+                let output = if text_only_model {
+                    let mut output = item.get("output").cloned().unwrap_or(Value::Null);
+                    let output_was_string = output.is_string();
+                    let mut discarded_media = Vec::new();
+                    let replacement = json!({
+                        "type": "text",
+                        "text": TOOL_RESULT_MEDIA_OMITTED_MARKER
+                    });
+                    let replaced = strip_and_clamp_media_from_tool_value(
+                        &mut output,
+                        &mut discarded_media,
+                        ToolMediaScope::AllSupported,
+                        &replacement,
+                        TOOL_RESULT_MEDIA_OMITTED_MARKER,
+                    );
+                    if replaced > 0 {
+                        if output_was_string {
+                            output.as_str().unwrap_or_default().to_string()
+                        } else {
+                            canonical_json_string(&output)
+                        }
                     } else {
-                        canonical_json_string(&output)
+                        match item.get("output") {
+                            Some(Value::String(s)) => canonicalize_json_string_if_parseable(s),
+                            Some(v) => canonical_json_string(v),
+                            None => String::new(),
+                        }
                     }
+                } else if let Some(media_plan) = item
+                    .get("output")
+                    .cloned()
+                    .and_then(plan_chat_tool_output_media)
+                {
+                    queue_chat_tool_output_media(&mut pending.media, call_id, media_plan.media_parts);
+                    media_plan.tool_content
                 } else {
+                    // Cache-sensitive no-media fallback: keep these expressions
+                    // byte-for-byte equivalent to the pre-fix conversion.
                     match item.get("output") {
                         Some(Value::String(s)) => canonicalize_json_string_if_parseable(s),
                         Some(v) => canonical_json_string(v),
                         None => String::new(),
                     }
-                }
-            } else if let Some(media_plan) = item
-                .get("output")
-                .cloned()
-                .and_then(plan_chat_tool_output_media)
-            {
-                queue_chat_tool_output_media(&mut pending.media, call_id, media_plan.media_parts);
-                media_plan.tool_content
-            } else {
-                // Cache-sensitive no-media fallback: keep these expressions
-                // byte-for-byte equivalent to the pre-fix conversion.
-                match item.get("output") {
-                    Some(Value::String(s)) => canonicalize_json_string_if_parseable(s),
-                    Some(v) => canonical_json_string(v),
-                    None => String::new(),
-                }
-            };
-            messages.push(json!({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": output
-            }));
+                };
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output
+                }));
+            }
         }
         Some("custom_tool_call_output") | Some("tool_search_output") => {
             flush_pending_tool_calls(
@@ -5774,6 +5798,100 @@ mod tests {
             assert!(message.contains(call_id));
         }
     }
+    #[test]
+    fn responses_request_to_chat_projects_orphan_codex_app_synthetic_output_as_user_message() {
+        // Regression (#98): standalone codex_app function_call_output without a
+        // call_id must be projected as a plain user message, not as a broken
+        // role=tool message, and the rest of the history must convert normally.
+        let input = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "id": "fco_1",
+                    "name": "send_message_to_thread",
+                    "namespace": "codex_app",
+                    "output": "<codex_delegation>hello</codex_delegation>"
+                },
+                {
+                    "type": "function_call_output",
+                    "id": "fco_2",
+                    "name": "automation_update",
+                    "namespace": "codex_app",
+                    "output": "<heartbeat>tick</heartbeat>"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Only reply OK."
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(
+            message_roles(&result),
+            vec!["user", "user", "user"]
+        );
+        assert_eq!(
+            messages[0]["content"],
+            "<codex_delegation>hello</codex_delegation>"
+        );
+        assert_eq!(messages[1]["content"], "<heartbeat>tick</heartbeat>");
+        assert!(messages[2].get("tool_call_id").is_none());
+    }
+
+    #[test]
+    fn responses_request_to_chat_still_rejects_non_codex_app_orphan_tool_outputs_without_call_id() {
+        let input = json!({
+            "model": "deepseek-v4-flash",
+            "input": [{
+                "type": "function_call_output",
+                "name": "read_file",
+                "output": "ok"
+            }]
+        });
+
+        let error = responses_to_chat_completions(input)
+            .expect_err("a non-codex_app orphan tool output must stay fail closed");
+        assert!(error.to_string().contains("tool output history is incomplete"));
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_paired_codex_app_tool_outputs_as_tool_messages() {
+        let input = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_codex_app",
+                    "name": "send_message_to_thread",
+                    "namespace": "codex_app",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_codex_app",
+                    "name": "send_message_to_thread",
+                    "namespace": "codex_app",
+                    "output": "<codex_delegation>done</codex_delegation>"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(message_roles(&result), vec!["assistant", "tool"]);
+        assert_eq!(messages[1]["tool_call_id"], "call_codex_app");
+        assert_eq!(
+            messages[1]["content"],
+            "<codex_delegation>done</codex_delegation>"
+        );
+    }
+
 
     #[test]
     fn responses_request_to_chat_keeps_reasoning_on_final_answer_after_tool_call() {
