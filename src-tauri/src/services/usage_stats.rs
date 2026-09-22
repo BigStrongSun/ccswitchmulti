@@ -6150,7 +6150,8 @@ mod tests {
     /// 发到一个并不服务它的 provider，不产生 token/成本——不应出现在模型统计里，
     /// 避免把同一模型拆散到多个 provider 名下分开统计。真实跨 provider 用量不受影响。
     #[test]
-    fn test_get_model_stats_drops_zero_usage_cross_provider_routing_ghosts() -> Result<(), AppError> {
+    fn test_get_model_stats_drops_zero_usage_cross_provider_routing_ghosts() -> Result<(), AppError>
+    {
         let db = Database::memory()?;
         {
             let conn = lock_conn!(db.conn);
@@ -6172,8 +6173,16 @@ mod tests {
                     latency_ms, status_code, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
-                    "real-deepseek", "provider-real", "codex", "deepseek-flash",
-                    100, 50, "0.01", 100, 200, 1000
+                    "real-deepseek",
+                    "provider-real",
+                    "codex",
+                    "deepseek-flash",
+                    100,
+                    50,
+                    "0.01",
+                    100,
+                    200,
+                    1000
                 ],
             )?;
             // 路由残留：同一个 deepseek-flash 被错配到 Qwen，0 token、0 成本。
@@ -6184,8 +6193,16 @@ mod tests {
                     latency_ms, status_code, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
-                    "ghost-deepseek-qwen", "provider-ghost", "codex", "deepseek-flash",
-                    0, 0, "0", 100, 200, 1001
+                    "ghost-deepseek-qwen",
+                    "provider-ghost",
+                    "codex",
+                    "deepseek-flash",
+                    0,
+                    0,
+                    "0",
+                    100,
+                    200,
+                    1001
                 ],
             )?;
         }

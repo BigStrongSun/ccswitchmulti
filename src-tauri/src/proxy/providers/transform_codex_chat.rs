@@ -1548,7 +1548,11 @@ fn append_responses_item_as_chat_message(
                     .cloned()
                     .and_then(plan_chat_tool_output_media)
                 {
-                    queue_chat_tool_output_media(&mut pending.media, call_id, media_plan.media_parts);
+                    queue_chat_tool_output_media(
+                        &mut pending.media,
+                        call_id,
+                        media_plan.media_parts,
+                    );
                     media_plan.tool_content
                 } else {
                     // Cache-sensitive no-media fallback: keep these expressions
@@ -6060,10 +6064,7 @@ mod tests {
         let result = responses_to_chat_completions(input).unwrap();
         let messages = result["messages"].as_array().unwrap();
 
-        assert_eq!(
-            message_roles(&result),
-            vec!["user", "user", "user"]
-        );
+        assert_eq!(message_roles(&result), vec!["user", "user", "user"]);
         assert_eq!(
             messages[0]["content"],
             "<codex_delegation>hello</codex_delegation>"
@@ -6085,7 +6086,9 @@ mod tests {
 
         let error = responses_to_chat_completions(input)
             .expect_err("a non-codex_app orphan tool output must stay fail closed");
-        assert!(error.to_string().contains("tool output history is incomplete"));
+        assert!(error
+            .to_string()
+            .contains("tool output history is incomplete"));
     }
 
     #[test]
@@ -6120,7 +6123,6 @@ mod tests {
             "<codex_delegation>done</codex_delegation>"
         );
     }
-
 
     #[test]
     fn responses_request_to_chat_keeps_reasoning_on_final_answer_after_tool_call() {

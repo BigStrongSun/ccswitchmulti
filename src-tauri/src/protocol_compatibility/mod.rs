@@ -607,8 +607,9 @@ impl ProbeTargetKey {
     }
 
     pub fn with_credential(mut self, credential: &str) -> Self {
-        self.credential_fingerprint =
-            hex::encode(Sha256::digest(format!("Bearer {}", credential.trim()).as_bytes()));
+        self.credential_fingerprint = hex::encode(Sha256::digest(
+            format!("Bearer {}", credential.trim()).as_bytes(),
+        ));
         self
     }
 
