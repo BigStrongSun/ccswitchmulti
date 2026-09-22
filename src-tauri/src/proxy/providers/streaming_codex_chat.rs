@@ -11,6 +11,7 @@ use super::{
     },
     transform_codex_chat::{
         chat_usage_to_responses_usage, custom_tool_input_from_chat_arguments,
+        delegate_mimo_function_validation, normalize_mimo_raw_patch_arguments,
         response_id_from_chat_id, response_message_item_id, response_tool_call_item_from_chat_name,
         response_tool_call_item_id_from_chat_name, CodexToolContext,
     },
@@ -840,11 +841,31 @@ impl ChatToResponsesState {
                 continue;
             }
 
+            if let Some(state) = self.tools.get_mut(&key) {
+                if let Some(arguments) = normalize_mimo_raw_patch_arguments(
+                    &self.model,
+                    &state.name,
+                    &state.arguments,
+                    &self.tool_context,
+                ) {
+                    state.arguments = arguments;
+                }
+            }
+
             let has_malformed_arguments = self
                 .tools
                 .get(&key)
                 .is_some_and(|state| !streamed_tool_arguments_are_complete(&state.arguments));
-            if has_malformed_arguments {
+            let delegate_validation = has_malformed_arguments
+                && self.tools.get(&key).is_some_and(|state| {
+                    delegate_mimo_function_validation(
+                        &self.model,
+                        &state.name,
+                        self.finish_reason.as_deref(),
+                        &self.tool_context,
+                    )
+                });
+            if has_malformed_arguments && !delegate_validation {
                 let (call_id_empty, args_bytes) = self
                     .tools
                     .get(&key)
@@ -907,7 +928,11 @@ impl ChatToResponsesState {
                 continue;
             };
             let output_index = state.output_index.unwrap_or(0);
-            let arguments = canonicalize_tool_arguments_str(&state.arguments);
+            let arguments = if delegate_validation {
+                state.arguments.clone()
+            } else {
+                canonicalize_tool_arguments_str(&state.arguments)
+            };
             let is_custom_tool = self.tool_context.is_custom_tool_chat_name(&state.name);
             let item = response_tool_call_item_from_chat_name(
                 &state.item_id,
@@ -1993,6 +2018,147 @@ mod tests {
         assert!(output.contains("\"type\":\"custom_tool_call\""));
         assert!(output.contains("\"name\":\"exec\""));
         assert!(output.contains("\"input\":\"ls -la\""));
+    }
+
+    #[tokio::test]
+    async fn streams_large_custom_tool_arguments_losslessly() {
+        check_large_custom_tool_arguments(false).await;
+    }
+
+    #[tokio::test]
+    async fn mimo_mixed_invalid_function_call_keeps_stream_and_arguments() {
+        let invalid = "{\"session_id\":4041,\"chars\":\"\u{3}\"}";
+        let context = super::super::transform_codex_chat::build_codex_tool_context_from_request(
+            &json!({
+                "tools":[{"type":"function","name":"write_stdin"},{"type":"function","name":"exec_command"}]
+            }),
+        );
+        let chunks = [
+            format!(
+                "data: {}\n\n",
+                json!({
+                    "model":"mimo-v2.6-flash", "choices":[{"delta":{"tool_calls":[
+                        {"index":0,"id":"bad","function":{"name":"write_stdin","arguments":invalid}},
+                        {"index":1,"id":"good","function":{"name":"exec_command","arguments":"{\"cmd\":\"echo ok\"}"}}
+                    ]},"finish_reason":"tool_calls"}]
+                })
+            ),
+            "data: [DONE]\n\n".to_string(),
+        ];
+        let output =
+            collect_with_context(chunks.iter().map(String::as_str).collect(), context).await;
+        let events = parse_sse_events(&output);
+        assert!(!events.iter().any(|e| e["type"] == "response.failed"));
+        let completed = events
+            .iter()
+            .find(|e| e["type"] == "response.completed")
+            .unwrap();
+        assert_eq!(completed["response"]["output"].as_array().unwrap().len(), 2);
+        assert_eq!(completed["response"]["output"][0]["arguments"], invalid);
+        assert_eq!(
+            completed["response"]["output"][1]["arguments"],
+            "{\"cmd\":\"echo ok\"}"
+        );
+        let delta = events
+            .iter()
+            .filter(|e| {
+                e["type"] == "response.function_call_arguments.delta" && e["output_index"] == 0
+            })
+            .map(|e| e["delta"].as_str().unwrap())
+            .collect::<String>();
+        let done = events
+            .iter()
+            .find(|e| {
+                e["type"] == "response.function_call_arguments.done" && e["output_index"] == 0
+            })
+            .unwrap();
+        assert_eq!(delta, invalid);
+        assert_eq!(done["arguments"], invalid);
+    }
+
+    #[tokio::test]
+    async fn mimo_streams_large_raw_patch_losslessly() {
+        check_large_custom_tool_arguments(true).await;
+    }
+
+    async fn check_large_custom_tool_arguments(raw: bool) {
+        let payload = format!(
+            "*** Begin Patch\n\"quoted\"\\path\n中文🚀\n{}*** End Patch",
+            "+long line with \\\"quotes\\\" and \\\\slashes\n".repeat(420)
+        );
+        assert!(payload.len() > 16 * 1024);
+        let arguments = if raw {
+            payload.clone()
+        } else {
+            json!({"input": payload}).to_string()
+        };
+        let mut boundaries = vec![0];
+        for target in [
+            arguments.len() / 4,
+            arguments.len() / 2,
+            arguments.len() * 3 / 4,
+        ] {
+            let mut boundary = target;
+            while !arguments.is_char_boundary(boundary) {
+                boundary += 1;
+            }
+            boundaries.push(boundary);
+        }
+        boundaries.push(arguments.len());
+
+        let mut chunks = Vec::new();
+        for index in 0..boundaries.len() - 1 {
+            let fragment = &arguments[boundaries[index]..boundaries[index + 1]];
+            let mut call = json!({
+                "index": 0,
+                "function": {"arguments": fragment}
+            });
+            if index == 0 {
+                call["id"] = json!("call_large_patch");
+                call["type"] = json!("function");
+                call["function"]["name"] = json!("apply_patch");
+            }
+            let mut choice = json!({"delta": {"tool_calls": [call]}});
+            if index == boundaries.len() - 2 {
+                choice["finish_reason"] = json!("tool_calls");
+            }
+            chunks.push(format!(
+                "data: {}\n\n",
+                json!({
+                    "id": "chatcmpl_large_custom",
+                    "model": "mimo-v2.6-pro",
+                    "choices": [choice]
+                })
+            ));
+        }
+        chunks.push("data: [DONE]\n\n".to_string());
+
+        let context =
+            super::super::transform_codex_chat::build_codex_tool_context_from_request(&json!({
+                "model": "mimo-v2.6-pro",
+                "tools": [{"type": "custom", "name": "apply_patch"}]
+            }));
+        let output =
+            collect_with_context(chunks.iter().map(String::as_str).collect(), context).await;
+        let events = parse_sse_events(&output);
+        let completed = events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .expect("large custom tool call should complete");
+        let item = &completed["response"]["output"][0];
+
+        assert_eq!(item["type"], "custom_tool_call");
+        assert_eq!(item["name"], "apply_patch");
+        assert_eq!(item["input"], payload);
+        assert!(events
+            .iter()
+            .any(|event| event["type"] == "response.custom_tool_call_input.delta"));
+        assert!(events
+            .iter()
+            .any(|event| event["type"] == "response.custom_tool_call_input.done"));
+        assert!(!events
+            .iter()
+            .any(|event| event["type"] == "response.failed"));
     }
 
     #[tokio::test]

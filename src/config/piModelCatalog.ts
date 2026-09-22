@@ -621,6 +621,24 @@ export const piModelCatalog = {
       maxTokens: 131_072,
     },
   },
+  "xiaomi/mimo-v2.6-flash": {
+    capabilities: {
+      name: "MiMo-V2.6-Flash",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 1_048_576,
+      maxTokens: 131_072,
+    },
+  },
+  "xiaomi/mimo-v2.6-pro": {
+    capabilities: {
+      name: "MiMo-V2.6-Pro",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 1_048_576,
+      maxTokens: 131_072,
+    },
+  },
   "xiaomi/mimo-v2.5-pro": {
     capabilities: {
       name: "MiMo-V2.5-Pro",

@@ -303,6 +303,13 @@ function openCodeGoCodexCatalog(protocol: OpenCodeGoProtocol) {
       inputModalities: model.input.some((modality) => modality === "image")
         ? (["text", "image"] as const)
         : (["text"] as const),
+      ...("supportsParallelToolCalls" in model &&
+      model.supportsParallelToolCalls !== undefined
+        ? { supportsParallelToolCalls: model.supportsParallelToolCalls }
+        : {}),
+      ...("baseInstructions" in model && model.baseInstructions
+        ? { baseInstructions: model.baseInstructions }
+        : {}),
       reasoning: openCodeGoCodexReasoning(model),
     })),
   );

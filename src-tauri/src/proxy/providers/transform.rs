@@ -64,11 +64,13 @@ pub fn is_openai_o_series(model: &str) -> bool {
 /// of the legacy `max_tokens` Chat Completions parameter.
 pub fn requires_max_completion_tokens(model: &str) -> bool {
     let normalized = model.to_lowercase();
+    let model_id = normalized.rsplit('/').next().unwrap_or(&normalized);
     is_openai_o_series(&normalized)
         || normalized
             .strip_prefix("gpt-")
             .and_then(|rest| rest.chars().next())
             .is_some_and(|c| c.is_ascii_digit() && c >= '5')
+        || matches!(model_id, "mimo-v2.6-pro" | "mimo-v2.6-flash")
 }
 
 /// Detect Responses-compatible models that support reasoning effort.
@@ -1941,6 +1943,13 @@ mod tests {
                 "{model} must receive max_completion_tokens"
             );
         }
+    }
+
+    #[test]
+    fn test_mimo_v26_uses_max_completion_tokens() {
+        assert!(requires_max_completion_tokens("mimo-v2.6-flash"));
+        assert!(requires_max_completion_tokens("xiaomi/mimo-v2.6-pro"));
+        assert!(!requires_max_completion_tokens("mimo-v2.5-pro"));
     }
 
     #[test]

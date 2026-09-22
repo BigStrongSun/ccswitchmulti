@@ -23,6 +23,8 @@ export interface OpenCodeGoModel {
   context: number;
   output: number;
   input: readonly OpenCodeGoInputModality[];
+  supportsParallelToolCalls?: boolean;
+  baseInstructions?: string;
   reasoning:
     | { kind: "unknown" }
     | { kind: "toggle" }
@@ -261,6 +263,30 @@ export const OPEN_CODE_GO_MODELS = [
       efforts: ["low", "high", "max"],
       disableAllowed: true,
     },
+  },
+  {
+    id: "mimo-v2.6-pro",
+    name: "MiMo V2.6 Pro",
+    protocol: "chat",
+    context: 1_048_576,
+    output: 131_072,
+    input: ["text", "image", "audio", "video"],
+    supportsParallelToolCalls: false,
+    baseInstructions:
+      "You are MiMo, an AI assistant developed by Xiaomi. Today's date: {date} {week}. Your knowledge cutoff date is December 2024.",
+    reasoning: { kind: "toggle" },
+  },
+  {
+    id: "mimo-v2.6-flash",
+    name: "MiMo V2.6 Flash",
+    protocol: "chat",
+    context: 1_048_576,
+    output: 131_072,
+    input: ["text", "image", "audio", "video"],
+    supportsParallelToolCalls: false,
+    baseInstructions:
+      "You are MiMo, an AI assistant developed by Xiaomi. Today's date: {date} {week}. Your knowledge cutoff date is December 2024.",
+    reasoning: { kind: "toggle" },
   },
   {
     id: "mimo-v2.5",

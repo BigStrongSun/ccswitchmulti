@@ -714,6 +714,7 @@ pub(crate) fn responses_to_chat_completions_with_reasoning_text_only_cache_and_h
         }
     }
 
+    apply_mimo_v26_chat_compatibility(&mut result, model, &tool_context);
     apply_openai_prompt_cache_options(&mut result, &body, cache_config);
 
     // Strict OpenAI-compatible upstreams (vLLM, enterprise gateways) reject
@@ -737,6 +738,115 @@ pub(crate) fn responses_to_chat_completions_with_reasoning_text_only_cache_and_h
     super::transform::inject_openai_stream_include_usage(&mut result);
 
     Ok(result)
+}
+
+fn is_mimo_v26_chat_model(model: &str) -> bool {
+    matches!(
+        model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase()
+            .as_str(),
+        "mimo-v2.6-pro" | "mimo-v2.6-flash"
+    )
+}
+
+/// MiMo can follow the embedded FREEFORM definition and return a raw patch.
+/// Wrap only a complete, declared apply_patch custom call; never repair or
+/// unescape malformed JSON or invent a missing patch terminator.
+pub(crate) fn normalize_mimo_raw_patch_arguments(
+    model: &str,
+    name: &str,
+    arguments: &str,
+    context: &CodexToolContext,
+) -> Option<String> {
+    if !is_mimo_v26_chat_model(model)
+        || !context
+            .lookup_chat_name(name)
+            .is_some_and(|spec| spec.kind == CodexToolKind::Custom && spec.name == "apply_patch")
+    {
+        return None;
+    }
+    let patch = arguments.trim();
+    if patch.lines().next() != Some("*** Begin Patch")
+        || patch.lines().last() != Some("*** End Patch")
+    {
+        return None;
+    }
+    Some(canonical_json_string(&json!({"input": arguments})))
+}
+
+/// A completed function call with invalid JSON is a tool validation error.
+/// Codex returns its parser error to the model; do not turn it into a broken
+/// transport or rewrite it into a different, potentially executable argument.
+pub(crate) fn delegate_mimo_function_validation(
+    model: &str,
+    name: &str,
+    finish_reason: Option<&str>,
+    context: &CodexToolContext,
+) -> bool {
+    is_mimo_v26_chat_model(model)
+        && matches!(finish_reason, Some("tool_calls" | "function_call" | "stop"))
+        && context.lookup_chat_name(name).is_some_and(|spec| {
+            matches!(
+                spec.kind,
+                CodexToolKind::Function | CodexToolKind::Namespace
+            )
+        })
+}
+
+/// MiMo 2.6 Chat accepts function tools only, supports `tool_choice=auto`, and
+/// does not expose the OpenAI parallel-tool switch. Keep the shared Responses
+/// bridge unchanged for every other model and tighten only MiMo custom tools.
+fn apply_mimo_v26_chat_compatibility(
+    body: &mut Value,
+    model: &str,
+    tool_context: &CodexToolContext,
+) {
+    if !is_mimo_v26_chat_model(model) {
+        return;
+    }
+
+    let Some(body) = body.as_object_mut() else {
+        return;
+    };
+    body.remove("parallel_tool_calls");
+    if body.contains_key("tool_choice") {
+        body.insert("tool_choice".to_string(), json!("auto"));
+    }
+
+    let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for tool in tools {
+        let is_custom = tool
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| tool_context.is_custom_tool_chat_name(name));
+        if !is_custom {
+            continue;
+        }
+        let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        // The original FREEFORM/grammar contract describes the input value,
+        // not the Chat function envelope.
+        let description = function
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        function.insert("description".to_string(), json!(format!(
+            "Chat transport: call this function with a JSON object containing exactly one string field, input. Escape newlines, quotes and backslashes as JSON. The FREEFORM and grammar instructions below apply only to the decoded input string, not to the outer arguments object.\n\n{description}"
+        )));
+        function.insert("strict".to_string(), Value::Bool(true));
+        if let Some(parameters) = function
+            .get_mut("parameters")
+            .and_then(Value::as_object_mut)
+        {
+            parameters.insert("additionalProperties".to_string(), Value::Bool(false));
+        }
+    }
 }
 
 /// 把 forwarder 侧已决策的 hosted tool 开关同步到已转换的 Chat body。
@@ -2358,6 +2468,33 @@ pub(crate) fn chat_completion_to_response_with_context_and_projection(
     let created_at = body.get("created").and_then(|v| v.as_u64()).unwrap_or(0);
     let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str());
 
+    let mut normalized_message = message.clone();
+    if is_mimo_v26_chat_model(model) {
+        let normalize_function = |function: &mut Value| {
+            if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+                let name = function.get("name").and_then(Value::as_str).unwrap_or("");
+                if let Some(normalized) =
+                    normalize_mimo_raw_patch_arguments(model, name, arguments, tool_context)
+                {
+                    function["arguments"] = json!(normalized);
+                }
+            }
+        };
+        if let Some(calls) = normalized_message
+            .get_mut("tool_calls")
+            .and_then(Value::as_array_mut)
+        {
+            for call in calls {
+                if let Some(function) = call.get_mut("function") {
+                    normalize_function(function);
+                }
+            }
+        }
+        if let Some(function) = normalized_message.get_mut("function_call") {
+            normalize_function(function);
+        }
+    }
+    let message = &normalized_message;
     let reasoning = chat_reasoning_text(message);
     let mut output = Vec::new();
     if let Some(reasoning_item) = chat_reasoning_to_response_output_item(
@@ -2372,8 +2509,13 @@ pub(crate) fn chat_completion_to_response_with_context_and_projection(
     if let Some(message_item) = message_item {
         output.push(message_item);
     }
-    let tool_calls =
-        chat_tool_calls_to_response_output_items(message, reasoning.as_deref(), tool_context);
+    let tool_calls = chat_tool_calls_to_response_output_items(
+        message,
+        reasoning.as_deref(),
+        tool_context,
+        model,
+        finish_reason,
+    );
     let terminal = classify_chat_terminal(
         finish_reason,
         ChatTerminalEvidence {
@@ -2548,6 +2690,8 @@ fn chat_tool_calls_to_response_output_items(
     message: &Value,
     reasoning: Option<&str>,
     tool_context: &CodexToolContext,
+    model: &str,
+    finish_reason: Option<&str>,
 ) -> ChatToolCallItems {
     let mut output = Vec::new();
     let mut dropped = 0usize;
@@ -2560,6 +2704,30 @@ fn chat_tool_calls_to_response_output_items(
             let name = function.get("name").and_then(|v| v.as_str()).unwrap_or("");
             // 纯空白名同样对应不到任何已发布工具，与空名同等对待。
             let arguments = function.get("arguments");
+            if !chat_tool_arguments_are_complete(arguments)
+                && delegate_mimo_function_validation(model, name, finish_reason, tool_context)
+            {
+                if let Some(arguments) = arguments.and_then(Value::as_str) {
+                    let call_id = tool_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("call_{index}"));
+                    let item_id =
+                        response_tool_call_item_id_from_chat_name(&call_id, name, tool_context);
+                    output.push(response_tool_call_item_from_chat_name(
+                        &item_id,
+                        "completed",
+                        &call_id,
+                        name,
+                        arguments,
+                        reasoning,
+                        tool_context,
+                    ));
+                    continue;
+                }
+            }
             if name.trim().is_empty() || !chat_tool_arguments_are_complete(arguments) {
                 dropped += 1;
                 // 只记结构信息，不记 arguments 内容（可能包含用户代码）。
@@ -2589,7 +2757,13 @@ fn chat_tool_calls_to_response_output_items(
         .get("function_call")
         .filter(|value| value.is_object())
     {
-        match chat_legacy_function_call_to_response_item(function_call, reasoning, tool_context) {
+        match chat_legacy_function_call_to_response_item(
+            function_call,
+            reasoning,
+            tool_context,
+            model,
+            finish_reason,
+        ) {
             Some(item) => output.push(item),
             None => dropped += 1,
         }
@@ -2633,6 +2807,8 @@ fn chat_legacy_function_call_to_response_item(
     function_call: &Value,
     reasoning: Option<&str>,
     tool_context: &CodexToolContext,
+    model: &str,
+    finish_reason: Option<&str>,
 ) -> Option<Value> {
     let call_id = function_call
         .get("id")
@@ -2648,6 +2824,22 @@ fn chat_legacy_function_call_to_response_item(
     // may generate function_call without providing a valid name)。
     // 纯空白名同样对应不到任何已发布工具，与空名同等对待。
     let arguments = function_call.get("arguments");
+    if !chat_tool_arguments_are_complete(arguments)
+        && delegate_mimo_function_validation(model, name, finish_reason, tool_context)
+    {
+        if let Some(arguments) = arguments.and_then(Value::as_str) {
+            let item_id = response_tool_call_item_id_from_chat_name(call_id, name, tool_context);
+            return Some(response_tool_call_item_from_chat_name(
+                &item_id,
+                "completed",
+                call_id,
+                name,
+                arguments,
+                reasoning,
+                tool_context,
+            ));
+        }
+    }
     if name.trim().is_empty() || !chat_tool_arguments_are_complete(arguments) {
         // 只记结构信息，不记 arguments 内容（可能包含用户代码）。
         let args_bytes = arguments
@@ -4043,6 +4235,43 @@ mod tests {
             result["messages"][0]["tool_calls"][0]["function"]["arguments"],
             r#"{"input":"*** Begin Patch\n*** End Patch"}"#
         );
+    }
+
+    #[test]
+    fn mimo_v26_compatibility_does_not_change_other_chat_models() {
+        for model in ["glm-5.3", "deepseek-v4-flash", "kimi-k3"] {
+            let result = responses_to_chat_completions(json!({
+                "model": model,
+                "tools": [{
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply a patch to files."
+                }],
+                "tool_choice": {"type": "custom", "name": "apply_patch"},
+                "parallel_tool_calls": true,
+                "input": "patch the file"
+            }))
+            .unwrap();
+
+            assert_eq!(
+                result["tool_choice"]["function"]["name"], "apply_patch",
+                "{model} tool choice changed"
+            );
+            assert_eq!(
+                result["parallel_tool_calls"], true,
+                "{model} parallel tools changed"
+            );
+            assert!(
+                result["tools"][0]["function"].get("strict").is_none(),
+                "{model} strict mode changed"
+            );
+            assert!(
+                result["tools"][0]["function"]["parameters"]
+                    .get("additionalProperties")
+                    .is_none(),
+                "{model} schema changed"
+            );
+        }
     }
 
     #[test]
@@ -6928,6 +7157,138 @@ mod tests {
             result["output"][0]["arguments"],
             r#"{"format":"png","prompt":"a robot in the rain"}"#
         );
+    }
+
+    #[test]
+    fn mimo_invalid_function_arguments_reach_client_validation() {
+        let invalid = "{\"session_id\":4041,\"chars\":\"\u{3}\"}";
+        assert!(serde_json::from_str::<Value>(invalid).is_err());
+        for model in ["mimo-v2.6-flash", "mimo-v2.6-pro", "glm-5.3"] {
+            let context = build_codex_tool_context_from_request(&json!({"tools": [
+                {"type":"function", "name":"write_stdin", "parameters":{"type":"object"}}
+            ]}));
+            for legacy in [false, true] {
+                let function = json!({"name":"write_stdin", "arguments":invalid});
+                let message = if legacy {
+                    json!({"function_call":function})
+                } else {
+                    json!({"tool_calls":[{"id":"call_bad", "function":function}]})
+                };
+                let result = chat_completion_to_response_with_context(
+                    json!({
+                        "model":model, "choices":[{"message":message,"finish_reason":"tool_calls"}]
+                    }),
+                    &context,
+                );
+                assert_eq!(result.is_ok(), model.starts_with("mimo-"));
+                if let Ok(result) = result {
+                    assert_eq!(result["output"][0]["type"], "function_call");
+                    assert_eq!(result["output"][0]["arguments"], invalid);
+                    assert!(result["output"][0].get("input").is_none());
+                }
+            }
+            assert!(!delegate_mimo_function_validation(
+                model,
+                "write_stdin",
+                None,
+                &context
+            ));
+            assert!(!delegate_mimo_function_validation(
+                model,
+                "write_stdin",
+                Some("length"),
+                &context
+            ));
+            assert!(!delegate_mimo_function_validation(
+                model,
+                "unknown",
+                Some("tool_calls"),
+                &context
+            ));
+        }
+    }
+
+    #[test]
+    fn mimo_raw_patch_round_trip_and_rejection_boundaries() {
+        let patch = "*** Begin Patch\r\n*** Add File: demo.txt\r\n+中文🚀 \\\"quoted\\\"\r\n*** End Patch\r\n";
+        for (model, kind, name, arguments, accepted) in [
+            ("mimo-v2.6-flash", "custom", "apply_patch", patch, true),
+            ("vendor/MIMO-V2.6-PRO", "custom", "apply_patch", patch, true),
+            ("glm-5.3", "custom", "apply_patch", patch, false),
+            ("deepseek-v4-flash", "custom", "apply_patch", patch, false),
+            ("kimi-k2.5", "custom", "apply_patch", patch, false),
+            ("mimo-v2.6-flash", "custom", "exec", patch, false),
+            (
+                "mimo-v2.6-flash",
+                "custom",
+                "apply_patch",
+                "*** Begin Patch\n+truncated",
+                false,
+            ),
+            (
+                "mimo-v2.6-flash",
+                "custom",
+                "apply_patch",
+                "{\"input\":\"*** Begin Patch\n*** End Patch",
+                false,
+            ),
+            (
+                "mimo-v2.6-flash",
+                "custom",
+                "apply_patch",
+                "*** Begin Patch\n*** End Patch\nextra",
+                false,
+            ),
+        ] {
+            let request = json!({"model": model, "tools": [{"type": kind, "name": name}]});
+            let context = build_codex_tool_context_from_request(&request);
+            for legacy in [false, true] {
+                let function = json!({"name": name, "arguments": arguments});
+                let message = if legacy {
+                    json!({"role": "assistant", "function_call": function})
+                } else {
+                    json!({"role": "assistant", "tool_calls": [{"id": "call_raw", "type": "function", "function": function}]})
+                };
+                let chat = json!({"model": model, "choices": [{"message": message, "finish_reason": "tool_calls"}]});
+                let result = chat_completion_to_response_with_context(chat, &context);
+                assert_eq!(
+                    result.is_ok(),
+                    accepted,
+                    "{model}/{kind}/{name}: {arguments}"
+                );
+                if let Ok(result) = result {
+                    assert_eq!(result["output"][0]["input"], patch);
+                    let replay = responses_to_chat_completions(json!({"model": model, "tools": request["tools"], "input": [
+                        result["output"][0], {"type": "custom_tool_call_output", "call_id": result["output"][0]["call_id"], "output": "ok"}
+                    ]})).unwrap();
+                    let replay_args = replay["messages"][0]["tool_calls"][0]["function"]
+                        ["arguments"]
+                        .as_str()
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::from_str::<Value>(replay_args).unwrap()["input"],
+                        patch
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mimo_custom_description_distinguishes_transport_from_raw_input() {
+        for model in ["mimo-v2.6-flash", "mimo-v2.6-pro", "glm-5.3"] {
+            let result = responses_to_chat_completions(json!({"model": model, "tools": [{
+                "type": "custom", "name": "apply_patch", "description": "FREEFORM: do not wrap the patch in JSON."
+            }]})).unwrap();
+            let description = result["tools"][0]["function"]["description"]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                description.starts_with("Chat transport:"),
+                model.starts_with("mimo-")
+            );
+            assert!(description.contains("FREEFORM: do not wrap the patch in JSON."));
+        }
     }
 
     #[test]
