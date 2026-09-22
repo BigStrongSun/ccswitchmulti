@@ -895,7 +895,7 @@ fn moonshot_schema_requires_an_object_root_even_when_codex_omits_root_type() {
 }
 
 #[test]
-fn moonshot_schema_rejects_unrepresentable_composition_instead_of_dropping_it() {
+fn moonshot_schema_drops_unrepresentable_composition_tool_and_sends_the_request() {
     let policy = CodexThirdPartyRequestPolicy::compile(&third_party_provider("openai_responses"))
         .expect("compile third-party request policy");
     let body = json!({
@@ -914,7 +914,7 @@ fn moonshot_schema_rejects_unrepresentable_composition_instead_of_dropping_it() 
         }]
     });
 
-    let error = policy
+    let prepared = policy
         .prepare(
             CodexRequestTransport::Responses,
             body,
@@ -923,28 +923,27 @@ fn moonshot_schema_rejects_unrepresentable_composition_instead_of_dropping_it() 
                 ..CodexRequestOptions::default()
             },
         )
-        .expect_err("MFJS cannot safely preserve allOf intersection semantics");
-    let message = error.to_string();
+        .expect("a broken tool must not poison the whole request");
 
-    assert!(message.contains("merge_guarded_settings"));
-    assert!(message.contains("$.tools[0].parameters"));
-    assert!(message.contains("allOf"));
+    assert_eq!(
+        prepared.body["tools"],
+        json!([]),
+        "the unrepresentable tool must be dropped instead of being sent"
+    );
 }
 
 #[test]
-fn moonshot_schema_rejects_semantic_constraints_and_tuple_items_instead_of_loosening() {
+fn moonshot_schema_drops_semantic_constraint_and_tuple_item_tools() {
     let policy = CodexThirdPartyRequestPolicy::compile(&third_party_provider("openai_responses"))
         .expect("compile third-party request policy");
-    for (tool_name, property_schema, expected_keyword) in [
+    for (tool_name, property_schema) in [
         (
             "pattern_guard",
             json!({"type": "string", "pattern": "^[a-z]+$"}),
-            "pattern",
         ),
         (
             "tuple_guard",
             json!({"type": "array", "items": [{"type": "string"}, {"type": "integer"}]}),
-            "tuple",
         ),
     ] {
         let body = json!({
@@ -960,7 +959,7 @@ fn moonshot_schema_rejects_semantic_constraints_and_tuple_items_instead_of_loose
             }]
         });
 
-        let error = policy
+        let prepared = policy
             .prepare(
                 CodexRequestTransport::Responses,
                 body,
@@ -969,10 +968,13 @@ fn moonshot_schema_rejects_semantic_constraints_and_tuple_items_instead_of_loose
                     ..CodexRequestOptions::default()
                 },
             )
-            .expect_err("unsupported MFJS constructs must fail closed");
-        let message = error.to_string();
-        assert!(message.contains(tool_name));
-        assert!(message.contains(expected_keyword), "{message}");
+            .expect("unsupported MFJS constructs must fail open by dropping the tool");
+
+        assert_eq!(
+            prepared.body["tools"],
+            json!([]),
+            "{tool_name}: the tool must not be sent in a loosened form"
+        );
     }
 }
 
@@ -1017,7 +1019,7 @@ fn moonshot_schema_drops_format_annotations_and_disables_strict_validation() {
 }
 
 #[test]
-fn moonshot_schema_rejects_overlapping_one_of_instead_of_changing_exclusive_semantics() {
+fn moonshot_schema_relaxes_overlapping_one_of_to_non_strict_any_of() {
     let policy = CodexThirdPartyRequestPolicy::compile(&third_party_provider("openai_responses"))
         .expect("compile third-party request policy");
     let body = json!({
@@ -1040,7 +1042,7 @@ fn moonshot_schema_rejects_overlapping_one_of_instead_of_changing_exclusive_sema
         }]
     });
 
-    let error = policy
+    let prepared = policy
         .prepare(
             CodexRequestTransport::Responses,
             body,
@@ -1049,9 +1051,27 @@ fn moonshot_schema_rejects_overlapping_one_of_instead_of_changing_exclusive_sema
                 ..CodexRequestOptions::default()
             },
         )
-        .expect_err("overlapping oneOf branches cannot become anyOf");
+        .expect("overlapping oneOf must fail open as a non-strict anyOf");
+    let tool = &prepared.body["tools"][0];
+    let value = &tool["parameters"]["properties"]["value"];
 
-    assert!(error.to_string().contains("oneOf"));
+    assert_eq!(
+        value["anyOf"]
+            .as_array()
+            .expect("oneOf must be widened to anyOf")
+            .len(),
+        2,
+        "both branches must survive the widening: {value}"
+    );
+    assert!(
+        value.get("oneOf").is_none(),
+        "oneOf must be replaced: {value}"
+    );
+    assert_eq!(
+        tool.get("strict").and_then(Value::as_bool),
+        Some(false),
+        "a widened union must mark the tool non-strict"
+    );
 }
 
 #[test]
@@ -1273,7 +1293,7 @@ fn moonshot_schema_merges_supported_ref_and_any_of_constraints_without_losing_th
 }
 
 #[test]
-fn moonshot_schema_compiles_recursive_local_refs_and_rejects_remote_refs() {
+fn moonshot_schema_compiles_recursive_local_refs_and_drops_remote_ref_tools() {
     let policy = CodexThirdPartyRequestPolicy::compile(&third_party_provider("openai_responses"))
         .expect("compile third-party request policy");
     let recursive = json!({
@@ -1342,7 +1362,7 @@ fn moonshot_schema_compiles_recursive_local_refs_and_rejects_remote_refs() {
             }
         }]
     });
-    let error = policy
+    let prepared = policy
         .prepare(
             CodexRequestTransport::Responses,
             remote,
@@ -1351,16 +1371,17 @@ fn moonshot_schema_compiles_recursive_local_refs_and_rejects_remote_refs() {
                 ..CodexRequestOptions::default()
             },
         )
-        .expect_err("remote refs must fail locally before reaching Moonshot");
-    let message = error.to_string();
+        .expect("a remote-ref tool must be dropped, not fail the whole request");
 
-    assert!(message.contains("remote_lookup"));
-    assert!(message.contains("$.tools[0].parameters.properties.query"));
-    assert!(message.contains("remote $ref"));
+    assert_eq!(
+        prepared.body["tools"],
+        json!([]),
+        "remote refs cannot reach Moonshot; the tool must be dropped"
+    );
 }
 
 #[test]
-fn provider_override_tools_are_validated_after_the_final_body_merge() {
+fn provider_override_tools_are_dropped_when_invalid_after_the_final_body_merge() {
     let mut provider = third_party_provider("openai_responses");
     provider
         .meta
@@ -1388,7 +1409,7 @@ fn provider_override_tools_are_validated_after_the_final_body_merge() {
     let policy = CodexThirdPartyRequestPolicy::compile(&provider)
         .expect("compile third-party request policy");
 
-    let error = policy
+    let body = policy
         .finalize_body(
             CodexRequestTransport::Responses,
             json!({"model": "visible-model", "input": "probe"}),
@@ -1397,14 +1418,22 @@ fn provider_override_tools_are_validated_after_the_final_body_merge() {
                 ..CodexRequestOptions::default()
             },
         )
-        .expect_err("Provider override tools must pass the same MFJS validation");
+        .expect("an invalid provider override tool must be dropped, not fail the request");
 
-    assert!(error.to_string().contains("save_provider"));
-    assert!(error.to_string().contains("pattern"));
+    assert_eq!(
+        body["additional_tools"][0]["namespace"],
+        json!("settings"),
+        "the namespace wrapper must survive the tool-level drop"
+    );
+    assert_eq!(
+        body["additional_tools"][0]["tools"],
+        json!([]),
+        "the invalid tool must not be sent in a loosened form"
+    );
 }
 
 #[test]
-fn moonshot_schema_rejects_required_property_forbidden_by_additional_properties() {
+fn moonshot_schema_drops_required_property_forbidden_by_additional_properties() {
     let provider = third_party_provider("openai_responses");
     let policy = CodexThirdPartyRequestPolicy::compile(&provider)
         .expect("compile third-party request policy");
@@ -1423,7 +1452,7 @@ fn moonshot_schema_rejects_required_property_forbidden_by_additional_properties(
         }]
     });
 
-    let error = policy
+    let body = policy
         .finalize_body(
             CodexRequestTransport::Responses,
             request,
@@ -1432,11 +1461,13 @@ fn moonshot_schema_rejects_required_property_forbidden_by_additional_properties(
                 ..CodexRequestOptions::default()
             },
         )
-        .expect_err("a required property forbidden by the source schema must fail closed");
+        .expect("a required property forbidden by the source schema must fail open");
 
-    assert!(error.to_string().contains("closed_required_property"));
-    assert!(error.to_string().contains("required"));
-    assert!(error.to_string().contains("additionalProperties"));
+    assert_eq!(
+        body["tools"],
+        json!([]),
+        "the unsatisfiable tool must be dropped instead of failing the request"
+    );
 }
 
 #[test]

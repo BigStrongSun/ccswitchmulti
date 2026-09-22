@@ -22,9 +22,25 @@ fn visit_tool_values(
 ) -> Result<(), ProxyError> {
     match value {
         Value::Array(items) => {
-            for (index, item) in items.iter_mut().enumerate() {
-                visit_tool_values(item, &format!("{path}[{index}]"), dialect)?;
+            // A single unrepresentable function tool must not poison the
+            // whole request: drop it with a structured event and keep the
+            // remaining tools. Non-function entries keep fail-closed
+            // semantics because dropping unknown tool kinds would hide real
+            // protocol errors.
+            let mut remaining = Vec::with_capacity(items.len());
+            let mut index = 0usize;
+            for mut item in items.drain(..) {
+                let is_function_tool = item.get("type").and_then(Value::as_str) == Some("function");
+                match visit_tool_values(&mut item, &format!("{path}[{index}]"), dialect) {
+                    Ok(()) => remaining.push(item),
+                    Err(error) if is_function_tool => {
+                        log::warn!("[MfjsToolSchema] dropped tool at {path}[{index}] ({error})");
+                    }
+                    Err(error) => return Err(error),
+                }
+                index += 1;
             }
+            *items = remaining;
         }
         Value::Object(object) => {
             if object.get("type").and_then(Value::as_str) == Some("function") {
@@ -341,11 +357,20 @@ impl<'a> MfjsCompiler<'a> {
             let branches = one_of
                 .as_array()
                 .ok_or_else(|| self.error(&format!("{path}.oneOf"), "oneOf must be an array"))?;
-            if branches.is_empty() || !one_of_branches_are_pairwise_disjoint(branches) {
+            if branches.is_empty() {
                 return Err(self.error(
                     &format!("{path}.oneOf"),
-                    "oneOf can only be represented as MFJS anyOf when every branch is provably disjoint",
+                    "empty oneOf cannot be represented safely",
                 ));
+            }
+            if !one_of_branches_are_pairwise_disjoint(branches) {
+                // MFJS has no oneOf. When the branches are not provably
+                // disjoint, widening oneOf to anyOf accepts a superset of
+                // the original constraint, so the tool goes non-strict
+                // instead of rejecting the whole request. Codex keeps
+                // shipping non-disjoint union tools (automation_update),
+                // so this must fail open.
+                self.relaxed = true;
             }
             source.insert("anyOf".to_string(), one_of);
         }
@@ -382,11 +407,20 @@ impl<'a> MfjsCompiler<'a> {
         }
 
         let any_of = source.remove("anyOf");
-        if let Some((keyword, _)) = source.iter().next() {
-            return Err(self.error(
-                &format!("{path}.{keyword}"),
-                &format!("{keyword} is not supported by Moonshot MFJS"),
-            ));
+        if !source.is_empty() {
+            // Unknown keys cannot be validated by MFJS. Dropping them
+            // widens the accepted argument set, so the tool goes
+            // non-strict instead of rejecting an otherwise usable Codex
+            // dynamic tool (e.g. the agents__followup_task `encrypted`
+            // marker).
+            self.relaxed = true;
+            for keyword in source.keys().cloned().collect::<Vec<_>>() {
+                log::warn!(
+                    "[MfjsToolSchema] tool `{}`: dropped unsupported key `{keyword}` at {path}",
+                    self.tool_name
+                );
+            }
+            source.clear();
         }
         let mut result = if let Some(any_of) = any_of {
             let children = any_of
@@ -1337,4 +1371,137 @@ fn expand_missing_type(mut constraints: Map<String, Value>) -> Value {
         }
     }
     json!({"anyOf": variants})
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn compile_tools(tools: Value) -> Result<Value, ProxyError> {
+        let mut body = json!({ "tools": tools });
+        compile_tool_schemas(&mut body, ToolSchemaDialect::MoonshotMfjs)?;
+        Ok(body)
+    }
+
+    fn function_tool(parameters: Value) -> Value {
+        json!({
+            "type": "function",
+            "name": "tool",
+            "parameters": parameters,
+        })
+    }
+
+    #[test]
+    fn non_disjoint_one_of_downgrades_to_any_of_relaxed() {
+        let body = compile_tools(json!([function_tool(json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "oneOf": [
+                        { "type": "string" },
+                        { "type": ["string", "number"] }
+                    ]
+                }
+            }
+        }))]))
+        .expect("non-disjoint oneOf must fail open");
+        let tool = &body["tools"][0];
+        let mode = &tool["parameters"]["properties"]["mode"];
+        assert!(
+            mode.get("anyOf").is_some(),
+            "oneOf must be widened to anyOf: {mode}"
+        );
+        assert_eq!(
+            tool.get("strict").and_then(Value::as_bool),
+            Some(false),
+            "widened oneOf must mark the tool non-strict"
+        );
+    }
+
+    #[test]
+    fn disjoint_one_of_stays_strict() {
+        let body = compile_tools(json!([function_tool(json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "oneOf": [
+                        { "type": "string" },
+                        { "type": "number" }
+                    ]
+                }
+            }
+        }))]))
+        .expect("disjoint oneOf must compile");
+        let tool = &body["tools"][0];
+        let mode = &tool["parameters"]["properties"]["mode"];
+        assert!(mode.get("anyOf").is_some());
+        assert!(
+            tool.get("strict").is_none(),
+            "disjoint oneOf must not relax the tool"
+        );
+    }
+
+    #[test]
+    fn empty_one_of_still_fails_closed() {
+        let result = compile_tools(json!([{
+            "type": "wrapper",
+            "nested": function_tool(json!({
+                "type": "object",
+                "properties": { "mode": { "oneOf": [] } }
+            })),
+        }]));
+        assert!(result.is_err(), "empty oneOf must stay fail closed");
+    }
+
+    #[test]
+    fn unknown_schema_keys_are_dropped_relaxed() {
+        let body = compile_tools(json!([function_tool(json!({
+            "type": "object",
+            "properties": {
+                "message": { "type": "object", "encrypted": true }
+            }
+        }))]))
+        .expect("unknown schema keys must fail open");
+        let tool = &body["tools"][0];
+        let message = &tool["parameters"]["properties"]["message"];
+        assert!(message.get("encrypted").is_none());
+        assert_eq!(message.get("type").and_then(Value::as_str), Some("object"));
+        assert_eq!(
+            tool.get("strict").and_then(Value::as_bool),
+            Some(false),
+            "dropped unknown key must mark the tool non-strict"
+        );
+    }
+
+    #[test]
+    fn broken_function_tool_is_dropped_and_siblings_survive() {
+        let body = compile_tools(json!([
+            function_tool(json!({ "type": "object", "allOf": [] })),
+            {
+                "type": "function",
+                "name": "fine",
+                "parameters": { "type": "object", "properties": {} },
+            },
+        ]))
+        .expect("a single broken tool must not fail the request");
+        let tools = body["tools"].as_array().expect("tools must stay an array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].get("name").and_then(Value::as_str), Some("fine"));
+    }
+
+    #[test]
+    fn non_function_tool_errors_still_fail_closed() {
+        let result = compile_tools(json!([{
+            "type": "wrapper",
+            "nested": function_tool(json!({ "type": "object", "allOf": [] })),
+        }]));
+        assert!(result.is_err(), "unknown tool kinds must stay fail closed");
+    }
+
+    #[test]
+    fn openai_dialect_passes_schemas_through() {
+        let mut body = json!({ "tools": [function_tool(json!({ "oneOf": [] }))] });
+        compile_tool_schemas(&mut body, ToolSchemaDialect::OpenAi)
+            .expect("OpenAi dialect must not compile");
+        assert!(body["tools"][0]["parameters"]["oneOf"].is_array());
+    }
 }
