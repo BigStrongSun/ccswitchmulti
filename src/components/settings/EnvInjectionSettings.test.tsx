@@ -133,4 +133,41 @@ describe("EnvInjectionSettings", () => {
     expect(screen.getByText("settings.json denied")).toBeInTheDocument();
     expect(screen.getByText("config.toml denied")).toBeInTheDocument();
   });
+
+  it("renders the backend empty report wire shape without crashing", async () => {
+    // Exact wire shape of the backend payload for an enabled configuration
+    // with no variables: all key arrays present and empty. Parsing JSON
+    // keeps the test faithful to how Tauri invoke() delivers the report.
+    const wire = JSON.stringify({
+      state: "disabled",
+      claude: {
+        state: "disabled",
+        managedKeys: [],
+        addedKeys: [],
+        updatedKeys: [],
+        removedKeys: [],
+        relinquishedKeys: [],
+        conflictedKeys: [],
+      },
+      codex: {
+        state: "disabled",
+        managedKeys: [],
+        addedKeys: [],
+        updatedKeys: [],
+        removedKeys: [],
+        relinquishedKeys: [],
+        conflictedKeys: [],
+      },
+      codexIncludeAllowlist: false,
+    });
+    vi.mocked(settingsApi.inspectEnvInjectionStatus).mockResolvedValue(
+      JSON.parse(wire) as EnvInjectionSyncReport,
+    );
+
+    render(<EnvInjectionSettings value={value} onChange={vi.fn()} />);
+
+    expect(
+      await screen.findByText("尚未启用"),
+    ).toBeInTheDocument();
+  });
 });
