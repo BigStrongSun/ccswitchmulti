@@ -69,6 +69,7 @@ futures = "0.3"
 async-stream = "0.3"
 bytes = "1.5"
 axum = { version = "0.8", features = ["ws"] }
+multer = "3"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors"] }
 hyper = { version = "1.0", features = ["full"] }
