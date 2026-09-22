@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use crate::app_config::AppType;
 use crate::codex_subagent_profiles::{
     compile_subagent_v2_profiles, deepseek_role_identity_for_model, deepseek_role_models_match,
-    initialize_legacy_subagent_v2, normalize_profile_key,
-    parse_persisted_subagent_v2, parse_persisted_subagent_v2_tolerant, render_generated_role_toml,
+    initialize_legacy_subagent_v2, normalize_profile_key, parse_persisted_subagent_v2,
+    parse_persisted_subagent_v2_tolerant, render_generated_role_toml,
     CatalogModel as SubagentCatalogModel, CodexSubagentProfileConfig,
     CompileError as SubagentCompileError, CompileOutput as SubagentCompileOutput,
     CompileRequest as SubagentCompileRequest, DiagnosticReasonCode as SubagentDiagnosticReasonCode,
@@ -2864,12 +2864,67 @@ fn set_codex_model_catalog_json_field(
     Ok(doc.to_string())
 }
 
+/// Codex Desktop 严格配置诊断生效的最小版本。
+///
+/// openai/codex PR #44691（2026-09-11 合入）让 Desktop 捆绑的 runtime 对未识别的
+/// 配置键启用严格诊断；`[model_providers.<id>].models` 是 CCSwitch 私有内联投影，
+/// 正是触发 "unrecognized configuration settings" 警告的键之一。Desktop 按每日一
+/// 列车发布，26.912（09-12 构建）是首个必然捆绑包含该 PR 的 runtime 的车，因此以
+/// Desktop 包版本作为门控信号。
+const CODEX_DESKTOP_STRICT_CONFIG_MIN_VERSION: [u32; 3] = [26, 912, 0];
+
+/// 进程内缓存探测到的 Desktop 版本，避免每次配置写入都跑 PowerShell。
+static CODEX_DESKTOP_VERSION_CACHE: OnceCell<Option<Vec<u32>>> = OnceCell::new();
+
+/// 给定版本是否会触发 "unrecognized configuration settings" 警告。
+///
+/// 只信 26.MDD 包版本体系（首组件为 26），避免把其他版本体系误读成 Desktop 版本。
+fn codex_desktop_warns_on_unrecognized_settings(version: &[u32]) -> bool {
+    version.first() == Some(&26)
+        && desktop_version_is_at_least(version, CODEX_DESKTOP_STRICT_CONFIG_MIN_VERSION)
+}
+
+/// 版本逐位比较，缺位按 0 补齐。
+fn desktop_version_is_at_least(version: &[u32], minimum: [u32; 3]) -> bool {
+    (0..minimum.len()).all(|index| version.get(index).copied().unwrap_or(0) >= minimum[index])
+}
+
+/// 已知 Desktop 版本下，是否应写入 provider 内联 `models` 投影。
+///
+/// `None` 表示未探测到版本，按"版本未知"保留旧行为。
+fn projection_write_inline_provider_models_for(version: Option<&[u32]>) -> bool {
+    !version.is_some_and(codex_desktop_warns_on_unrecognized_settings)
+}
+
+/// 返回已安装 Codex Desktop 版本；`None` 表示探测失败。
+///
+/// 测试构建不跑真实探测（结果依赖机器环境，会让投影测试变成机器相关）：
+/// 直接返回 `None`，全部测试走"版本未知"的旧行为。
+fn codex_desktop_version_for_projection() -> Option<Vec<u32>> {
+    #[cfg(test)]
+    {
+        return None;
+    }
+    CODEX_DESKTOP_VERSION_CACHE
+        .get_or_init(crate::codex_desktop::installed_codex_desktop_version)
+        .clone()
+}
+
+/// 是否应写入 provider 内联 `models` 投影。
+///
+/// 严格诊断生效的 Desktop 只写顶层 `model_catalog_json` 并清理内联模型；旧
+/// Desktop 或探测失败时保留旧行为，避免回归。
+fn projection_write_inline_provider_models() -> bool {
+    projection_write_inline_provider_models_for(codex_desktop_version_for_projection().as_deref())
+}
+
 /// 同步 Codex Desktop 需要的 catalog 指针和 provider 内联模型。
 fn set_codex_model_catalog_projection_fields(
     config_text: &str,
     catalog_path: Option<&Path>,
     specs: Option<&[CodexCatalogModelSpec]>,
     catalog: Option<&Value>,
+    write_inline_provider_models: bool,
 ) -> Result<String, AppError> {
     let mut doc = config_text
         .parse::<DocumentMut>()
@@ -2878,7 +2933,13 @@ fn set_codex_model_catalog_projection_fields(
     match (catalog_path, specs) {
         (Some(path), Some(specs)) => {
             doc["model_catalog_json"] = toml_edit::value(path.to_string_lossy().as_ref());
-            set_active_codex_provider_models(&mut doc, specs, catalog);
+            if write_inline_provider_models {
+                set_active_codex_provider_models(&mut doc, specs, catalog);
+            } else {
+                // 新版 Desktop 的严格诊断会把内联 `models` 当成未识别键：不写入，
+                // 并清理旧版本留下的残留，让两条入口都不留半套。
+                remove_active_codex_provider_models(&mut doc);
+            }
             ensure_codex_agents_defaults(&mut doc);
             ensure_codex_multi_agent_reserved_schema_compatible(
                 &mut doc,
@@ -3838,12 +3899,12 @@ fn compile_configured_codex_subagent_roles(
                 );
             }
             if let Some(classification) = classification.clone() {
-                route_classifications.insert(spec.model.to_ascii_lowercase(), classification.clone());
+                route_classifications
+                    .insert(spec.model.to_ascii_lowercase(), classification.clone());
                 // 别名键：profile 用旧 slug（deepseek-v4-flash）时也能查到
                 // catalog 新 slug（deepseek-flash）的路由分类。
                 if let Some(role_identity) = deepseek_role_identity_for_model(&spec.model) {
-                    route_classifications
-                        .insert(role_identity.to_string(), classification);
+                    route_classifications.insert(role_identity.to_string(), classification);
                 }
             }
             SubagentCatalogModel {
@@ -4130,7 +4191,10 @@ fn catalog_profile_draft(
         Some(canonical) => canonical,
         None => identity.as_str(),
     };
-    if let Some(mut preset) = defaults.pointer(&format!("/profiles/{preset_key}")).cloned() {
+    if let Some(mut preset) = defaults
+        .pointer(&format!("/profiles/{preset_key}"))
+        .cloned()
+    {
         preset["model"] = Value::String(model.to_string());
         preset["enabled"] = Value::Bool(enabled_preferred);
         if !enabled_preferred {
@@ -6265,6 +6329,10 @@ fn prepare_codex_config_text_with_model_catalog_impl(
     let catalog_path = get_codex_model_catalog_path();
     let specs = codex_catalog_model_specs(settings, config_text);
 
+    // 是否写入 provider 内联模型取决于已安装 Desktop 版本；严格诊断生效的
+    // Desktop 只保留 catalog 指针。
+    let write_inline_provider_models = projection_write_inline_provider_models();
+
     if !specs.is_empty() {
         let generated_catalog = codex_model_catalog_from_settings(settings, config_text, profile)?
             .unwrap_or_else(|| json!({ "models": [] }));
@@ -6284,6 +6352,7 @@ fn prepare_codex_config_text_with_model_catalog_impl(
             Some(&catalog_path),
             Some(&specs),
             Some(&catalog),
+            write_inline_provider_models,
         )?;
         let mut doc = config_text
             .parse::<DocumentMut>()
@@ -6327,7 +6396,13 @@ fn prepare_codex_config_text_with_model_catalog_impl(
     } else {
         restore_codex_models_cache_if_cc_switch_owned()?;
         prune_stale_codex_managed_agent_files(&get_codex_agents_dir(), &HashSet::new())?;
-        let config_text = set_codex_model_catalog_projection_fields(config_text, None, None, None)?;
+        let config_text = set_codex_model_catalog_projection_fields(
+            config_text,
+            None,
+            None,
+            None,
+            write_inline_provider_models,
+        )?;
         let config_text = set_codex_native_web_search_field(
             &config_text,
             profile == CodexCatalogToolProfile::Anthropic,
@@ -8439,7 +8514,9 @@ wire_api = "responses"
         assert!(!codex_catalog_model_name_is_text_only(
             "deepseek-v4-flash-vision-exp"
         ));
-        assert!(!codex_catalog_model_name_is_text_only("deepseek-flash-vision"));
+        assert!(!codex_catalog_model_name_is_text_only(
+            "deepseek-flash-vision"
+        ));
     }
 
     #[test]
@@ -8448,7 +8525,10 @@ wire_api = "responses"
             codex_agent_role_name_for_model("deepseek-flash"),
             "deepseek-flash"
         );
-        assert_eq!(codex_agent_role_name_for_model("deepseek-pro"), "deepseek-pro");
+        assert_eq!(
+            codex_agent_role_name_for_model("deepseek-pro"),
+            "deepseek-pro"
+        );
         assert!(codex_agent_description_for_model("deepseek-flash")
             .contains("DeepSeek V4 Flash worker"));
         assert_eq!(
@@ -8467,20 +8547,20 @@ wire_api = "responses"
 
     #[test]
     fn catalog_profile_draft_uses_flash_preset_for_official_alias() {
-        let draft = catalog_profile_draft("deepseek-flash", true, None)
-            .expect("flash alias draft");
+        let draft = catalog_profile_draft("deepseek-flash", true, None).expect("flash alias draft");
         assert_eq!(draft["model"], "deepseek-flash");
         assert_eq!(draft["enabled"], true);
         let strengths = draft["questionnaire"]["taskStrengths"]
             .as_array()
             .expect("taskStrengths");
-        assert!(strengths.iter().any(|value| value == "long_context_reading"));
+        assert!(strengths
+            .iter()
+            .any(|value| value == "long_context_reading"));
     }
 
     #[test]
     fn catalog_profile_draft_keeps_generic_stub_for_unknown_models() {
-        let draft = catalog_profile_draft("some-model", false, None)
-            .expect("unknown model draft");
+        let draft = catalog_profile_draft("some-model", false, None).expect("unknown model draft");
         assert_eq!(draft["model"], "some-model");
         assert_eq!(draft["enabled"], false);
         assert_eq!(draft["questionnaire"]["preference"], "eligible");
@@ -14533,6 +14613,7 @@ base_url = "http://127.0.0.1:15721/v1"
             Some(Path::new("catalog")),
             Some(&specs),
             None,
+            true,
         )
         .expect("project catalog fields");
         let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
@@ -14548,6 +14629,116 @@ base_url = "http://127.0.0.1:15721/v1"
         assert_eq!(
             agents.get("max_depth").and_then(|v| v.as_integer()),
             Some(1)
+        );
+    }
+
+    /// 严格诊断版本门控：只有 26.MDD 包版本体系且 >= 26.912.0 才视为触发警告。
+    #[test]
+    fn strict_config_version_gate_matrix() {
+        let versions = [
+            Vec::<u32>::new(),
+            vec![123],
+            vec![25, 999, 999, 9],
+            vec![26, 911, 999, 9],
+        ];
+        for version in versions {
+            assert!(
+                !codex_desktop_warns_on_unrecognized_settings(&version),
+                "{version:?} 不应触发严格诊断警告"
+            );
+        }
+        let versions = [
+            vec![26, 912, 0, 0],
+            vec![26, 915, 4065, 0],
+            vec![26, 999, 1, 0],
+        ];
+        for version in versions {
+            assert!(
+                codex_desktop_warns_on_unrecognized_settings(&version),
+                "{version:?} 应触发严格诊断警告"
+            );
+        }
+    }
+
+    /// 投影门控跟随 Desktop 版本：新版停写，旧版与未知版本保留旧行为。
+    #[test]
+    fn projection_gate_follows_desktop_version_detection() {
+        assert!(
+            !projection_write_inline_provider_models_for(Some(&[26u32, 915, 4065, 0])),
+            "新版 Desktop 应停写内联模型"
+        );
+        assert!(
+            projection_write_inline_provider_models_for(Some(&[26, 911, 999, 9])),
+            "旧版 Desktop 应保留内联模型写入"
+        );
+        assert!(
+            projection_write_inline_provider_models_for(Some(&[25, 999, 999, 9])),
+            "非 26 版本体系应按未知处理并保留旧行为"
+        );
+        assert!(
+            projection_write_inline_provider_models_for(Some(&[123u32])),
+            "非标准版本应按未知处理并保留旧行为"
+        );
+        assert!(
+            projection_write_inline_provider_models_for(None),
+            "探测失败应按版本未知处理并保留旧行为"
+        );
+    }
+
+    /// 严格诊断生效的 Desktop：不写内联模型，并清理旧版本残留的内联模型；
+    /// catalog 指针与 provider 其他字段不受影响。
+    #[test]
+    fn strict_config_desktop_stops_and_cleans_inline_provider_models() {
+        let specs = vec![CodexCatalogModelSpec {
+            model: "gpt-5.6-sol".to_string(),
+            upstream_model: None,
+            display_name: "gpt-5.6-sol".to_string(),
+            context_window: 272_000,
+            text_only: false,
+            is_default: true,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+            reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
+            sort_index: None,
+        }];
+        let config = r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+models = [
+    { model = "stale-model", visibility = "list" }
+]
+"#;
+
+        let projected = set_codex_model_catalog_projection_fields(
+            config,
+            Some(Path::new("catalog")),
+            Some(&specs),
+            None,
+            false,
+        )
+        .expect("project catalog fields");
+        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
+        let provider = parsed
+            .get("model_providers")
+            .and_then(|providers| providers.get("codex_model_router_v2"))
+            .expect("custom provider");
+        assert!(
+            provider.get("models").is_none(),
+            "严格诊断模式不应留下内联模型：\n{projected}"
+        );
+        assert_eq!(
+            provider.get("base_url").and_then(|value| value.as_str()),
+            Some("http://127.0.0.1:15721/v1")
+        );
+        assert_eq!(
+            parsed
+                .get("model_catalog_json")
+                .and_then(|value| value.as_str()),
+            Some("catalog")
         );
     }
 
@@ -14595,6 +14786,7 @@ base_url = "http://127.0.0.1:15721/v1"
             Some(Path::new("catalog")),
             Some(&specs),
             Some(&catalog),
+            true,
         )
         .expect("project catalog fields");
         let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
@@ -14690,6 +14882,7 @@ base_url = "http://127.0.0.1:15721/v1"
             Some(Path::new("catalog")),
             Some(&specs),
             Some(&catalog),
+            true,
         )
         .expect("project catalog fields");
         let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
@@ -14753,6 +14946,7 @@ base_url = "http://127.0.0.1:15721/v1"
             Some(Path::new("catalog")),
             Some(&specs),
             None,
+            true,
         )
         .expect("project catalog fields");
         let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
@@ -15980,6 +16174,7 @@ max_depth = 2
             Some(&catalog_path),
             Some(&specs),
             None,
+            true,
         )
         .expect("project catalog fields");
         let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
