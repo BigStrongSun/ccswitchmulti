@@ -1323,6 +1323,11 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             use crate::openclaw_config;
             use crate::openclaw_config::OpenClawProviderConfig;
 
+            // 旧版/受污染行不能走通用 raw JSON fallback 把 TE 私有元数据写给 Agent。
+            if provider.has_token_exchange_descriptor() {
+                return Err(AppError::InvalidInput("te_descriptor_migration_required".into()));
+            }
+
             // Convert settings_config to OpenClawProviderConfig
             let openclaw_config_result =
                 serde_json::from_value::<OpenClawProviderConfig>(provider.settings_config.clone());
@@ -2454,6 +2459,20 @@ mod tests {
     use serde_json::json;
     use serial_test::serial;
     use std::{env, fs, sync::Arc};
+
+    #[test]
+    fn legacy_te_descriptor_is_rejected_before_generic_openclaw_live_write() {
+        let provider = Provider::with_id(
+            "te-legacy".into(), "TE Legacy".into(),
+            json!({"api":"openai-completions", "baseUrl":"http://127.0.0.1:9814/v1",
+                "apiKey":"te-provider-placeholder-not-a-secret", "models":[{"id":"qwen3.8"}],
+                "teProvider":{"taskId":"secret-task"}}),
+            None,
+        );
+        let error = write_live_snapshot(&AppType::OpenClaw, &provider)
+            .expect_err("private legacy descriptor must not reach generic Agent config");
+        assert!(error.to_string().contains("te_descriptor_migration_required"));
+    }
     use tempfile::TempDir;
 
     fn write_openclaw_live_config(config: Value) {
@@ -2524,6 +2543,13 @@ mod tests {
             "providerProbeUrl": "https://attacker.example/provider-health"
         })));
         let state = AppState::new(Arc::new(crate::database::Database::memory().unwrap()));
+        // live 文件不是身份来源；必须已经在可信注册表有相同静态描述符。
+        state.db.upsert_te_provider_descriptor(&json!({
+            "providerType":"token-exchange", "providerId":"te-live",
+            "pluginId":"token-exchange", "protocolVersion":"te-provider.v1",
+            "sidecarUrl":"http://127.0.0.1:9814", "healthPath":"/healthz",
+            "expectedPartnerAic":"partner-aic", "models":[{"id":"qwen3.8","name":"Qwen 3.8"}]
+        })).expect("trusted descriptor");
 
         let imported = import_openclaw_providers_from_live(&state).expect("import should finish");
 
@@ -2540,14 +2566,12 @@ mod tests {
                 .and_then(|meta| meta.provider_type.as_deref()),
             Some("token_exchange")
         );
-        assert_eq!(
-            stored.settings_config["teProvider"]["sidecarUrl"],
-            json!("http://127.0.0.1:9814")
-        );
-        assert!(stored.settings_config["teProvider"]
-            .get("providerProbeUrl")
-            .is_none());
-        assert!(stored.settings_config["teProvider"].get("taskId").is_none());
+        assert!(stored.settings_config.get("teProvider").is_none());
+        let descriptor = state.db.get_te_provider_descriptor("te-live")
+            .expect("registry lookup").expect("registered descriptor");
+        assert_eq!(descriptor["sidecarUrl"], "http://127.0.0.1:9814");
+        assert!(descriptor.get("providerProbeUrl").is_none());
+        assert!(descriptor.get("taskId").is_none());
     }
 
     #[test]

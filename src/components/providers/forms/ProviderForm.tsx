@@ -108,7 +108,11 @@ import {
   buildOpenClawTeProviderConfig,
   canonicalizeTeProviderSettings,
   hasTokenExchangeDescriptor,
+  TE_PROVIDER_DEFAULT_TIMEOUT_SECONDS,
+  TE_PROVIDER_DEFAULT_KEEP_ALIVE_SECONDS,
+  toTeProviderDescriptor,
 } from "@/utils/teProvider";
+import type { TeStaticProviderDescriptor } from "@/lib/api/providers";
 import {
   ProviderAdvancedConfig,
   type PricingModelSourceOption,
@@ -1205,6 +1209,41 @@ function ProviderFormFull({
     onSettingsConfigChange: (config) => form.setValue("settingsConfig", config),
     getSettingsConfig: () => form.getValues("settingsConfig"),
   });
+  const loadedTeDescriptorId = useRef<string | null>(null);
+  const applyTeDescriptorRef = useRef(
+    openclawForm.handleOpenclawTeProviderChange,
+  );
+  applyTeDescriptorRef.current = openclawForm.handleOpenclawTeProviderChange;
+  const [teDescriptorReadyId, setTeDescriptorReadyId] = useState<string | null>(
+    null,
+  );
+  useEffect(() => {
+    if (appId !== "openclaw" || !providerId || !isTokenExchangeProvider) return;
+    if (loadedTeDescriptorId.current === providerId) return;
+    loadedTeDescriptorId.current = providerId;
+    let active = true;
+    // 旧版仍可从原 settingsConfig 读取；新版只从隔离 registry 恢复编辑草稿。
+    void providersApi
+      .getTeProviderDescriptor(providerId)
+      .then((descriptor) => {
+        if (active && descriptor) {
+          applyTeDescriptorRef.current({
+            sidecarUrl: descriptor.sidecarUrl,
+            expectedPartnerAic: descriptor.expectedPartnerAic,
+            protocolVersion: descriptor.protocolVersion,
+            bindingDelivery: "gateway-plugin",
+            models: descriptor.models,
+          });
+          setTeDescriptorReadyId(providerId);
+        }
+      })
+      .catch(() => {
+        /* 离线/旧库继续使用已有本地表单，保存时严格验证。 */
+      });
+    return () => {
+      active = false;
+    };
+  }, [appId, providerId, isTokenExchangeProvider]);
   const {
     data: openclawLiveProviderIds = [],
     isLoading: isOpenclawLiveProviderIdsLoading,
@@ -1679,6 +1718,17 @@ function ProviderFormFull({
     let settingsConfig: string;
 
     if (isTokenExchangeProvider) {
+      // 新格式只有公开投影；未从私有注册表读回身份时禁止把默认草稿当成原值。
+      if (
+        providerId &&
+        !hasTokenExchangeDescriptor(initialData?.settingsConfig) &&
+        teDescriptorReadyId !== providerId
+      ) {
+        toast.error(
+          "TE 静态描述符尚未从私有注册表成功读取，未保存。请重新打开编辑窗口重试。",
+        );
+        return;
+      }
       const canonical = canonicalizeTeProviderSettings(
         openclawForm.openclawTeProvider,
       );
@@ -1688,6 +1738,19 @@ function ProviderFormFull({
           {
             duration: 5000,
           },
+        );
+        return;
+      }
+      if (
+        canonical.bindingDelivery !== "gateway-plugin" ||
+        canonical.providerTimeoutSeconds !==
+          TE_PROVIDER_DEFAULT_TIMEOUT_SECONDS ||
+        canonical.keepAliveIntervalSeconds !==
+          TE_PROVIDER_DEFAULT_KEEP_ALIVE_SECONDS
+      ) {
+        toast.error(
+          "当前仅支持 Gateway 插件和默认超时/保活值（300 秒 / 30 秒）；自定义运行设置尚未持久化，未保存。",
+          { duration: 6000 },
         );
         return;
       }
@@ -2083,6 +2146,12 @@ function ProviderFormFull({
 
     payload.meta = nextMeta;
 
+    if (isTokenExchangeProvider) {
+      payload.teDescriptor = toTeProviderDescriptor(
+        (payload.providerKey || providerId || "").trim(),
+        openclawForm.openclawTeProvider!,
+      );
+    }
     await onSubmit(payload);
     if (isCanonicalCodexOfficial) {
       const migrationStatus = await finalizeCodexOfficialAuthOwnershipAfterSave(
@@ -3210,6 +3279,8 @@ function ProviderFormFull({
 }
 
 export type ProviderFormValues = ProviderFormData & {
+  /** Static TE identity travels beside, never inside, the public Provider projection. */
+  teDescriptor?: TeStaticProviderDescriptor;
   presetId?: string;
   presetCategory?: ProviderCategory;
   isPartner?: boolean;

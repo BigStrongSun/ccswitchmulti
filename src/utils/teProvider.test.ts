@@ -9,6 +9,7 @@ import {
   TE_PROVIDER_MAX_KEEP_ALIVE_SECONDS,
   TE_PROVIDER_MAX_TIMEOUT_SECONDS,
   toOpenClawModel,
+  toTeProviderDescriptor,
   validateTeProviderSettings,
 } from "@/utils/teProvider";
 
@@ -161,8 +162,7 @@ describe("buildOpenClawTeProviderConfig", () => {
       settings({ sidecarUrl: "http://127.0.0.1:9814/" }),
     );
     expect(config.baseUrl).toBe("http://127.0.0.1:9814/v1");
-    expect(config.teProvider?.providerTimeoutSeconds).toBe(300);
-    expect(config.teProvider?.keepAliveIntervalSeconds).toBe(30);
+    expect(config).not.toHaveProperty("teProvider");
   });
 
   it("emits only the canonical static descriptor and never copies runtime fields", () => {
@@ -178,18 +178,8 @@ describe("buildOpenClawTeProviderConfig", () => {
       /invalid TE provider settings/,
     );
     expect(
-      Object.keys(
-        buildOpenClawTeProviderConfig(settings()).teProvider ?? {},
-      ).sort(),
-    ).toEqual([
-      "bindingDelivery",
-      "expectedPartnerAic",
-      "keepAliveIntervalSeconds",
-      "models",
-      "protocolVersion",
-      "providerTimeoutSeconds",
-      "sidecarUrl",
-    ]);
+      Object.keys(buildOpenClawTeProviderConfig(settings())).sort(),
+    ).toEqual(["api", "apiKey", "baseUrl", "models"]);
   });
 
   it("refuses to build a config from invalid settings", () => {
@@ -198,6 +188,44 @@ describe("buildOpenClawTeProviderConfig", () => {
         settings({ sidecarUrl: "http://example.com" }),
       ),
     ).toThrow(/invalid TE provider settings/);
+  });
+});
+
+describe("toTeProviderDescriptor", () => {
+  it("projects exactly the static SDK registry contract", () => {
+    expect(toTeProviderDescriptor("te-provider", settings())).toEqual({
+      providerType: "token-exchange",
+      providerId: "te-provider",
+      pluginId: "token-exchange",
+      protocolVersion: "te-provider.v1",
+      sidecarUrl: "http://127.0.0.1:9814",
+      healthPath: "/healthz",
+      expectedPartnerAic: settings().expectedPartnerAic,
+      models: [{ id: "qwen3.8", name: "Qwen 3.8" }],
+    });
+  });
+  it("preserves explicitly supplied model capabilities without inferring absent metadata", () => {
+    const models = [
+      {
+        id: "vision",
+        name: "Vision",
+        inputModalities: ["text", "image"],
+        contextWindowTokens: 262144,
+        supportsReasoning: true,
+        reasoningEfforts: ["high"],
+      },
+    ];
+    expect(
+      toTeProviderDescriptor("te-provider", settings({ models })).models,
+    ).toEqual(models);
+  });
+  it("keeps partial SDK cost private and does not invent OpenClaw prices", () => {
+    const model = { id: "m", name: "M", cost: { cacheRead: 0.01 } };
+    expect(
+      toTeProviderDescriptor("te-provider", settings({ models: [model] }))
+        .models[0].cost,
+    ).toEqual({ cacheRead: 0.01 });
+    expect(toOpenClawModel(model).cost).toBeUndefined();
   });
 });
 

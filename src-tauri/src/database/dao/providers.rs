@@ -119,7 +119,7 @@ fn ensure_official_seed_in_transaction(
     Ok(())
 }
 
-fn save_provider_in_transaction(
+pub(super) fn save_provider_in_transaction(
     tx: &Transaction<'_>,
     app_type: &str,
     provider: &Provider,
@@ -673,6 +673,10 @@ impl Database {
             super::protocol_compatibility::delete_protocol_state_for_provider_in_transaction(
                 &tx, id,
             )?;
+        } else if app_type == "openclaw" {
+            // TE descriptor 随明确删除其长期 Provider 而撤销；普通 Provider 不受影响。
+            tx.execute("DELETE FROM te_provider_descriptors WHERE provider_id = ?1", [id])
+                .map_err(|error| AppError::Database(error.to_string()))?;
         }
         tx.commit()
             .map_err(|error| AppError::Database(error.to_string()))

@@ -557,4 +557,44 @@ context_window = 500000
     expect(submitted.icon).toBeUndefined();
     expect(submitted.iconColor).toBeUndefined();
   });
+
+  it("passes the TE descriptor separately from public OpenClaw settings", async () => {
+    const handleSubmit = vi.fn().mockResolvedValue(undefined);
+    const descriptor = {
+      providerType: "token-exchange" as const,
+      providerId: "te-new",
+      pluginId: "token-exchange" as const,
+      protocolVersion: "te-provider.v1" as const,
+      sidecarUrl: "http://127.0.0.1:9814",
+      healthPath: "/healthz" as const,
+      expectedPartnerAic: "partner-aic",
+      models: [{ id: "qwen3.8", name: "Qwen 3.8" }],
+    };
+    mockFormValues = {
+      name: "TE New",
+      websiteUrl: "",
+      settingsConfig: JSON.stringify({
+        api: "openai-completions",
+        baseUrl: "http://127.0.0.1:9814/v1",
+        apiKey: "te-provider-placeholder-not-a-secret",
+        models: descriptor.models,
+      }),
+      meta: { providerType: "token_exchange" },
+      teDescriptor: descriptor,
+    };
+    render(
+      <AddProviderDialog
+        open
+        onOpenChange={vi.fn()}
+        appId="openclaw"
+        onSubmit={handleSubmit}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "common.add" }));
+    await waitFor(() => expect(handleSubmit).toHaveBeenCalledTimes(1));
+    expect(handleSubmit.mock.calls[0][0].teDescriptor).toEqual(descriptor);
+    expect(handleSubmit.mock.calls[0][0].settingsConfig).not.toHaveProperty(
+      "teProvider",
+    );
+  });
 });

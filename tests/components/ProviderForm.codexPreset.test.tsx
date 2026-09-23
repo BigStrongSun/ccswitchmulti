@@ -6,6 +6,7 @@ import { ProviderForm } from "@/components/providers/forms/ProviderForm";
 
 const codexCandidateApiMocks = vi.hoisted(() => ({
   validateProviderCandidate: vi.fn(),
+  getTeProviderDescriptor: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock("@/lib/query", () => ({
@@ -46,6 +47,11 @@ vi.mock("@/lib/api", async () => {
       validateProviderCandidate: (...args: unknown[]) =>
         codexCandidateApiMocks.validateProviderCandidate(...args),
     },
+    providersApi: {
+      ...actual.providersApi,
+      getTeProviderDescriptor: (...args: unknown[]) =>
+        codexCandidateApiMocks.getTeProviderDescriptor(...args),
+    },
   };
 });
 
@@ -73,12 +79,17 @@ vi.mock("@/components/providers/forms/CodexConfigEditor", () => ({
 vi.mock("@/components/providers/forms/OpenClawFormFields", () => ({
   OpenClawFormFields: ({
     isTokenExchangeProvider,
+    teProvider,
   }: {
     isTokenExchangeProvider?: boolean;
+    teProvider?: { expectedPartnerAic?: string };
   }) => (
     <section data-testid="openclaw-provider-fields">
       <span data-testid="openclaw-provider-type">
         {isTokenExchangeProvider ? "token_exchange" : "ordinary"}
+      </span>
+      <span data-testid="te-provider-draft-aic">
+        {teProvider?.expectedPartnerAic}
       </span>
     </section>
   ),
@@ -223,7 +234,7 @@ const legacyTeProviderSettings = {
     sidecarUrl: "http://127.0.0.1:9814",
     expectedPartnerAic: "partner-aic",
     protocolVersion: "te-provider.v1",
-    bindingDelivery: "config-headers",
+    bindingDelivery: "gateway-plugin",
     models: [{ id: "qwen3.8", name: "Qwen 3.8" }],
   },
 };
@@ -808,6 +819,86 @@ describe("ProviderForm Codex preset selection", () => {
 });
 
 describe("ProviderForm legacy Token Exchange migration", () => {
+  it("loads modern TE edit data from the private registry and submits only the public projection", async () => {
+    codexCandidateApiMocks.getTeProviderDescriptor.mockResolvedValue({
+      providerType: "token-exchange",
+      providerId: "te-registered",
+      pluginId: "token-exchange",
+      protocolVersion: "te-provider.v1",
+      sidecarUrl: "http://127.0.0.1:19001",
+      healthPath: "/healthz",
+      expectedPartnerAic: "registered-partner",
+      models: [{ id: "registered-model", name: "Registered Model" }],
+    });
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      appId: "openclaw",
+      providerId: "te-registered",
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Registered TE",
+        meta: { providerType: "token_exchange" },
+        settingsConfig: {
+          api: "openai-completions",
+          baseUrl: "http://127.0.0.1:19001/v1",
+          apiKey: "te-provider-placeholder-not-a-secret",
+          models: [{ id: "registered-model", name: "Registered Model" }],
+        },
+      },
+    });
+    await waitFor(() =>
+      expect(
+        codexCandidateApiMocks.getTeProviderDescriptor,
+      ).toHaveBeenCalledWith("te-registered"),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("te-provider-draft-aic")).toHaveTextContent(
+        "registered-partner",
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    const submitted = onSubmit.mock.calls[0][0];
+    expect(submitted.teDescriptor.expectedPartnerAic).toBe(
+      "registered-partner",
+    );
+    expect(JSON.parse(submitted.settingsConfig)).not.toHaveProperty(
+      "teProvider",
+    );
+    codexCandidateApiMocks.getTeProviderDescriptor.mockResolvedValue(null);
+  });
+
+  it("does not save a modern TE Provider if the private descriptor is unavailable", async () => {
+    codexCandidateApiMocks.getTeProviderDescriptor.mockResolvedValueOnce(null);
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      appId: "openclaw",
+      providerId: "te-missing",
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Missing descriptor",
+        meta: { providerType: "token_exchange" },
+        settingsConfig: {
+          api: "openai-completions",
+          baseUrl: "http://127.0.0.1:9814/v1",
+          apiKey: "te-provider-placeholder-not-a-secret",
+          models: [{ id: "m", name: "M" }],
+        },
+      },
+    });
+    await waitFor(() =>
+      expect(
+        codexCandidateApiMocks.getTeProviderDescriptor,
+      ).toHaveBeenCalledWith("te-missing"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("treats a DB descriptor as TE when live OpenClaw settings are unavailable", async () => {
     const onSubmit = vi.fn();
     renderProviderForm({
@@ -837,12 +928,12 @@ describe("ProviderForm legacy Token Exchange migration", () => {
     await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
     const submitted = onSubmit.mock.calls[0][0];
     expect(submitted.meta.providerType).toBe("token_exchange");
-    expect(JSON.parse(submitted.settingsConfig)).toMatchObject(
-      legacyTeProviderSettings,
+    expect(JSON.parse(submitted.settingsConfig)).not.toHaveProperty(
+      "teProvider",
     );
-    expect(JSON.parse(submitted.settingsConfig).teProvider).toMatchObject({
-      providerTimeoutSeconds: 300,
-      keepAliveIntervalSeconds: 30,
+    expect(submitted.teDescriptor).toMatchObject({
+      providerId: "legacy-te",
+      expectedPartnerAic: "partner-aic",
     });
   });
 
@@ -879,9 +970,9 @@ describe("ProviderForm legacy Token Exchange migration", () => {
     const submitted = onSubmit.mock.calls[0][0];
     const persisted = JSON.parse(submitted.settingsConfig);
     expect(submitted.meta.providerType).toBe("token_exchange");
-    expect(persisted.teProvider).not.toHaveProperty("taskId");
-    expect(persisted.teProvider).not.toHaveProperty("proxyKey");
-    expect(persisted.teProvider).not.toHaveProperty("unknownField");
+    expect(persisted).not.toHaveProperty("teProvider");
+    expect(JSON.stringify(submitted)).not.toContain("secret-proxy-key");
+    expect(JSON.stringify(submitted)).not.toContain("runtime-task");
   });
 
   it("does not classify an ordinary provider without a descriptor as TE", async () => {

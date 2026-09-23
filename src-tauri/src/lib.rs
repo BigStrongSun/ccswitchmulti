@@ -1895,6 +1895,8 @@ pub fn run() {
             commands::scan_local_proxies,
             // Token Exchange Provider 运行态（只读）
             commands::te_provider_runtime_status,
+            commands::get_te_provider_descriptor,
+            commands::save_te_provider,
             // Window theme control
             commands::set_window_theme,
             // Generic managed auth commands
@@ -2757,5 +2759,9 @@ mod tests {
             handler.contains("commands::te_provider_runtime_status,"),
             "the TE Provider runtime panel must have a registered Tauri command"
         );
+        assert!(handler.contains("commands::get_te_provider_descriptor,"));
+        assert!(handler.contains("commands::save_te_provider,"));
+        assert!(!handler.contains("commands::upsert_te_provider_descriptor,"));
+        assert!(!handler.contains("commands::delete_te_provider_descriptor,"));
     }
 }

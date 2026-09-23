@@ -8,6 +8,14 @@
 - 刷新调用同时位于同步配置投影热路径：进程内 gate 保证只有一个请求可在飞行，竞争调用立即沿用已有可信快照；失败后短暂冷却 60 秒，避免每次投影都阻塞最多 10 秒并对 GitHub 形成请求风暴。取消/异常释放也按失败进入冷却，成功写入仍即时清除冷却；这只限制短期失败重试，不改变 6 小时成功 TTL 或覆盖 stale cache 的原子写入规则。
 - 官方 Codex 目录中 GPT-6 Sol 是 `low..max` 加 `ultra`（v2 编排能力），GPT-6 Luna 止于 `max`；API 的原生 reasoning `max` 与 Codex `ultra` 编排语义不同，投影必须保留来源元数据而不能按型号手工猜测。
 
+## 2026-09-23 TE Provider 静态描述符隔离边界（源码候选）
+
+- TE Provider 的长期定位字段属于专用 SQLite `te_provider_descriptors` 注册表；Agent/OpenClaw `settings_config` 只保留 `api/baseUrl/placeholder apiKey/models`。UI 草稿与 live 投影不可混存，Task/lease/binding/Proxy Key 始终不能持久化。
+- v24→v25 对旧 OpenClaw `settingsConfig.teProvider` 只迁移符合严格静态描述符及公开投影的行；恶意、损坏或不匹配行保留原记录并拒绝成为可用 registry 身份，方便调查和恢复。SDK 模型能力字段可选且缺失=未知，CCSM 严格保留显式元数据，但 descriptor/schema 本身不证明能力来源已验证。
+- UI 新建/编辑改由 `save_te_provider` 唯一写 IPC：先严格核对私有 descriptor 与公开投影，SQLite 同一事务保存两份记录；旧独立 upsert/delete IPC 不再注册。descriptor INSERT/UPDATE 触发失败时 Provider 一并回滚。OpenClaw live 发布在事务之后单独返回 `stored_and_published` / `stored_publish_failed` / `stored_not_published`，后两种不得报告成已发布；仍不是 AIP Task bind/revoke 闭环。
+- 现代 TE 编辑必须先从私有 registry 读回描述符；原 effect 的回调每次渲染换引用造成请求返回被 cleanup 丢弃，现改稳定 ref 并在未读回时禁止保存。历史行只在 v25 可信迁移已注册相同描述符后才可通过普通 Provider 规范化。SDK `cost` 可只填部分字段；缺价不补 0，OpenClaw public cost 只有 input/output 都明确时才投影。非默认超时/保活与配置头投递尚无私有 runtime 配置，本批 UI 显式拒存并提示，不静默丢弃。
+- 此分支仅是源码候选；未构建、安装、重启在线 CCSM，未证明目标 OpenClaw 插件版本与真实任务授权运行。后续需要独立 live publish 与 Task bind/revoke 端到端验收。
+
 ## 2026-09-13 手动逐模型协议确认与 MultiRouter 刷新证据复用
 
 - `codexProtocolOverrides` 是用户对某个模型明确选择 Chat 或 Responses 的保存意图，不能只把 Provider 级 `codexProtocolMode=manual` 当作手动模式。此前 Single 与 Universal Protocol Lab adapter 错把这种草稿送为 `accept_auto`；后端在 prepare 时正确识别 override 的手动写入意图并拒绝，前端遂停在 `action_required`，没有可确认保存的操作。现在两个 adapter 都以“Provider 级 manual 或存在任一逐模型 override”为手动意图，提交 `confirm_manual`；该选择不会触发自动探测或被自动推荐覆盖。

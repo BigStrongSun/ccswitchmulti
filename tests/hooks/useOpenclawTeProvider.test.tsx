@@ -89,7 +89,10 @@ describe("useOpenclawFormState TE Provider", () => {
     });
 
     const stored = readSettingsConfig();
-    expect(stored.teProvider.sidecarUrl).toBe("http://127.0.0.1:19001");
+    expect(stored).not.toHaveProperty("teProvider");
+    expect(result.current.openclawTeProvider?.sidecarUrl).toBe(
+      "http://127.0.0.1:19001/",
+    );
     expect(stored.baseUrl).toBe("http://127.0.0.1:19001/v1");
     expect(stored.apiKey).toBe(TE_PROVIDER_PLACEHOLDER_API_KEY);
     expect(stored.models[0]).toMatchObject({

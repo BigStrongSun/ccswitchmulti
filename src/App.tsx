@@ -989,11 +989,13 @@ function App() {
   const handleEditProvider = async ({
     provider,
     originalId,
+    teDescriptor,
   }: {
     provider: Provider;
     originalId?: string;
+    teDescriptor?: import("@/lib/api/providers").TeStaticProviderDescriptor;
   }) => {
-    await updateProvider(provider, originalId);
+    await updateProvider(provider, originalId, teDescriptor);
     setEditingProvider(null);
   };
 

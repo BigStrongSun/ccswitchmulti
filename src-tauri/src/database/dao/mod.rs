@@ -13,6 +13,7 @@ pub mod proxy;
 pub mod settings;
 pub mod skills;
 pub mod stream_check;
+pub mod te_provider;
 pub mod universal_providers;
 pub mod usage_rollup;
 

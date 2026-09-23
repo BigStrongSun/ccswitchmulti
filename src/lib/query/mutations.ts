@@ -3,7 +3,10 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { providersApi, sessionsApi, settingsApi, type AppId } from "@/lib/api";
 import type { DeleteSessionOptions } from "@/lib/api/sessions";
-import type { SwitchResult } from "@/lib/api/providers";
+import type {
+  SwitchResult,
+  TeStaticProviderDescriptor,
+} from "@/lib/api/providers";
 import type { Provider, SessionMeta, Settings } from "@/types";
 import {
   extractErrorMessage,
@@ -18,6 +21,10 @@ import { invalidatePiProviderCaches } from "@/lib/query/pi";
 
 export interface UpdateProviderMutationResult {
   provider: Provider;
+  tePublishStatus?:
+    | "stored_not_published"
+    | "stored_and_published"
+    | "stored_publish_failed";
 }
 import {
   CODEX_OFFICIAL_PROVIDER_ID,
@@ -93,6 +100,7 @@ export const useAddProviderMutation = (appId: AppId) => {
     mutationFn: async (
       providerInput: Omit<Provider, "id"> & {
         providerKey?: string;
+        teDescriptor?: TeStaticProviderDescriptor;
         addToLive?: boolean;
         ensureClaudeDesktopOfficialSeed?: boolean;
         ensureCodexOfficialSeed?: boolean;
@@ -101,6 +109,7 @@ export const useAddProviderMutation = (appId: AppId) => {
     ) => {
       const {
         providerKey: _providerKey,
+        teDescriptor,
         addToLive,
         ensureClaudeDesktopOfficialSeed,
         ensureCodexOfficialSeed,
@@ -169,10 +178,21 @@ export const useAddProviderMutation = (appId: AppId) => {
       };
       delete (newProvider as any).providerKey;
 
+      if (teDescriptor) {
+        if (appId !== "openclaw")
+          throw new Error("TE descriptor requires OpenClaw");
+        const tePublishStatus = await providersApi.saveTeProvider(
+          newProvider,
+          teDescriptor,
+          undefined,
+          addToLive,
+        );
+        return { ...newProvider, tePublishStatus };
+      }
       await providersApi.add(newProvider, appId, addToLive);
-      return newProvider;
+      return { ...newProvider, tePublishStatus: undefined };
     },
-    onSuccess: async () => {
+    onSuccess: async (provider) => {
       await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
 
       if (appId === "opencode") {
@@ -209,14 +229,20 @@ export const useAddProviderMutation = (appId: AppId) => {
         );
       }
 
-      toast.success(
-        t("notifications.providerAdded", {
-          defaultValue: "供应商已添加",
-        }),
-        {
-          closeButton: true,
-        },
-      );
+      if (
+        "tePublishStatus" in provider &&
+        provider.tePublishStatus === "stored_publish_failed"
+      ) {
+        toast.warning(
+          "TE Provider 已保存，但 OpenClaw 配置发布失败；请检查配置后重试。",
+          { closeButton: true },
+        );
+      } else {
+        toast.success(
+          t("notifications.providerAdded", { defaultValue: "供应商已添加" }),
+          { closeButton: true },
+        );
+      }
       await warnIfActiveCodexProjectionPending(
         appId,
         t("notifications.codexProjectionPending", {
@@ -256,10 +282,22 @@ export const useUpdateProviderMutation = (appId: AppId) => {
     mutationFn: async ({
       provider,
       originalId,
+      teDescriptor,
     }: {
       provider: Provider;
       originalId?: string;
+      teDescriptor?: TeStaticProviderDescriptor;
     }) => {
+      if (teDescriptor) {
+        if (appId !== "openclaw")
+          throw new Error("TE descriptor requires OpenClaw");
+        const tePublishStatus = await providersApi.saveTeProvider(
+          provider,
+          teDescriptor,
+          originalId,
+        );
+        return { provider, tePublishStatus };
+      }
       await providersApi.update(provider, appId, originalId);
       return { provider };
     },
@@ -282,14 +320,17 @@ export const useUpdateProviderMutation = (appId: AppId) => {
       if (appId === "hermes") {
         await invalidateHermesProviderCaches(queryClient);
       }
-      toast.success(
-        t("notifications.updateSuccess", {
-          defaultValue: "供应商更新成功",
-        }),
-        {
-          closeButton: true,
-        },
-      );
+      if (result.tePublishStatus === "stored_publish_failed") {
+        toast.warning(
+          "TE Provider 已更新，但 OpenClaw 配置发布失败；请检查配置后重试。",
+          { closeButton: true },
+        );
+      } else {
+        toast.success(
+          t("notifications.updateSuccess", { defaultValue: "供应商更新成功" }),
+          { closeButton: true },
+        );
+      }
       await warnIfActiveCodexProjectionPending(
         appId,
         t("notifications.codexProjectionPending", {

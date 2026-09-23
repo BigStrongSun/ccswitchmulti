@@ -301,7 +301,7 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="config-headers">
+                <SelectItem value="config-headers" disabled>
                   {t("openclaw.teProvider.bindingDeliveryHeaders", {
                     defaultValue: "写入 Agent 配置头",
                   })}
@@ -313,6 +313,9 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
                 </SelectItem>
               </SelectContent>
             </Select>
+            <p className="text-xs text-muted-foreground">
+              当前仅支持 Gateway 插件；配置头投递尚未接入私有运行配置。
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="te-provider-timeout">
@@ -354,6 +357,9 @@ export function TeProviderFields({ value, onChange }: TeProviderFieldsProps) {
               placeholder={String(TE_PROVIDER_DEFAULT_KEEP_ALIVE_SECONDS)}
             />
           </div>
+          <p className="text-xs text-muted-foreground">
+            自定义超时和保活尚未持久化；仅默认 300 秒 / 30 秒可保存。
+          </p>
         </div>
       </div>
 

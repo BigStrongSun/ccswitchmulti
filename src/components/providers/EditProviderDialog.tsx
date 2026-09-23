@@ -13,6 +13,7 @@ import {
   useCodexProviderSetSave,
 } from "@/components/providers/forms/useCodexProviderSetSave";
 import { openclawApi, providersApi, vscodeApi, type AppId } from "@/lib/api";
+import type { TeStaticProviderDescriptor } from "@/lib/api/providers";
 import {
   getCodexProviderEditorSnapshot,
   type CodexProviderEditorSnapshot,
@@ -25,6 +26,7 @@ interface EditProviderDialogProps {
   onSubmit: (payload: {
     provider: Provider;
     originalId?: string;
+    teDescriptor?: TeStaticProviderDescriptor;
   }) => Promise<void> | void;
   appId: AppId;
   isProxyTakeover?: boolean; // 代理接管模式下不读取 live（避免显示被接管后的代理配置）
@@ -311,6 +313,7 @@ export function EditProviderDialog({
       await onSubmit({
         provider: updatedProvider,
         originalId: provider.id,
+        teDescriptor: values.teDescriptor,
       });
       onOpenChange(false);
     },

@@ -300,8 +300,12 @@ export function sanitizeTeProviderDraft(
           result.supportsReasoning = model.supportsReasoning;
         if (isRecord(model.cost)) {
           const cost: NonNullable<OpenClawTeProviderModel["cost"]> = {
-            input: finiteNumber(model.cost.input) ?? 0,
-            output: finiteNumber(model.cost.output) ?? 0,
+            ...(finiteNumber(model.cost.input) !== undefined
+              ? { input: finiteNumber(model.cost.input) }
+              : {}),
+            ...(finiteNumber(model.cost.output) !== undefined
+              ? { output: finiteNumber(model.cost.output) }
+              : {}),
           };
           const cacheRead = finiteNumber(model.cost.cacheRead);
           const cacheWrite = finiteNumber(model.cost.cacheWrite);
@@ -399,7 +403,7 @@ export function toOpenClawModel(model: OpenClawTeProviderModel): OpenClawModel {
   if (model.supportsReasoning !== undefined) {
     entry.reasoning = model.supportsReasoning;
   }
-  if (model.cost) {
+  if (model.cost?.input !== undefined && model.cost.output !== undefined) {
     entry.cost = {
       input: model.cost.input,
       output: model.cost.output,
@@ -438,53 +442,28 @@ export function buildOpenClawTeProviderConfig(
     baseUrl: `${canonical.sidecarUrl}/v1`,
     apiKey: TE_PROVIDER_PLACEHOLDER_API_KEY,
     models: canonical.models.map(toOpenClawModel),
-    teProvider: {
-      sidecarUrl: canonical.sidecarUrl,
-      expectedPartnerAic: canonical.expectedPartnerAic,
-      protocolVersion: canonical.protocolVersion,
-      bindingDelivery: canonical.bindingDelivery,
-      providerTimeoutSeconds: canonical.providerTimeoutSeconds,
-      keepAliveIntervalSeconds: canonical.keepAliveIntervalSeconds,
-      models: canonical.models.map((model) => ({
-        id: model.id,
-        name: model.name,
-        ...(model.inputModalities
-          ? { inputModalities: [...model.inputModalities] }
-          : {}),
-        ...(model.outputModalities
-          ? { outputModalities: [...model.outputModalities] }
-          : {}),
-        ...(model.contextWindowTokens !== undefined
-          ? { contextWindowTokens: model.contextWindowTokens }
-          : {}),
-        ...(model.maxOutputTokens !== undefined
-          ? { maxOutputTokens: model.maxOutputTokens }
-          : {}),
-        ...(model.supportsTools !== undefined
-          ? { supportsTools: model.supportsTools }
-          : {}),
-        ...(model.supportsReasoning !== undefined
-          ? { supportsReasoning: model.supportsReasoning }
-          : {}),
-        ...(model.reasoningEfforts
-          ? { reasoningEfforts: [...model.reasoningEfforts] }
-          : {}),
-        ...(model.cost
-          ? {
-              cost: {
-                input: model.cost.input,
-                output: model.cost.output,
-                ...(model.cost.cacheRead !== undefined
-                  ? { cacheRead: model.cost.cacheRead }
-                  : {}),
-                ...(model.cost.cacheWrite !== undefined
-                  ? { cacheWrite: model.cost.cacheWrite }
-                  : {}),
-              },
-            }
-          : {}),
-      })),
-    },
+  };
+}
+
+/** SDK 严格描述符独立于 Agent LLM 配置；预览只放公开占位字段。 */
+export function toTeProviderDescriptor(
+  providerId: string,
+  settings: OpenClawTeProviderSettings,
+) {
+  const canonical = canonicalizeTeProviderSettings(settings);
+  if (!canonical || !/^[a-z0-9][a-z0-9-]*$/.test(providerId)) {
+    throw new Error("invalid TE provider descriptor");
+  }
+  // 能力元数据只复制已显式声明且校验过的字段；缺失保持未知，不推断已验证来源。
+  return {
+    providerType: "token-exchange" as const,
+    providerId,
+    pluginId: "token-exchange" as const,
+    protocolVersion: TE_PROVIDER_PROTOCOL_VERSION,
+    sidecarUrl: canonical.sidecarUrl,
+    healthPath: "/healthz" as const,
+    expectedPartnerAic: canonical.expectedPartnerAic,
+    models: canonical.models.map((model) => ({ ...model })),
   };
 }
 
@@ -522,13 +501,13 @@ export const TE_PROVIDER_BINDING_FIELDS: readonly TeProviderBindingField[] = [
     field: "providerTimeoutSeconds",
     filledBy: "user",
     persisted: true,
-    note: "Task 超时上限（30–86400 秒）",
+    note: "固定 300 秒；自定义值尚未接入私有运行配置，保存时拒绝",
   },
   {
     field: "keepAliveIntervalSeconds",
     filledBy: "user",
     persisted: true,
-    note: "注入器保活间隔（5–3600 秒）",
+    note: "固定 30 秒；自定义值尚未接入私有运行配置，保存时拒绝",
   },
   {
     field: "models",
@@ -540,7 +519,7 @@ export const TE_PROVIDER_BINDING_FIELDS: readonly TeProviderBindingField[] = [
     field: "bindingDelivery",
     filledBy: "user",
     persisted: true,
-    note: "配置头或 Gateway 插件",
+    note: "当前只支持 Gateway 插件；配置头投递不会被静默持久化",
   },
   {
     field: "taskId",

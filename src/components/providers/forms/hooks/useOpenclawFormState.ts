@@ -218,7 +218,8 @@ export function useOpenclawFormState({
           return;
         }
         const projected = buildOpenClawTeProviderConfig(canonical);
-        config.teProvider = canonical;
+        // TE descriptor 由独立 registry 写入；通用 OpenClaw 配置只能接收公开投影。
+        delete config.teProvider;
         // 投影结果里 baseUrl/apiKey/models 由 builder 固定生成；这里显式判空，避免把 undefined
         // 写回配置覆盖掉用户既有值。
         if (projected.baseUrl) {

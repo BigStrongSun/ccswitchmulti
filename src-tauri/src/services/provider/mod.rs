@@ -2009,22 +2009,96 @@ command = "example-mcp"
                     }
                 }),
             );
-            ProviderService::add(state, AppType::OpenClaw, valid, false)
-                .expect("valid TE provider");
+            // 旧 IPC 不得在 Provider 事务前先注册描述符；由专用入口一次性保存。
+            assert!(ProviderService::add(state, AppType::OpenClaw, valid, false).is_err());
+            assert!(state.db.get_te_provider_descriptor("te-canonical-valid").unwrap().is_none());
+            let public = token_exchange_openclaw_provider("te-canonical-valid", json!({
+                "api": "openai-completions",
+                "baseUrl": "http://127.0.0.1:9814/v1",
+                "apiKey": "te-provider-placeholder-not-a-secret",
+                "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}]
+            }));
+            let descriptor = json!({
+                "providerType": "token-exchange", "providerId": "te-canonical-valid",
+                "pluginId": "token-exchange", "protocolVersion": "te-provider.v1",
+                "sidecarUrl": "http://127.0.0.1:9814", "healthPath": "/healthz",
+                "expectedPartnerAic": "partner-aic",
+                "models": [{"id": "qwen3.8", "name": "Qwen 3.8"}]
+            });
+            assert_eq!(ProviderService::save_token_exchange_openclaw(
+                state, public, descriptor, None, false
+            ).expect("atomic TE provider save"), "stored_not_published");
             let stored = state
                 .db
                 .get_provider_by_id("te-canonical-valid", AppType::OpenClaw.as_str())
                 .expect("query stored")
                 .expect("stored provider");
-            assert_eq!(
-                stored.settings_config["teProvider"]["sidecarUrl"],
-                json!("http://127.0.0.1:9814")
-            );
-            assert_eq!(
-                stored.settings_config["teProvider"]["providerTimeoutSeconds"],
-                json!(300)
-            );
-            assert!(stored.settings_config["teProvider"].get("taskId").is_none());
+            assert!(stored.settings_config.get("teProvider").is_none());
+            assert_eq!(stored.settings_config["baseUrl"], "http://127.0.0.1:9814/v1");
+            let descriptor = state.db.get_te_provider_descriptor("te-canonical-valid")
+                .expect("registry lookup").expect("registered descriptor");
+            assert_eq!(descriptor["sidecarUrl"], "http://127.0.0.1:9814");
+            assert!(descriptor.get("taskId").is_none());
+
+            // An update must replace both authoritative records, while a rejected projection
+            // must leave the previously committed pair intact.
+            let mut changed = stored.clone();
+            changed.name = "updated TE".into();
+            let mut changed_descriptor = descriptor.clone();
+            changed_descriptor["expectedPartnerAic"] = json!("updated-partner");
+            assert_eq!(ProviderService::save_token_exchange_openclaw(
+                state, changed.clone(), changed_descriptor.clone(), Some("te-canonical-valid"), false
+            ).expect("atomic TE provider update"), "stored_not_published");
+            assert_eq!(state.db.get_provider_by_id("te-canonical-valid", "openclaw")
+                .unwrap().unwrap().name, "updated TE");
+            assert_eq!(state.db.get_te_provider_descriptor("te-canonical-valid")
+                .unwrap(), Some(changed_descriptor.clone()));
+
+            let mut mismatched = changed.clone();
+            mismatched.settings_config["baseUrl"] = json!("https://untrusted.example/v1");
+            assert!(ProviderService::save_token_exchange_openclaw(
+                state, mismatched, changed_descriptor.clone(), Some("te-canonical-valid"), false
+            ).is_err());
+            let mut leaked = changed;
+            leaked.settings_config["proxyKey"] = json!("private-key");
+            assert!(ProviderService::save_token_exchange_openclaw(
+                state, leaked, changed_descriptor.clone(), Some("te-canonical-valid"), false
+            ).is_err());
+            assert_eq!(state.db.get_provider_by_id("te-canonical-valid", "openclaw")
+                .unwrap().unwrap().settings_config, stored.settings_config);
+            assert_eq!(state.db.get_te_provider_descriptor("te-canonical-valid")
+                .unwrap(), Some(changed_descriptor));
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn registered_te_provider_accepts_only_exact_public_projection() {
+        with_test_home(|state, _| {
+            let descriptor = json!({
+                "providerType":"token-exchange", "providerId":"te-registered",
+                "pluginId":"token-exchange", "protocolVersion":"te-provider.v1",
+                "sidecarUrl":"http://127.0.0.1:9814", "healthPath":"/healthz",
+                "expectedPartnerAic":"partner-aic",
+                "models":[{"id":"qwen3.8","name":"Qwen 3.8"}]
+            });
+            state.db.upsert_te_provider_descriptor(&descriptor).expect("register descriptor");
+            let projection = json!({
+                "api":"openai-completions", "baseUrl":"http://127.0.0.1:9814/v1",
+                "apiKey":"te-provider-placeholder-not-a-secret",
+                "models":[{"id":"qwen3.8","name":"Qwen 3.8"}]
+            });
+            let provider = token_exchange_openclaw_provider("te-registered", projection.clone());
+            ProviderService::add(state, AppType::OpenClaw, provider.clone(), false)
+                .expect("registered public projection accepted");
+            let stored = state.db.get_provider_by_id("te-registered", "openclaw")
+                .unwrap().unwrap();
+            assert_eq!(stored.settings_config, projection);
+            let mut malicious = provider;
+            malicious.settings_config["teProvider"] = json!({"taskId":"leak"});
+            assert!(ProviderService::update(state, AppType::OpenClaw, None, malicious).is_err());
+            assert_eq!(state.db.get_provider_by_id("te-registered", "openclaw")
+                .unwrap().unwrap().settings_config, projection);
         });
     }
 
@@ -2081,6 +2155,13 @@ command = "example-mcp"
                 Some("token_exchange")
             );
 
+            // 正式升级由 v25 迁移先注册可信旧行；模拟同一前置状态。
+            state.db.upsert_te_provider_descriptor(&json!({
+                "providerType":"token-exchange", "providerId":"te-legacy-valid",
+                "pluginId":"token-exchange", "protocolVersion":"te-provider.v1",
+                "sidecarUrl":"http://127.0.0.1:9814", "healthPath":"/healthz",
+                "expectedPartnerAic":"partner-aic", "models":[{"id":"qwen3.8","name":"Qwen 3.8"}]
+            })).expect("trusted migrated descriptor");
             ProviderService::update(state, AppType::OpenClaw, Some("te-legacy-valid"), valid)
                 .expect("valid legacy descriptor should normalize and persist");
             let stored_valid = state
@@ -6121,6 +6202,78 @@ impl ProviderService {
         Self::add_with_protocol_profile(state, app_type, provider, add_to_live, None)
     }
 
+    /// TE 的公开 Provider 和静态身份在一个 SQLite 事务提交；live 发布另设边界。
+    pub fn save_token_exchange_openclaw(
+        state: &AppState,
+        mut provider: Provider,
+        descriptor: Value,
+        original_id: Option<&str>,
+        add_to_live: bool,
+    ) -> Result<&'static str, AppError> {
+        let descriptor = crate::commands::validate_static_te_descriptor(&descriptor)?;
+        if descriptor["providerId"].as_str() != Some(provider.id.as_str())
+            || !provider.is_token_exchange()
+            || provider.has_token_exchange_descriptor()
+            || original_id.is_some_and(|id| id != provider.id)
+        {
+            return Err(AppError::InvalidInput("te_descriptor_provider_mismatch".into()));
+        }
+        let existing = state.db.get_provider_by_id(&provider.id, AppType::OpenClaw.as_str())?;
+        if original_id.is_none() && existing.is_some() {
+            return Err(AppError::InvalidInput("te_provider_already_exists".into()));
+        }
+        if original_id.is_some() && existing.is_none() {
+            return Err(AppError::InvalidInput("te_provider_not_found".into()));
+        }
+        if existing.as_ref().is_some_and(|previous| !previous.is_token_exchange()) {
+            return Err(AppError::InvalidInput("te_provider_type_conflict".into()));
+        }
+        let settings = provider.settings_config.as_object_mut().ok_or_else(|| {
+            AppError::InvalidInput("token_exchange_settings_must_be_object".into())
+        })?;
+        let original_projection = Value::Object(settings.clone());
+        settings.insert("teProvider".into(), serde_json::json!({
+            "sidecarUrl": descriptor["sidecarUrl"],
+            "expectedPartnerAic": descriptor["expectedPartnerAic"],
+            "protocolVersion": descriptor["protocolVersion"],
+            "bindingDelivery": "gateway-plugin",
+            "models": descriptor["models"],
+        }));
+        let normalized_descriptor = Self::normalize_token_exchange_openclaw_settings(&mut provider)?;
+        if normalized_descriptor != descriptor || provider.settings_config != original_projection {
+            return Err(AppError::InvalidInput("te_descriptor_projection_mismatch".into()));
+        }
+        Self::validate_provider_settings(&AppType::OpenClaw, &provider)?;
+        normalize_provider_common_config_for_storage(
+            state.db.as_ref(), &AppType::OpenClaw, &mut provider,
+        )?;
+        Self::normalize_usage_script_credential_overrides(&AppType::OpenClaw, &mut provider);
+
+        let publish = if let Some(previous) = existing.as_ref() {
+            Self::check_live_config_exists(
+                &AppType::OpenClaw,
+                &provider.id,
+                Self::provider_live_config_managed(&provider)
+                    .or_else(|| Self::provider_live_config_managed(previous)),
+            )?
+        } else {
+            add_to_live
+        };
+        Self::set_provider_live_config_managed(&mut provider, publish);
+        state.db.save_te_provider_with_descriptor(&provider, &descriptor)?;
+        if !publish {
+            return Ok("stored_not_published");
+        }
+        // SQLite 已提交；发布失败必须显式回报待重试状态，不能误称事务回滚。
+        match write_live_with_common_config(state.db.as_ref(), &AppType::OpenClaw, &provider) {
+            Ok(()) => Ok("stored_and_published"),
+            Err(error) => {
+                log::warn!("TE provider live publication failed: {error}");
+                Ok("stored_publish_failed")
+            }
+        }
+    }
+
     pub(crate) fn add_with_protocol_profile(
         state: &AppState,
         app_type: AppType,
@@ -6501,7 +6654,7 @@ impl ProviderService {
     ///
     /// UI 校验只是体验层；这里重新做类型、字段和秘密边界校验，并从零构造
     /// settings_config，防止直接 IPC 或旧版本 UI 通过对象展开写入运行时字段。
-    fn normalize_token_exchange_openclaw_settings(provider: &mut Provider) -> Result<(), AppError> {
+    fn normalize_token_exchange_openclaw_settings(provider: &mut Provider) -> Result<Value, AppError> {
         const PLACEHOLDER: &str = "te-provider-placeholder-not-a-secret";
         const STATIC_FIELDS: &[&str] = &[
             "sidecarUrl",
@@ -6749,13 +6902,8 @@ impl ProviderService {
                         ));
                     }
                 }
-                let price = |name: &str, required: bool| -> Result<Option<f64>, AppError> {
+                let price = |name: &str| -> Result<Option<f64>, AppError> {
                     let Some(value) = object.get(name) else {
-                        if required {
-                            return Err(AppError::InvalidInput(
-                                "token_exchange_model_cost_invalid".to_string(),
-                            ));
-                        }
                         return Ok(None);
                     };
                     let number = value
@@ -6767,10 +6915,10 @@ impl ProviderService {
                     Ok(Some(number))
                 };
                 Some((
-                    price("input", true)?,
-                    price("output", true)?,
-                    price("cacheRead", false)?,
-                    price("cacheWrite", false)?,
+                    price("input")?,
+                    price("output")?,
+                    price("cacheRead")?,
+                    price("cacheWrite")?,
                 ))
             } else {
                 None
@@ -6810,8 +6958,12 @@ impl ProviderService {
             }
             if let Some((input_price, output_price, cache_read, cache_write)) = cost {
                 let mut object = serde_json::Map::new();
-                object.insert("input".to_string(), Value::from(input_price.unwrap()));
-                object.insert("output".to_string(), Value::from(output_price.unwrap()));
+                if let Some(value) = input_price {
+                    object.insert("input".to_string(), Value::from(value));
+                }
+                if let Some(value) = output_price {
+                    object.insert("output".to_string(), Value::from(value));
+                }
                 if let Some(value) = cache_read {
                     object.insert("cacheRead".to_string(), Value::from(value));
                 }
@@ -6836,10 +6988,10 @@ impl ProviderService {
             if let Some(value) = supports_reasoning {
                 openclaw.insert("reasoning".to_string(), Value::Bool(value));
             }
-            if let Some((input_price, output_price, cache_read, cache_write)) = cost {
+            if let Some((Some(input_price), Some(output_price), cache_read, cache_write)) = cost {
                 let mut object = serde_json::Map::new();
-                object.insert("input".to_string(), Value::from(input_price.unwrap()));
-                object.insert("output".to_string(), Value::from(output_price.unwrap()));
+                object.insert("input".to_string(), Value::from(input_price));
+                object.insert("output".to_string(), Value::from(output_price));
                 if let Some(value) = cache_read {
                     object.insert("cacheRead".to_string(), Value::from(value));
                 }
@@ -6901,7 +7053,17 @@ impl ProviderService {
         canonical_settings.insert("baseUrl".to_string(), Value::String(canonical_base_url));
         canonical_settings.insert("apiKey".to_string(), Value::String(PLACEHOLDER.to_string()));
         canonical_settings.insert("models".to_string(), Value::Array(openclaw_models));
-        canonical_settings.insert("teProvider".to_string(), Value::Object(canonical_te));
+        // 私有静态描述符独立存入 TE registry；通用 Agent 配置绝不携带它。
+        let descriptor = serde_json::json!({
+            "providerType": "token-exchange",
+            "providerId": provider.id.clone(),
+            "pluginId": "token-exchange",
+            "protocolVersion": "te-provider.v1",
+            "sidecarUrl": canonical_te["sidecarUrl"],
+            "healthPath": "/healthz",
+            "expectedPartnerAic": canonical_te["expectedPartnerAic"],
+            "models": canonical_te["models"],
+        });
         provider.settings_config = Value::Object(canonical_settings);
         // 旧版 OpenClaw 行可能只有 descriptor；规范化成功后回填唯一权威类型，
         // 让后续列表、路由和前端编辑都不再依赖 descriptor 反推。
@@ -6909,7 +7071,7 @@ impl ProviderService {
             .meta
             .get_or_insert_with(crate::provider::ProviderMeta::default);
         meta.provider_type = Some("token_exchange".to_string());
-        Ok(())
+        Ok(descriptor)
     }
 
     /// Batch Router references are validated by the batch planner after all source
@@ -6933,9 +7095,23 @@ impl ProviderService {
     ) -> Result<Provider, AppError> {
         Self::ensure_codex_provider_is_user_operable(app_type, &provider)?;
         Self::normalize_provider_if_claude(app_type, &mut provider);
-        if *app_type == AppType::OpenClaw && provider.is_token_exchange() {
-            Self::normalize_token_exchange_openclaw_settings(&mut provider)?;
-        }
+        let te_descriptor = if *app_type == AppType::OpenClaw && provider.is_token_exchange() {
+            if !provider.has_token_exchange_descriptor() {
+                let registered = state.db.get_te_provider_descriptor(&provider.id)?
+                    .ok_or_else(|| AppError::InvalidInput("te_descriptor_registration_required".into()))?;
+                let te = serde_json::json!({
+                    "sidecarUrl": registered["sidecarUrl"],
+                    "expectedPartnerAic": registered["expectedPartnerAic"],
+                    "protocolVersion": registered["protocolVersion"],
+                    "bindingDelivery": "gateway-plugin",
+                    "models": registered["models"],
+                });
+                provider.settings_config.as_object_mut()
+                    .ok_or_else(|| AppError::InvalidInput("token_exchange_settings_must_be_object".into()))?
+                    .insert("teProvider".into(), te);
+            }
+            Some(Self::normalize_token_exchange_openclaw_settings(&mut provider)?)
+        } else { None };
         if *app_type == AppType::Codex {
             crate::codex_multirouter::provider_set::migrate_legacy_codex_protocol_overrides_for_save(
                 &mut provider,
@@ -6943,6 +7119,12 @@ impl ProviderService {
             .map_err(|error| AppError::InvalidInput(error.to_string()))?;
         }
         Self::validate_provider_settings(app_type, &provider)?;
+        if let Some(descriptor) = te_descriptor {
+            // 普通 Provider IPC 不得在事务外改变 TE registry；旧行须走专用保存。
+            if state.db.get_te_provider_descriptor(&provider.id)?.as_ref() != Some(&descriptor) {
+                return Err(AppError::InvalidInput("te_descriptor_registration_required".into()));
+            }
+        }
         normalize_provider_common_config_for_storage(state.db.as_ref(), app_type, &mut provider)?;
         Self::normalize_usage_script_credential_overrides(app_type, &mut provider);
         Ok(provider)
@@ -9137,7 +9319,7 @@ impl ProviderService {
                         "OpenClaw configuration must be a JSON object",
                     ));
                 }
-                if provider.is_token_exchange() {
+                if provider.is_token_exchange() && provider.has_token_exchange_descriptor() {
                     let mut candidate = provider.clone();
                     Self::normalize_token_exchange_openclaw_settings(&mut candidate)?;
                 }

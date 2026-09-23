@@ -45,6 +45,9 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // TE 静态注册表不依附于 Agent 通用配置；只接受无秘密的严格描述符。
+        Self::create_te_provider_descriptor_table(conn)?;
+
         // 2. Provider Endpoints 表
         conn.execute(
             "CREATE TABLE IF NOT EXISTS provider_endpoints (
@@ -609,6 +612,10 @@ impl Database {
                         log::info!("迁移数据库从 v23 到 v24（Codex 追加解析游标与会话元数据）");
                         Self::migrate_v23_to_v24(conn)?;
                         Self::set_user_version(conn, 24)?;
+                    }
+                    24 => {
+                        Self::migrate_v24_to_v25(conn)?;
+                        Self::set_user_version(conn, 25)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1402,6 +1409,61 @@ impl Database {
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn create_te_provider_descriptor_table(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS te_provider_descriptors (
+                provider_id TEXT PRIMARY KEY,
+                descriptor TEXT NOT NULL
+            );",
+        )
+        .map_err(|error| AppError::Database(error.to_string()))
+    }
+
+    fn migrate_v24_to_v25(conn: &Connection) -> Result<(), AppError> {
+        Self::create_te_provider_descriptor_table(conn)?;
+        let mut statement = conn.prepare(
+            "SELECT id, settings_config, meta FROM providers WHERE app_type = 'openclaw'",
+        )?;
+        let records = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        for (id, raw_settings, raw_meta) in records {
+            let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&raw_settings) else { continue; };
+            let Some(te) = settings.get("teProvider").and_then(serde_json::Value::as_object) else { continue; };
+            if te.keys().any(|key| ![
+                "sidecarUrl", "expectedPartnerAic", "protocolVersion", "bindingDelivery",
+                "providerTimeoutSeconds", "keepAliveIntervalSeconds", "models", "providerProbeUrl",
+            ].contains(&key.as_str())) { continue; }
+            let descriptor = serde_json::json!({
+                "providerType": "token-exchange", "providerId": id,
+                "pluginId": "token-exchange", "protocolVersion": te.get("protocolVersion"),
+                "sidecarUrl": te.get("sidecarUrl"), "healthPath": "/healthz",
+                "expectedPartnerAic": te.get("expectedPartnerAic"), "models": te.get("models")
+            });
+            // 旧行先检查公开投影与描述符，损坏行保留原貌但绝不进入专用 registry。
+            if crate::commands::validate_static_te_descriptor(&descriptor).is_err()
+                || settings["apiKey"] != "te-provider-placeholder-not-a-secret"
+                || settings["baseUrl"] != format!("{}/v1", te.get("sidecarUrl").and_then(|v| v.as_str()).unwrap_or("").trim_end_matches('/'))
+                || !settings["models"].is_array()
+            { continue; }
+            let Some(settings_map) = settings.as_object_mut() else { continue; };
+            settings_map.remove("teProvider");
+            let mut meta = serde_json::from_str::<serde_json::Value>(&raw_meta).unwrap_or_else(|_| serde_json::json!({}));
+            let Some(meta_map) = meta.as_object_mut() else { continue; };
+            meta_map.insert("providerType".into(), serde_json::json!("token_exchange"));
+            conn.execute(
+                "INSERT INTO te_provider_descriptors (provider_id, descriptor) VALUES (?1, ?2)",
+                params![id, descriptor.to_string()],
+            )?;
+            conn.execute(
+                "UPDATE providers SET settings_config = ?1, meta = ?2 WHERE id = ?3 AND app_type = 'openclaw'",
+                params![settings.to_string(), meta.to_string(), id],
+            )?;
+        }
         Ok(())
     }
 
@@ -3970,6 +4032,39 @@ impl Database {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn migrate_v24_te_descriptor_preserves_valid_legacy_and_quarantines_invalid() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        Database::create_tables_on_conn(&conn)?;
+        let config = json!({
+            "api":"openai-completions", "baseUrl":"http://127.0.0.1:9814/v1",
+            "apiKey":"te-provider-placeholder-not-a-secret",
+            "models":[{"id":"qwen3.8","name":"Qwen 3.8"}],
+            "teProvider": {
+                "sidecarUrl":"http://127.0.0.1:9814", "expectedPartnerAic":"partner-aic",
+                "protocolVersion":"te-provider.v1", "bindingDelivery":"gateway-plugin",
+                "models":[{"id":"qwen3.8","name":"Qwen 3.8"}]
+            }
+        });
+        for (id, settings) in [
+            ("te-valid", config.clone()),
+            ("te-invalid", { let mut bad = config; bad["teProvider"]["proxyKey"] = json!("secret"); bad }),
+        ] {
+            conn.execute("INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES (?1, 'openclaw', ?1, ?2, '{}')",
+                params![id, settings.to_string()])?;
+        }
+        Database::set_user_version(&conn, 24)?;
+        Database::apply_schema_migrations_on_conn(&conn)?;
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        let valid: String = conn.query_row("SELECT settings_config FROM providers WHERE id='te-valid'", [], |r| r.get(0))?;
+        let invalid: String = conn.query_row("SELECT settings_config FROM providers WHERE id='te-invalid'", [], |r| r.get(0))?;
+        assert!(serde_json::from_str::<serde_json::Value>(&valid).expect("valid JSON")["teProvider"].is_null());
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&invalid).expect("valid JSON")["teProvider"]["proxyKey"], "secret");
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM te_provider_descriptors", [], |r| r.get(0))?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
 
     #[test]
     fn startup_sequence_migrates_v22_proxy_config_before_capacity_seed() -> Result<(), AppError> {

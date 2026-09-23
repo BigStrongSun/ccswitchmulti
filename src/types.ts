@@ -1097,8 +1097,8 @@ export interface OpenClawTeProviderModel {
   supportsReasoning?: boolean;
   reasoningEfforts?: string[]; // none|minimal|low|medium|high|xhigh|max|ultra
   cost?: {
-    input: number;
-    output: number;
+    input?: number;
+    output?: number;
     cacheRead?: number;
     cacheWrite?: number;
   };

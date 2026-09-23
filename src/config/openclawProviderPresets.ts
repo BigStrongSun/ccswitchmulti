@@ -3669,7 +3669,7 @@ export const openclawProviderPresets: OpenClawProviderPreset[] = [
         sidecarUrl: "http://127.0.0.1:9814",
         expectedPartnerAic: "",
         protocolVersion: "te-provider.v1",
-        bindingDelivery: "config-headers",
+        bindingDelivery: "gateway-plugin",
         providerTimeoutSeconds: 300,
         keepAliveIntervalSeconds: 30,
         models: [{ id: "approved-model-id", name: "approved-model-id" }],

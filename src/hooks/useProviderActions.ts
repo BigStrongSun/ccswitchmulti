@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { providersApi, settingsApi, openclawApi, type AppId } from "@/lib/api";
+import type { TeStaticProviderDescriptor } from "@/lib/api/providers";
 import type {
   Provider,
   UsageScript,
@@ -81,6 +82,7 @@ export function useProviderActions(
     async (
       provider: Omit<Provider, "id"> & {
         providerKey?: string;
+        teDescriptor?: TeStaticProviderDescriptor;
         suggestedDefaults?: OpenClawSuggestedDefaults;
         addToLive?: boolean;
         ensureClaudeDesktopOfficialSeed?: boolean;
@@ -142,10 +144,15 @@ export function useProviderActions(
 
   // 更新供应商
   const updateProvider = useCallback(
-    async (provider: Provider, originalId?: string) => {
+    async (
+      provider: Provider,
+      originalId?: string,
+      teDescriptor?: TeStaticProviderDescriptor,
+    ) => {
       const result = await updateProviderMutation.mutateAsync({
         provider,
         originalId,
+        teDescriptor,
       });
 
       // 更新托盘菜单（失败不影响主操作）

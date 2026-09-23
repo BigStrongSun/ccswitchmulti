@@ -56,6 +56,18 @@ export interface ProviderDeleteOutcome {
   warnings: string[];
 }
 
+/** 与 Agent 的 OpenClaw LLM 配置隔离存取的非秘密 TE 定位描述符。 */
+export interface TeStaticProviderDescriptor {
+  providerType: "token-exchange";
+  providerId: string;
+  pluginId: "token-exchange";
+  protocolVersion: "te-provider.v1";
+  sidecarUrl: string;
+  healthPath: "/healthz";
+  expectedPartnerAic: string;
+  models: import("@/types").OpenClawTeProviderModel[];
+}
+
 export interface CodexMultiRouterMigrationDiff {
   removedRouteFields: string[];
   createdProviderIds: string[];
@@ -250,6 +262,28 @@ export const providersApi = {
       provider,
       app: appId,
       originalId,
+    });
+  },
+
+  async getTeProviderDescriptor(
+    providerId: string,
+  ): Promise<TeStaticProviderDescriptor | null> {
+    return await invoke("get_te_provider_descriptor", { providerId });
+  },
+
+  async saveTeProvider(
+    provider: Provider,
+    descriptor: TeStaticProviderDescriptor,
+    originalId?: string,
+    addToLive?: boolean,
+  ): Promise<
+    "stored_not_published" | "stored_and_published" | "stored_publish_failed"
+  > {
+    return await invoke("save_te_provider", {
+      provider,
+      descriptor,
+      originalId,
+      addToLive,
     });
   },
 

@@ -8,14 +8,210 @@
 //! - 错误信息只保留稳定分类，不回显响应正文或凭据。
 
 use crate::error::AppError;
+use crate::provider::Provider;
+use crate::services::ProviderService;
+use crate::store::AppState;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::{Duration, Instant};
+use tauri::State;
 use url::Url;
 
 const HEALTHZ_PATH: &str = "/healthz";
 const PROVIDER_HEALTH_PATH: &str = "/provider-health";
 const PROBE_TIMEOUT_SECONDS: u64 = 5;
+
+/// SDK 静态描述符是公开定位记录，不是 Task 凭据；未知字段和所有秘密必须拒绝。
+pub fn validate_static_te_descriptor(raw: &Value) -> Result<Value, AppError> {
+    const ROOT: &[&str] = &[
+        "providerType",
+        "providerId",
+        "pluginId",
+        "protocolVersion",
+        "sidecarUrl",
+        "healthPath",
+        "expectedPartnerAic",
+        "models",
+    ];
+    const MODEL: &[&str] = &[
+        "id",
+        "name",
+        "inputModalities",
+        "outputModalities",
+        "contextWindowTokens",
+        "maxOutputTokens",
+        "supportsTools",
+        "supportsReasoning",
+        "reasoningEfforts",
+        "cost",
+    ];
+    let invalid = || AppError::InvalidInput("te_descriptor_invalid".to_string());
+    let map = raw.as_object().ok_or_else(invalid)?;
+    if map.len() != ROOT.len()
+        || map.keys().any(|key| !ROOT.contains(&key.as_str()))
+        || raw["providerType"] != "token-exchange"
+        || raw["pluginId"] != "token-exchange"
+        || raw["protocolVersion"] != "te-provider.v1"
+        || raw["healthPath"] != "/healthz"
+    {
+        return Err(invalid());
+    }
+    for field in ["providerId", "pluginId"] {
+        let value = raw[field].as_str().ok_or_else(invalid)?;
+        if value.is_empty()
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || !value.as_bytes()[0].is_ascii_lowercase() && !value.as_bytes()[0].is_ascii_digit()
+        {
+            return Err(invalid());
+        }
+    }
+    let sidecar = raw["sidecarUrl"].as_str().ok_or_else(invalid)?;
+    let remainder = sidecar
+        .strip_prefix("http://127.0.0.1")
+        .or_else(|| sidecar.strip_prefix("http://[::1]"))
+        .ok_or_else(invalid)?;
+    if !remainder.is_empty() {
+        let port = remainder.strip_prefix(':').ok_or_else(invalid)?;
+        if port.is_empty()
+            || port.starts_with('0')
+            || port.len() > 5
+            || !port.bytes().all(|byte| byte.is_ascii_digit())
+            || port.parse::<u16>().is_err()
+        {
+            return Err(invalid());
+        }
+    }
+    if normalize_loopback_sidecar_url(sidecar)? != sidecar
+        || !url::Url::parse(sidecar)
+            .map_err(|_| invalid())?
+            .path()
+            .is_empty()
+            && url::Url::parse(sidecar).map_err(|_| invalid())?.path() != "/"
+        || sidecar.ends_with('/')
+    {
+        return Err(invalid());
+    }
+    let aic = raw["expectedPartnerAic"].as_str().ok_or_else(invalid)?;
+    if aic.trim().is_empty() || aic.len() > 256 {
+        return Err(invalid());
+    }
+    let models = raw["models"].as_array().ok_or_else(invalid)?;
+    if models.is_empty() {
+        return Err(invalid());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for model in models {
+        let entry = model.as_object().ok_or_else(invalid)?;
+        if entry.keys().any(|key| !MODEL.contains(&key.as_str())) {
+            return Err(invalid());
+        }
+        for field in ["id", "name"] {
+            if entry
+                .get(field)
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(invalid());
+            }
+        }
+        if !seen.insert(entry["id"].as_str().unwrap()) {
+            return Err(invalid());
+        }
+        for (field, allowed) in [
+            (
+                "inputModalities",
+                &["text", "image", "audio", "video", "file"][..],
+            ),
+            (
+                "outputModalities",
+                &["text", "embedding", "audio", "image"][..],
+            ),
+            (
+                "reasoningEfforts",
+                &[
+                    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+                ][..],
+            ),
+        ] {
+            if let Some(value) = entry.get(field) {
+                let entries = value
+                    .as_array()
+                    .filter(|items| !items.is_empty())
+                    .ok_or_else(invalid)?;
+                if entries
+                    .iter()
+                    .any(|item| item.as_str().is_none_or(|item| !allowed.contains(&item)))
+                {
+                    return Err(invalid());
+                }
+                let unique = entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<std::collections::HashSet<_>>();
+                if unique.len() != entries.len() {
+                    return Err(invalid());
+                }
+            }
+        }
+        for field in ["contextWindowTokens", "maxOutputTokens"] {
+            if entry
+                .get(field)
+                .is_some_and(|value| value.as_u64().is_none_or(|number| number == 0))
+            {
+                return Err(invalid());
+            }
+        }
+        for field in ["supportsTools", "supportsReasoning"] {
+            if entry.get(field).is_some_and(|value| !value.is_boolean()) {
+                return Err(invalid());
+            }
+        }
+        if let Some(cost) = entry.get("cost") {
+            let cost = cost.as_object().ok_or_else(invalid)?;
+            if cost
+                .keys()
+                .any(|key| !["input", "output", "cacheRead", "cacheWrite"].contains(&key.as_str()))
+                || cost.values().any(|value| {
+                    value
+                        .as_f64()
+                        .is_none_or(|number| !number.is_finite() || number < 0.0)
+                })
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(raw.clone())
+}
+
+#[tauri::command]
+pub fn get_te_provider_descriptor(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<Option<Value>, AppError> {
+    state.db.get_te_provider_descriptor(&provider_id)
+}
+
+/// UI 专用写入口：SQLite 原子持久化；live 发布结果独立返回。
+#[tauri::command]
+pub fn save_te_provider(
+    state: State<'_, AppState>,
+    provider: Provider,
+    descriptor: Value,
+    #[allow(non_snake_case)] originalId: Option<String>,
+    #[allow(non_snake_case)] addToLive: Option<bool>,
+) -> Result<&'static str, AppError> {
+    ProviderService::save_token_exchange_openclaw(
+        state.inner(),
+        provider,
+        descriptor,
+        originalId.as_deref(),
+        addToLive.unwrap_or(true),
+    )
+}
 
 /// 上游模型提供商的只读存活快照。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -252,6 +448,60 @@ pub async fn te_provider_runtime_status(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn static_descriptor_rejects_runtime_and_unknown_fields() {
+        use serde_json::json;
+        let good = json!({
+            "providerType": "token-exchange", "providerId": "token-exchange",
+            "pluginId": "token-exchange", "protocolVersion": "te-provider.v1",
+            "sidecarUrl": "http://127.0.0.1:9814", "healthPath": "/healthz",
+            "expectedPartnerAic": "partner-aic",
+            "models": [{"id":"qwen3.8", "name":"Qwen 3.8"}]
+        });
+        assert!(super::validate_static_te_descriptor(&good).is_ok());
+        for key in [
+            "taskId",
+            "leaseId",
+            "bindingId",
+            "proxyKey",
+            "secret",
+            "unknown",
+        ] {
+            let mut invalid = good.clone();
+            invalid[key] = json!("forbidden");
+            assert!(
+                super::validate_static_te_descriptor(&invalid).is_err(),
+                "{key}"
+            );
+        }
+        for sidecar in [
+            "http://localhost:9814",
+            "http://127.1:9814",
+            "http://127.0.0.1:09814",
+            "http://127.0.0.1:9814/path",
+        ] {
+            let mut invalid = good.clone();
+            invalid["sidecarUrl"] = json!(sidecar);
+            assert!(
+                super::validate_static_te_descriptor(&invalid).is_err(),
+                "{sidecar}"
+            );
+        }
+        let mut invalid = good.clone();
+        invalid["models"][0]["reasoningEfforts"] = json!(["high", "high"]);
+        assert!(super::validate_static_te_descriptor(&invalid).is_err());
+        let mut capable = good;
+        capable["models"][0]["inputModalities"] = json!(["text", "image"]);
+        capable["models"][0]["contextWindowTokens"] = json!(262144);
+        capable["models"][0]["supportsReasoning"] = json!(true);
+        capable["models"][0]["cost"] = json!({"cacheRead": 0.01});
+        assert_eq!(
+            super::validate_static_te_descriptor(&capable).unwrap(),
+            capable
+        );
+        capable["models"][0]["cost"]["output"] = json!(-1);
+        assert!(super::validate_static_te_descriptor(&capable).is_err());
+    }
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;

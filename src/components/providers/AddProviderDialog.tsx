@@ -31,6 +31,7 @@ import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
 import type { OpenClawSuggestedDefaults } from "@/config/openclawProviderPresets";
 import type { UniversalProviderPreset } from "@/config/universalProviderPresets";
 import { generateUUID } from "@/utils/uuid";
+import type { TeStaticProviderDescriptor } from "@/lib/api/providers";
 
 interface AddProviderDialogProps {
   open: boolean;
@@ -40,6 +41,7 @@ interface AddProviderDialogProps {
   onSubmit: (
     provider: Omit<Provider, "id"> & {
       providerKey?: string;
+      teDescriptor?: TeStaticProviderDescriptor;
       suggestedDefaults?: OpenClawSuggestedDefaults;
       ensureClaudeDesktopOfficialSeed?: boolean;
       ensureCodexOfficialSeed?: boolean;
@@ -166,6 +168,7 @@ export function AddProviderDialog({
       // 构造基础提交数据
       const providerData: Omit<Provider, "id"> & {
         providerKey?: string;
+        teDescriptor?: TeStaticProviderDescriptor;
         suggestedDefaults?: OpenClawSuggestedDefaults;
         ensureClaudeDesktopOfficialSeed?: boolean;
         ensureCodexOfficialSeed?: boolean;
@@ -175,6 +178,7 @@ export function AddProviderDialog({
         notes: values.notes?.trim() || undefined,
         websiteUrl: values.websiteUrl?.trim() || undefined,
         settingsConfig: parsedConfig,
+        ...(values.teDescriptor ? { teDescriptor: values.teDescriptor } : {}),
         icon: values.icon?.trim() || undefined,
         iconColor: values.iconColor?.trim() || undefined,
         ...(values.presetCategory ? { category: values.presetCategory } : {}),
