@@ -1427,17 +1427,41 @@ impl Database {
         let mut statement = conn.prepare(
             "SELECT id, settings_config, meta FROM providers WHERE app_type = 'openclaw'",
         )?;
-        let records = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-        })?.collect::<Result<Vec<_>, _>>()?;
+        let records = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         for (id, raw_settings, raw_meta) in records {
-            let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&raw_settings) else { continue; };
-            let Some(te) = settings.get("teProvider").and_then(serde_json::Value::as_object) else { continue; };
-            if te.keys().any(|key| ![
-                "sidecarUrl", "expectedPartnerAic", "protocolVersion", "bindingDelivery",
-                "providerTimeoutSeconds", "keepAliveIntervalSeconds", "models", "providerProbeUrl",
-            ].contains(&key.as_str())) { continue; }
+            let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&raw_settings) else {
+                continue;
+            };
+            let Some(te) = settings
+                .get("teProvider")
+                .and_then(serde_json::Value::as_object)
+            else {
+                continue;
+            };
+            if te.keys().any(|key| {
+                ![
+                    "sidecarUrl",
+                    "expectedPartnerAic",
+                    "protocolVersion",
+                    "bindingDelivery",
+                    "providerTimeoutSeconds",
+                    "keepAliveIntervalSeconds",
+                    "models",
+                    "providerProbeUrl",
+                ]
+                .contains(&key.as_str())
+            }) {
+                continue;
+            }
             let descriptor = serde_json::json!({
                 "providerType": "token-exchange", "providerId": id,
                 "pluginId": "token-exchange", "protocolVersion": te.get("protocolVersion"),
@@ -1447,13 +1471,27 @@ impl Database {
             // 旧行先检查公开投影与描述符，损坏行保留原貌但绝不进入专用 registry。
             if crate::commands::validate_static_te_descriptor(&descriptor).is_err()
                 || settings["apiKey"] != "te-provider-placeholder-not-a-secret"
-                || settings["baseUrl"] != format!("{}/v1", te.get("sidecarUrl").and_then(|v| v.as_str()).unwrap_or("").trim_end_matches('/'))
+                || settings["baseUrl"]
+                    != format!(
+                        "{}/v1",
+                        te.get("sidecarUrl")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim_end_matches('/')
+                    )
                 || !settings["models"].is_array()
-            { continue; }
-            let Some(settings_map) = settings.as_object_mut() else { continue; };
+            {
+                continue;
+            }
+            let Some(settings_map) = settings.as_object_mut() else {
+                continue;
+            };
             settings_map.remove("teProvider");
-            let mut meta = serde_json::from_str::<serde_json::Value>(&raw_meta).unwrap_or_else(|_| serde_json::json!({}));
-            let Some(meta_map) = meta.as_object_mut() else { continue; };
+            let mut meta = serde_json::from_str::<serde_json::Value>(&raw_meta)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let Some(meta_map) = meta.as_object_mut() else {
+                continue;
+            };
             meta_map.insert("providerType".into(), serde_json::json!("token_exchange"));
             conn.execute(
                 "INSERT INTO te_provider_descriptors (provider_id, descriptor) VALUES (?1, ?2)",
@@ -4034,7 +4072,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn migrate_v24_te_descriptor_preserves_valid_legacy_and_quarantines_invalid() -> Result<(), AppError> {
+    fn migrate_v24_te_descriptor_preserves_valid_legacy_and_quarantines_invalid(
+    ) -> Result<(), AppError> {
         let conn = Connection::open_in_memory()?;
         Database::create_tables_on_conn(&conn)?;
         let config = json!({
@@ -4049,7 +4088,11 @@ mod tests {
         });
         for (id, settings) in [
             ("te-valid", config.clone()),
-            ("te-invalid", { let mut bad = config; bad["teProvider"]["proxyKey"] = json!("secret"); bad }),
+            ("te-invalid", {
+                let mut bad = config;
+                bad["teProvider"]["proxyKey"] = json!("secret");
+                bad
+            }),
         ] {
             conn.execute("INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES (?1, 'openclaw', ?1, ?2, '{}')",
                 params![id, settings.to_string()])?;
@@ -4057,11 +4100,29 @@ mod tests {
         Database::set_user_version(&conn, 24)?;
         Database::apply_schema_migrations_on_conn(&conn)?;
         assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
-        let valid: String = conn.query_row("SELECT settings_config FROM providers WHERE id='te-valid'", [], |r| r.get(0))?;
-        let invalid: String = conn.query_row("SELECT settings_config FROM providers WHERE id='te-invalid'", [], |r| r.get(0))?;
-        assert!(serde_json::from_str::<serde_json::Value>(&valid).expect("valid JSON")["teProvider"].is_null());
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&invalid).expect("valid JSON")["teProvider"]["proxyKey"], "secret");
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM te_provider_descriptors", [], |r| r.get(0))?;
+        let valid: String = conn.query_row(
+            "SELECT settings_config FROM providers WHERE id='te-valid'",
+            [],
+            |r| r.get(0),
+        )?;
+        let invalid: String = conn.query_row(
+            "SELECT settings_config FROM providers WHERE id='te-invalid'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&valid).expect("valid JSON")["teProvider"]
+                .is_null()
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&invalid).expect("valid JSON")["teProvider"]
+                ["proxyKey"],
+            "secret"
+        );
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM te_provider_descriptors", [], |r| {
+                r.get(0)
+            })?;
         assert_eq!(count, 1);
         Ok(())
     }

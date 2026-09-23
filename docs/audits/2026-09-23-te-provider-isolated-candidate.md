@@ -33,3 +33,9 @@ raw EXE 的 Windows FileVersion / ProductVersion 均为 `3.20.2-19`。NSIS 的 A
 测试运行时设置 `CARGO_TARGET_DIR=C:\Users\sunda\AppData\Local\Temp\ccsm-te-descriptor-target-20260923` 及 `CCSM_TE_QA_SIDECAR_URL=http://127.0.0.1:29814`，执行 `cargo test --manifest-path src-tauri/Cargo.toml --lib te_provider_isolated_live_projection_reaches_companion_sidecar -- --ignored --test-threads=1 --nocapture`，结果 1/1；未提供端点且不用 `--ignored` 时结果是 0 passed、1 ignored，不会空跑通过。验收后只停止本次启动的 sidecar，端口 29814 已无 listener。
 
 **尚未证明**：桌面窗口实际点击 Add 的 Tauri IPC 跨进程路径、插件在目标 OpenClaw 版本上的加载、经认证 AIP Task Start/bind/revoke、真实 TE Proxy 调用、正式安装与在线切换。这些必须在同一隔离宿主具备可信身份和任务材料后再验收；本候选不能作为生产放行结论。
+
+## `3.20.2-20` 主线集成补记
+
+`main@e70e5712` 在 Codex 官方目录主线 `e056d60a` 后依次接入 `0bb385b1`（原子注册）和 `e70e5712`（隔离 sidecar 回归），未改变前一候选的 Rust/前端 TE 逻辑。`pnpm typecheck` 通过；两批前端聚焦测试共 270/270 通过，涵盖 TE 表单/新增/编辑、Provider 操作及受影响的 Codex workspace/profile。D 盘独立 Cargo target 上 `cargo test --lib te_provider` 为 18 passed、1 ignored，`--lib token_exchange` 为 8 passed，`--lib migrate_v24_te_descriptor` 为 1 passed；ignored 的 live sidecar 用例需要显式隔离服务，不能当作已在新主线运行的 E2E。
+
+首次 post-commit 自动构建以 `0bb385b1` 为源身份启动，编译期间 HEAD 前进到 `e70e5712`，脚本按预期在导出前报 `release source identity changed` 并自动清理该轮 Cargo target。同期另一个 worktree 的 `3.20.2-19` 构建完成并更新共享导出目录，因此现有共享目录的元数据不是本主线产物。本节截至收尾提交前仅证明源码测试；最终提交的打包结果、哈希与未安装边界需另行核验。

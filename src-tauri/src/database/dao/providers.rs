@@ -675,8 +675,11 @@ impl Database {
             )?;
         } else if app_type == "openclaw" {
             // TE descriptor 随明确删除其长期 Provider 而撤销；普通 Provider 不受影响。
-            tx.execute("DELETE FROM te_provider_descriptors WHERE provider_id = ?1", [id])
-                .map_err(|error| AppError::Database(error.to_string()))?;
+            tx.execute(
+                "DELETE FROM te_provider_descriptors WHERE provider_id = ?1",
+                [id],
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
         }
         tx.commit()
             .map_err(|error| AppError::Database(error.to_string()))

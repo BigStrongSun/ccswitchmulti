@@ -11,6 +11,7 @@
 ## 2026-09-23 TE Provider 静态描述符隔离边界（源码候选）
 
 - 交付接续：`8661486d` 已构建 Windows x64 raw EXE、history-repair sidecar 和未签名 NSIS 候选；归档哈希、同批 companion `0.1.0` / SDK `0.2.2` 契约与隔离 live→真实 sidecar（health 200、无绑定 428）详见 `docs/audits/2026-09-23-te-provider-isolated-candidate.md`。测试用例默认 ignored，显式 loopback 环境运行通过；仍未安装、验证实际桌面 IPC 或完成经认证 AIP/Proxy E2E。旧 README 分步 upsert 与原子 IPC 不兼容，需 companion 侧同步改文档。
+- 主线集成：`main@e70e5712` 依次 cherry-pick descriptor 原子注册和隔离 sidecar 回归，在 `3.20.2-20` 的 Codex 官方目录改动之上前端 TE/Codex 聚焦 270/270、TypeScript typecheck、Rust TE 18 passed/1 ignored、Token Exchange 8 passed、v24→v25 迁移 1 passed。首个 post-commit release hook 在两次提交之间启动，被提交身份校验正确拒绝（`0bb385b1`→`e70e5712`）；共享导出目录随后由另一 worktree 的 `3.20.2-19` 产物覆盖，不能作为本主线产物。Rustfmt 与聚焦回归已完成，最终提交和打包仍须完成；不能将前一候选的 live 验收直接写成新主线的真实 E2E。
 
 - TE Provider 的长期定位字段属于专用 SQLite `te_provider_descriptors` 注册表；Agent/OpenClaw `settings_config` 只保留 `api/baseUrl/placeholder apiKey/models`。UI 草稿与 live 投影不可混存，Task/lease/binding/Proxy Key 始终不能持久化。
 - v24→v25 对旧 OpenClaw `settingsConfig.teProvider` 只迁移符合严格静态描述符及公开投影的行；恶意、损坏或不匹配行保留原记录并拒绝成为可用 registry 身份，方便调查和恢复。SDK 模型能力字段可选且缺失=未知，CCSM 严格保留显式元数据，但 descriptor/schema 本身不证明能力来源已验证。
