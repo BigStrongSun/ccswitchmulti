@@ -1,5 +1,9 @@
 # CC Switch Repository Memory
 
+## 2026-09-23 Codex app-server 非预期退出证据
+
+- 16:40:57 Desktop 原始日志明确记录旧 app-server 非预期退出，退出码 `3221225786 / 0xC000013A`，最近 stderr 错误为 `Custom tool call output is missing`；随即重启成功。该退出码对应 Windows `STATUS_CONTROL_C_EXIT`，但不能仅凭最近错误推断是谁发出了控制事件，也不能断定缺工具输出是原因而非伴随/后续状态。Windows 无对应 Codex WER；CCSM、WebSocket 超时、后续 Sandbox Service 异常和更新均无因果证据。详见 `memory-2026-09-23-codex-appserver-exit-evidence.md`。
+
 ## 2026-09-23 Codex Provider 保存校验 fail-closed
 
 - Provider 保存过去按 `err.message.includes("reasoning")` 识别推理校验异常；中文 Ultra 校验不匹配，吞掉错误后把旧 `values.settingsConfig` 当新值继续提交，API Key 等表单草稿因此未写入。
