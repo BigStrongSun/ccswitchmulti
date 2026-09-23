@@ -261,14 +261,20 @@ export const normalizeCodexCatalogModelsForSave = (
       reasoning?.defaultEffort &&
       !reasoning.supportedEfforts.includes(reasoning.defaultEffort)
     ) {
-      throw new Error(`${model}：默认推理强度必须包含在该模型支持的推理强度中`);
+      throw new CodexCatalogValidationError(
+        model,
+        `${model}：默认推理强度必须包含在该模型支持的推理强度中`,
+      );
     }
     if (
       reasoning &&
       !reasoning.disableAllowed &&
       reasoning.supportedEfforts.includes("none")
     ) {
-      throw new Error(`${model}：包含“关闭推理”档时，必须允许关闭推理`);
+      throw new CodexCatalogValidationError(
+        model,
+        `${model}：包含“关闭推理”档时，必须允许关闭推理`,
+      );
     }
     if (
       reasoning &&
@@ -281,7 +287,10 @@ export const normalizeCodexCatalogModelsForSave = (
     ) {
       for (const effort of reasoning.supportedEfforts) {
         if (!reasoning.upstream.effortMap?.[effort]) {
-          throw new Error(`${model}：推理强度映射缺少 ${effort} 档`);
+          throw new CodexCatalogValidationError(
+            model,
+            `${model}：推理强度映射缺少 ${effort} 档`,
+          );
         }
       }
       // 与后端 CodexModelReasoningCapability::validate 对齐：
@@ -296,7 +305,8 @@ export const normalizeCodexCatalogModelsForSave = (
             target &&
             !reasoning.supportedEfforts.includes(target as CodexReasoningEffort)
           ) {
-            throw new Error(
+            throw new CodexCatalogValidationError(
+              model,
               `${model}：${source} 档映射到的 ${target} 不在该模型支持的推理强度中`,
             );
           }
@@ -304,8 +314,9 @@ export const normalizeCodexCatalogModelsForSave = (
       }
     }
     if (item.codexUltra?.enabled && !item.codexUltra.providerEffort) {
-      throw new Error(
-        `${model}：解锁 Ultra 档后，必须选择对应的供应商推理强度`,
+      throw new CodexCatalogValidationError(
+        model,
+        `${model}：已解锁 Ultra 档，但尚未选择对应的供应商推理强度。请完成此项后再保存；当前所有修改均未保存。`,
       );
     }
 
@@ -352,6 +363,16 @@ export const normalizeCodexCatalogModelsForSave = (
 
   return normalized;
 };
+
+export class CodexCatalogValidationError extends Error {
+  constructor(
+    readonly model: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CodexCatalogValidationError";
+  }
+}
 
 const normalizeCodexSpawnAgentModelsForSave = (
   selectedModels: string[],
@@ -505,6 +526,9 @@ function ProviderFormFull({
   const [isEndpointModalOpen, setIsEndpointModalOpen] = useState(false);
   const [isCodexEndpointModalOpen, setIsCodexEndpointModalOpen] =
     useState(false);
+  const [codexCatalogValidationError, setCodexCatalogValidationError] =
+    useState<CodexCatalogValidationError | null>(null);
+  const [codexSaveError, setCodexSaveError] = useState<string | null>(null);
   const codexProviderDetailsRef = useRef<HTMLDivElement | null>(null);
 
   const [draftCustomEndpoints, setDraftCustomEndpoints] = useState<string[]>(
@@ -1822,11 +1846,18 @@ function ProviderFormFull({
         }
         settingsConfig = JSON.stringify(configObj);
       } catch (err) {
-        if (err instanceof Error && err.message.includes("reasoning")) {
-          toast.error(`Codex 推理能力配置无效：${err.message}`);
-          return;
+        if (err instanceof CodexCatalogValidationError) {
+          setCodexCatalogValidationError(err);
+          toast.error(err.message, { duration: 6000 });
+        } else {
+          const message = t("providerForm.codexConfigInvalidNotSaved", {
+            defaultValue:
+              "Codex 配置无效或无法解析，本次所有修改均未保存。请检查配置后重试。",
+          });
+          setCodexSaveError(message);
+          toast.error(message);
         }
-        settingsConfig = values.settingsConfig.trim();
+        return;
       }
     } else if (appId === "gemini") {
       try {
@@ -2152,7 +2183,24 @@ function ProviderFormFull({
         openclawForm.openclawTeProvider!,
       );
     }
-    await onSubmit(payload);
+    try {
+      await onSubmit(payload);
+    } catch (error) {
+      if (appId === "codex") {
+        const message = t("providerForm.codexConfigInvalidNotSaved", {
+          defaultValue:
+            "保存失败，本次所有修改仍保留在当前草稿中，尚未保存。请检查后重试。",
+        });
+        setCodexSaveError(message);
+        toast.error(message);
+        return;
+      }
+      throw error;
+    }
+    if (appId === "codex") {
+      setCodexCatalogValidationError(null);
+      setCodexSaveError(null);
+    }
     if (isCanonicalCodexOfficial) {
       const migrationStatus = await finalizeCodexOfficialAuthOwnershipAfterSave(
         codexOfficialAuthMigration,
@@ -2913,7 +2961,19 @@ function ProviderFormFull({
                 }
                 catalogModels={codexCatalogModels}
                 presetCatalogModels={codexPresetBaseline}
-                onCatalogModelsChange={setCodexCatalogModels}
+                onCatalogModelsChange={(models) => {
+                  setCodexCatalogModels(models);
+                  try {
+                    normalizeCodexCatalogModelsForSave(models);
+                    setCodexCatalogValidationError(null);
+                  } catch (error) {
+                    if (error instanceof CodexCatalogValidationError) {
+                      setCodexCatalogValidationError(error);
+                    }
+                  }
+                }}
+                catalogValidationError={codexCatalogValidationError}
+                saveError={codexSaveError}
                 spawnAgentModels={codexSpawnAgentModels}
                 onSpawnAgentModelsChange={setCodexSpawnAgentModels}
                 codexRouting={codexRouting}

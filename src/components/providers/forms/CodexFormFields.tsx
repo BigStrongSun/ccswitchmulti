@@ -291,6 +291,8 @@ interface CodexFormFieldsProps {
   // Current maintained preset baseline, used only for explicit override/restore.
   presetCatalogModels?: CodexCatalogModel[];
   onCatalogModelsChange?: (models: CodexCatalogModel[]) => void;
+  catalogValidationError?: { model: string; message: string } | null;
+  saveError?: string | null;
   spawnAgentModels?: string[];
   onSpawnAgentModelsChange?: (models: string[]) => void;
   codexRouting?: CodexRoutingConfig;
@@ -306,6 +308,42 @@ interface CodexFormFieldsProps {
   onLocalProxyHeadersOverrideChange: (value: string) => void;
   localProxyBodyOverride: string;
   onLocalProxyBodyOverrideChange: (value: string) => void;
+}
+
+export function CodexFormSaveFeedback({
+  catalogValidationError,
+  saveError,
+}: {
+  catalogValidationError?: { model: string; message: string } | null;
+  saveError?: string | null;
+}) {
+  if (!catalogValidationError && !saveError) return null;
+  return (
+    <div className="space-y-2">
+      {catalogValidationError && (
+        <div
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/5 p-3 text-sm text-destructive"
+        >
+          {catalogValidationError.message}
+          <span className="mt-1 block text-xs">
+            API Key、端点及其他修改仍保留在当前草稿中，但本次所有修改均未保存。
+          </span>
+        </div>
+      )}
+      {saveError && (
+        <div
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/5 p-3 text-sm text-destructive"
+        >
+          {saveError}
+          <span className="mt-1 block text-xs">
+            API Key 和其他输入仍保留在当前草稿中，不会显示在此错误提示中。
+          </span>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function capabilityFromReasoningDetection(
@@ -718,6 +756,8 @@ export function CodexFormFields({
   catalogModels = [],
   presetCatalogModels = [],
   onCatalogModelsChange,
+  catalogValidationError = null,
+  saveError = null,
   speedTestEndpoints,
   customUserAgent,
   onCustomUserAgentChange,
@@ -786,6 +826,13 @@ export function CodexFormFields({
   const isChatFormat = apiFormat === "openai_chat";
   const isAnthropicFormat = apiFormat === "anthropic";
   const canEditCatalog = Boolean(onCatalogModelsChange);
+
+  useEffect(() => {
+    if (!catalogValidationError) return;
+    document
+      .getElementById("codex-catalog-validation-row")
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [catalogValidationError]);
 
   // 普通 Provider 表单只消费并原样回传历史 codexRouting；可见编辑入口统一收口到
   // CodexRouterWorkspacePage，避免与完整 MultiRouter 工作台形成两套配置界面。
@@ -1903,6 +1950,10 @@ export function CodexFormFields({
           aria-labelledby="codex-model-reasoning-title"
           className="space-y-4 rounded-lg border border-border-default bg-muted/10 p-4"
         >
+          <CodexFormSaveFeedback
+            catalogValidationError={catalogValidationError}
+            saveError={saveError}
+          />
           <div className="space-y-1">
             <h3
               id="codex-model-reasoning-title"
@@ -1965,8 +2016,13 @@ export function CodexFormFields({
 
                 return (
                   <article
+                    id={
+                      catalogValidationError?.model === model
+                        ? "codex-catalog-validation-row"
+                        : undefined
+                    }
                     key={`reasoning:${row.rowId}`}
-                    className="space-y-3 rounded-md border bg-background p-3 text-xs"
+                    className={`space-y-3 rounded-md border bg-background p-3 text-xs ${catalogValidationError?.model === model ? "border-destructive ring-1 ring-destructive" : ""}`}
                   >
                     <CodexModelReasoningSummary
                       model={row.displayName?.trim() || model || "未命名模型"}

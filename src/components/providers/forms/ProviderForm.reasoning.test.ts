@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { CodexModelReasoningCapability } from "@/types";
 
-import { normalizeCodexCatalogModelsForSave } from "./ProviderForm";
+import {
+  CodexCatalogValidationError,
+  normalizeCodexCatalogModelsForSave,
+} from "./ProviderForm";
 import {
   applyCodexReasoningCapabilitySource,
   validateCodexReasoningCapabilityDraft,
@@ -39,11 +42,17 @@ describe("Codex catalog reasoning capability persistence", () => {
   });
 
   it("requires a selected Provider effort when Ultra is unlocked", () => {
-    expect(() =>
+    let caught: unknown;
+    try {
       normalizeCodexCatalogModelsForSave([
         { model: "deepseek", codexUltra: { enabled: true } },
-      ]),
-    ).toThrow(/解锁 Ultra 档后，必须选择对应的供应商推理强度/);
+      ]);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CodexCatalogValidationError);
+    expect(caught).toHaveProperty("model", "deepseek");
+    expect((caught as Error).message).toContain("当前所有修改均未保存");
 
     expect(
       normalizeCodexCatalogModelsForSave([
@@ -58,6 +67,26 @@ describe("Codex catalog reasoning capability persistence", () => {
         codexUltra: { enabled: true, providerEffort: "high" },
       },
     ]);
+  });
+
+  it("classifies non-Ultra reasoning validation as a structured catalog error", () => {
+    expect(() =>
+      normalizeCodexCatalogModelsForSave([
+        {
+          model: "invalid-default",
+          reasoning: {
+            supported: true,
+            supportedEfforts: ["low"],
+            defaultEffort: "high",
+            disableAllowed: false,
+            upstream: {
+              format: "string",
+              parameter: "reasoning_effort",
+            },
+          },
+        },
+      ]),
+    ).toThrow(CodexCatalogValidationError);
   });
 
   it("preserves a valid user model reasoning override", () => {
