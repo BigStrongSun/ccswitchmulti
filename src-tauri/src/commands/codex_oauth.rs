@@ -328,15 +328,17 @@ pub async fn refresh_codex_official_model_catalog(
     // This is deliberately the catalog-only builder, not
     // `sync_current_provider_for_app`: a manual directory refresh must not
     // rewrite user routing, auth, or other live config fields. The builder's
-    // existing projection chain atomically writes both generated catalog and
-    // CCSM-owned models_cache, and propagates either write failure.
+    // existing projection chain publishes the generated catalog/cache pair
+    // through its compensating rollback boundary, and propagates either write
+    // failure. A failed result means pair synchronization was not confirmed.
     match crate::services::provider::build_codex_live_config_for_provider(&state.db, &provider) {
         Ok(_) => status.projection_applied = true,
         Err(error) => {
             log::warn!("official catalog refresh projection failed: {error}");
-            status.projection_reason = Some("projection_failed".to_string());
+            status.projection_reason = Some("projection_outputs_unconfirmed".to_string());
             status.refresh_error.get_or_insert_with(|| {
-                "Official catalog refreshed, but CCSM catalog projection failed".to_string()
+                "Official catalog refreshed, but CCSM could not confirm synchronized generated catalog outputs"
+                    .to_string()
             });
         }
     }
@@ -377,9 +379,9 @@ mod tests {
             fetched_at: Some("2026-09-23T00:00:00Z".to_string()),
             model_count: 2,
             used_stale_cache: false,
-            projection_applied: true,
-            projection_reason: None,
-            refresh_error: None,
+            projection_applied: false,
+            projection_reason: Some("projection_outputs_unconfirmed".to_string()),
+            refresh_error: Some("projection failed".to_string()),
         })
         .expect("serialize status");
 
@@ -387,8 +389,8 @@ mod tests {
         assert_eq!(value["fetchedAt"], "2026-09-23T00:00:00Z");
         assert_eq!(value["modelCount"], 2);
         assert_eq!(value["usedStaleCache"], false);
-        assert_eq!(value["projectionApplied"], true);
-        assert!(value.get("projectionReason").is_some());
-        assert!(value.get("refreshError").is_some());
+        assert_eq!(value["projectionApplied"], false);
+        assert_eq!(value["projectionReason"], "projection_outputs_unconfirmed");
+        assert_eq!(value["refreshError"], "projection failed");
     }
 }

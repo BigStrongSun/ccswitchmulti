@@ -6352,6 +6352,71 @@ fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(),
     write_json_file(&cache_path, &cache)
 }
 
+fn codex_catalog_cache_publish_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn capture_optional_file(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AppError::io(path, error)),
+    }
+}
+
+fn restore_optional_file(path: &Path, snapshot: Option<&[u8]>) -> Result<(), AppError> {
+    match snapshot {
+        Some(bytes) => atomic_write(path, bytes),
+        None if path.exists() => delete_file(path),
+        None => Ok(()),
+    }
+}
+
+/// Publish the two generated Codex model files as a compensating transaction.
+/// Each file write is atomic; this boundary additionally restores catalog,
+/// cache, and cache backup if the dependent cache projection fails, avoiding a
+/// mixed pair after a partial publish. It does not claim a filesystem-wide
+/// atomic rename across both files.
+fn publish_codex_catalog_and_models_cache_transactionally<F>(
+    catalog_path: &Path,
+    catalog: &Value,
+    cache_path: &Path,
+    backup_path: &Path,
+    sync_cache: F,
+) -> Result<(), AppError>
+where
+    F: FnOnce() -> Result<(), AppError>,
+{
+    let _guard = codex_catalog_cache_publish_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let catalog_before = capture_optional_file(catalog_path)?;
+    let cache_before = capture_optional_file(cache_path)?;
+    let backup_before = capture_optional_file(backup_path)?;
+
+    write_json_file(catalog_path, catalog)?;
+    if let Err(error) = sync_cache() {
+        let rollback = [
+            (backup_path, backup_before.as_deref()),
+            (cache_path, cache_before.as_deref()),
+            (catalog_path, catalog_before.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(path, snapshot)| restore_optional_file(path, snapshot).err())
+        .map(|rollback_error| rollback_error.to_string())
+        .collect::<Vec<_>>();
+        if rollback.is_empty() {
+            return Err(error);
+        }
+        return Err(AppError::Message(format!(
+            "Codex catalog/cache projection failed: {error}; rollback also failed: {}",
+            rollback.join("; ")
+        )));
+    }
+    Ok(())
+}
+
 /// 在退出 MultiRouter 或清空模型目录时恢复 Codex 原始模型缓存。
 fn restore_codex_models_cache_if_cc_switch_owned() -> Result<(), AppError> {
     let cache_path = get_codex_models_cache_path();
@@ -6477,8 +6542,13 @@ fn prepare_codex_config_text_with_model_catalog_impl(
             codex_subagent_version(settings),
             provider_context,
         )?;
-        write_json_file(&catalog_path, &catalog)?;
-        sync_codex_models_cache_with_cc_switch_catalog(&catalog)?;
+        publish_codex_catalog_and_models_cache_transactionally(
+            &catalog_path,
+            &catalog,
+            &get_codex_models_cache_path(),
+            &get_codex_models_cache_backup_path(),
+            || sync_codex_models_cache_with_cc_switch_catalog(&catalog),
+        )?;
         sync_codex_managed_agent_files_with_settings(
             &specs,
             codex_subagent_version(settings),
@@ -17955,6 +18025,45 @@ wire_api = "responses"
         assert_eq!(
             manual_official_catalog_projection_eligibility(true, user_managed, base),
             Err("catalog_not_cc_switch_owned")
+        );
+    }
+
+    #[test]
+    fn catalog_cache_publish_rolls_back_both_outputs_when_cache_sync_fails() {
+        let temp = tempfile::tempdir().expect("temp output directory");
+        let catalog_path = temp.path().join("cc-switch-model-catalog.json");
+        let cache_path = temp.path().join("models_cache.json");
+        let backup_path = temp.path().join("models_cache.cc-switch-backup.json");
+        std::fs::write(&catalog_path, b"old-catalog").expect("seed catalog");
+        std::fs::write(&cache_path, b"old-cache").expect("seed cache");
+        std::fs::write(&backup_path, b"old-backup").expect("seed backup");
+
+        let error = publish_codex_catalog_and_models_cache_transactionally(
+            &catalog_path,
+            &json!({"models": [{"slug": "fresh"}]}),
+            &cache_path,
+            &backup_path,
+            || {
+                std::fs::write(&cache_path, b"new-cache-before-failure")
+                    .expect("simulate cache write");
+                std::fs::write(&backup_path, b"new-backup-before-failure")
+                    .expect("simulate backup write");
+                Err(AppError::Message("cache sync failed".to_string()))
+            },
+        )
+        .expect_err("cache sync failure must roll back the catalog transaction");
+        assert!(error.to_string().contains("cache sync failed"));
+        assert_eq!(
+            std::fs::read(&catalog_path).expect("restored catalog"),
+            b"old-catalog"
+        );
+        assert_eq!(
+            std::fs::read(&cache_path).expect("restored cache"),
+            b"old-cache"
+        );
+        assert_eq!(
+            std::fs::read(&backup_path).expect("restored backup"),
+            b"old-backup"
         );
     }
 }

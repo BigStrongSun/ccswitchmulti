@@ -20,6 +20,15 @@
   takeover is enabled and live `config.toml` points at the CCSM-owned catalog.
   Disabled takeover or a user-owned catalog produces a clear reason and does
   not modify generated outputs.
+- `cc-switch-model-catalog.json` and `models_cache.json` are separate files,
+  so no filesystem-wide atomic rename is claimed. Their publisher snapshots
+  catalog, cache, and backup, uses atomic per-file writes, and compensates by
+  restoring all three on cache-sync failure. A command failure reports
+  `projection_outputs_unconfirmed`, never that no generated file changed.
+- A successful public snapshot followed by projection failure is still fresh
+  upstream state; a later explicit refresh intentionally performs another
+  forced upstream request rather than treating that snapshot as an applied
+  projection.
 - UI entry is Status -> Link status -> "Force refresh official model catalog".
   It displays the above result fields and tells the user to refresh the Codex
   model picker. This source change is not installed, deployed, or runtime-UI
