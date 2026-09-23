@@ -581,7 +581,9 @@ fn lift_codex_responses_control_messages(input: Value) -> (Value, Vec<String>) {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if codex_responses_input_item_is_control_message(item_type, &object) {
+        if codex_responses_input_item_is_control_message(item_type, &object)
+            && !codex_responses_input_item_has_explicit_prompt_cache_breakpoint(&object)
+        {
             let text = codex_responses_input_item_text(&object);
             let text = text.trim();
             if !text.is_empty() {
@@ -743,6 +745,29 @@ fn codex_responses_input_item_is_control_message(
             object.get("role").and_then(Value::as_str),
             Some("system" | "developer")
         )
+}
+
+/// 判断控制消息是否携带官方显式 prompt-cache 断点。
+///
+/// 顶层 `instructions` 不支持 `prompt_cache_breakpoint`；将这类 developer
+/// message 提升会静默删除断点并改变 GPT-5.6+/GPT-6 的 cache-write 边界。
+/// 仅识别当前官方 wire 形状 `{ "mode": "explicit" }`，不把旧版布尔标记或
+/// 未知扩展当作缓存指令，从而避免代理猜测性地改变普通消息的稳定前缀。
+fn codex_responses_input_item_has_explicit_prompt_cache_breakpoint(
+    object: &Map<String, Value>,
+) -> bool {
+    object
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            parts.iter().any(|part| {
+                part.get("prompt_cache_breakpoint")
+                    .and_then(Value::as_object)
+                    .and_then(|breakpoint| breakpoint.get("mode"))
+                    .and_then(Value::as_str)
+                    == Some("explicit")
+            })
+        })
 }
 
 /// 提取 Codex input item 中可合并进 instructions 的文本。
@@ -2139,6 +2164,74 @@ mod tests {
 
         assert!(normalized.get("prompt_cache_retention").is_none());
         assert_eq!(normalized["prompt_cache_options"]["ttl"], "30m");
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_preserves_explicit_prompt_cache_boundary() {
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-6-sol",
+                "instructions": "Existing stable instructions.",
+                "reasoning": { "effort": "medium" },
+                "prompt_cache_options": { "mode": "explicit", "ttl": "30m" },
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "Reusable policy and reference material.",
+                            "prompt_cache_breakpoint": { "mode": "explicit" }
+                        }]
+                    },
+                    {
+                        "type": "configuration_update",
+                        "reasoning": { "effort": "high" }
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{ "type": "input_text", "text": "Use the stronger setting now." }]
+                    }
+                ]
+            }),
+            false,
+        );
+
+        let input = normalized["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(
+            input[0]["content"][0]["prompt_cache_breakpoint"],
+            json!({ "mode": "explicit" })
+        );
+        assert_eq!(input[1]["type"], "configuration_update");
+        assert_eq!(input[1]["reasoning"]["effort"], "high");
+        assert_eq!(normalized["reasoning"]["effort"], "medium");
+        assert_eq!(normalized["prompt_cache_options"]["mode"], "explicit");
+        assert_eq!(normalized["prompt_cache_options"]["ttl"], "30m");
+    }
+
+    #[test]
+    fn codex_responses_control_message_with_noncanonical_cache_marker_is_still_lifted() {
+        let normalized = normalize_codex_responses_passthrough_request(json!({
+            "instructions": "Existing instructions.",
+            "input": [{
+                "type": "message",
+                "role": "developer",
+                "content": [{
+                    "type": "input_text",
+                    "text": "Existing control message.",
+                    "prompt_cache_breakpoint": true
+                }]
+            }]
+        }));
+
+        assert!(normalized["input"].as_array().is_some_and(Vec::is_empty));
+        assert_eq!(
+            normalized["instructions"],
+            "Existing instructions.\n\nExisting control message."
+        );
     }
 
     #[test]
