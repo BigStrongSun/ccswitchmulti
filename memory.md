@@ -10,6 +10,8 @@
 
 ## 2026-09-23 TE Provider 静态描述符隔离边界（源码候选）
 
+- 交付接续：`8661486d` 已构建 Windows x64 raw EXE、history-repair sidecar 和未签名 NSIS 候选；归档哈希、同批 companion `0.1.0` / SDK `0.2.2` 契约与隔离 live→真实 sidecar（health 200、无绑定 428）详见 `docs/audits/2026-09-23-te-provider-isolated-candidate.md`。测试用例默认 ignored，显式 loopback 环境运行通过；仍未安装、验证实际桌面 IPC 或完成经认证 AIP/Proxy E2E。旧 README 分步 upsert 与原子 IPC 不兼容，需 companion 侧同步改文档。
+
 - TE Provider 的长期定位字段属于专用 SQLite `te_provider_descriptors` 注册表；Agent/OpenClaw `settings_config` 只保留 `api/baseUrl/placeholder apiKey/models`。UI 草稿与 live 投影不可混存，Task/lease/binding/Proxy Key 始终不能持久化。
 - v24→v25 对旧 OpenClaw `settingsConfig.teProvider` 只迁移符合严格静态描述符及公开投影的行；恶意、损坏或不匹配行保留原记录并拒绝成为可用 registry 身份，方便调查和恢复。SDK 模型能力字段可选且缺失=未知，CCSM 严格保留显式元数据，但 descriptor/schema 本身不证明能力来源已验证。
 - UI 新建/编辑改由 `save_te_provider` 唯一写 IPC：先严格核对私有 descriptor 与公开投影，SQLite 同一事务保存两份记录；旧独立 upsert/delete IPC 不再注册。descriptor INSERT/UPDATE 触发失败时 Provider 一并回滚。OpenClaw live 发布在事务之后单独返回 `stored_and_published` / `stored_publish_failed` / `stored_not_published`，后两种不得报告成已发布；仍不是 AIP Task bind/revoke 闭环。

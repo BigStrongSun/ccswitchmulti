@@ -2073,6 +2073,84 @@ command = "example-mcp"
 
     #[test]
     #[serial]
+    #[ignore = "requires an explicitly isolated CCSM_TE_QA_SIDECAR_URL"]
+    fn te_provider_isolated_live_projection_reaches_companion_sidecar() {
+        // 显式隔离端点是必需门禁；普通测试默认 ignored，绝不空跑宣称真实链路通过。
+        let sidecar_url = env::var("CCSM_TE_QA_SIDECAR_URL")
+            .expect("set CCSM_TE_QA_SIDECAR_URL to an isolated sidecar");
+        let sidecar_url = crate::commands::normalize_loopback_sidecar_url(&sidecar_url)
+            .expect("QA sidecar must be a numeric loopback endpoint");
+        with_test_home(|state, home| {
+            let descriptor = json!({
+                "providerType": "token-exchange", "providerId": "te-qa",
+                "pluginId": "token-exchange", "protocolVersion": "te-provider.v1",
+                "sidecarUrl": sidecar_url, "healthPath": "/healthz",
+                "expectedPartnerAic": "partner-aic",
+                "models": [{"id": "qwen3.8", "name": "qwen3.8"}]
+            });
+            let projection = json!({
+                "api": "openai-completions",
+                "baseUrl": format!("{sidecar_url}/v1"),
+                "apiKey": "te-provider-placeholder-not-a-secret",
+                "models": [{"id": "qwen3.8", "name": "qwen3.8"}]
+            });
+            let provider = token_exchange_openclaw_provider("te-qa", projection.clone());
+            assert_eq!(
+                ProviderService::save_token_exchange_openclaw(
+                    state, provider.clone(), descriptor.clone(), None, true
+                ).expect("persist pair then publish live"),
+                "stored_and_published"
+            );
+            assert_eq!(state.db.get_te_provider_descriptor("te-qa").unwrap(), Some(descriptor.clone()));
+            let stored = state.db.get_provider_by_id("te-qa", "openclaw").unwrap().unwrap();
+            assert_eq!(stored.settings_config, projection);
+            let live = crate::openclaw_config::get_provider("te-qa").unwrap().unwrap();
+            assert_eq!(live["baseUrl"], format!("{sidecar_url}/v1"));
+            assert_eq!(live["apiKey"], "te-provider-placeholder-not-a-secret");
+            assert!(live.get("teProvider").is_none());
+            assert!(home.join(".openclaw").join("openclaw.json").exists());
+
+            let status = tauri::async_runtime::block_on(
+                crate::commands::te_provider_runtime_status(sidecar_url.clone())
+            ).expect("read actual sidecar status");
+            assert!(status.sidecar_reachable);
+            assert_eq!(status.sidecar_status.as_deref(), Some("ok"));
+            assert_eq!(status.provider.as_ref().and_then(|snapshot| snapshot.online), None);
+            assert!(!status.runtime_binding_exposed);
+
+            let denied = tauri::async_runtime::block_on(async {
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .expect("create isolated loopback client");
+                let response = client
+                    .post(format!("{sidecar_url}/v1/chat/completions"))
+                    .json(&json!({"model": "qwen3.8", "messages": [{"role": "user", "content": "qa"}]}))
+                    .send()
+                    .await
+                    .expect("sidecar must answer the OpenAI-compatible route");
+                let code = response.status().as_u16();
+                let body: Value = response.json().await.expect("read structured refusal");
+                (code, body)
+            });
+            assert_eq!(denied.0, 428);
+            assert_eq!(denied.1["error"]["code"], "te_proxy_key_required");
+
+            // 失败的秘密注入不得污染已提交的 DB 与 Agent live 投影。
+            let mut rejected = provider;
+            rejected.settings_config["proxyKey"] = json!("forbidden");
+            assert!(ProviderService::save_token_exchange_openclaw(
+                state, rejected, descriptor, Some("te-qa"), false
+            ).is_err());
+            assert_eq!(state.db.get_provider_by_id("te-qa", "openclaw")
+                .unwrap().unwrap().settings_config, projection);
+            assert_eq!(crate::openclaw_config::get_provider("te-qa").unwrap(), Some(live));
+        });
+    }
+
+    #[test]
+    #[serial]
     fn registered_te_provider_accepts_only_exact_public_projection() {
         with_test_home(|state, _| {
             let descriptor = json!({
