@@ -143,6 +143,22 @@ export async function fetchCodexOfficialFallbackModels(): Promise<
   return invoke("get_codex_official_fallback_models");
 }
 
+/** 完整官方目录强制刷新结果；刷新快照不等于已重投影或已被 Desktop 热加载。 */
+export interface CodexOfficialCatalogRefreshResult {
+  source: string;
+  fetchedAt: string | null;
+  modelCount: number;
+  usedStaleCache: boolean;
+  projectionApplied: boolean;
+  projectionReason: string | null;
+  refreshError: string | null;
+}
+
+/** 强制跳过快照 TTL，只有后端的接管所有权检查通过才重生成 Codex 目录。 */
+export async function refreshCodexOfficialModelCatalog(): Promise<CodexOfficialCatalogRefreshResult> {
+  return invoke("refresh_codex_official_model_catalog");
+}
+
 /**
  * 根据错误类型显示对应的 toast 提示
  */

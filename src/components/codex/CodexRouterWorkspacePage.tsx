@@ -79,6 +79,8 @@ import {
   fetchCodexOfficialFallbackModels,
   fetchCodexOauthModels,
   fetchModelsForConfig,
+  refreshCodexOfficialModelCatalog,
+  type CodexOfficialCatalogRefreshResult,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import type { CodexGuardianStatus } from "@/types/proxy";
@@ -7106,6 +7108,12 @@ function StatusTab({
   const [isDiagnosing, setIsDiagnosing] = useState(false);
   const [modelPickerUnlockResult, setModelPickerUnlockResult] =
     useState<CodexModelPickerUnlockResult | null>(null);
+  const [isRefreshingOfficialCatalog, setIsRefreshingOfficialCatalog] =
+    useState(false);
+  const [officialCatalogRefreshResult, setOfficialCatalogRefreshResult] =
+    useState<CodexOfficialCatalogRefreshResult | null>(null);
+  const [officialCatalogRefreshError, setOfficialCatalogRefreshError] =
+    useState<string | null>(null);
 
   const { data: guardianStatus } = useQuery<CodexGuardianStatus | null>({
     queryKey: ["codexGuardianStatus"],
@@ -7347,6 +7355,29 @@ function StatusTab({
     }
   }
 
+  /// 明确的手动强制刷新：结果必须区分上游新快照、旧缓存与接管目录是否已重生成。
+  async function refreshOfficialCatalog() {
+    setIsRefreshingOfficialCatalog(true);
+    setOfficialCatalogRefreshError(null);
+    setOfficialCatalogRefreshResult(null);
+    try {
+      const result = await refreshCodexOfficialModelCatalog();
+      setOfficialCatalogRefreshResult(result);
+      if (result.projectionApplied) {
+        await queryClient.invalidateQueries({
+          queryKey: ["providers", "codex"],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["codexMultiRouterProjection"],
+        });
+      }
+    } catch (error) {
+      setOfficialCatalogRefreshError(workspaceErrorMessage(error));
+    } finally {
+      setIsRefreshingOfficialCatalog(false);
+    }
+  }
+
   /// Codex Desktop 模型菜单还会被 renderer 白名单二次过滤；这里显式触发 CDP 注入/启动修复。
   async function unlockModelPicker() {
     setIsUnlockingModelPicker(true);
@@ -7424,6 +7455,23 @@ function StatusTab({
                     <GitBranch className="h-4 w-4" />
                   )}
                   协议探测
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={refreshOfficialCatalog}
+                  disabled={isRefreshingOfficialCatalog}
+                  className="gap-2 border-sky-300 bg-background/70 text-sky-700 hover:bg-sky-50 dark:border-sky-500/50 dark:bg-sky-500/10 dark:text-sky-100"
+                >
+                  <RefreshCw
+                    className={cn(
+                      "h-4 w-4",
+                      isRefreshingOfficialCatalog && "animate-spin",
+                    )}
+                  />
+                  {isRefreshingOfficialCatalog
+                    ? "正在刷新官方目录"
+                    : "强制刷新官方模型目录"}
                 </Button>
                 <TooltipProvider delayDuration={200}>
                   <Tooltip>
@@ -7607,6 +7655,79 @@ function StatusTab({
           ) : isCodexTakeoverActive ? (
             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600 dark:border-slate-600/50 dark:bg-slate-900/60 dark:text-slate-300">
               模型菜单守护未启动；重新开启 Codex 接管以激活。
+            </div>
+          ) : null}
+          {officialCatalogRefreshError ? (
+            <div
+              role="alert"
+              className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800 dark:border-rose-700/50 dark:bg-rose-950/25 dark:text-rose-100"
+            >
+              官方目录刷新未完成：{officialCatalogRefreshError}
+              。原有目录保持不变。
+            </div>
+          ) : null}
+          {officialCatalogRefreshResult ? (
+            <div
+              role="status"
+              className={cn(
+                "mt-3 rounded-lg border p-3 text-xs leading-5",
+                officialCatalogRefreshResult.projectionApplied
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-700/50 dark:bg-emerald-950/25 dark:text-emerald-100"
+                  : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/25 dark:text-amber-100",
+              )}
+            >
+              <div className="font-semibold">
+                {officialCatalogRefreshResult.source === "unavailable" ||
+                officialCatalogRefreshResult.usedStaleCache
+                  ? "官方目录未刷新成功"
+                  : officialCatalogRefreshResult.projectionApplied
+                    ? "官方目录刷新成功，Codex 接管目录已重生成"
+                    : "官方快照已刷新，但 Codex 接管目录未更新"}
+              </div>
+              <div>
+                来源：
+                {officialCatalogRefreshResult.source ===
+                "openai_codex_models_json"
+                  ? "OpenAI Codex models.json"
+                  : officialCatalogRefreshResult.source === "stale_cache"
+                    ? "CCSM 旧官方快照"
+                    : officialCatalogRefreshResult.source === "unavailable"
+                      ? "无可用快照"
+                      : officialCatalogRefreshResult.source}
+                ；{officialCatalogRefreshResult.modelCount} 个模型；刷新时间：
+                {officialCatalogRefreshResult.fetchedAt ?? "无"}。
+                {officialCatalogRefreshResult.usedStaleCache
+                  ? "本次沿用旧缓存。"
+                  : ""}
+              </div>
+              {officialCatalogRefreshResult.refreshError ? (
+                <div>
+                  上游刷新失败：{officialCatalogRefreshResult.refreshError}
+                </div>
+              ) : null}
+              {officialCatalogRefreshResult.projectionApplied ? (
+                <div>
+                  请刷新 Codex 模型选择器；若 Desktop
+                  未热加载新目录，请新建任务后再检查。
+                </div>
+              ) : (
+                <div>
+                  本次未修改 Codex 生成目录
+                  {officialCatalogRefreshResult.projectionReason
+                    ? `（${
+                        {
+                          takeover_not_active: "Codex 接管未启用",
+                          catalog_not_cc_switch_owned:
+                            "当前目录不归 CCSwitchMulti 管理",
+                          refresh_failed: "上游刷新失败",
+                          projection_failed: "目录重生成失败",
+                        }[officialCatalogRefreshResult.projectionReason] ??
+                        officialCatalogRefreshResult.projectionReason
+                      }）`
+                    : ""}
+                  ；不要将快照更新视为运行态生效。
+                </div>
+              )}
             </div>
           ) : null}
           {!modelPickerUnlockResult ? (

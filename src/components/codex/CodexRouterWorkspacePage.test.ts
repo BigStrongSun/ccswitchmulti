@@ -8,6 +8,7 @@ import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import {
   fetchCodexOauthModels,
   fetchModelsForConfig,
+  refreshCodexOfficialModelCatalog,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import type { CodexRoutingProjectionStatus } from "@/lib/api/providers";
@@ -115,6 +116,7 @@ vi.mock("@/lib/api/model-fetch", () => ({
   fetchCodexOfficialFallbackModels: vi.fn(),
   fetchCodexOauthModels: vi.fn(),
   fetchModelsForConfig: vi.fn(),
+  refreshCodexOfficialModelCatalog: vi.fn(),
 }));
 
 vi.mock("@/lib/api/codexEgressTimezone", () => ({
@@ -4746,6 +4748,89 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         screen.getByText("已刷新校验状态，请查看链路卡片和最近转发表。"),
       ).toBeInTheDocument(),
     );
+  });
+
+  it("forces an official catalog refresh and reports the projection outcome", async () => {
+    const source: Provider = {
+      id: "official-refresh-source",
+      name: "Official Source",
+      category: "custom",
+      settingsConfig: { modelCatalog: { models: [{ model: "gpt-6-sol" }] } },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    vi.mocked(refreshCodexOfficialModelCatalog).mockResolvedValueOnce({
+      source: "openai_codex_models_json",
+      fetchedAt: "2026-09-23T03:00:00Z",
+      modelCount: 11,
+      usedStaleCache: false,
+      projectionApplied: true,
+      projectionReason: null,
+      refreshError: null,
+    });
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "强制刷新官方模型目录" }));
+    await waitFor(() =>
+      expect(refreshCodexOfficialModelCatalog).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.getByText(/官方目录刷新成功/)).toBeInTheDocument();
+    expect(screen.getByText(/11 个模型/)).toBeInTheDocument();
+    expect(screen.getByText(/2026-09-23T03:00:00Z/)).toBeInTheDocument();
+    expect(screen.getByText(/刷新 Codex 模型选择器/)).toBeInTheDocument();
+  });
+
+  it("keeps a stale official cache visibly distinct from a successful reprojection", async () => {
+    const source: Provider = {
+      id: "stale-refresh-source",
+      name: "Stale Source",
+      category: "custom",
+      settingsConfig: { modelCatalog: { models: [{ model: "gpt-6-sol" }] } },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    vi.mocked(refreshCodexOfficialModelCatalog).mockResolvedValueOnce({
+      source: "stale_cache",
+      fetchedAt: "2026-09-22T03:00:00Z",
+      modelCount: 9,
+      usedStaleCache: true,
+      projectionApplied: false,
+      projectionReason: "refresh_failed",
+      refreshError: "upstream unavailable",
+    });
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "强制刷新官方模型目录" }));
+    await waitFor(() =>
+      expect(refreshCodexOfficialModelCatalog).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.getByText(/官方目录未刷新成功/)).toBeInTheDocument();
+    expect(screen.getByText(/本次沿用旧缓存/)).toBeInTheDocument();
+    expect(screen.queryByText(/刷新 Codex 模型选择器/)).not.toBeInTheDocument();
   });
 
   // 解锁模型菜单是 issue #10 的关键恢复动作，必须同时固定提示文案和真实 API 调用。
