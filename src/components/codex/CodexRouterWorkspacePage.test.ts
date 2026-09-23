@@ -4833,6 +4833,49 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(screen.queryByText(/刷新 Codex 模型选择器/)).not.toBeInTheDocument();
   });
 
+  it("does not claim both generated artifacts stayed unchanged after a projection error", async () => {
+    const source: Provider = {
+      id: "projection-error-source",
+      name: "Projection Error Source",
+      category: "custom",
+      settingsConfig: { modelCatalog: { models: [{ model: "gpt-6-sol" }] } },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    vi.mocked(refreshCodexOfficialModelCatalog).mockResolvedValueOnce({
+      source: "openai_codex_models_json",
+      fetchedAt: "2026-09-23T03:00:00Z",
+      modelCount: 11,
+      usedStaleCache: false,
+      projectionApplied: false,
+      projectionReason: "projection_failed",
+      refreshError: "Catalog projection failed",
+    });
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "强制刷新官方模型目录" }));
+    await waitFor(() =>
+      expect(refreshCodexOfficialModelCatalog).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.getByText(/未确认双目录同步/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/本次未修改 Codex 生成目录/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/刷新 Codex 模型选择器/)).not.toBeInTheDocument();
+  });
+
   // 解锁模型菜单是 issue #10 的关键恢复动作，必须同时固定提示文案和真实 API 调用。
   it("explains and triggers the Codex model picker unlock action", async () => {
     const source: Provider = {

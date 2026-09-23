@@ -7710,6 +7710,11 @@ function StatusTab({
                   请刷新 Codex 模型选择器；若 Desktop
                   未热加载新目录，请新建任务后再检查。
                 </div>
+              ) : officialCatalogRefreshResult.projectionReason ===
+                "projection_failed" ? (
+                <div>
+                  目录重生成失败，未确认双目录同步；生成物可能部分变化，请检查诊断后再使用，不能视为运行态生效。
+                </div>
               ) : (
                 <div>
                   本次未修改 Codex 生成目录
