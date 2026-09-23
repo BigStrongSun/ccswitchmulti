@@ -1521,6 +1521,7 @@ pub fn run() {
             commands::inspect_codex_multirouter_projection,
             commands::inspect_active_codex_multirouter_projection,
             commands::retry_codex_multirouter_projection,
+            commands::refresh_codex_official_model_catalog,
             commands::get_codex_multirouter_revision,
             commands::preview_codex_multirouter_migration,
             commands::apply_codex_multirouter_migration,

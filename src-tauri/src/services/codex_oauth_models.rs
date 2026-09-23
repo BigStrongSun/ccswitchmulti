@@ -6,6 +6,7 @@
 use crate::proxy::providers::CODEX_OAUTH_ORIGINATOR;
 use crate::services::model_fetch::FetchedModel;
 use once_cell::sync::Lazy;
+use serde::Serialize;
 use serde_json::Value;
 use std::error::Error;
 use std::sync::Mutex;
@@ -26,6 +27,8 @@ const CODEX_OAUTH_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 static CODEX_PUBLIC_CATALOG_REFRESH_GATE: Lazy<Mutex<CatalogRefreshGate>> =
     Lazy::new(|| Mutex::new(CatalogRefreshGate::default()));
+static CODEX_PUBLIC_CATALOG_REFRESH_COMPLETED: Lazy<tokio::sync::Notify> =
+    Lazy::new(tokio::sync::Notify::new);
 
 #[derive(Default)]
 struct CatalogRefreshGate {
@@ -40,6 +43,14 @@ impl CatalogRefreshGate {
                 .retry_after
                 .is_some_and(|retry_after| now < retry_after)
         {
+            return false;
+        }
+        self.in_flight = true;
+        true
+    }
+
+    fn try_start_forced(&mut self, _now: Instant) -> bool {
+        if self.in_flight {
             return false;
         }
         self.in_flight = true;
@@ -69,6 +80,7 @@ impl CatalogRefreshPermit {
             gate.finish(Instant::now(), succeeded);
         }
         self.finished = true;
+        CODEX_PUBLIC_CATALOG_REFRESH_COMPLETED.notify_waiters();
     }
 }
 
@@ -81,8 +93,21 @@ impl Drop for CatalogRefreshPermit {
             if let Ok(mut gate) = CODEX_PUBLIC_CATALOG_REFRESH_GATE.lock() {
                 gate.finish(Instant::now(), false);
             }
+            CODEX_PUBLIC_CATALOG_REFRESH_COMPLETED.notify_waiters();
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialCatalogRefreshResult {
+    pub source: String,
+    pub fetched_at: Option<String>,
+    pub model_count: usize,
+    pub used_stale_cache: bool,
+    #[serde(skip_serializing)]
+    pub refreshed: bool,
+    pub refresh_error: Option<String>,
 }
 
 /// 使用 ChatGPT OAuth access token 在线读取官方 Codex 模型列表。
@@ -219,6 +244,111 @@ pub async fn refresh_public_official_catalog_if_needed() -> Result<(), String> {
     };
     permit.finish(result.is_ok());
     result
+}
+
+/// Explicitly refresh the public OpenAI/Codex catalog. Unlike the automatic
+/// path this ignores both the six-hour TTL and the short failure cooldown. A
+/// concurrent explicit caller waits for the in-flight request; if it failed,
+/// it owns a new forced attempt instead of presenting stale data as fresh.
+pub async fn refresh_public_official_catalog_force() -> OfficialCatalogRefreshResult {
+    loop {
+        // Register before reading the gate. `notify_waiters` does not retain a
+        // permit for a future that has not been enabled yet, so reversing this
+        // order could leave a manual refresh waiting forever if the in-flight
+        // request completed in the tiny check-to-wait window.
+        let notified = CODEX_PUBLIC_CATALOG_REFRESH_COMPLETED.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let permit = {
+            let mut gate = match CODEX_PUBLIC_CATALOG_REFRESH_GATE.lock() {
+                Ok(gate) => gate,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            gate.try_start_forced(Instant::now())
+                .then_some(CatalogRefreshPermit { finished: false })
+        };
+
+        let Some(permit) = permit else {
+            notified.await;
+            if !crate::codex_config::codex_public_official_models_cache_needs_refresh() {
+                return public_catalog_snapshot_result(
+                    "openai_codex_models_json",
+                    false,
+                    true,
+                    None,
+                );
+            }
+            continue;
+        };
+
+        let result = match fetch_public_official_catalog_from_url(CODEX_PUBLIC_MODELS_URL).await {
+            Ok(models) => crate::codex_config::store_codex_public_official_models_cache(&models)
+                .map(|()| {
+                    public_catalog_snapshot_result("openai_codex_models_json", false, true, None)
+                })
+                .map_err(|error| {
+                    format!("Failed to cache OpenAI public Codex model catalog: {error}")
+                }),
+            Err(error) => Err(error),
+        };
+        permit.finish(result.is_ok());
+
+        return match result {
+            Ok(outcome) => outcome,
+            Err(error) => public_catalog_snapshot_result(
+                "stale_cache",
+                true,
+                false,
+                Some(sanitize_public_catalog_error(&error)),
+            ),
+        };
+    }
+}
+
+fn public_catalog_snapshot_result(
+    source: &str,
+    used_stale_cache: bool,
+    refreshed: bool,
+    refresh_error: Option<String>,
+) -> OfficialCatalogRefreshResult {
+    public_catalog_result_from_snapshot(
+        crate::codex_config::codex_public_official_models_cache_snapshot(),
+        source,
+        used_stale_cache,
+        refreshed,
+        refresh_error,
+    )
+}
+
+fn public_catalog_result_from_snapshot(
+    snapshot: Option<(Option<String>, usize)>,
+    source: &str,
+    used_stale_cache: bool,
+    refreshed: bool,
+    refresh_error: Option<String>,
+) -> OfficialCatalogRefreshResult {
+    let has_snapshot = snapshot.is_some();
+    let (fetched_at, model_count) = snapshot.unwrap_or((None, 0));
+    OfficialCatalogRefreshResult {
+        source: if has_snapshot || refreshed {
+            source.to_string()
+        } else {
+            "unavailable".to_string()
+        },
+        fetched_at,
+        model_count,
+        used_stale_cache: used_stale_cache && has_snapshot,
+        refreshed,
+        refresh_error,
+    }
+}
+
+fn sanitize_public_catalog_error(error: &str) -> String {
+    // Do not expose transport diagnostics or response bodies at IPC. Either
+    // could acquire sensitive details if a proxy or HTTP implementation changes.
+    log::warn!("forced public Codex catalog refresh failed: {error}");
+    "Unable to refresh the official model catalog; the trusted cached snapshot was retained"
+        .to_string()
 }
 
 async fn fetch_public_official_catalog_from_url(url: &str) -> Result<Vec<Value>, String> {
@@ -582,6 +712,61 @@ mod tests {
             gate.try_start(start + Duration::from_secs(63)),
             "a successful refresh clears the failure cooldown"
         );
+    }
+
+    #[test]
+    fn forced_public_catalog_refresh_bypasses_failure_cooldown() {
+        let start = Instant::now();
+        let mut gate = CatalogRefreshGate::default();
+
+        assert!(gate.try_start(start));
+        gate.finish(start + Duration::from_secs(1), false);
+
+        assert!(
+            gate.try_start_forced(start + Duration::from_secs(2)),
+            "an explicit user refresh must request upstream even during automatic retry cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn enabled_manual_refresh_waiter_observes_completion_between_gate_check_and_wait() {
+        let notify = tokio::sync::Notify::new();
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        // Models the in-flight request completing after the caller saw a busy
+        // gate but before it actually awaits the notification.
+        notify.notify_waiters();
+        tokio::time::timeout(Duration::from_millis(50), notified)
+            .await
+            .expect("pre-enabled waiter must not miss completion");
+    }
+
+    #[test]
+    fn failed_forced_refresh_reports_only_an_actual_stale_snapshot() {
+        let stale = public_catalog_result_from_snapshot(
+            Some((Some("2026-09-23T00:00:00Z".to_string()), 3)),
+            "stale_cache",
+            true,
+            false,
+            Some("refresh failed".to_string()),
+        );
+        assert_eq!(stale.source, "stale_cache");
+        assert!(stale.used_stale_cache);
+        assert_eq!(stale.model_count, 3);
+        assert!(!stale.refreshed);
+
+        let unavailable = public_catalog_result_from_snapshot(
+            None,
+            "stale_cache",
+            true,
+            false,
+            Some("refresh failed".to_string()),
+        );
+        assert_eq!(unavailable.source, "unavailable");
+        assert!(!unavailable.used_stale_cache);
+        assert_eq!(unavailable.model_count, 0);
     }
 
     #[test]

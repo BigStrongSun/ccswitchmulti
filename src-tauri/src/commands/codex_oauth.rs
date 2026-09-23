@@ -5,10 +5,12 @@
 //! 大部分认证命令通过通用 `auth_*` 命令（参见 `commands::auth`）暴露给前端，
 //! 此处定义 State wrapper 以及 Codex OAuth 专属的订阅额度和模型列表查询命令。
 
+use crate::app_config::AppType;
 use crate::proxy::providers::codex_oauth_auth::{
     CodexAccountPoolPolicy, CodexOAuthError, CodexOAuthManager,
 };
 use crate::services::model_fetch::FetchedModel;
+use crate::services::provider::ProviderService;
 use crate::services::subscription::{query_codex_quota, CredentialStatus, SubscriptionQuota};
 use crate::store::AppState;
 use std::sync::Arc;
@@ -22,6 +24,18 @@ pub struct CodexAccountPoolQuotaStatus {
     remaining_percent: Option<f64>,
     queried_at: Option<i64>,
     error: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualOfficialCatalogRefreshStatus {
+    source: String,
+    fetched_at: Option<String>,
+    model_count: usize,
+    used_stale_cache: bool,
+    projection_applied: bool,
+    projection_reason: Option<String>,
+    refresh_error: Option<String>,
 }
 
 fn quota_remaining_percent(quota: &SubscriptionQuota) -> Option<f64> {
@@ -233,6 +247,102 @@ pub async fn get_codex_official_fallback_models() -> Result<Vec<FetchedModel>, S
     crate::services::codex_oauth_models::fetch_official_fallback_models().await
 }
 
+/// Force-refresh the public official catalog, then rebuild the generated Codex
+/// catalog only when the current live configuration is an active CCSM takeover.
+/// User-managed directories are intentionally left untouched.
+#[tauri::command]
+pub async fn refresh_codex_official_model_catalog(
+    state: State<'_, AppState>,
+) -> Result<ManualOfficialCatalogRefreshStatus, String> {
+    let refresh =
+        crate::services::codex_oauth_models::refresh_public_official_catalog_force().await;
+    let mut status = ManualOfficialCatalogRefreshStatus {
+        source: refresh.source,
+        fetched_at: refresh.fetched_at,
+        model_count: refresh.model_count,
+        used_stale_cache: refresh.used_stale_cache,
+        projection_applied: false,
+        projection_reason: None,
+        refresh_error: refresh.refresh_error,
+    };
+
+    if !refresh.refreshed {
+        status.projection_reason = Some("refresh_not_fresh".to_string());
+        return Ok(status);
+    }
+
+    let takeover_enabled = match state
+        .db
+        .get_proxy_config_for_app(AppType::Codex.as_str())
+        .await
+    {
+        Ok(config) => config.enabled,
+        Err(error) => {
+            log::warn!(
+                "unable to determine Codex takeover state during official catalog refresh: {error}"
+            );
+            status.projection_reason = Some("takeover_status_unavailable".to_string());
+            status.refresh_error.get_or_insert_with(|| {
+                "Unable to determine whether Codex takeover is active".to_string()
+            });
+            return Ok(status);
+        }
+    };
+    let live_config = match crate::codex_config::read_codex_config_text() {
+        Ok(config) => config,
+        Err(error) => {
+            log::warn!(
+                "unable to read Codex configuration during official catalog refresh: {error}"
+            );
+            status.projection_reason = Some("codex_config_unreadable".to_string());
+            status.refresh_error.get_or_insert_with(|| {
+                "Unable to read Codex configuration for safe projection".to_string()
+            });
+            return Ok(status);
+        }
+    };
+    if let Err(reason) = crate::codex_config::manual_official_catalog_projection_eligibility(
+        takeover_enabled,
+        &live_config,
+        &crate::codex_config::get_codex_config_dir(),
+    ) {
+        status.projection_reason = Some(reason.to_string());
+        return Ok(status);
+    }
+    let Some(provider_id) =
+        ProviderService::user_operable_current_provider_id(state.inner(), &AppType::Codex)
+            .map_err(|error| error.to_string())?
+    else {
+        status.projection_reason = Some("no_active_codex_provider".to_string());
+        return Ok(status);
+    };
+    let Some(provider) = state
+        .db
+        .get_provider_by_id(&provider_id, AppType::Codex.as_str())
+        .map_err(|error| error.to_string())?
+    else {
+        status.projection_reason = Some("no_active_codex_provider".to_string());
+        return Ok(status);
+    };
+
+    // This is deliberately the catalog-only builder, not
+    // `sync_current_provider_for_app`: a manual directory refresh must not
+    // rewrite user routing, auth, or other live config fields. The builder's
+    // existing projection chain atomically writes both generated catalog and
+    // CCSM-owned models_cache, and propagates either write failure.
+    match crate::services::provider::build_codex_live_config_for_provider(&state.db, &provider) {
+        Ok(_) => status.projection_applied = true,
+        Err(error) => {
+            log::warn!("official catalog refresh projection failed: {error}");
+            status.projection_reason = Some("projection_failed".to_string());
+            status.refresh_error.get_or_insert_with(|| {
+                "Official catalog refreshed, but CCSM catalog projection failed".to_string()
+            });
+        }
+    }
+    Ok(status)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +368,27 @@ mod tests {
         let status = credential_status_for_codex_oauth_error(&CodexOAuthError::ExpiredToken);
 
         assert!(matches!(status, CredentialStatus::Valid));
+    }
+
+    #[test]
+    fn manual_catalog_refresh_status_serializes_frontend_contract() {
+        let value = serde_json::to_value(ManualOfficialCatalogRefreshStatus {
+            source: "openai_codex_models_json".to_string(),
+            fetched_at: Some("2026-09-23T00:00:00Z".to_string()),
+            model_count: 2,
+            used_stale_cache: false,
+            projection_applied: true,
+            projection_reason: None,
+            refresh_error: None,
+        })
+        .expect("serialize status");
+
+        assert_eq!(value["source"], "openai_codex_models_json");
+        assert_eq!(value["fetchedAt"], "2026-09-23T00:00:00Z");
+        assert_eq!(value["modelCount"], 2);
+        assert_eq!(value["usedStaleCache"], false);
+        assert_eq!(value["projectionApplied"], true);
+        assert!(value.get("projectionReason").is_some());
+        assert!(value.get("refreshError").is_some());
     }
 }

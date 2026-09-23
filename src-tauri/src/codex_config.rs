@@ -1759,15 +1759,13 @@ fn official_models_with_bundled_fallback(
         }
     }
     // A successfully refreshed public snapshot is newer than the local Codex
-    // cache/backup. Keep local entries as offline fallback, then let the
-    // verified public catalog replace stale same-slug capability metadata.
-    for overlay_models in [
-        Some(cached_models.as_slice()),
-        bundled_models,
-        public_models,
-    ]
-    .into_iter()
-    .flatten()
+    // cache/backup. Keep local entries as offline fallback, then let explicit
+    // public fields replace stale same-slug metadata. Public entries may omit
+    // picker-only fields that are still present in a trusted local snapshot,
+    // so absence must not erase those fields.
+    for overlay_models in [Some(cached_models.as_slice()), bundled_models]
+        .into_iter()
+        .flatten()
     {
         for overlay in overlay_models {
             let Some(model_id) = codex_model_stable_id(overlay) else {
@@ -1781,7 +1779,39 @@ fn official_models_with_bundled_fallback(
             }
         }
     }
+    for overlay in public_models.into_iter().flatten() {
+        let Some(model_id) = codex_model_stable_id(overlay) else {
+            continue;
+        };
+        if let Some(index) = model_indexes.get(&model_id).copied() {
+            models[index] = merge_public_official_model_metadata(&models[index], overlay);
+        } else {
+            model_indexes.insert(model_id, models.len());
+            models.push(overlay.clone());
+        }
+    }
     (!models.is_empty()).then_some(models)
+}
+
+/// A public `models.json` entry is authoritative for fields it explicitly
+/// carries, while a missing key means the public schema did not make a claim.
+/// Preserve trusted local metadata in that latter case instead of treating an
+/// incomplete newer entry as a deletion.
+fn merge_public_official_model_metadata(existing: &Value, public: &Value) -> Value {
+    let (Some(existing), Some(public)) = (existing.as_object(), public.as_object()) else {
+        return public.clone();
+    };
+    let mut merged = existing.clone();
+    for (key, value) in public {
+        if value.is_null() && matches!(key.as_str(), "model_specialty" | "modelSpecialty") {
+            // The upstream catalog serializes this optional picker hint as
+            // null for many models. That is absence, not an explicit request
+            // to erase a richer trusted local value.
+            continue;
+        }
+        merged.insert(key.clone(), value.clone());
+    }
+    Value::Object(merged)
 }
 
 fn codex_public_official_models_cache_path() -> PathBuf {
@@ -1795,6 +1825,26 @@ fn load_codex_public_official_models_cache() -> Option<Vec<Value>> {
         .get("models")?
         .as_array()
         .cloned()
+}
+
+/// Read only the observable metadata of the independently owned public
+/// catalog snapshot. This does not fall back to Codex's cache/backup: callers
+/// use it to truthfully report whether an explicit public refresh retained an
+/// old public snapshot.
+pub(crate) fn codex_public_official_models_cache_snapshot() -> Option<(Option<String>, usize)> {
+    let cache = read_json_file_if_exists(&codex_public_official_models_cache_path())
+        .ok()
+        .flatten()?;
+    let models = cache.get("models")?.as_array()?;
+    (!models.is_empty()).then(|| {
+        (
+            cache
+                .get("fetched_at")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            models.len(),
+        )
+    })
 }
 
 /// 公开官方目录最多每六小时刷新一次。目录缺失、损坏或没有时间戳时允许刷新；
@@ -6715,6 +6765,24 @@ pub(crate) fn resolve_cc_switch_catalog_path(
     }
 
     Some(resolved)
+}
+
+/// The manual official-directory action may rebuild generated artifacts only
+/// when both takeover and the live CCSM-owned catalog pointer prove that this
+/// process owns the projection. A stale filename alone is deliberately not
+/// enough: users may keep a generated file after disabling takeover.
+pub(crate) fn manual_official_catalog_projection_eligibility(
+    takeover_enabled: bool,
+    config_text: &str,
+    config_dir: &Path,
+) -> Result<(), &'static str> {
+    if !takeover_enabled {
+        return Err("takeover_not_active");
+    }
+    resolve_cc_switch_catalog_path(config_text, config_dir)
+        .is_some()
+        .then_some(())
+        .ok_or("catalog_not_cc_switch_owned")
 }
 
 /// Pure reverse-parsing core: convert Codex catalog JSON text back into the
@@ -17070,6 +17138,48 @@ model_catalog_json = "cc-switch-model-catalog.json"
     }
 
     #[test]
+    fn public_catalog_overlay_preserves_local_picker_metadata_when_the_official_entry_omits_it() {
+        let local = json!({
+            "slug": "gpt-5.5",
+            "model_specialty": "coding",
+            "supported_reasoning_levels": [{"effort": "low"}]
+        });
+        let public = json!({
+            "slug": "gpt-5.5",
+            "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]
+        });
+
+        let merged = merge_public_official_model_metadata(&local, &public);
+        assert_eq!(merged["model_specialty"], "coding");
+        assert_eq!(
+            merged["supported_reasoning_levels"]
+                .as_array()
+                .expect("public capability")
+                .len(),
+            2,
+            "an explicitly supplied official capability wins over a stale local value"
+        );
+
+        let explicitly_updated = json!({
+            "slug": "gpt-5.5",
+            "model_specialty": "general"
+        });
+        assert_eq!(
+            merge_public_official_model_metadata(&local, &explicitly_updated)["model_specialty"],
+            "general",
+            "an explicitly supplied official picker field wins over a stale local value"
+        );
+        assert_eq!(
+            merge_public_official_model_metadata(
+                &local,
+                &json!({"slug": "gpt-5.5", "model_specialty": null})
+            )["model_specialty"],
+            "coding",
+            "the official optional null marker is not a destructive metadata claim"
+        );
+    }
+
+    #[test]
     fn packaged_official_catalog_keeps_astra_available_without_new_codex_cli() {
         let models = load_codex_packaged_official_models()
             .expect("CCSM must ship an official fallback catalog");
@@ -17826,5 +17936,25 @@ wire_api = "responses"
             "matchPrefixes": ["gpt"]
         });
         assert!(codex_catalog_route_matches_model(&all, "gpt-5.4"));
+    }
+
+    #[test]
+    fn manual_official_catalog_refresh_only_projects_a_takeover_owned_catalog() {
+        let base = Path::new("C:/test/.codex");
+        let managed = "model_catalog_json = \"cc-switch-model-catalog.json\"";
+        let user_managed = "model_catalog_json = \"my-models.json\"";
+
+        assert_eq!(
+            manual_official_catalog_projection_eligibility(true, managed, base),
+            Ok(())
+        );
+        assert_eq!(
+            manual_official_catalog_projection_eligibility(false, managed, base),
+            Err("takeover_not_active")
+        );
+        assert_eq!(
+            manual_official_catalog_projection_eligibility(true, user_managed, base),
+            Err("catalog_not_cc_switch_owned")
+        );
     }
 }
