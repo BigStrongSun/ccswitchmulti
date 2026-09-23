@@ -5,9 +5,11 @@
 
 use crate::proxy::providers::CODEX_OAUTH_ORIGINATOR;
 use crate::services::model_fetch::FetchedModel;
+use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::error::Error;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const CODEX_OAUTH_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 const CODEX_PUBLIC_MODELS_URL: &str =
@@ -15,8 +17,73 @@ const CODEX_PUBLIC_MODELS_URL: &str =
 const CODEX_OAUTH_FETCH_TIMEOUT_SECS: u64 = 15;
 const CODEX_PUBLIC_MODELS_FETCH_TIMEOUT_SECS: u64 = 10;
 const CODEX_PUBLIC_MODELS_MAX_BYTES: u64 = 8 * 1024 * 1024;
+// A failed public GitHub fetch must not turn every synchronous config projection
+// into another 10-second network wait. It is deliberately short: this is only
+// an in-process outage backoff, not a replacement for the six-hour cache TTL.
+const CODEX_PUBLIC_MODELS_FAILURE_COOLDOWN_SECS: u64 = 60;
 const ERROR_BODY_MAX_CHARS: usize = 512;
 const CODEX_OAUTH_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+static CODEX_PUBLIC_CATALOG_REFRESH_GATE: Lazy<Mutex<CatalogRefreshGate>> =
+    Lazy::new(|| Mutex::new(CatalogRefreshGate::default()));
+
+#[derive(Default)]
+struct CatalogRefreshGate {
+    in_flight: bool,
+    retry_after: Option<Instant>,
+}
+
+impl CatalogRefreshGate {
+    fn try_start(&mut self, now: Instant) -> bool {
+        if self.in_flight
+            || self
+                .retry_after
+                .is_some_and(|retry_after| now < retry_after)
+        {
+            return false;
+        }
+        self.in_flight = true;
+        true
+    }
+
+    fn finish(&mut self, now: Instant, succeeded: bool) {
+        self.in_flight = false;
+        self.retry_after = (!succeeded)
+            .then_some(now + Duration::from_secs(CODEX_PUBLIC_MODELS_FAILURE_COOLDOWN_SECS));
+    }
+}
+
+struct CatalogRefreshPermit {
+    finished: bool,
+}
+
+impl CatalogRefreshPermit {
+    fn try_acquire() -> Option<Self> {
+        let mut gate = CODEX_PUBLIC_CATALOG_REFRESH_GATE.lock().ok()?;
+        gate.try_start(Instant::now())
+            .then_some(Self { finished: false })
+    }
+
+    fn finish(mut self, succeeded: bool) {
+        if let Ok(mut gate) = CODEX_PUBLIC_CATALOG_REFRESH_GATE.lock() {
+            gate.finish(Instant::now(), succeeded);
+        }
+        self.finished = true;
+    }
+}
+
+impl Drop for CatalogRefreshPermit {
+    fn drop(&mut self) {
+        if !self.finished {
+            // Cancellation or unwinding between acquisition and completion
+            // must never leave refreshes permanently disabled. Treat it as a
+            // failed attempt so the normal short cooldown still applies.
+            if let Ok(mut gate) = CODEX_PUBLIC_CATALOG_REFRESH_GATE.lock() {
+                gate.finish(Instant::now(), false);
+            }
+        }
+    }
+}
 
 /// 使用 ChatGPT OAuth access token 在线读取官方 Codex 模型列表。
 ///
@@ -117,7 +184,9 @@ pub fn fetch_cached_models_from_disk() -> Result<Vec<FetchedModel>, String> {
 /// 使用上面的本地可信来源链。公共内容在写入独立缓存前会移除指令字段。
 pub async fn fetch_official_fallback_models() -> Result<Vec<FetchedModel>, String> {
     if let Err(error) = refresh_public_official_catalog_if_needed().await {
-        log::warn!("failed to refresh OpenAI public Codex model catalog; using stale cache: {error}");
+        log::warn!(
+            "failed to refresh OpenAI public Codex model catalog; using stale cache: {error}"
+        );
     }
     fetch_cached_models_from_disk()
 }
@@ -128,9 +197,28 @@ pub async fn refresh_public_official_catalog_if_needed() -> Result<(), String> {
     if !crate::codex_config::codex_public_official_models_cache_needs_refresh() {
         return Ok(());
     }
-    let models = fetch_public_official_catalog_from_url(CODEX_PUBLIC_MODELS_URL).await?;
-    crate::codex_config::store_codex_public_official_models_cache(&models)
-        .map_err(|error| format!("Failed to cache OpenAI public Codex model catalog: {error}"))
+    // This function is also reached by synchronous live-config projection. Do
+    // not queue every concurrent projection behind an outbound request: one
+    // caller refreshes while all other callers retain their trusted snapshot.
+    let Some(permit) = CatalogRefreshPermit::try_acquire() else {
+        return Ok(());
+    };
+
+    // Re-check after winning the gate: another successful writer could have
+    // refreshed the cache between the initial check and permit acquisition.
+    let result = if !crate::codex_config::codex_public_official_models_cache_needs_refresh() {
+        Ok(())
+    } else {
+        match fetch_public_official_catalog_from_url(CODEX_PUBLIC_MODELS_URL).await {
+            Ok(models) => crate::codex_config::store_codex_public_official_models_cache(&models)
+                .map_err(|error| {
+                    format!("Failed to cache OpenAI public Codex model catalog: {error}")
+                }),
+            Err(error) => Err(error),
+        }
+    };
+    permit.finish(result.is_ok());
+    result
 }
 
 async fn fetch_public_official_catalog_from_url(url: &str) -> Result<Vec<Value>, String> {
@@ -465,6 +553,35 @@ mod tests {
                 .expect("serve public catalog fixture");
         });
         (format!("http://{address}/models.json"), task)
+    }
+
+    #[test]
+    fn public_catalog_refresh_gate_allows_one_in_flight_attempt_and_cools_down_failures() {
+        let start = Instant::now();
+        let mut gate = CatalogRefreshGate::default();
+
+        assert!(gate.try_start(start));
+        assert!(
+            !gate.try_start(start + Duration::from_secs(1)),
+            "concurrent projections must use their current trusted snapshot"
+        );
+
+        gate.finish(start + Duration::from_secs(2), false);
+        assert!(
+            !gate.try_start(start + Duration::from_secs(2)),
+            "a failed request must not be retried by every hot-path projection"
+        );
+        assert!(
+            !gate.try_start(start + Duration::from_secs(61)),
+            "retry stays suppressed throughout the configured cooldown"
+        );
+        assert!(gate.try_start(start + Duration::from_secs(62)));
+
+        gate.finish(start + Duration::from_secs(63), true);
+        assert!(
+            gate.try_start(start + Duration::from_secs(63)),
+            "a successful refresh clears the failure cooldown"
+        );
     }
 
     #[test]

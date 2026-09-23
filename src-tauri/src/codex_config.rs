@@ -1806,7 +1806,11 @@ pub(crate) fn codex_public_official_models_cache_needs_refresh() -> bool {
     else {
         return true;
     };
-    if cache.get("models").and_then(Value::as_array).is_none_or(Vec::is_empty) {
+    if cache
+        .get("models")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
         return true;
     }
     let Some(fetched_at) = cache.get("fetched_at").and_then(Value::as_str) else {
@@ -1815,7 +1819,9 @@ pub(crate) fn codex_public_official_models_cache_needs_refresh() -> bool {
     let Some(fetched_at) = chrono::DateTime::parse_from_rfc3339(fetched_at).ok() else {
         return true;
     };
-    chrono::Utc::now().signed_duration_since(fetched_at).num_seconds()
+    chrono::Utc::now()
+        .signed_duration_since(fetched_at)
+        .num_seconds()
         >= CODEX_PUBLIC_OFFICIAL_MODELS_CACHE_MAX_AGE_SECS
 }
 
@@ -17043,12 +17049,24 @@ model_catalog_json = "cc-switch-model-catalog.json"
         )
         .expect("refreshed public catalog");
         let efforts = |slug: &str| {
-            models.iter().find(|model| codex_model_stable_id(model).as_deref() == Some(slug))
-                .expect("official model")["supported_reasoning_levels"].as_array().expect("levels")
-                .iter().filter_map(|level| level["effort"].as_str()).collect::<Vec<_>>()
+            models
+                .iter()
+                .find(|model| codex_model_stable_id(model).as_deref() == Some(slug))
+                .expect("official model")["supported_reasoning_levels"]
+                .as_array()
+                .expect("levels")
+                .iter()
+                .filter_map(|level| level["effort"].as_str())
+                .collect::<Vec<_>>()
         };
-        assert_eq!(efforts("gpt-6-sol"), vec!["low", "medium", "high", "xhigh", "max", "ultra"]);
-        assert_eq!(efforts("gpt-6-luna"), vec!["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(
+            efforts("gpt-6-sol"),
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(
+            efforts("gpt-6-luna"),
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
     }
 
     #[test]
