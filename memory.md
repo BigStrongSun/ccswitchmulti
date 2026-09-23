@@ -3,6 +3,7 @@
 ## 2026-09-23 Codex app-server 非预期退出证据
 
 - 16:40:57 Desktop 原始日志明确记录旧 app-server 非预期退出，退出码 `3221225786 / 0xC000013A`，最近 stderr 错误为 `Custom tool call output is missing`；随即重启成功。该退出码对应 Windows `STATUS_CONTROL_C_EXIT`，但不能仅凭最近错误推断是谁发出了控制事件，也不能断定缺工具输出是原因而非伴随/后续状态。Windows 无对应 Codex WER；CCSM、WebSocket 超时、后续 Sandbox Service 异常和更新均无因果证据。详见 `memory-2026-09-23-codex-appserver-exit-evidence.md`。
+- 17:17:02 MSIX `26.917.6896.0 → 26.917.8451.0` 更新；当天更新前共四次相同退出码（16:17、16:33、16:40、16:57），更新后至约 18:00 的 43 分钟观测窗口内为零，新后端 `0.155.0-alpha.16.3` 仍存活。这是短期未复现，不是官方修复证明；相关官方 GitHub issue 仍 Open，也未找到对应修复公告。版本、日志范围和搜索边界同见上方详记。
 
 ## 2026-09-23 Codex Provider 保存校验 fail-closed
 

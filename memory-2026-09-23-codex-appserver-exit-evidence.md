@@ -12,3 +12,11 @@
 ## 尚缺的决定性证据
 
 现有证据已确定 **旧 app-server 非预期退出、Windows 控制事件式退出码、最近内部错误以及 Desktop 自动重启成功**；但仍缺控制事件发送者、旧 PID 当时的父进程生命周期、进程级堆栈/转储或可重现触发序列。不能区分“缺工具输出引发退出”和“进程先被中断导致工具输出缺失”等路径，也不能把 WebSocket 超时、Sandbox Service 异常或 CCSM 代理动作直接归因于本次退出。下一次复现需只读、限定范围地捕获进程生命周期与控制事件来源；不要为制造证据而重启现有进程。
+
+## 17:17 Codex 更新后的只读复核
+
+- Windows AppModel Runtime/Admin 在本机时间 17:17:02 记录 `OpenAI.Codex` MSIX 从 `26.917.6896.0` 切换到 `26.917.8451.0`，17:19:08 新包启动 Desktop PID 25112。`check_app_update` 返回内部应用版本 `26.917.62051`、build `10789`、prod 渠道 `up_to_date`；内部应用版本与 MSIX 包号不可混为一谈。
+- 新 Desktop 的 app-server PID 9292 于 17:19:13 启动（PPID 25112），二进制为 `%LOCALAPPDATA%\OpenAI\Codex\bin\80f78947ad880e6e\codex.exe`，`--version` 为 `codex-cli 0.155.0-alpha.16.3`，SHA256 为 `A19F8F6C3C9DD5B71B6B1E3EB1EC55D75AAFB2FDFB686D9E1F7A5F47DB07D0D2`。16:40:57 旧 Desktop 日志所拉起的后端报告 `0.155.0-alpha.16`；旧二进制已不在原路径，不能再对它做哈希核对。
+- 扫描 2026-09-23 的 Desktop 日志（`%LOCALAPPDATA%\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\Codex\Logs\2026\09\23`）共发现四次 `Codex CLI process exited classifiedAsExpected=false code=3221225786`：本机时间 16:17:34、16:33:37、16:40:57、16:57:10，**全部早于 17:17 更新**。其中 16:40 与 16:57 两次的最近 stderr 是缺失 custom-tool 输出；另两次最近 stderr 不是此错误，反证不能把该错误当成所有退出的必要条件。
+- 截至本机约 18:00，更新后约 43 分钟的日志/进程观测没有同退出码或缺输出错误，17:19 启动的 PID 9292 仍存活。这支持“新版本在当前短窗口内尚未复现”，**不支持“官方已确认修复”或“长期稳定”**。日志保留范围及工作负载未作等量控制，不能由零事件计算修复率。
+- 2026-09-23 查阅 OpenAI 官方 GitHub issue [#36778](https://github.com/openai/codex/issues/36778)、[#40231](https://github.com/openai/codex/issues/40231)、[#41988](https://github.com/openai/codex/issues/41988)，均仍显示 Open，未找到与本机新包/后端修订明确对应的修复声明；官方 Codex changelog 也未找到该退出码的修复条目。Codex 内置 Web 搜索发现相似案例；独立 Matrix 搜索没有找到相关权威修复结果。以上是当前检索结果，不等于证明官方没有私下修复。
