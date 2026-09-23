@@ -5795,7 +5795,15 @@ mod tests {
         drop(blocker);
         service.retry_pending_takeover_restore().await;
 
-        assert!(service.pending_takeover_restore.lock().await.is_none());
+        // 失败时带出 pending 现场（attempts + last_error）：此前 macOS CI 首跑
+        // 只报 is_none() 断言，看不到恢复重试的具体错误。
+        {
+            let pending = service.pending_takeover_restore.lock().await.clone();
+            assert!(
+                pending.is_none(),
+                "restore must consume the intent after the port frees up; pending: {pending:?}"
+            );
+        }
         assert!(
             service.is_running().await,
             "proxy must be serving again after the port frees up"

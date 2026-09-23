@@ -49,12 +49,35 @@ use windows_sys::Win32::Storage::FileSystem::{
 const CODEX_THREAD_REQUEST_ID_PREFIX: &str = "codex_session:thread-v1";
 const CODEX_FINGERPRINT_BYTES: usize = 4096;
 
+/// 测试用：append 读取字节数按文件路径隔离。
+///
+/// CI 的 `cargo test` 是并行执行的；进程级单值计数器会被同进程内其它测试的
+/// sync_codex_append 读取污染（macOS CI 4245 passed / 2 failed 中
+/// "left: 48, right: 0" 即此）。每个测试用自己的 tempdir 路径，按 key 隔离后
+/// 并行互不干扰。
 #[cfg(test)]
-static CODEX_APPEND_BYTES_READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CODEX_APPEND_BYTES_READ: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, u64>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
-fn take_codex_append_bytes_read() -> u64 {
-    CODEX_APPEND_BYTES_READ.swap(0, std::sync::atomic::Ordering::Relaxed)
+fn append_bytes_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    CODEX_APPEND_BYTES_READ.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+fn note_codex_append_bytes_read(file: &Path, bytes: u64) {
+    if let Ok(mut map) = append_bytes_map().lock() {
+        *map.entry(file.to_string_lossy().to_string()).or_insert(0) += bytes;
+    }
+}
+
+#[cfg(test)]
+fn take_codex_append_bytes_read(file: &Path) -> u64 {
+    append_bytes_map()
+        .lock()
+        .map(|mut map| map.remove(&file.to_string_lossy().to_string()).unwrap_or(0))
+        .unwrap_or(0)
 }
 
 #[derive(Debug)]
@@ -1860,7 +1883,7 @@ fn sync_codex_append(
             break;
         }
         #[cfg(test)]
-        CODEX_APPEND_BYTES_READ.fetch_add(read as u64, std::sync::atomic::Ordering::Relaxed);
+        note_codex_append_bytes_read(file_path, read as u64);
         if !buffer.ends_with(b"\n") {
             break;
         }
@@ -2638,7 +2661,7 @@ mod tests {
         assert!(fs::metadata(&file).unwrap().len() < CODEX_FINGERPRINT_BYTES as u64);
         let db = Database::memory()?;
         assert_eq!(sync_test_file(&db, &file, &[&file])?.imported, 1);
-        assert_eq!(take_codex_append_bytes_read(), 0);
+        assert_eq!(take_codex_append_bytes_read(&file), 0);
 
         let appended = token_count_at(20, 4, 7, "2026-09-14T00:00:02Z").to_string() + "\n";
         use std::io::Write;
@@ -2651,7 +2674,7 @@ mod tests {
         // A new pass emulates process restart: only persisted checkpoint state
         // may carry the model/high-water/signature/event-index semantics.
         assert_eq!(sync_test_file(&db, &file, &[&file])?.imported, 1);
-        assert_eq!(take_codex_append_bytes_read(), appended.len() as u64);
+        assert_eq!(take_codex_append_bytes_read(&file), appended.len() as u64);
         let conn = lock_conn!(db.conn);
         let rows: i64 = conn.query_row(
             "SELECT COUNT(*) FROM proxy_request_logs WHERE data_source='codex_session'",
