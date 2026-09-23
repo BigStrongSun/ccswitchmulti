@@ -4847,7 +4847,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       modelCount: 11,
       usedStaleCache: false,
       projectionApplied: false,
-      projectionReason: "projection_failed",
+      projectionReason: "projection_outputs_unconfirmed",
       refreshError: "Catalog projection failed",
     });
     renderWorkspace(

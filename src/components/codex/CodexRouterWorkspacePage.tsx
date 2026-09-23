@@ -7711,7 +7711,9 @@ function StatusTab({
                   未热加载新目录，请新建任务后再检查。
                 </div>
               ) : officialCatalogRefreshResult.projectionReason ===
-                "projection_failed" ? (
+                  "projection_failed" ||
+                officialCatalogRefreshResult.projectionReason ===
+                  "projection_outputs_unconfirmed" ? (
                 <div>
                   目录重生成失败，未确认双目录同步；生成物可能部分变化，请检查诊断后再使用，不能视为运行态生效。
                 </div>
@@ -7726,6 +7728,8 @@ function StatusTab({
                             "当前目录不归 CCSwitchMulti 管理",
                           refresh_failed: "上游刷新失败",
                           projection_failed: "目录重生成失败",
+                          projection_outputs_unconfirmed:
+                            "双目录更新状态未确认",
                         }[officialCatalogRefreshResult.projectionReason] ??
                         officialCatalogRefreshResult.projectionReason
                       }）`
