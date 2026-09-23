@@ -17,10 +17,7 @@ import {
   isUniversalProviderSetCancelled,
   useUniversalProviderSetSave,
 } from "@/components/universal/useUniversalProviderSetSave";
-import {
-  isCodexProviderSetCancelled,
-  useCodexProviderSetSave,
-} from "@/components/providers/forms/useCodexProviderSetSave";
+import { useCodexProviderSetSave } from "@/components/providers/forms/useCodexProviderSetSave";
 import { providerPresets } from "@/config/claudeProviderPresets";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 import { geminiProviderPresets } from "@/config/geminiProviderPresets";
@@ -388,16 +385,11 @@ export function AddProviderDialog({
           createdAt: Date.now(),
         };
         codexDraftProviderIdRef.current = provider.id;
-        try {
-          await persistCodexProviderSet(
-            provider,
-            values.protocolProbeReceiptIds ?? [],
-            { allowUnverifiedSave: true },
-          );
-        } catch (error) {
-          if (isCodexProviderSetCancelled(error)) return;
-          throw error;
-        }
+        await persistCodexProviderSet(
+          provider,
+          values.protocolProbeReceiptIds ?? [],
+          { allowUnverifiedSave: true },
+        );
         onOpenChange(false);
         return;
       }

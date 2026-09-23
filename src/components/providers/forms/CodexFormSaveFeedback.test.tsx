@@ -20,12 +20,32 @@ describe("CodexFormSaveFeedback", () => {
     );
   });
 
-  it("shows a generic save error without rendering the secret draft value", () => {
+  it("shows a generic pre-submit error without rendering the secret draft value", () => {
     render(
-      <CodexFormSaveFeedback saveError="Codex 配置无效或无法解析，本次所有修改均未保存。" />,
+      <CodexFormSaveFeedback saveError="Codex 设置校验或解析失败；本次尚未提交，草稿仍保留。" />,
     );
 
-    expect(screen.getByRole("alert")).toHaveTextContent("所有修改均未保存");
+    expect(screen.getByRole("alert")).toHaveTextContent("本次尚未提交");
     expect(screen.getByRole("alert")).not.toHaveTextContent("synthetic-secret");
+  });
+
+  it("does not claim a rejected backend save was not written", () => {
+    render(
+      <CodexFormSaveFeedback saveError="保存结果未确认。后端可能已写入，但后续同步失败；请刷新核对状态，核对前避免重复修改 API Key。当前草稿仍保留。" />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent("保存结果未确认");
+    expect(screen.getByRole("alert")).toHaveTextContent("后端可能已写入");
+    expect(screen.getByRole("alert")).toHaveTextContent("刷新核对状态");
+    expect(screen.getByRole("alert")).toHaveTextContent("避免重复修改 API Key");
+  });
+
+  it("shows canceled Codex saves as definitely not saved", () => {
+    render(
+      <CodexFormSaveFeedback saveError="操作已取消，未保存。当前草稿仍保留，可继续编辑后重试。" />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent("操作已取消，未保存");
+    expect(screen.getByRole("alert")).toHaveTextContent("当前草稿仍保留");
   });
 });

@@ -3,7 +3,7 @@
 ## 2026-09-23 Codex Provider 保存校验 fail-closed
 
 - Provider 保存过去按 `err.message.includes("reasoning")` 识别推理校验异常；中文 Ultra 校验不匹配，吞掉错误后把旧 `values.settingsConfig` 当新值继续提交，API Key 等表单草稿因此未写入。
-- Catalog/推理归一化失败现在使用带 `model` 的结构化 `CodexCatalogValidationError`；Codex 配置构造 catch 全部 fail-closed，不再有 stale settings fallback。Ultra 错误在表单模型目录区持续可见并定位红框行；目录更新会重新验证全量草稿，只在有效后清除。普通解析错误和提交 promise rejection 同样显示不含凭据的持久错误；成功提交清除。
+- Catalog/推理归一化失败现在使用带 `model` 的结构化 `CodexCatalogValidationError`；Codex 配置构造 catch 全部 fail-closed，不再有 stale settings fallback。Ultra 错误在表单模型目录区持续可见并定位红框行；目录更新会重新验证全量草稿，只在有效后清除。普通解析错误和提交 promise rejection 同样显示不含凭据的持久错误；保存结果不确定时不再谎称未写入，改为提醒刷新核对并避免重复修改密钥。Add/Edit Codex Provider Set 取消会作为取消错误继续冒泡，在 ProviderForm 显示“操作已取消，未保存”，不会伪装成功。
 - 详见 `memory-2026-09-23-codex-provider-save-validation.md`。定向测试覆盖结构化 Ultra/普通推理错误和反馈 banner；不等同于安装态或完整 Provider 页面 E2E。
 
 ## 2026-09-23 Codex 官方目录动态刷新与 GPT-6 档位投影

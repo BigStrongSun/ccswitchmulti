@@ -8,10 +8,7 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
-import {
-  isCodexProviderSetCancelled,
-  useCodexProviderSetSave,
-} from "@/components/providers/forms/useCodexProviderSetSave";
+import { useCodexProviderSetSave } from "@/components/providers/forms/useCodexProviderSetSave";
 import { openclawApi, providersApi, vscodeApi, type AppId } from "@/lib/api";
 import type { TeStaticProviderDescriptor } from "@/lib/api/providers";
 import {
@@ -297,15 +294,10 @@ export function EditProviderDialog({
           isGeneratedFacade);
 
       if (isEligibleCodexLogicalSource) {
-        try {
-          await persistCodexProviderSet(
-            updatedProvider,
-            values.protocolProbeReceiptIds ?? [],
-          );
-        } catch (error) {
-          if (isCodexProviderSetCancelled(error)) return;
-          throw error;
-        }
+        await persistCodexProviderSet(
+          updatedProvider,
+          values.protocolProbeReceiptIds ?? [],
+        );
         onOpenChange(false);
         return;
       }

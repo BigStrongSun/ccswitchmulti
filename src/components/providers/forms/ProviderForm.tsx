@@ -97,7 +97,8 @@ import { ProviderPresetSelector } from "./ProviderPresetSelector";
 import { BasicFormFields } from "./BasicFormFields";
 import { ClaudeFormFields } from "./ClaudeFormFields";
 import { ClaudeDesktopProviderForm } from "./ClaudeDesktopProviderForm";
-import { CodexFormFields } from "./CodexFormFields";
+import { CodexFormFields, CodexFormSaveFeedback } from "./CodexFormFields";
+import { isCodexProviderSetCancelled } from "./useCodexProviderSetSave";
 import { completeCodexReasoningEffortMap } from "./codexReasoningCapability";
 import { GrokBuildProviderForm } from "./GrokBuildProviderForm";
 import { GeminiFormFields } from "./GeminiFormFields";
@@ -1852,7 +1853,7 @@ function ProviderFormFull({
         } else {
           const message = t("providerForm.codexConfigInvalidNotSaved", {
             defaultValue:
-              "Codex 配置无效或无法解析，本次所有修改均未保存。请检查配置后重试。",
+              "Codex 设置校验或解析失败；本次尚未提交，草稿仍保留。请检查配置后重试。",
           });
           setCodexSaveError(message);
           toast.error(message);
@@ -2188,8 +2189,9 @@ function ProviderFormFull({
     } catch (error) {
       if (appId === "codex") {
         const message = t("providerForm.codexConfigInvalidNotSaved", {
-          defaultValue:
-            "保存失败，本次所有修改仍保留在当前草稿中，尚未保存。请检查后重试。",
+          defaultValue: isCodexProviderSetCancelled(error)
+            ? "操作已取消，未保存。当前草稿仍保留，可继续编辑后重试。"
+            : "保存结果未确认。后端可能已写入，但后续同步失败；请刷新核对状态，核对前避免重复修改 API Key。当前草稿仍保留。",
         });
         setCodexSaveError(message);
         toast.error(message);
@@ -2562,6 +2564,9 @@ function ProviderFormFull({
           onSubmit={form.handleSubmit(handleSubmit)}
           className="space-y-6 glass rounded-xl p-6 border border-white/10"
         >
+          {appId === "codex" && codexSaveError && (
+            <CodexFormSaveFeedback saveError={codexSaveError} />
+          )}
           {!initialData && (
             <ProviderPresetSelector
               selectedPresetId={selectedPresetId}
@@ -2973,7 +2978,6 @@ function ProviderFormFull({
                   }
                 }}
                 catalogValidationError={codexCatalogValidationError}
-                saveError={codexSaveError}
                 spawnAgentModels={codexSpawnAgentModels}
                 onSpawnAgentModelsChange={setCodexSpawnAgentModels}
                 codexRouting={codexRouting}
