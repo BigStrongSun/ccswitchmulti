@@ -62,6 +62,7 @@ pub(crate) const CODEX_MANAGED_STREAM_MAX_RETRIES: u64 = 10;
 const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
 const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
 const CODEX_PUBLIC_OFFICIAL_MODELS_CACHE_FILENAME: &str = "codex-official-models-cache.json";
+const CODEX_PUBLIC_OFFICIAL_MODELS_CACHE_MAX_AGE_SECS: i64 = 6 * 60 * 60;
 const CC_SWITCH_CODEX_MODELS_CACHE_ETAG: &str = "cc-switch-model-catalog";
 
 #[cfg(target_os = "windows")]
@@ -1757,10 +1758,13 @@ fn official_models_with_bundled_fallback(
             model_indexes.insert(model_id, index);
         }
     }
+    // A successfully refreshed public snapshot is newer than the local Codex
+    // cache/backup. Keep local entries as offline fallback, then let the
+    // verified public catalog replace stale same-slug capability metadata.
     for overlay_models in [
-        public_models,
         Some(cached_models.as_slice()),
         bundled_models,
+        public_models,
     ]
     .into_iter()
     .flatten()
@@ -1791,6 +1795,28 @@ fn load_codex_public_official_models_cache() -> Option<Vec<Value>> {
         .get("models")?
         .as_array()
         .cloned()
+}
+
+/// 公开官方目录最多每六小时刷新一次。目录缺失、损坏或没有时间戳时允许刷新；
+/// 刷新失败仍由现有来源链保留最后一份可信目录，不会阻断本地投影。
+pub(crate) fn codex_public_official_models_cache_needs_refresh() -> bool {
+    let Some(cache) = read_json_file_if_exists(&codex_public_official_models_cache_path())
+        .ok()
+        .flatten()
+    else {
+        return true;
+    };
+    if cache.get("models").and_then(Value::as_array).is_none_or(Vec::is_empty) {
+        return true;
+    }
+    let Some(fetched_at) = cache.get("fetched_at").and_then(Value::as_str) else {
+        return true;
+    };
+    let Some(fetched_at) = chrono::DateTime::parse_from_rfc3339(fetched_at).ok() else {
+        return true;
+    };
+    chrono::Utc::now().signed_duration_since(fetched_at).num_seconds()
+        >= CODEX_PUBLIC_OFFICIAL_MODELS_CACHE_MAX_AGE_SECS
 }
 
 pub(crate) fn store_codex_public_official_models_cache(models: &[Value]) -> Result<(), AppError> {
@@ -6326,6 +6352,17 @@ fn prepare_codex_config_text_with_model_catalog_impl(
     profile: CodexCatalogToolProfile,
     provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<String, AppError> {
+    // Codex switches custom providers to StaticModelsManager when this catalog
+    // pointer is present. Refresh the separate official snapshot before reading
+    // it so static projection inherits current full ModelInfo without making
+    // network failure a routing failure.
+    if crate::codex_config::codex_public_official_models_cache_needs_refresh() {
+        if let Err(error) = crate::services::provider::block_on_tauri_runtime(
+            crate::services::codex_oauth_models::refresh_public_official_catalog_if_needed(),
+        ) {
+            log::warn!("using stale Codex official model catalog after refresh failure: {error}");
+        }
+    }
     let catalog_path = get_codex_model_catalog_path();
     let specs = codex_catalog_model_specs(settings, config_text);
 
@@ -16973,6 +17010,45 @@ model_catalog_json = "cc-switch-model-catalog.json"
             Some(&json!([{ "id": "new_tier" }])),
             "the current bundled official entry must override the stale backup field"
         );
+    }
+
+    #[test]
+    fn refreshed_public_catalog_replaces_stale_same_slug_reasoning_metadata() {
+        let stale_backup = json!({
+            "models": [{
+                "slug": "gpt-6-sol",
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}, {"effort": "xhigh"}]
+            }]
+        });
+        let public = json!([
+            {
+                "slug": "gpt-6-sol",
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}, {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}]
+            },
+            {
+                "slug": "gpt-6-luna",
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}, {"effort": "xhigh"}, {"effort": "max"}]
+            }
+        ]);
+
+        let models = official_models_with_bundled_fallback(
+            Some(&json!({"etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG, "models": []})),
+            Some(&stale_backup),
+            None,
+            public.as_array().map(Vec::as_slice),
+            None,
+        )
+        .expect("refreshed public catalog");
+        let efforts = |slug: &str| {
+            models.iter().find(|model| codex_model_stable_id(model).as_deref() == Some(slug))
+                .expect("official model")["supported_reasoning_levels"].as_array().expect("levels")
+                .iter().filter_map(|level| level["effort"].as_str()).collect::<Vec<_>>()
+        };
+        assert_eq!(efforts("gpt-6-sol"), vec!["low", "medium", "high", "xhigh", "max", "ultra"]);
+        assert_eq!(efforts("gpt-6-luna"), vec!["low", "medium", "high", "xhigh", "max"]);
     }
 
     #[test]

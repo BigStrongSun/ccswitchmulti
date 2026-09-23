@@ -116,36 +116,21 @@ pub fn fetch_cached_models_from_disk() -> Result<Vec<FetchedModel>, String> {
 /// 无需 CCSM OAuth 的官方目录入口：优先刷新 OpenAI/Codex 公共 catalog，失败时
 /// 使用上面的本地可信来源链。公共内容在写入独立缓存前会移除指令字段。
 pub async fn fetch_official_fallback_models() -> Result<Vec<FetchedModel>, String> {
-    fetch_official_fallback_models_from_url(CODEX_PUBLIC_MODELS_URL).await
+    if let Err(error) = refresh_public_official_catalog_if_needed().await {
+        log::warn!("failed to refresh OpenAI public Codex model catalog; using stale cache: {error}");
+    }
+    fetch_cached_models_from_disk()
 }
 
-async fn fetch_official_fallback_models_from_url(
-    public_models_url: &str,
-) -> Result<Vec<FetchedModel>, String> {
-    match fetch_public_official_catalog_from_url(public_models_url).await {
-        Ok(models) => {
-            let parsed = parse_cached_models(serde_json::json!({ "models": models }));
-            match crate::codex_config::store_codex_public_official_models_cache(&models) {
-                Ok(()) => {
-                    let merged = fetch_cached_models_from_disk()?;
-                    if !merged.is_empty() {
-                        return Ok(merged);
-                    }
-                }
-                Err(error) => {
-                    log::warn!("failed to cache OpenAI public Codex model catalog: {error}");
-                    if !parsed.is_empty() {
-                        return Ok(parsed);
-                    }
-                }
-            }
-        }
-        Err(error) => {
-            log::warn!("failed to refresh OpenAI public Codex model catalog: {error}");
-        }
+/// 刷新独立的 OpenAI/Codex 公共目录快照；成功才原子替换缓存，失败保留旧快照。
+/// 该入口由所有静态 catalog 投影共用，不依赖 OAuth token 或 UI 生命周期。
+pub async fn refresh_public_official_catalog_if_needed() -> Result<(), String> {
+    if !crate::codex_config::codex_public_official_models_cache_needs_refresh() {
+        return Ok(());
     }
-
-    fetch_cached_models_from_disk()
+    let models = fetch_public_official_catalog_from_url(CODEX_PUBLIC_MODELS_URL).await?;
+    crate::codex_config::store_codex_public_official_models_cache(&models)
+        .map_err(|error| format!("Failed to cache OpenAI public Codex model catalog: {error}"))
 }
 
 async fn fetch_public_official_catalog_from_url(url: &str) -> Result<Vec<Value>, String> {
@@ -680,5 +665,15 @@ mod tests {
         assert_eq!(models[0]["slug"], json!("aurora-code"));
         assert!(models[0].get("model_messages").is_none());
         assert!(models[0].get("base_instructions").is_none());
+    }
+
+    #[tokio::test]
+    async fn public_official_catalog_rejects_a_response_without_a_models_array() {
+        let (url, server) = spawn_public_catalog_server(json!({"data": []})).await;
+        let error = fetch_public_official_catalog_from_url(&url)
+            .await
+            .expect_err("malformed catalog must not replace a trusted cache");
+        server.abort();
+        assert!(error.contains("no models array"));
     }
 }

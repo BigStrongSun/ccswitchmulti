@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-09-23 Codex 官方目录动态刷新与 GPT-6 档位投影
+
+- Codex custom provider 一旦配置 `model_catalog_json` 即使用静态目录管理器，不会自行请求 `/models`；CCSM 因而必须保留该指针以枚举自定义路由模型，并在每次后台投影前用独立官方快照补全同 slug 的完整 `ModelInfo`，不能删除静态目录来规避旧缓存。
+- 公共权威入口是 `https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json`，不需要 OAuth token；OAuth `chatgpt.com/backend-api/codex/models` 则需要 Bearer、originator 与 workspace id，只适合账号可用性过滤。UI 得到的 `FetchedModel` 是简化 DTO，不能替代官方原始能力快照。
+- 独立 `codex-official-models-cache.json` 以 6 小时 TTL 在投影前刷新；网络、HTTP 或 JSON 失败只记录警告并继续使用 stale 的可信快照，不阻断本地路由。新鲜公共目录覆盖同 slug 的本机 backup/bundled 元数据，防止 stale cache 将新模型重新降到 generic `xhigh`。
+- 官方 Codex 目录中 GPT-6 Sol 是 `low..max` 加 `ultra`（v2 编排能力），GPT-6 Luna 止于 `max`；API 的原生 reasoning `max` 与 Codex `ultra` 编排语义不同，投影必须保留来源元数据而不能按型号手工猜测。
+
 ## 2026-09-13 手动逐模型协议确认与 MultiRouter 刷新证据复用
 
 - `codexProtocolOverrides` 是用户对某个模型明确选择 Chat 或 Responses 的保存意图，不能只把 Provider 级 `codexProtocolMode=manual` 当作手动模式。此前 Single 与 Universal Protocol Lab adapter 错把这种草稿送为 `accept_auto`；后端在 prepare 时正确识别 override 的手动写入意图并拒绝，前端遂停在 `action_required`，没有可确认保存的操作。现在两个 adapter 都以“Provider 级 manual 或存在任一逐模型 override”为手动意图，提交 `confirm_manual`；该选择不会触发自动探测或被自动推荐覆盖。
