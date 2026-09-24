@@ -1,7 +1,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Output};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+use std::time::Instant;
 
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -2609,11 +2611,12 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 fn powershell_json_value(script: &str) -> Option<Value> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let output = Command::new("powershell")
+    const POWERSHELL_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+    let mut command = Command::new("powershell");
+    command
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
+        .creation_flags(CREATE_NO_WINDOW);
+    let output = command_output_with_timeout(&mut command, POWERSHELL_COMMAND_TIMEOUT)?;
     if !output.status.success() {
         return None;
     }
@@ -2622,6 +2625,89 @@ fn powershell_json_value(script: &str) -> Option<Value> {
         return None;
     }
     serde_json::from_str::<Value>(&stdout).ok()
+}
+
+/// Wait for a command without leaving a timed-out child behind.
+///
+/// Output pipes are drained concurrently so a verbose command cannot block on a
+/// full pipe while this thread polls its process state.
+pub(crate) fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Option<Output> {
+    use std::io::Read;
+    use std::sync::mpsc;
+    use std::thread;
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take().expect("stdout was configured as piped");
+    let mut stderr = child.stderr.take().expect("stderr was configured as piped");
+    let Some(deadline) = Instant::now().checked_add(timeout) else {
+        terminate_and_reap_child(&mut child);
+        return None;
+    };
+    let (sender, receiver) = mpsc::channel();
+    let stdout_sender = sender.clone();
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let _ = stdout_sender.send((true, stdout.read_to_end(&mut output).map(|_| output)));
+    });
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let _ = sender.send((false, stderr.read_to_end(&mut output).map(|_| output)));
+    });
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // `try_wait` already observed termination. `wait` is retained
+                // here to make the reap guarantee explicit for every exit path.
+                let _ = child.wait();
+                break status;
+            }
+            Ok(None) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    terminate_and_reap_child(&mut child);
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(20).min(deadline - now));
+            }
+            Err(_) => {
+                terminate_and_reap_child(&mut child);
+                return None;
+            }
+        }
+    };
+
+    // A descendant may inherit a pipe even after PowerShell exits. Bound the
+    // output drain by the same deadline instead of joining a stuck reader.
+    let mut stdout = None;
+    let mut stderr = None;
+    for _ in 0..2 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (is_stdout, result) = receiver.recv_timeout(remaining).ok()?;
+        if is_stdout {
+            stdout = Some(result.ok()?);
+        } else {
+            stderr = Some(result.ok()?);
+        }
+    }
+    Some(Output {
+        status,
+        stdout: stdout?,
+        stderr: stderr?,
+    })
+}
+
+fn terminate_and_reap_child(child: &mut Child) {
+    // If the process exited between `try_wait` and `kill`, `wait` still reaps it.
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// 解析 PowerShell 输出的字符串或字符串数组 JSON。
@@ -2669,6 +2755,7 @@ fn version_tuple_from_package_name(name: &str) -> Vec<u32> {
 /// `Get-AppxPackage`。探测不到版本时返回 `None`；调用方必须按"版本未知"
 /// 回落旧行为，不得当作旧版本处理。
 #[cfg(target_os = "windows")]
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn installed_codex_desktop_version() -> Option<Vec<u32>> {
     let mut candidates = Vec::new();
     collect_windowsapps_codex_executable_candidates(&mut candidates);
@@ -2691,6 +2778,7 @@ pub(crate) fn installed_codex_desktop_version() -> Option<Vec<u32>> {
 
 /// 探测已安装 Codex Desktop 的版本（Info.plist `CFBundleShortVersionString`）。
 #[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn installed_codex_desktop_version() -> Option<Vec<u32>> {
     macos_codex_common_bundle_candidates()
         .iter()
@@ -2704,6 +2792,7 @@ pub(crate) fn installed_codex_desktop_version() -> Option<Vec<u32>> {
 
 /// 其他平台没有可靠的 Desktop 版本探测通道，返回 `None`（按版本未知处理）。
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn installed_codex_desktop_version() -> Option<Vec<u32>> {
     None
 }
@@ -3862,6 +3951,32 @@ JSON.stringify({{ firstCount, secondCount, patched }});
             vec![26, 623, 141536, 0]
         );
         assert!(version_tuple_from_package_name("Other.Package.Without.Version").is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_timeout_terminates_and_reaps_stalled_child() {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let mut command = Command::new("powershell");
+        command
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .creation_flags(CREATE_NO_WINDOW);
+
+        let started = Instant::now();
+        let output = command_output_with_timeout(&mut command, Duration::from_secs(1));
+
+        assert!(output.is_none(), "stalled PowerShell should time out");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timed-out PowerShell child must be terminated and reaped promptly"
+        );
     }
 
     /// 验证只接受平台 Desktop shell，避免把 CLI/app-server `codex` 用于 renderer 解锁。

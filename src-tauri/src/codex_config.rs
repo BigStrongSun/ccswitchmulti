@@ -2267,14 +2267,20 @@ fn codex_bundled_models_command(candidate: &Path) -> Command {
 
 #[cfg(not(test))]
 fn load_codex_bundled_models_uncached() -> Option<Vec<Value>> {
+    let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_secs(5))?;
     for candidate in codex_cli_candidates() {
         let candidate_label = candidate.to_string_lossy();
-        let output = match codex_bundled_models_command(&candidate).output() {
-            Ok(output) => output,
-            Err(err) => {
-                log::debug!("failed to run `{candidate_label} debug models --bundled`: {err}");
-                continue;
-            }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            log::warn!("Codex bundled 模型探测超时，使用已有目录和静态模板");
+            break;
+        }
+        let output = match crate::codex_desktop::command_output_with_timeout(
+            &mut codex_bundled_models_command(&candidate),
+            remaining,
+        ) {
+            Some(output) => output,
+            None => continue,
         };
 
         if !output.status.success() {
@@ -2956,6 +2962,7 @@ fn set_codex_model_catalog_json_field(
 const CODEX_DESKTOP_STRICT_CONFIG_MIN_VERSION: [u32; 3] = [26, 912, 0];
 
 /// 进程内缓存探测到的 Desktop 版本，避免每次配置写入都跑 PowerShell。
+#[cfg(not(test))]
 static CODEX_DESKTOP_VERSION_CACHE: OnceCell<Option<Vec<u32>>> = OnceCell::new();
 
 /// 给定版本是否会触发 "unrecognized configuration settings" 警告。
@@ -2978,7 +2985,50 @@ fn projection_write_inline_provider_models_for(version: Option<&[u32]>) -> bool 
     !version.is_some_and(codex_desktop_warns_on_unrecognized_settings)
 }
 
-/// 返回已安装 Codex Desktop 版本；`None` 表示探测失败。
+/// 在接管锁之外预热版本和 bundled 模型。其他投影入口仍可按需探测
+/// bundled 模型，但子进程有整体截止时间，不能无限占用写配置线程。
+pub(crate) async fn prewarm_codex_projection_processes() {
+    #[cfg(not(test))]
+    {
+        let desktop = async {
+            if CODEX_DESKTOP_VERSION_CACHE.get().is_some() {
+                return;
+            }
+            let detection = tauri::async_runtime::spawn_blocking(|| {
+                CODEX_DESKTOP_VERSION_CACHE
+                    .get_or_init(crate::codex_desktop::installed_codex_desktop_version)
+                    .clone()
+            });
+            match tokio::time::timeout(std::time::Duration::from_secs(8), detection).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => log::warn!("Codex Desktop 版本探测任务失败: {error}"),
+                Err(_) => log::warn!("Codex Desktop 版本探测超时，按版本未知继续接管"),
+            }
+        };
+        let bundled = async {
+            if CODEX_BUNDLED_MODELS_CACHE.get().is_some() {
+                return;
+            }
+            let detection = tauri::async_runtime::spawn_blocking(|| {
+                CODEX_BUNDLED_MODELS_CACHE
+                    .get_or_init(load_codex_bundled_models_uncached)
+                    .clone()
+            });
+            match tokio::time::timeout(std::time::Duration::from_secs(8), detection).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => log::warn!("Codex bundled 模型探测任务失败: {error}"),
+                Err(_) => log::warn!("Codex bundled 模型探测超时，使用已有目录和静态模板"),
+            }
+        };
+        tokio::join!(desktop, bundled);
+    }
+}
+
+fn cached_codex_desktop_version(cache: &OnceCell<Option<Vec<u32>>>) -> Option<Vec<u32>> {
+    cache.get().cloned().flatten()
+}
+
+/// 返回已缓存的 Codex Desktop 版本；未完成或失败时按版本未知处理。
 ///
 /// 测试构建不跑真实探测（结果依赖机器环境，会让投影测试变成机器相关）：
 /// 直接返回 `None`，全部测试走"版本未知"的旧行为。
@@ -2987,9 +3037,10 @@ fn codex_desktop_version_for_projection() -> Option<Vec<u32>> {
     {
         return None;
     }
-    CODEX_DESKTOP_VERSION_CACHE
-        .get_or_init(crate::codex_desktop::installed_codex_desktop_version)
-        .clone()
+    #[cfg(not(test))]
+    {
+        cached_codex_desktop_version(&CODEX_DESKTOP_VERSION_CACHE)
+    }
 }
 
 /// 是否应写入 provider 内联 `models` 投影。
@@ -14863,6 +14914,19 @@ base_url = "http://127.0.0.1:15721/v1"
         assert!(
             projection_write_inline_provider_models_for(None),
             "探测失败应按版本未知处理并保留旧行为"
+        );
+    }
+
+    #[test]
+    fn projection_version_lookup_never_starts_detection_in_the_write_path() {
+        let cache = OnceCell::new();
+        assert_eq!(cached_codex_desktop_version(&cache), None);
+        assert!(cache.get().is_none(), "只读投影不能初始化版本探测");
+
+        cache.set(Some(vec![26, 915, 4065, 0])).unwrap();
+        assert_eq!(
+            cached_codex_desktop_version(&cache),
+            Some(vec![26, 915, 4065, 0])
         );
     }
 

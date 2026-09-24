@@ -1142,6 +1142,9 @@ impl ProxyService {
     pub async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
         let app = parse_local_proxy_app(app_type)?;
         let app_type_str = app.as_str();
+        if enabled && app == AppType::Codex {
+            crate::codex_config::prewarm_codex_projection_processes().await;
+        }
         let _guard = self.switch_locks.lock_for_app(app_type_str).await;
 
         if enabled {
