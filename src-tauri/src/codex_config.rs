@@ -2985,7 +2985,49 @@ fn projection_write_inline_provider_models_for(version: Option<&[u32]>) -> bool 
     !version.is_some_and(codex_desktop_warns_on_unrecognized_settings)
 }
 
-/// 在接管锁之外预热版本和 bundled 模型。其他投影入口仍可按需探测
+/// 官方模型目录刷新的单次时间预算：只用于后台调度，任何调用者都不等待它。
+#[cfg(not(test))]
+const CODEX_PUBLIC_CATALOG_REFRESH_BUDGET_SECS: u64 = 20;
+
+/// 后台调度官方模型目录刷新；立即返回，不联网、不阻塞。
+///
+/// 这个函数从同步投影路径调用，调用方可能正持有接管锁，因此这里只做一次
+/// 去重调度：真正的抓取在后台任务里进行，失败继续使用已有快照。六小时 TTL 与
+/// 失败冷却都在 `refresh_public_official_catalog_if_needed` 内部判定。
+fn schedule_codex_public_official_catalog_refresh() {
+    #[cfg(test)]
+    {
+        // 单元测试不发起网络请求：测试运行时无法推进定时器，等待网络会挂死。
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        if !codex_public_official_models_cache_needs_refresh() {
+            return;
+        }
+        tauri::async_runtime::spawn(async {
+            let refresh =
+                crate::services::codex_oauth_models::refresh_public_official_catalog_if_needed();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(CODEX_PUBLIC_CATALOG_REFRESH_BUDGET_SECS),
+                refresh,
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!(
+                    "using stale Codex official model catalog after refresh failure: {error}"
+                ),
+                Err(_) => log::warn!(
+                    "Codex official model catalog refresh exceeded its {}s budget",
+                    CODEX_PUBLIC_CATALOG_REFRESH_BUDGET_SECS
+                ),
+            }
+        });
+    }
+}
+
+/// 在接管锁之外预热版本和 bundled 模型，并调度一次官方目录刷新。其他投影入口仍可按需探测
 /// bundled 模型，但子进程有整体截止时间，不能无限占用写配置线程。
 pub(crate) async fn prewarm_codex_projection_processes() {
     #[cfg(not(test))]
@@ -3020,6 +3062,8 @@ pub(crate) async fn prewarm_codex_projection_processes() {
                 Err(_) => log::warn!("Codex bundled 模型探测超时，使用已有目录和静态模板"),
             }
         };
+        // 官方目录刷新按后台任务调度：它不参与接管写入，也不需要调用方等待。
+        schedule_codex_public_official_catalog_refresh();
         tokio::join!(desktop, bundled);
     }
 }
@@ -6525,16 +6569,13 @@ fn prepare_codex_config_text_with_model_catalog_impl(
     provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<String, AppError> {
     // Codex switches custom providers to StaticModelsManager when this catalog
-    // pointer is present. Refresh the separate official snapshot before reading
-    // it so static projection inherits current full ModelInfo without making
-    // network failure a routing failure.
-    if crate::codex_config::codex_public_official_models_cache_needs_refresh() {
-        if let Err(error) = crate::services::provider::block_on_tauri_runtime(
-            crate::services::codex_oauth_models::refresh_public_official_catalog_if_needed(),
-        ) {
-            log::warn!("using stale Codex official model catalog after refresh failure: {error}");
-        }
-    }
+    // pointer is present, and the projection below only reads the official
+    // snapshot from disk. This function runs on synchronous projection paths,
+    // including the takeover write that holds the per-app switch lock: blocking
+    // here on the network used to stall takeover for the whole fetch timeout (or
+    // forever when the caller drives its own runtime). Refresh is therefore
+    // scheduled in the background instead of awaited.
+    schedule_codex_public_official_catalog_refresh();
     let catalog_path = get_codex_model_catalog_path();
     let specs = codex_catalog_model_specs(settings, config_text);
 
