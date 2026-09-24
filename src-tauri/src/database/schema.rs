@@ -1424,6 +1424,11 @@ impl Database {
 
     fn migrate_v24_to_v25(conn: &Connection) -> Result<(), AppError> {
         Self::create_te_provider_descriptor_table(conn)?;
+        // 版本号来自存量库时 providers 必然存在；版本号来自新建库/测试夹具时
+        // 可能还没有基表，此时也不存在需要投影的 OpenClaw 旧行。
+        if !Self::table_exists(conn, "providers")? {
+            return Ok(());
+        }
         let mut statement = conn.prepare(
             "SELECT id, settings_config, meta FROM providers WHERE app_type = 'openclaw'",
         )?;
