@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HistoryEnvelopeMode {
+    Legacy,
+    Paginated,
+}
+
 fn protected(path: &Path, reason: &str) -> AppError {
     AppError::Message(format!(
         "codex_paginated_history_immutable: {}: {reason}; provider migration cannot safely rewrite byte-addressed history",
@@ -16,10 +22,30 @@ pub(super) fn ensure_legacy_rollout(path: &Path) -> Result<(), AppError> {
 }
 
 pub(super) fn ensure_legacy_content(path: &Path, content: &str) -> Result<(), AppError> {
-    ensure_legacy_header(path, content.as_bytes())
+    match inspect_history_header(path, content.as_bytes())? {
+        HistoryEnvelopeMode::Legacy => Ok(()),
+        HistoryEnvelopeMode::Paginated => Err(protected(path, "non-legacy history envelope")),
+    }
 }
 
 fn ensure_legacy_header(path: &Path, reader: impl BufRead) -> Result<(), AppError> {
+    match inspect_history_header(path, reader)? {
+        HistoryEnvelopeMode::Legacy => Ok(()),
+        HistoryEnvelopeMode::Paginated => Err(protected(path, "non-legacy history envelope")),
+    }
+}
+
+pub(super) fn inspect_history_content(
+    path: &Path,
+    content: &str,
+) -> Result<HistoryEnvelopeMode, AppError> {
+    inspect_history_header(path, content.as_bytes())
+}
+
+fn inspect_history_header(
+    path: &Path,
+    reader: impl BufRead,
+) -> Result<HistoryEnvelopeMode, AppError> {
     for line in reader.lines() {
         let line = line.map_err(|e| AppError::io(path, e))?;
         if line.trim().is_empty() {
@@ -31,15 +57,18 @@ fn ensure_legacy_header(path: &Path, reader: impl BufRead) -> Result<(), AppErro
         if value["type"] != "session_meta" || !payload.is_object() {
             return Err(protected(path, "missing session metadata"));
         }
+        if payload["history_mode"] == "paginated" {
+            return Ok(HistoryEnvelopeMode::Paginated);
+        }
         if !value["ordinal"].is_null()
             || !payload["history_base"].is_null()
             || (!payload["history_mode"].is_null() && payload["history_mode"] != "legacy")
         {
             return Err(protected(path, "non-legacy history envelope"));
         }
-        return Ok(());
+        return Ok(HistoryEnvelopeMode::Legacy);
     }
-    Ok(())
+    Ok(HistoryEnvelopeMode::Legacy)
 }
 
 fn ensure_legacy_tree(root: &Path) -> Result<(), AppError> {

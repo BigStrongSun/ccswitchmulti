@@ -67,6 +67,7 @@ function repairOutcomeFixture(dryRun: boolean) {
     providerRowsUpdated: dryRun ? 0 : 3,
     rolloutFirstLinesToUpdate: 1,
     rolloutFirstLinesUpdated: dryRun ? 0 : 1,
+    paginatedRolloutProviderUpdatesSkipped: 0,
     userEventRowsToUpdate: 0,
     userEventRowsUpdated: 0,
     visibleCandidateRows: 7,

@@ -277,6 +277,8 @@ pub struct CodexHistoryVisibilityRepairOutcome {
     /// 包括 session_meta 与后续 thread_settings_applied，而不再只限第一行。
     pub rollout_first_lines_to_update: usize,
     pub rollout_first_lines_updated: usize,
+    /// 分页 rollout 采用字节寻址，Provider 状态保持原文；恢复时由 live Provider 兼容层接管。
+    pub paginated_rollout_provider_updates_skipped: usize,
     pub user_event_rows_to_update: usize,
     pub user_event_rows_updated: usize,
     pub visible_candidate_rows: usize,
@@ -1188,6 +1190,13 @@ struct RolloutProviderUpdate {
     old_mtime_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+enum RolloutProviderUpdateDecision {
+    Unchanged,
+    Rewrite(RolloutProviderUpdate),
+    PaginatedSkipped,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 /// session_index.jsonl 聚焦移动后的写入统计。
 struct SessionIndexMoveCounts {
@@ -1205,8 +1214,6 @@ fn repair_codex_history_visibility_at(
     normalized_project_path: Option<String>,
     runtime: HistoryVisibilityRepairRuntimeOptions,
 ) -> Result<CodexHistoryVisibilityRepairOutcome, AppError> {
-    migration_guard::ensure_legacy_history(codex_dir)?;
-    migration_guard::ensure_legacy_db(&active_db.path)?;
     let mut conn = Connection::open(&active_db.path)
         .map_err(|e| AppError::Database(format!("打开 Codex active state DB 失败: {e}")))?;
     conn.busy_timeout(Duration::from_secs(5))
@@ -1307,6 +1314,7 @@ fn repair_codex_history_visibility_at(
     let provider_update_id_set: HashSet<String> = provider_update_ids.iter().cloned().collect();
 
     let mut rollout_provider_updates = Vec::new();
+    let mut paginated_rollout_provider_updates_skipped = 0;
     if runtime.provider_bucket_sync_enabled {
         for row in rows.iter().filter(|row| {
             provider_update_id_set.contains(&row.id)
@@ -1314,8 +1322,14 @@ fn repair_codex_history_visibility_at(
         }) {
             // DB 已在目标桶也必须核对 rollout：旧版修复可能只改过
             // session_meta/threads，留下后续 thread_settings_applied 指向旧 provider。
-            if let Some(update) = prepare_rollout_provider_update(row, target_provider)? {
-                rollout_provider_updates.push(update);
+            match prepare_rollout_provider_update(row, target_provider)? {
+                RolloutProviderUpdateDecision::Unchanged => {}
+                RolloutProviderUpdateDecision::Rewrite(update) => {
+                    rollout_provider_updates.push(update);
+                }
+                RolloutProviderUpdateDecision::PaginatedSkipped => {
+                    paginated_rollout_provider_updates_skipped += 1;
+                }
             }
         }
     }
@@ -1464,6 +1478,7 @@ fn repair_codex_history_visibility_at(
         backfill_state_to_update: Database::table_exists(&conn, "backfill_state")?,
         provider_rows_to_update: provider_update_ids.len(),
         rollout_first_lines_to_update: rollout_provider_updates.len(),
+        paginated_rollout_provider_updates_skipped,
         user_event_rows_to_update: user_event_update_ids.len(),
         visible_candidate_rows: visible_rows.len(),
         session_index_missing_to_append: missing_index_rows.len(),
@@ -2745,12 +2760,21 @@ fn rollout_contains_user_event(path: Option<PathBuf>) -> bool {
 fn prepare_rollout_provider_update(
     row: &ThreadHistoryRow,
     target_provider: &str,
-) -> Result<Option<RolloutProviderUpdate>, AppError> {
+) -> Result<RolloutProviderUpdateDecision, AppError> {
     let Some(path) = resolve_history_path(row.rollout_path.as_deref()) else {
-        return Ok(None);
+        return Ok(RolloutProviderUpdateDecision::Unchanged);
     };
     let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
-    migration_guard::ensure_legacy_content(&path, &content)?;
+    let envelope_mode = migration_guard::inspect_history_content(&path, &content)?;
+    let needs_update = content
+        .lines()
+        .any(|line| rewrite_codex_provider_state_line(line, target_provider).is_some());
+    if !needs_update {
+        return Ok(RolloutProviderUpdateDecision::Unchanged);
+    }
+    if envelope_mode == migration_guard::HistoryEnvelopeMode::Paginated {
+        return Ok(RolloutProviderUpdateDecision::PaginatedSkipped);
+    }
     let old_mtime_ms = fs::metadata(&path)
         .ok()
         .and_then(|metadata| metadata.modified().ok())
@@ -2767,13 +2791,15 @@ fn prepare_rollout_provider_update(
         }
     }
     if !changed {
-        return Ok(None);
+        return Ok(RolloutProviderUpdateDecision::Unchanged);
     }
-    Ok(Some(RolloutProviderUpdate {
-        path,
-        rewritten,
-        old_mtime_ms,
-    }))
+    Ok(RolloutProviderUpdateDecision::Rewrite(
+        RolloutProviderUpdate {
+            path,
+            rewritten,
+            old_mtime_ms,
+        },
+    ))
 }
 
 /// 改写 Codex 恢复线程时真正读取的两类 provider 状态。
@@ -6120,6 +6146,93 @@ mod tests {
             .join("state/sqlite")
             .join(CODEX_STATE_DB_FILENAME)
             .exists());
+    }
+
+    #[test]
+    fn repair_visibility_updates_paginated_state_without_rewriting_rollout_bytes() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let session_dir = codex_dir.join("sessions/2026/09/23");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let rollout = session_dir.join("rollout-paginated.jsonl");
+        let original = concat!(
+            "{\"timestamp\":\"2026-09-23T08:00:00Z\",\"type\":\"session_meta\",\"ordinal\":0,\"payload\":{\"id\":\"paginated-thread\",\"model_provider\":\"openai\",\"history_mode\":\"paginated\",\"cwd\":\"C:\\\\work\",\"source\":\"vscode\"}}\n",
+            "{\"timestamp\":\"2026-09-23T08:00:01Z\",\"type\":\"event_msg\",\"ordinal\":1,\"payload\":{\"type\":\"user_message\",\"message\":\"keep bytes immutable\"}}\n",
+            "{\"timestamp\":\"2026-09-23T08:00:02Z\",\"type\":\"event_msg\",\"ordinal\":2,\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"model_provider_id\":\"openai\"}}}\n"
+        )
+        .as_bytes()
+        .to_vec();
+        fs::write(&rollout, &original).expect("write paginated rollout");
+
+        let db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open state db");
+        create_history_test_threads_table(&conn);
+        conn.execute(
+            "INSERT INTO threads VALUES ('paginated-thread', ?1, 'openai', 'C:\\work', 1, 0, 'vscode', 'user', 'Paginated thread', 'Paginated thread', 'keep bytes immutable', 1, 1000)",
+            [rollout.to_string_lossy().to_string()],
+        )
+        .expect("insert paginated thread");
+        drop(conn);
+
+        let active = ActiveCodexStateDb {
+            path: db_path.clone(),
+            kind: "codex_root".to_string(),
+        };
+        let runtime = |dry_run, backup_root_override| HistoryVisibilityRepairRuntimeOptions {
+            dry_run,
+            count: 0,
+            window_limit: 0,
+            balance_recent_window: false,
+            max_per_project: 0,
+            max_total: 0,
+            source_filter: Some("all".to_string()),
+            include_archived: false,
+            include_subagents: false,
+            selected_session_ids: BTreeSet::new(),
+            provider_bucket_sync_enabled: true,
+            backup_root_override,
+        };
+
+        let dry_run = repair_codex_history_visibility_at(
+            &codex_dir,
+            active.clone(),
+            CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
+            Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
+            source_ids(&["openai"]),
+            None,
+            runtime(true, Some(dir.path().join("dry-run-backup"))),
+        )
+        .expect("dry-run paginated repair");
+        assert_eq!(dry_run.provider_rows_to_update, 1);
+        assert_eq!(dry_run.rollout_first_lines_to_update, 0);
+        assert_eq!(dry_run.paginated_rollout_provider_updates_skipped, 1);
+        assert_eq!(fs::read(&rollout).expect("read after dry-run"), original);
+
+        let applied = repair_codex_history_visibility_at(
+            &codex_dir,
+            active,
+            CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
+            Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
+            source_ids(&["openai"]),
+            None,
+            runtime(false, Some(dir.path().join("apply-backup"))),
+        )
+        .expect("apply paginated repair");
+        assert_eq!(applied.provider_rows_updated, 1);
+        assert_eq!(applied.rollout_first_lines_updated, 0);
+        assert_eq!(applied.paginated_rollout_provider_updates_skipped, 1);
+        assert_eq!(fs::read(&rollout).expect("read after apply"), original);
+
+        let conn = Connection::open(db_path).expect("reopen state db");
+        let provider: String = conn
+            .query_row(
+                "SELECT model_provider FROM threads WHERE id = 'paginated-thread'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read repaired provider");
+        assert_eq!(provider, CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID);
     }
 
     #[test]

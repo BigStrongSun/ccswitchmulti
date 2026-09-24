@@ -262,6 +262,7 @@ export interface CodexHistoryVisibilityRepairOutcome {
   providerRowsUpdated: number;
   rolloutFirstLinesToUpdate: number;
   rolloutFirstLinesUpdated: number;
+  paginatedRolloutProviderUpdatesSkipped: number;
   userEventRowsToUpdate: number;
   userEventRowsUpdated: number;
   visibleCandidateRows: number;

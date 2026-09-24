@@ -78,18 +78,26 @@ fn direct_provider_rewrite_rejects_paginated_history() {
 }
 
 #[test]
-fn provider_visibility_plan_rejects_paginated_rollout() {
+fn provider_visibility_plan_skips_paginated_rollout_without_scheduling_a_rewrite() {
     let temp = tempfile::tempdir().unwrap();
     let path = history_fixture(temp.path(), "paginated", true);
     let row = ThreadHistoryRow {
         rollout_path: Some(path.to_string_lossy().to_string()),
         ..Default::default()
     };
-    let error = prepare_rollout_provider_update(&row, "openai")
-        .expect_err("visibility repair must not schedule a canonical rewrite");
-    assert!(error
-        .to_string()
-        .contains("codex_paginated_history_immutable"));
+    let decision = prepare_rollout_provider_update(&row, "openai")
+        .expect("visibility repair may inspect but must not rewrite paginated history");
+    assert!(matches!(
+        decision,
+        RolloutProviderUpdateDecision::PaginatedSkipped
+    ));
+    assert!(matches!(
+        migration_guard::ensure_legacy_content(
+            &path,
+            &fs::read_to_string(&path).expect("read paginated fixture")
+        ),
+        Err(error) if error.to_string().contains("codex_paginated_history_immutable")
+    ));
 }
 
 #[test]

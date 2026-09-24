@@ -1030,7 +1030,7 @@ interface RepairResultPanelProps {
 }
 
 /// 展示 dry-run/apply 证据和当前 DB 的 source/provider 分布。
-function RepairResultPanel({
+export function RepairResultPanel({
   result,
   error,
   sourceCounts,
@@ -1069,6 +1069,10 @@ function RepairResultPanel({
                   value={result.rolloutFirstLinesToUpdate}
                 />
                 <RepairMetric
+                  label="分页 Provider 原文保留"
+                  value={result.paginatedRolloutProviderUpdatesSkipped}
+                />
+                <RepairMetric
                   label="user-event"
                   value={result.userEventRowsToUpdate}
                 />
@@ -1095,6 +1099,13 @@ function RepairResultPanel({
                 />
               </div>
               <div className="space-y-1 rounded-md bg-muted/60 p-2 font-mono text-[11px] text-muted-foreground">
+                {result.paginatedRolloutProviderUpdatesSkipped > 0 ? (
+                  <div className="font-sans text-amber-700 dark:text-amber-200">
+                    分页历史不会改写 rollout Provider
+                    字节；可见性与索引修复照常执行，恢复会话时由当前 live
+                    Provider 兼容层接管。
+                  </div>
+                ) : null}
                 <div className="truncate">db={result.stateDbPath ?? "-"}</div>
                 <div className="truncate">
                   live={result.liveConfigModelProvider ?? "-"}
