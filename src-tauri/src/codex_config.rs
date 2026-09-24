@@ -1758,16 +1758,14 @@ fn official_models_with_bundled_fallback(
             model_indexes.insert(model_id, index);
         }
     }
-    // A successfully refreshed public snapshot is newer than the local Codex
-    // cache/backup. Keep local entries as offline fallback, then let explicit
-    // public fields replace stale same-slug metadata. Public entries may omit
-    // picker-only fields that are still present in a trusted local snapshot,
-    // so absence must not erase those fields.
-    for overlay_models in [Some(cached_models.as_slice()), bundled_models]
-        .into_iter()
-        .flatten()
-    {
-        for overlay in overlay_models {
+    /// Overlay local runtime entries by stable id: replace same-slug entries in
+    /// place and append ids the current source is the first to know about.
+    fn overlay_local_models(
+        models: &mut Vec<Value>,
+        model_indexes: &mut HashMap<String, usize>,
+        overlays: &[Value],
+    ) {
+        for overlay in overlays {
             let Some(model_id) = codex_model_stable_id(overlay) else {
                 continue;
             };
@@ -1779,6 +1777,16 @@ fn official_models_with_bundled_fallback(
             }
         }
     }
+
+    // Precedence is base -> local trusted cache/backup -> refreshed public
+    // snapshot -> current Codex runtime (bundled). A successfully refreshed
+    // public snapshot is newer than the local cache/backup, yet it may omit
+    // picker-only fields that a trusted local snapshot still carries, so it is
+    // merged instead of replacing those entries. The bundled runtime catalog is
+    // the newest on-machine source: it keeps its metadata and is appended for
+    // ids only it knows about, while the public catalog still contributes
+    // future ids it lists before it.
+    overlay_local_models(&mut models, &mut model_indexes, &cached_models);
     for overlay in public_models.into_iter().flatten() {
         let Some(model_id) = codex_model_stable_id(overlay) else {
             continue;
@@ -1789,6 +1797,9 @@ fn official_models_with_bundled_fallback(
             model_indexes.insert(model_id, models.len());
             models.push(overlay.clone());
         }
+    }
+    if let Some(bundled_models) = bundled_models {
+        overlay_local_models(&mut models, &mut model_indexes, bundled_models);
     }
     (!models.is_empty()).then_some(models)
 }
