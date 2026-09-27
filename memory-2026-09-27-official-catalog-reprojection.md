@@ -18,3 +18,9 @@
 - `cargo test --lib official_catalog`：8 passed，0 failed；涵盖实际公共快照存储、变化识别及接管关闭时拒绝自动投影。
 - `cargo check --manifest-path src-tauri/Cargo.toml --lib --no-default-features`：exit 0；rustfmt、diff 检查通过。
 - 尚未验证自动网络刷新到实际生成目录的成功链路，未做完整测试套件、构建、安装、重启或 UI 验收；不能宣称用户控件问题已解决。
+
+## 本地 Windows 构建
+
+- 2026-09-27 13:18:51，正式 local-release-pipeline 完成；版本 `3.20.2-22`，源码 `0d7c75265067e182023998a4e119eeca06b5d1e4`（包含 `c4835de21`）。TypeScript 检查、release 编译及 NSIS 打包通过。
+- 产物在 `C:/Users/sunda/Documents/LLMservice/最新版ccswitchmulti`，包含 Windows installer、portable 与 SHA256SUMS。构建缓存自动清理约 3.2 GiB。
+- 未安装、未重启、未发布 GitHub；完整自动刷新成功链路及控件 UI 验收仍待验证。
