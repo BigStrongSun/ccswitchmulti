@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::error::Error;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tauri::Manager;
 
 const CODEX_OAUTH_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 const CODEX_PUBLIC_MODELS_URL: &str =
@@ -29,6 +30,29 @@ static CODEX_PUBLIC_CATALOG_REFRESH_GATE: Lazy<Mutex<CatalogRefreshGate>> =
     Lazy::new(|| Mutex::new(CatalogRefreshGate::default()));
 static CODEX_PUBLIC_CATALOG_REFRESH_COMPLETED: Lazy<tokio::sync::Notify> =
     Lazy::new(tokio::sync::Notify::new);
+static CODEX_PUBLIC_CATALOG_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn register_public_catalog_app_handle(app_handle: tauri::AppHandle) {
+    let _ = CODEX_PUBLIC_CATALOG_APP_HANDLE.set(app_handle);
+}
+
+fn reproject_after_automatic_catalog_change() {
+    let Some(app_handle) = CODEX_PUBLIC_CATALOG_APP_HANDLE.get() else {
+        return;
+    };
+    let app_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = app_handle.try_state::<crate::store::AppState>() else {
+            return;
+        };
+        if let Err(reason) =
+            crate::commands::reproject_current_official_catalog_if_owned(&state).await
+        {
+            log::info!("skip automatic Codex catalog reprojection: {reason}");
+        }
+    });
+}
 
 #[derive(Default)]
 struct CatalogRefreshGate {
@@ -218,21 +242,21 @@ pub async fn fetch_official_fallback_models() -> Result<Vec<FetchedModel>, Strin
 
 /// 刷新独立的 OpenAI/Codex 公共目录快照；成功才原子替换缓存，失败保留旧快照。
 /// 该入口由所有静态 catalog 投影共用，不依赖 OAuth token 或 UI 生命周期。
-pub async fn refresh_public_official_catalog_if_needed() -> Result<(), String> {
+pub async fn refresh_public_official_catalog_if_needed() -> Result<bool, String> {
     if !crate::codex_config::codex_public_official_models_cache_needs_refresh() {
-        return Ok(());
+        return Ok(false);
     }
     // This function is also reached by synchronous live-config projection. Do
     // not queue every concurrent projection behind an outbound request: one
     // caller refreshes while all other callers retain their trusted snapshot.
     let Some(permit) = CatalogRefreshPermit::try_acquire() else {
-        return Ok(());
+        return Ok(false);
     };
 
     // Re-check after winning the gate: another successful writer could have
     // refreshed the cache between the initial check and permit acquisition.
     let result = if !crate::codex_config::codex_public_official_models_cache_needs_refresh() {
-        Ok(())
+        Ok(false)
     } else {
         match fetch_public_official_catalog_from_url(CODEX_PUBLIC_MODELS_URL).await {
             Ok(models) => crate::codex_config::store_codex_public_official_models_cache(&models)
@@ -243,6 +267,9 @@ pub async fn refresh_public_official_catalog_if_needed() -> Result<(), String> {
         }
     };
     permit.finish(result.is_ok());
+    if result.as_ref().is_ok_and(|changed| *changed) {
+        reproject_after_automatic_catalog_change();
+    }
     result
 }
 
@@ -283,8 +310,16 @@ pub async fn refresh_public_official_catalog_force() -> OfficialCatalogRefreshRe
 
         let result = match fetch_public_official_catalog_from_url(CODEX_PUBLIC_MODELS_URL).await {
             Ok(models) => crate::codex_config::store_codex_public_official_models_cache(&models)
-                .map(|()| {
-                    public_catalog_snapshot_result("openai_codex_models_json", false, true, None)
+                .map(|changed| {
+                    (
+                        public_catalog_snapshot_result(
+                            "openai_codex_models_json",
+                            false,
+                            true,
+                            None,
+                        ),
+                        changed,
+                    )
                 })
                 .map_err(|error| {
                     format!("Failed to cache OpenAI public Codex model catalog: {error}")
@@ -294,7 +329,7 @@ pub async fn refresh_public_official_catalog_force() -> OfficialCatalogRefreshRe
         permit.finish(result.is_ok());
 
         return match result {
-            Ok(outcome) => outcome,
+            Ok((outcome, _changed)) => outcome,
             Err(error) => public_catalog_snapshot_result(
                 "stale_cache",
                 true,
@@ -413,6 +448,22 @@ fn sanitize_public_official_model(model: &Value) -> Option<Value> {
         model.remove(field);
     }
     Some(Value::Object(model))
+}
+
+pub(crate) fn public_catalog_models_changed(previous: &[Value], next: &[Value]) -> bool {
+    let mut previous = previous.to_vec();
+    let mut next = next.to_vec();
+    let sort_key = |model: &Value| {
+        let id = ["slug", "model", "id"]
+            .iter()
+            .find_map(|field| model.get(*field).and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        (id, model.to_string())
+    };
+    previous.sort_by_key(&sort_key);
+    next.sort_by_key(&sort_key);
+    previous != next
 }
 
 /// 解析已经过来源隔离的官方模型目录。
@@ -767,6 +818,22 @@ mod tests {
         assert_eq!(unavailable.source, "unavailable");
         assert!(!unavailable.used_stale_cache);
         assert_eq!(unavailable.model_count, 0);
+    }
+
+    #[test]
+    fn public_catalog_change_detection_ignores_model_order_but_not_metadata() {
+        let original = vec![
+            json!({"slug": "gpt-6-sol", "supported_reasoning_levels": ["low", "max"]}),
+            json!({"slug": "gpt-6-luna", "context_window": 128000}),
+        ];
+        let reordered = vec![original[1].clone(), original[0].clone()];
+        let changed = vec![
+            json!({"slug": "gpt-6-sol", "supported_reasoning_levels": ["low", "max", "ultra"]}),
+            original[1].clone(),
+        ];
+
+        assert!(!public_catalog_models_changed(&original, &reordered));
+        assert!(public_catalog_models_changed(&original, &changed));
     }
 
     #[test]

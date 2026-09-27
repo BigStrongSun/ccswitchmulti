@@ -38,6 +38,16 @@ pub struct ManualOfficialCatalogRefreshStatus {
     refresh_error: Option<String>,
 }
 
+pub(crate) async fn reproject_current_official_catalog_if_owned(
+    state: &AppState,
+) -> Result<bool, &'static str> {
+    state
+        .proxy_service
+        .reproject_official_codex_catalog_if_owned()
+        .await?;
+    Ok(true)
+}
+
 fn quota_remaining_percent(quota: &SubscriptionQuota) -> Option<f64> {
     quota
         .success

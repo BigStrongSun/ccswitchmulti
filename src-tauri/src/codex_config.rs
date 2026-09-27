@@ -1886,15 +1886,24 @@ pub(crate) fn codex_public_official_models_cache_needs_refresh() -> bool {
         >= CODEX_PUBLIC_OFFICIAL_MODELS_CACHE_MAX_AGE_SECS
 }
 
-pub(crate) fn store_codex_public_official_models_cache(models: &[Value]) -> Result<(), AppError> {
+pub(crate) fn store_codex_public_official_models_cache(models: &[Value]) -> Result<bool, AppError> {
+    let path = codex_public_official_models_cache_path();
+    let previous = read_json_file_if_exists(&path)
+        .ok()
+        .flatten()
+        .and_then(|cache| cache.get("models").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    let changed =
+        crate::services::codex_oauth_models::public_catalog_models_changed(&previous, models);
     write_json_file(
-        &codex_public_official_models_cache_path(),
+        &path,
         &json!({
             "source": "https://github.com/openai/codex",
             "fetched_at": current_utc_rfc3339_nanos(),
             "models": models,
         }),
-    )
+    )?;
+    Ok(changed)
 }
 
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
@@ -3025,7 +3034,7 @@ fn schedule_codex_public_official_catalog_refresh() {
             )
             .await
             {
-                Ok(Ok(())) => {}
+                Ok(Ok(_)) => {}
                 Ok(Err(error)) => log::warn!(
                     "using stale Codex official model catalog after refresh failure: {error}"
                 ),
@@ -11821,6 +11830,29 @@ trust_level = "trusted"
             }),
         )
         .expect("seed models cache");
+    }
+
+    #[test]
+    #[serial]
+    fn storing_changed_public_official_catalog_reports_change_and_persists_new_metadata() {
+        let _home = TestHomeGuard::new();
+        let initial = vec![json!({
+            "slug": "gpt-6-sol",
+            "supported_reasoning_levels": ["low", "max"]
+        })];
+        assert!(store_codex_public_official_models_cache(&initial).expect("store initial catalog"));
+
+        let updated = vec![json!({
+            "slug": "gpt-6-sol",
+            "supported_reasoning_levels": ["low", "max", "ultra"]
+        })];
+        assert!(store_codex_public_official_models_cache(&updated).expect("store updated catalog"));
+        assert!(
+            !store_codex_public_official_models_cache(&updated).expect("store unchanged catalog")
+        );
+
+        let persisted = load_codex_public_official_models_cache().expect("read public catalog");
+        assert_eq!(persisted, updated);
     }
 
     /// 注入一次性的官方 OAuth 模型上下文覆盖值，供缺缓存场景的单测使用。

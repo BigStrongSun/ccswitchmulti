@@ -859,9 +859,60 @@ impl ProxyService {
 
     /// 设置 AppHandle（在应用初始化时调用）
     pub fn set_app_handle(&self, handle: tauri::AppHandle) {
+        crate::services::codex_oauth_models::register_public_catalog_app_handle(handle.clone());
         futures::executor::block_on(async {
             *self.app_handle.write().await = Some(handle);
         });
+    }
+
+    pub(crate) async fn reproject_official_codex_catalog_if_owned(
+        &self,
+    ) -> Result<(), &'static str> {
+        let _guard = self.lock_switch_for_app(AppType::Codex.as_str()).await;
+        let takeover_enabled = self
+            .db
+            .get_proxy_config_for_app(AppType::Codex.as_str())
+            .await
+            .map_err(|_| "takeover_status_unavailable")?
+            .enabled;
+        let live_config =
+            crate::codex_config::read_codex_config_text().map_err(|_| "codex_config_unreadable")?;
+        crate::codex_config::manual_official_catalog_projection_eligibility(
+            takeover_enabled,
+            &live_config,
+            &crate::codex_config::get_codex_config_dir(),
+        )
+        .map_err(|reason| match reason {
+            "takeover_not_active" => "takeover_not_active",
+            _ => "catalog_not_cc_switch_owned",
+        })?;
+        let document = live_config
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| "codex_config_unreadable")?;
+        if document
+            .get("model_provider")
+            .and_then(|item| item.as_str())
+            != Some(crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID)
+        {
+            return Err("provider_not_cc_switch_router");
+        }
+        let provider_id =
+            crate::settings::get_effective_current_provider(&self.db, &AppType::Codex)
+                .map_err(|_| "active_provider_unavailable")?
+                .ok_or("no_active_codex_provider")?;
+        let provider = self
+            .db
+            .get_provider_by_id(&provider_id, AppType::Codex.as_str())
+            .map_err(|_| "active_provider_unavailable")?
+            .ok_or("no_active_codex_provider")?;
+        if crate::codex_multirouter::provider_set::codex_provider_set_leaf_parent_id(&provider)
+            .is_some()
+        {
+            return Err("active_provider_unavailable");
+        }
+        crate::services::provider::build_codex_live_config_for_provider(&self.db, &provider)
+            .map_err(|_| "projection_outputs_unconfirmed")?;
+        Ok(())
     }
 
     pub(crate) async fn lock_switch_for_app(
@@ -5673,6 +5724,23 @@ mod tests {
             "启动代理服务器失败: 地址绑定失败: 127.0.0.1:15721 已被占用"
         ));
         assert!(!is_port_ownership_guard_error(""));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn automatic_official_catalog_projection_refuses_when_codex_takeover_is_inactive() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db);
+
+        assert_eq!(
+            service
+                .reproject_official_codex_catalog_if_owned()
+                .await
+                .expect_err("inactive takeover must not publish generated catalogs"),
+            "takeover_not_active"
+        );
     }
 
     #[tokio::test]
