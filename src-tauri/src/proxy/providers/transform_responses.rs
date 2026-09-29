@@ -570,14 +570,18 @@ pub fn anthropic_to_responses_with_cache_retention(
                 }
                 response_tools.push(response_tool);
             } else if forced_hosted_web_search_name.is_none() {
-                response_tools.push(json!({
+                let mut response_tool = json!({
                     "type": "function",
                     "name": tool.get("name").and_then(|n| n.as_str()).unwrap_or(""),
-                    "description": tool.get("description"),
                     "parameters": super::transform::clean_schema(
                         tool.get("input_schema").cloned().unwrap_or(json!({}))
                     )
-                }));
+                });
+                if let Some(description) = tool.get("description").filter(|value| !value.is_null())
+                {
+                    response_tool["description"] = description.clone();
+                }
+                response_tools.push(response_tool);
             }
         }
 
@@ -1707,6 +1711,16 @@ pub(crate) fn responses_to_anthropic_with_web_search_options(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anthropic_responses_omits_missing_tool_description() {
+        let input = json!({
+            "model": "gpt-5.4", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "NoDesc", "input_schema": {"type": "object"}}]
+        });
+        let output = anthropic_to_responses(input, None, false, false).unwrap();
+        assert!(output["tools"][0].get("description").is_none());
+    }
     use super::*;
 
     #[test]

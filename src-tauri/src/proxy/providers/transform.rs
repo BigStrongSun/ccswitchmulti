@@ -242,14 +242,14 @@ pub fn anthropic_to_openai_with_reasoning_content(
             .iter()
             .filter(|t| t.get("type").and_then(|v| v.as_str()) != Some("BatchTool"))
             .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.get("name").and_then(|n| n.as_str()).unwrap_or(""),
-                        "description": t.get("description"),
-                        "parameters": clean_schema(t.get("input_schema").cloned().unwrap_or(json!({})))
-                    }
-                })
+                let mut function = json!({
+                    "name": t.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                    "parameters": clean_schema(t.get("input_schema").cloned().unwrap_or(json!({})))
+                });
+                if let Some(description) = t.get("description").filter(|value| !value.is_null()) {
+                    function["description"] = description.clone();
+                }
+                json!({"type": "function", "function": function})
             })
             .collect();
 
@@ -1783,6 +1783,17 @@ mod tests {
     fn test_output_config_max_preserved_for_gpt_6_astra() {
         let body = json!({"model": "gpt-6-astra", "output_config": {"effort": "max"}});
         assert_eq!(resolve_reasoning_effort(&body), Some("max"));
+    }
+
+    #[test]
+    fn anthropic_chat_omits_missing_tool_description() {
+        let input = json!({
+            "model": "gpt-5.4", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "NoDesc", "input_schema": {"type": "object"}}]
+        });
+        let output = anthropic_to_openai_with_reasoning_content(input, false).unwrap();
+        assert!(output["tools"][0]["function"].get("description").is_none());
     }
 
     #[test]
