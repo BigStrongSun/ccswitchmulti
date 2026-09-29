@@ -31,3 +31,5 @@
 - 当前 Codex app-server PID 21088 于 13:30:10 启动；CCSM 生成目录与 `models_cache.json` 的 LastWriteTime 均为 13:20:21，且 GPT-6 Sol/Luna 条目含推理档位、Fast 与 priority 元数据。这符合新进程读取目录的时间顺序，但并非当前进程 `model/list` 或 UI 控件的直接证明。
 - Windows HKCU 卸载项 `DisplayVersion` 仍为 `3.20.2-18`，与已安装/运行文件不一致；本轮只读验收未改注册表。
 - 未触发官方目录强制刷新、未重启 Codex 或 CCSM，自动刷新成功链路与 UI 档位控件仍未完成端到端验收。
+- 2026-09-29 15:28 左右用当前安装的 Codex `0.158.0-alpha.2.1` 启动独立诊断 app-server，发送 `initialize` 与 `model/list`：`gpt-6-luna` 返回 `low, medium, high, xhigh, max`，`gpt-6-sol` 返回 `low, medium, high, xhigh, max, ultra`；两者都返回 `additionalSpeedTiers=[fast]`、`serviceTiers=[priority]`。这证明新进程可以从当前目录读到档位，但独立诊断进程不是正在运行的桌面 PID 21088；不能把结果当作当前 UI 控件实测。
+- 当前桌面 app-server PID 21088 没有 TCP listener，标准输入由桌面宿主持有；本轮未发现可安全读取该现役进程 `model/list` 的控制通道。Windows Computer Use 技能禁止自动操控 ChatGPT 桌面 UI，因此没有进行该窗口点击验收。仍需用户界面观察或受支持的现役 RPC 才能宣称控件已正常。
