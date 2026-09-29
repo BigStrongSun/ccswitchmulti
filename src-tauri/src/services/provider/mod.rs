@@ -216,6 +216,31 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
 /// Provider business logic service
 pub struct ProviderService;
 
+/// Fail before switching or taking over a Codex provider whose explicit OAuth
+/// account was deleted. Never silently substitute another account.
+pub(crate) fn ensure_codex_managed_account_binding(provider: &Provider) -> Result<(), AppError> {
+    let Some(account_id) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.codex_official_auth.as_ref())
+        .filter(|auth| auth.mode == crate::provider::CodexOfficialAuthMode::ManagedOauth)
+        .and_then(|auth| auth.account_id.as_deref())
+    else {
+        return Ok(());
+    };
+    let manager = crate::proxy::providers::codex_oauth_auth::CodexOAuthManager::new(
+        crate::config::get_app_config_dir(),
+    );
+    let accounts = block_on_tauri_runtime(manager.list_accounts());
+    if accounts.iter().any(|account| account.id == account_id) {
+        Ok(())
+    } else {
+        Err(AppError::Message(
+            "绑定的 CCSM OAuth 账号已不存在；请在供应商编辑页选择账号并保存后重试".to_string(),
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodexOfficialAuthMigrationState {
@@ -918,6 +943,69 @@ mod tests {
 
             assert_eq!(script.api_key, None);
             assert_eq!(script.base_url, None);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn switching_to_deleted_codex_account_is_rejected_before_current_changes() {
+        with_test_home(|state, _| {
+            let current = Provider::with_id(
+                "current".to_string(),
+                "Current".to_string(),
+                codex_settings("https://example.com/v1", "test-key"),
+                None,
+            );
+            let mut stale = Provider::with_id(
+                crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+                "OpenAI Official".to_string(),
+                json!({"auth": {}, "config": "model = \"gpt-5.6\"\n"}),
+                None,
+            );
+            stale.category = Some("official".to_string());
+            stale.meta = Some(ProviderMeta {
+                codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                    mode: crate::provider::CodexOfficialAuthMode::ManagedOauth,
+                    account_id: Some("deleted-account".to_string()),
+                }),
+                ..Default::default()
+            });
+            state.db.save_provider("codex", &current).unwrap();
+            state.db.save_provider("codex", &stale).unwrap();
+            state.db.set_current_provider("codex", &current.id).unwrap();
+            crate::settings::set_current_provider(&AppType::Codex, Some(&current.id)).unwrap();
+
+            let error = ProviderService::switch(state, AppType::Codex, &stale.id).unwrap_err();
+            assert!(error.to_string().contains("选择账号"), "{error}");
+            assert_eq!(
+                crate::settings::get_effective_current_provider(&state.db, &AppType::Codex)
+                    .unwrap()
+                    .as_deref(),
+                Some(current.id.as_str())
+            );
+
+            let manager = crate::proxy::providers::codex_oauth_auth::CodexOAuthManager::new(
+                crate::config::get_app_config_dir(),
+            );
+            block_on_tauri_runtime(manager.seed_test_account("new-account", "test-access"))
+                .unwrap();
+            stale
+                .meta
+                .as_mut()
+                .unwrap()
+                .codex_official_auth
+                .as_mut()
+                .unwrap()
+                .account_id = Some("new-account".to_string());
+            state.db.save_provider("codex", &stale).unwrap();
+            ProviderService::switch(state, AppType::Codex, &stale.id)
+                .expect("explicit replacement binding should restore switchability");
+            assert_eq!(
+                crate::settings::get_effective_current_provider(&state.db, &AppType::Codex)
+                    .unwrap()
+                    .as_deref(),
+                Some(stale.id.as_str())
+            );
         });
     }
 
@@ -8103,6 +8191,13 @@ impl ProviderService {
         } else {
             None
         };
+
+        // Account removal leaves provider bindings intact so users can choose a
+        // replacement explicitly. Reject a stale fixed-account target before
+        // changing the current provider, takeover backup, or native config.
+        if matches!(app_type, AppType::Codex) {
+            ensure_codex_managed_account_binding(_provider)?;
+        }
 
         // Backup or live placeholders mean the live file is owned by proxy
         // takeover, even if the proxy server is temporarily stopped or is in the

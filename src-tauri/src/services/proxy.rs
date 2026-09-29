@@ -1198,6 +1198,22 @@ impl ProxyService {
         }
         let _guard = self.switch_locks.lock_for_app(app_type_str).await;
 
+        if enabled && app == AppType::Codex {
+            if let Some(current_id) =
+                crate::settings::get_effective_current_provider(&self.db, &AppType::Codex)
+                    .map_err(|error| format!("读取当前 Codex 供应商失败: {error}"))?
+            {
+                if let Some(provider) = self
+                    .db
+                    .get_provider_by_id(&current_id, "codex")
+                    .map_err(|error| format!("读取当前 Codex 供应商失败: {error}"))?
+                {
+                    crate::services::provider::ensure_codex_managed_account_binding(&provider)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+
         if enabled {
             // 1) 代理服务未运行则自动启动
             if !self.is_running().await {
@@ -7605,6 +7621,48 @@ wire_api = "responses"
             .set_takeover_for_app("codex", false)
             .await
             .expect("disable Codex takeover");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_takeover_rejects_deleted_fixed_account_before_starting_proxy() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        let mut provider = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+            "OpenAI Official".to_string(),
+            json!({"auth": {}, "config": "model = \"gpt-5.6\"\n"}),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        provider.meta = Some(ProviderMeta {
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::ManagedOauth,
+                account_id: Some("deleted-account".to_string()),
+            }),
+            ..Default::default()
+        });
+        db.save_provider("codex", &provider).unwrap();
+        db.set_current_provider("codex", &provider.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id)).unwrap();
+        crate::codex_config::write_codex_live_atomic(&json!({}), Some("model = \"gpt-5.6\"\n"))
+            .unwrap();
+
+        let result = service.set_takeover_for_app("codex", true).await;
+        if result.is_ok() {
+            service.set_takeover_for_app("codex", false).await.unwrap();
+        }
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("选择账号")),
+            "{result:?}"
+        );
+        assert!(!service.is_running().await);
+        assert!(db.get_live_backup("codex").await.unwrap().is_none());
     }
 
     #[tokio::test]
