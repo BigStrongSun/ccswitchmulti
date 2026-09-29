@@ -5851,3 +5851,5 @@ supported in one streaming turn`。
 - 裸跑 `cargo build`、`cargo test` 或直接 `pnpm tauri build` 不会经过 npm 脚本生命周期，Cargo 本身也没有“命令结束自动 clean”的原生钩子；项目内日常完整构建应使用 `pnpm build`，发布使用 `pnpm release:local`。定向 Rust 测试若显式指定其它 target，应由创建该 target 的调用方清理，定时任务仅兜底上述白名单位置。
 
 - 2026-09-18 CCSwitchMulti v3.20.2-19 正式发布：annotated tag `v3.20.2-19` 固定指向 `13d1722d`（本版唯一功能改动为 DeepSeek 角色 slug 别名统一修复 `7fb839db`），Release workflow `35287539781` 的五平台构建、Publish、Assemble 全部 success；GitHub Release 非 draft/prerelease、19 个资产，`latest.json` 为 `3.20.2-19`、六平台/六签名齐全，Windows-Setup.exe SHA-256 与 GitHub digest 一致。按用户指示“先不用管本地替换”，未做本机安装/重启，本机安装态仍为 `3.20.2-18`（不含本修复）。main CI `35287533992` 的 Frontend + 三平台 Backend 失败与 push 前 `34960285771` 失败集相同（既有失败，非本修复引入），不能宣称 CI 全绿；详见 `docs/audits/2026-09-18-v3.20.2-19-release-execution.md`。
+
+- 2026-09-29 CCSwitchMulti v3.20.2-22 正式发布：tag `v3.20.2-22` 指向 `363e5155`，Release workflow `36537399668` 七个 job 全 success，正式 Release 有 19 项资产；下载复核 19/19 大小与 GitHub SHA-256 匹配，`latest.json` 六平台/六签名一致。原版 farion1231/cc-switch 最新 Release 已到 v3.20.4，官方 main 又有新提交；本轮未合并原版。详见 `memory-2026-09-29-v3.20.2-22-release.md`。
