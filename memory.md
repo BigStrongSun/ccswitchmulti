@@ -5854,3 +5854,4 @@ supported in one streaming turn`。
 
 - 2026-09-29 CCSwitchMulti v3.20.2-22 正式发布：tag `v3.20.2-22` 指向 `363e5155`，Release workflow `36537399668` 七个 job 全 success，正式 Release 有 19 项资产；下载复核 19/19 大小与 GitHub SHA-256 匹配，`latest.json` 六平台/六签名一致。原版 farion1231/cc-switch 最新 Release 已到 v3.20.4，官方 main 又有新提交；本轮未合并原版。详见 `memory-2026-09-29-v3.20.2-22-release.md`。
 - 2026-09-29 CCSwitchMulti 对照 CCS v3.20.4 的选择性同步进行中：三条代理转换缺口（缺失工具描述、GPT-5.6/GPT-6 Astra max 档、Copilot auto stop）已用 RED/GREEN 回归修复；`additional_tools` 与 `detail: original` 已有本地等价实现。认证和旧账号绑定仍待单独核对，尚未称为 3.20.4-1。详见 `memory-2026-09-29-v3.20.4-sync.md`。
+- 2026-09-29 CCS v3.20.4 凭据保留适配阶段：非官方 Codex DB-only key 不再被空 live auth 在编辑/切换回填时抹掉；live 新凭据和官方登出继续优先。前后端聚焦测试与前端类型检查通过，旧账号绑定仍在核对。详见 `memory-2026-09-29-v3.20.4-sync.md`。

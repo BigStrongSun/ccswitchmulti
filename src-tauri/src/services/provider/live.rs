@@ -1087,6 +1087,26 @@ fn restore_live_settings_for_provider_backfill(
         }
     }
 
+    // A third-party provider may keep its only credential in its DB row. Its
+    // live auth.json is a shared Codex slot and can be absent after switching.
+    // Absence is not an explicit request to erase the provider credential.
+    if provider.category.as_deref() != Some("official")
+        && !crate::proxy::providers::is_codex_official_provider(provider)
+        && !settings
+            .get("auth")
+            .is_some_and(crate::codex_config::codex_auth_has_login_material)
+    {
+        if let Some(stored_auth) = provider
+            .settings_config
+            .get("auth")
+            .filter(|auth| crate::codex_config::codex_auth_has_login_material(auth))
+        {
+            if let Some(object) = settings.as_object_mut() {
+                object.insert("auth".to_string(), stored_auth.clone());
+            }
+        }
+    }
+
     // `modelCatalog` is a cc-switch–private field whose SSOT is the DB. Live's
     // `config.toml` only carries a lossy projection (`model_catalog_json` →
     // generated catalog file) that proxy takeover/restore cycles and Codex.app
@@ -3575,6 +3595,58 @@ web_search = true
             provider.settings_config.get("codexRouting"),
             "switch-away backfill must keep the DB-stored codexRouting when Live has none"
         );
+    }
+
+    #[test]
+    fn codex_third_party_backfill_keeps_db_only_key_without_live_auth() {
+        let mut provider = Provider::with_id(
+            "header-auth".to_string(),
+            "Header Auth".to_string(),
+            json!({"auth": {"OPENAI_API_KEY": "sk-db-only"}, "config": "model_provider = \"custom\"\n"}),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        let result = restore_live_settings_for_provider_backfill(
+            &AppType::Codex,
+            &provider,
+            json!({"auth": {}, "config": "model_provider = \"custom\"\nmodel = \"new\"\n"}),
+        );
+        assert_eq!(result["auth"]["OPENAI_API_KEY"], "sk-db-only");
+        assert!(result["config"]
+            .as_str()
+            .unwrap()
+            .contains("model = \"new\""));
+    }
+
+    #[test]
+    fn codex_backfill_respects_live_key_and_official_logout() {
+        let mut third_party = Provider::with_id(
+            "custom".to_string(),
+            "Custom".to_string(),
+            json!({"auth": {"OPENAI_API_KEY": "old"}, "config": "model_provider = \"custom\"\n"}),
+            None,
+        );
+        third_party.category = Some("custom".to_string());
+        let live_key = restore_live_settings_for_provider_backfill(
+            &AppType::Codex,
+            &third_party,
+            json!({"auth": {"OPENAI_API_KEY": "new"}, "config": "model_provider = \"custom\"\n"}),
+        );
+        assert_eq!(live_key["auth"]["OPENAI_API_KEY"], "new");
+
+        let mut official = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+            "Official".to_string(),
+            json!({"auth": {"auth_mode": "chatgpt", "tokens": {"refresh_token": "old"}}, "config": "model = \"gpt-5.6\"\n"}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        let logged_out = restore_live_settings_for_provider_backfill(
+            &AppType::Codex,
+            &official,
+            json!({"auth": {}, "config": "model = \"gpt-5.6\"\n"}),
+        );
+        assert_eq!(logged_out["auth"], json!({}));
     }
 
     #[test]

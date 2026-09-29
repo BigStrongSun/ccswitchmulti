@@ -214,6 +214,25 @@ export function EditProviderDialog({
         unknown
       >;
       let merged = base;
+      const hasCredential = (auth: unknown): boolean => {
+        if (!auth || typeof auth !== "object" || Array.isArray(auth))
+          return false;
+        return Object.entries(auth).some(([key, value]) => {
+          if (key === "auth_mode" || value == null) return false;
+          if (typeof value === "string") return value.trim().length > 0;
+          if (Array.isArray(value)) return value.length > 0;
+          if (typeof value === "object") return Object.keys(value).length > 0;
+          return true;
+        });
+      };
+      if (
+        editingProvider.category !== "official" &&
+        editingProvider.id !== "codex-official" &&
+        !hasCredential(liveSettings.auth) &&
+        hasCredential(dbConfig.auth)
+      ) {
+        merged = { ...merged, auth: dbConfig.auth };
+      }
       for (const privateField of ["modelCatalog", "codexRouting"]) {
         const dbValue = dbConfig[privateField];
         if (dbValue !== undefined) {

@@ -330,6 +330,77 @@ describe("EditProviderDialog", () => {
     });
   });
 
+  it("preserves a third-party Codex DB-only key when live auth is empty", async () => {
+    const provider: Provider = {
+      id: "header-auth",
+      name: "Header Auth",
+      category: "custom",
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "sk-db-only" },
+        config: 'model_provider = "custom"\n',
+      },
+    };
+    apiMocks.getCurrent.mockResolvedValue(provider.id);
+    apiMocks.getLiveProviderSettings.mockResolvedValue({
+      auth: {},
+      config: 'model_provider = "custom"\nmodel = "new"\n',
+    });
+    apiMocks.getCodexProviderEditorSnapshot.mockResolvedValue(
+      editorSnapshotFor(provider),
+    );
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="codex"
+      />,
+    );
+    await waitFor(() => {
+      const settings = JSON.parse(
+        screen.getByTestId("settings-config").textContent ?? "{}",
+      );
+      expect(settings.auth).toEqual({ OPENAI_API_KEY: "sk-db-only" });
+      expect(settings.config).toContain('model = "new"');
+    });
+  });
+
+  it("keeps official Codex live logout authoritative", async () => {
+    const provider: Provider = {
+      id: "codex-official",
+      name: "Official",
+      category: "official",
+      settingsConfig: {
+        auth: { auth_mode: "chatgpt", tokens: { refresh_token: "old" } },
+        config: 'model = "gpt-5.6"\n',
+      },
+    };
+    apiMocks.getCurrent.mockResolvedValue(provider.id);
+    apiMocks.getLiveProviderSettings.mockResolvedValue({
+      auth: {},
+      config: 'model = "gpt-5.6"\n',
+    });
+    apiMocks.getCodexProviderEditorSnapshot.mockResolvedValue(
+      editorSnapshotFor(provider),
+    );
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="codex"
+      />,
+    );
+    await waitFor(() => {
+      const settings = JSON.parse(
+        screen.getByTestId("settings-config").textContent ?? "{}",
+      );
+      expect(settings.auth).toEqual({});
+    });
+  });
+
   it("OpenClaw live 不可读时回退到数据库中的 legacy TE descriptor", async () => {
     const legacySettings = {
       api: "openai-completions",

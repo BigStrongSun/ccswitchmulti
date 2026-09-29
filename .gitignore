@@ -36,3 +36,4 @@ mainWindow.js
 /scripts/codex-history-tool/__pycache__/
 /scripts/codex-history-tool/*.spec
 /scripts/logs/
+/.tmp/local-release-cargo/
