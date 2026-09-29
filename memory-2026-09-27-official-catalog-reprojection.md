@@ -24,3 +24,10 @@
 - 2026-09-27 13:18:51，正式 local-release-pipeline 完成；版本 `3.20.2-22`，源码 `0d7c75265067e182023998a4e119eeca06b5d1e4`（包含 `c4835de21`）。TypeScript 检查、release 编译及 NSIS 打包通过。
 - 产物在 `C:/Users/sunda/Documents/LLMservice/最新版ccswitchmulti`，包含 Windows installer、portable 与 SHA256SUMS。构建缓存自动清理约 3.2 GiB。
 - 未安装、未重启、未发布 GitHub；完整自动刷新成功链路及控件 UI 验收仍待验证。
+
+## 2026-09-29 安装态只读核验
+
+- 已安装主程序 `C:/Users/sunda/AppData/Local/CCSwitchMulti/cc-switch.exe` 的 FileVersion 为 `3.20.2-22`；SHA-256 等于本地发布目录 `windows/installer/CCSwitchMulti_3.20.2-22_x64-installed-exe.sha256`。PID 33860 于 13:20:20 启动，持有 `127.0.0.1:15721`，`/health` HTTP 200。
+- 当前 Codex app-server PID 21088 于 13:30:10 启动；CCSM 生成目录与 `models_cache.json` 的 LastWriteTime 均为 13:20:21，且 GPT-6 Sol/Luna 条目含推理档位、Fast 与 priority 元数据。这符合新进程读取目录的时间顺序，但并非当前进程 `model/list` 或 UI 控件的直接证明。
+- Windows HKCU 卸载项 `DisplayVersion` 仍为 `3.20.2-18`，与已安装/运行文件不一致；本轮只读验收未改注册表。
+- 未触发官方目录强制刷新、未重启 Codex 或 CCSM，自动刷新成功链路与 UI 档位控件仍未完成端到端验收。
