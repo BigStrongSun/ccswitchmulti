@@ -5857,4 +5857,5 @@ supported in one streaming turn`。
 - 2026-09-29 CCS v3.20.4 凭据保留适配阶段：非官方 Codex DB-only key 不再被空 live auth 在编辑/切换回填时抹掉；live 新凭据和官方登出继续优先。前后端聚焦测试与前端类型检查通过，旧账号绑定仍在核对。详见 `memory-2026-09-29-v3.20.4-sync.md`。
 - 2026-09-29 CCS v3.20.4 工具描述跟进：Claude→Chat/Responses 两处缺失工具描述原会序列化为 null，已按上游修正并用两条 RED/GREEN 用例验证。旧账号绑定仍保留 fail-closed 但切换/接管缺预检，不能宣称上游 #7395 已同步。详见 `memory-2026-09-29-v3.20.4-sync.md`。
 - 2026-09-29 CCS v3.20.4 失效账号门禁：OpenAI Official 固定 managed OAuth 账号删除后，switch/takeover 现在于状态变更前拒绝失效引用、提示显式选择新账号；新账号重新绑定后可切换。两条入口的 RED/GREEN 回归通过，不自动重绑、不触及账号池。详见 `memory-2026-09-29-v3.20.4-sync.md`。
-- 2026-09-29 CCSM 3.20.4-1 候选：四处版本元数据已更新、发行说明标明只同步选定上游修复，未引入原版 MiniMax/DB v19。前端 1673/1673，Rust 串行 4292/4292（9 ignored），但并行首轮 `stale_fingerprint` 有 1 次失败、单跑通过；Tauri 包和正式 Release 尚待构建验收。详见 `memory-2026-09-29-v3.20.4-sync.md`。
+- 2026-09-29 CCSM 3.20.4-1 候选阶段：四处版本元数据已更新、发行说明标明只同步选定上游修复，未引入原版 MiniMax/DB v19。前端 1673/1673，Rust 串行 4292/4292（9 ignored），但并行首轮 `stale_fingerprint` 有 1 次失败、单跑通过；后续构建与发布结果见下一条。详见 `memory-2026-09-29-v3.20.4-sync.md`。
+- 2026-09-29 CCSM v3.20.4-1 已发布：tag 固定 `6ae29267`，Release workflow `36557643457` 七 job success；正式 Release 非 draft/prerelease，19/19 下载资产的大小与 SHA-256 匹配 GitHub digest，`latest.json` 六平台 URL 与 `.sig` 一致。本地 Windows NSIS 候选也已从同一提交构建并通过 16/16 清单校验。未安装、未做新版 UI 直接端到端验收；首次并行 Rust `stale_fingerprint` 竞态仍待定位。详见 `memory-2026-09-29-v3.20.4-sync.md`。
