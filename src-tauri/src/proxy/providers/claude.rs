@@ -344,11 +344,7 @@ pub fn transform_claude_request_for_api_format(
     // Copilot 场景：优先从 metadata.user_id 提取 session ID 作为 cache key
     // 格式: "uuid_sessionId" → 提取 "_" 后面的部分作为 session 标识
     // 同一会话的请求共享 cache key，提升 Copilot 缓存命中率
-    let is_copilot = provider
-        .meta
-        .as_ref()
-        .and_then(|m| m.provider_type.as_deref())
-        == Some("github_copilot")
+    let is_copilot = provider.is_github_copilot()
         || provider
             .settings_config
             .get("baseUrl")
@@ -446,6 +442,11 @@ pub fn transform_claude_request_for_api_format(
             // 不在 SSE 末尾吐 usage → 转换出的 Anthropic message_delta 全 0 →
             // 整笔 input/output/cache 漏记（与 Codex Responses→Chat 路径同源）。
             super::transform::inject_openai_stream_include_usage(&mut result);
+            if is_copilot {
+                if let Some(object) = result.as_object_mut() {
+                    object.remove("stop");
+                }
+            }
             Ok(result)
         }
         "gemini_native" => super::transform_gemini::anthropic_to_gemini_with_shadow(
@@ -1777,6 +1778,34 @@ mod tests {
                 .unwrap();
         assert_eq!(transformed["stream"], true);
         assert_eq!(transformed["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn test_copilot_chat_omits_stop_but_other_chat_preserves_it() {
+        let request = json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 64,
+            "stop_sequences": ["END"]
+        });
+        let copilot = create_provider(
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.githubcopilot.com"}}),
+        );
+        let generic =
+            create_provider(json!({"env": {"ANTHROPIC_BASE_URL": "https://openrouter.ai/api/v1"}}));
+        let copilot_result = transform_claude_request_for_api_format(
+            request.clone(),
+            &copilot,
+            "openai_chat",
+            None,
+            None,
+        )
+        .unwrap();
+        let generic_result =
+            transform_claude_request_for_api_format(request, &generic, "openai_chat", None, None)
+                .unwrap();
+        assert!(copilot_result.get("stop").is_none());
+        assert_eq!(generic_result["stop"], json!(["END"]));
     }
 
     #[test]

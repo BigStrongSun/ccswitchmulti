@@ -100,6 +100,10 @@ pub fn supports_reasoning_effort(model: &str) -> bool {
 ///    - `enabled` without budget → `high` (conservative default)
 ///    - `disabled` / absent → `None`
 pub fn resolve_reasoning_effort(body: &Value) -> Option<&'static str> {
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     // --- Priority 1: explicit output_config.effort ---
     if let Some(effort) = body
         .pointer("/output_config/effort")
@@ -109,8 +113,17 @@ pub fn resolve_reasoning_effort(body: &Value) -> Option<&'static str> {
             "low" => Some("low"),
             "medium" => Some("medium"),
             "high" => Some("high"),
-            "max" => Some("xhigh"), // OpenAI xhigh = maximum reasoning effort
-            _ => None,              // unknown value — do not inject
+            "xhigh" => Some("xhigh"),
+            "max"
+                if matches!(
+                    model.to_ascii_lowercase().as_str(),
+                    "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-6-astra"
+                ) =>
+            {
+                Some("max")
+            }
+            "max" => Some("xhigh"),
+            _ => None, // unknown value — do not inject
         };
     }
 
@@ -1764,6 +1777,12 @@ mod tests {
     fn test_output_config_max_maps_to_reasoning_effort_xhigh() {
         let body = json!({"output_config": {"effort": "max"}});
         assert_eq!(resolve_reasoning_effort(&body), Some("xhigh"));
+    }
+
+    #[test]
+    fn test_output_config_max_preserved_for_gpt_6_astra() {
+        let body = json!({"model": "gpt-6-astra", "output_config": {"effort": "max"}});
+        assert_eq!(resolve_reasoning_effort(&body), Some("max"));
     }
 
     #[test]

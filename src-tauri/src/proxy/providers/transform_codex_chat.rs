@@ -2325,9 +2325,11 @@ fn responses_function_tool_to_chat_tool(tool: &Value, chat_name: &str) -> Option
 
     let mut function = json!({
         "name": chat_name,
-        "description": tool.get("description").cloned().unwrap_or(Value::Null),
         "parameters": normalize_function_parameters(tool.get("parameters"))
     });
+    if let Some(description) = tool.get("description").filter(|value| !value.is_null()) {
+        function["description"] = description.clone();
+    }
     if let Some(strict) = tool.get("strict") {
         function["strict"] = strict.clone();
     }
@@ -3760,6 +3762,17 @@ mod tests {
             result["tools"][0]["function"]["parameters"],
             json!({"type": "object", "properties": {}})
         );
+    }
+
+    #[test]
+    fn responses_request_to_chat_omits_missing_tool_description() {
+        let input = json!({
+            "model": "gpt-5.4",
+            "tools": [{"type": "function", "name": "without_description", "parameters": {"type": "object"}}],
+            "input": "hi"
+        });
+        let result = responses_to_chat_completions(input).unwrap();
+        assert!(result["tools"][0]["function"].get("description").is_none());
     }
 
     #[test]
