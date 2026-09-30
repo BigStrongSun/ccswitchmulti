@@ -492,6 +492,101 @@ fn image_edits_v2_text_only_official_route_falls_back_without_text_model_overrid
     );
 }
 
+#[test]
+fn image_requests_v2_desktop_login_route_falls_back_without_image_catalog() {
+    use crate::proxy::providers::{CodexAdapter, ProviderAdapter};
+
+    for text_model in ["gpt-5.6-sol", "review-alias"] {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let router = v2_router(
+            json!([v2_route(
+                "official",
+                "codex-official",
+                json!({"mode": "include", "models": [text_model]}),
+                "provider_config"
+            )]),
+            "official",
+        );
+        let mut official = managed_oauth_official_provider(
+            "codex-official",
+            json!([{"model": text_model, "upstreamModel": "gpt-5.6-sol"}]),
+        );
+        official.meta.as_mut().unwrap().codex_official_auth = Some(CodexOfficialAuthConfig {
+            mode: CodexOfficialAuthMode::DesktopCurrentLogin,
+            account_id: None,
+        });
+        db.save_provider("codex", &router).unwrap();
+        db.save_provider("codex", &official).unwrap();
+        let before = serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap();
+        let providers = HashMap::from([(official.id.clone(), official.clone())]);
+        let image_body = json!({"model": "gpt-image-2", "prompt": "draw a square"});
+        assert!(crate::proxy::providers::resolve_codex_v2_routed_provider(
+            &router,
+            &image_body,
+            &providers
+        )
+        .unwrap()
+        .is_none());
+        assert!(
+            crate::proxy::providers::resolve_codex_v2_raw_passthrough_provider(
+                &router,
+                &image_body,
+                &providers,
+                None
+            )
+            .unwrap()
+            .is_none()
+        );
+        let state = build_state(db.clone());
+        let resolved = resolve_codex_image_generation_provider(&state, &router, &image_body)
+            .unwrap()
+            .expect("Desktop login must serve images without adding an image catalog entry");
+
+        assert!(crate::proxy::providers::provider_uses_native_codex_auth(
+            &resolved
+        ));
+        assert!(resolved.meta.as_ref().unwrap().provider_type.is_none());
+        assert_eq!(
+            resolved.settings_config["codexResolvedRouteMatched"],
+            json!(text_model == "gpt-5.6-sol")
+        );
+        assert!(resolved
+            .settings_config
+            .get("codexResolvedUpstreamModelOverride")
+            .is_none());
+        assert_eq!(
+            CodexAdapter.extract_base_url(&resolved).unwrap(),
+            crate::proxy::providers::CHATGPT_CODEX_BASE_URL
+        );
+        assert_eq!(image_body["model"], "gpt-image-2");
+        assert_eq!(
+            serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap(),
+            before,
+            "image fallback must not change stored providers"
+        );
+    }
+}
+
+#[test]
+fn image_requests_native_marker_does_not_make_nonofficial_oauth_an_image_target() {
+    let mut provider = crate::provider::Provider::with_id(
+        "route-probe".to_string(),
+        "Route probe".to_string(),
+        json!({"codexNativeAuthPassthrough": true}),
+        None,
+    );
+    assert!(!provider_is_codex_image_generation_oauth_target(&provider));
+
+    provider.category = Some("official".to_string());
+    for provider_type in ["xai_oauth", "github_copilot"] {
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some(provider_type.to_string()),
+            ..Default::default()
+        });
+        assert!(!provider_is_codex_image_generation_oauth_target(&provider));
+    }
+}
+
 /// A user who explicitly routes `gpt-image-2` to a third-party Images API keeps
 /// that route: the endpoint-specific official fallback must step aside.
 #[test]
@@ -627,6 +722,93 @@ impl Drop for IsolatedHome {
         }
         let _ = crate::settings::reload_settings();
     }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn image_generations_handler_preserves_native_body_and_auth_with_text_only_route() {
+    let _home = IsolatedHome::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let app = axum::Router::new().route(
+        "/v1/images/generations",
+        axum::routing::post(move |request: axum::extract::Request| {
+            let tx = tx.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let bytes = body.collect().await.unwrap().to_bytes();
+                tx.send((parts.uri, parts.headers, bytes)).await.unwrap();
+                axum::Json(json!({"created": 1, "data": [{"b64_json": "synthetic"}]}))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let db = Arc::new(Database::memory().unwrap());
+    let router = v2_router(
+        json!([v2_route(
+            "official",
+            "codex-official",
+            json!({"mode": "include", "models": ["gpt-5.6-sol"]}),
+            "provider_config"
+        )]),
+        "official",
+    );
+    let mut official =
+        managed_oauth_official_provider("codex-official", json!([{"model": "gpt-5.6-sol"}]));
+    official.meta.as_mut().unwrap().codex_official_auth = Some(CodexOfficialAuthConfig {
+        mode: CodexOfficialAuthMode::DesktopCurrentLogin,
+        account_id: None,
+    });
+    official.settings_config["codexTestBaseUrl"] = json!(format!("http://{addr}/v1"));
+    official.settings_config["model"] = json!("gpt-5.6-sol");
+    official.settings_config["config"] = json!("model = \"gpt-5.6-sol\"\n");
+    db.save_provider("codex", &router).unwrap();
+    db.save_provider("codex", &official).unwrap();
+    db.set_current_provider("codex", &router.id).unwrap();
+    // Whitespace makes this catch both text-model remapping and JSON reserialization.
+    let raw =
+        br#"{ "model": "gpt-image-2", "prompt": "synthetic test square", "size": "1024x1024" }"#;
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/images/generations?quality=high")
+        .header("originator", "codex_cli_rs")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer synthetic-test-image-login")
+        .body(axum::body::Body::from(raw.as_slice()))
+        .unwrap();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        handle_image_generations(State(build_state(db)), request),
+    )
+    .await;
+    server.abort();
+    let response = response
+        .expect("local request timeout")
+        .expect("handler response");
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let (uri, headers, actual) = rx.try_recv().expect("captured upstream request");
+    assert_eq!(uri.to_string(), "/v1/images/generations?quality=high");
+    assert_eq!(headers["content-type"], "application/json");
+    assert_eq!(
+        headers["authorization"],
+        "Bearer synthetic-test-image-login"
+    );
+    assert_eq!(actual.as_ref(), raw.as_slice());
+    let body: Value = serde_json::from_slice(&actual).unwrap();
+    assert_eq!(body["model"], "gpt-image-2");
+    assert_eq!(body["prompt"], "synthetic test square");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["created"],
+        1
+    );
 }
 
 #[tokio::test]
