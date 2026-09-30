@@ -16,14 +16,14 @@
 - 原生 Codex 会过滤 `service_tier = "default"`，只有模型 catalog 支持且配置为非默认值时才发送。
 - 原生 Codex 会把 `prompt_cache_key` 默认设为 thread id，并在 `client_metadata` 中写入 `x-codex-installation-id`。
 - CCSwitchMulti Codex OAuth adapter 会把本地 `/v1/responses` 归一化到官方 `/backend-api/codex/responses`；forwarder 对可信本地 Codex 请求保留唯一且位于官方 first-party 白名单内的 `originator`，缺失、重复、未知值及 External API/协议转换请求回退为 `codex_cli_rs`。
-- 旧实现提交 `af58740b` 曾成对硬编码 `originator = codex_cli_rs` 与 `version = 0.144.1`；提交 `cd8d6bc6` 把 originator 统一移到 forwarder 时漏迁 version，造成自定义 OpenAI 门面只有来源、没有版本。当前实现从可信 first-party Codex User-Agent 动态恢复真实构建版本，线程 originator 与进程 User-Agent 不同时也能恢复；UA 中的可信版本覆盖独立 `version` 头里的旧值，第三方 User-Agent 不伪造版本。
+- 旧实现提交 `af58740b` 曾成对硬编码 `originator = codex_cli_rs` 与 `version = 0.144.1`；提交 `cd8d6bc6` 把 originator 统一移到 forwarder 时漏迁 version。后续从 User-Agent 动态合成独立 `version` 的做法也不符合当前官方 Codex 默认请求头：官方仅发送 `originator` 和 `User-Agent`，不会默认发送独立 `version`。当前官方代理链剥除入站 `version`，不再从 UA 合成；第三方 Provider 只有显式配置 header override 才能重设该头。
 - `User-Agent`、host integration 生成的 `x-oai-attestation` 和 OpenAI 私有协商头沿本机 Codex 请求链透传；External API 的 attestation 与任意 version 会剥离。`x-cc-switch-*` 本地控制头在普通和 raw passthrough 出站前统一删除，CCSM 自己不生成 attestation。
 - 当前官方 Codex `ContentItem` 原生覆盖 `input_text`、`input_image`、`input_audio`，`encrypted_function_args` 的类型是字符串数组；这些字段以及 `client_metadata`、`internal_chat_message_metadata_passthrough` 在官方 route 保持结构。当前 Codex 普通消息类型没有 `input_file`，不能把兼容 API 的文件项说成 Desktop 已实际发送；文件上传等未知 `/v1/*` endpoint 由 raw passthrough 保留原始字节、Content-Type 和官方认证。
 - CCSwitchMulti 对 Responses-Lite 采用负缓存 fallback：只有上游明确返回不支持 Lite header 的错误时，才去头重试。
 
 ## 能做到与不能宣称的对齐
 
-- 可以对齐：OpenAI 能力分支、Responses 语义、模型和工具字段、官方 Codex 当前发送的图片/音频内容、raw 文件 endpoint、User-Agent、first-party originator、真实 Codex version，以及本机 host 提供时的 attestation。
+- 可以对齐：OpenAI 能力分支、Responses 语义、模型和工具字段、官方 Codex 当前发送的图片/音频内容、raw 文件 endpoint、User-Agent、first-party originator，以及本机 host 提供时的 attestation；Codex 构建版本由 User-Agent 表达，不另合成 `version` 请求头。
 - 不能宣称完全不可区分：经过本地代理后，上游 TCP/TLS 连接、HTTP 客户端实现、header 序列化细节和源网络属于 CCSM；某个 Codex host 是否提供 attestation 也不是 CCSM 能保证的。
 - 不应伪造：CCSM 版本不能冒充 Codex 版本，第三方客户端不能凭任意 User-Agent 或自报头获得 first-party version/attestation。
 

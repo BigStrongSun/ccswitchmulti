@@ -59,6 +59,44 @@ fn default_product_user_agent_is_identical_for_probe_and_production() {
 }
 
 #[test]
+fn third_party_request_drops_inbound_codex_version_fingerprint() {
+    let provider = third_party_provider();
+    let mut production_headers = HeaderMap::new();
+    production_headers.insert(
+        header::USER_AGENT,
+        HeaderValue::from_static("codex_cli_rs/0.158.0-alpha.2.1"),
+    );
+    production_headers.insert("version", HeaderValue::from_static("0.158.0-alpha.2.1"));
+
+    apply_provider_header_policy(&provider, &mut production_headers);
+
+    assert!(production_headers.get("version").is_none());
+    assert_eq!(
+        user_agent(&production_headers),
+        Some(concat!("CCSwitchMulti/", env!("CARGO_PKG_VERSION")))
+    );
+}
+
+#[test]
+fn third_party_provider_may_explicitly_set_its_own_version_header() {
+    let mut provider = third_party_provider();
+    let meta = provider.meta.as_mut().unwrap();
+    meta.local_proxy_request_overrides = Some(LocalProxyRequestOverrides {
+        headers: HashMap::from([("version".to_string(), "gateway-v2".to_string())]),
+        body: None,
+    });
+    let mut production_headers = HeaderMap::new();
+    production_headers.insert("version", HeaderValue::from_static("0.158.0-alpha.2.1"));
+
+    apply_provider_header_policy(&provider, &mut production_headers);
+
+    assert_eq!(
+        production_headers.get("version"),
+        Some(&HeaderValue::from_static("gateway-v2"))
+    );
+}
+
+#[test]
 fn custom_user_agent_wins_in_probe_and_production_header_policy() {
     let mut provider = third_party_provider();
     let meta = provider.meta.as_mut().unwrap();

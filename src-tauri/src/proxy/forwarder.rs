@@ -6096,6 +6096,7 @@ fn is_codex_client_fingerprint_header(key_str: &str) -> bool {
             | "x-openai-subagent"
             | "x-client-request-id"
             | "openai-beta"
+            | "version"
             | "openai-organization"
             | "openai-project"
     ) || key_str.starts_with("x-stainless-")
@@ -6593,33 +6594,13 @@ fn is_first_party_codex_originator(value: &str) -> bool {
         || value == "codex_chatgpt_desktop"
 }
 
-/// 从官方 Codex User-Agent 中提取真实构建版本。
-///
-/// 官方格式为 `<process-originator>/<cargo-version> (<os...>) ...`。线程级 originator
-/// 可以覆盖进程 originator，因此这里分别校验 User-Agent 自带的进程身份和版本，不能
-/// 要求它与请求头中的线程来源相同。
-fn codex_client_version_from_user_agent(user_agent: &str) -> Option<&str> {
-    let (process_originator, remainder) = user_agent.split_once('/')?;
-    if !is_first_party_codex_originator(process_originator) {
-        return None;
-    }
-    let version = remainder.split_whitespace().next()?;
-    (!version.is_empty()
-        && version.len() <= 64
-        && version.as_bytes()[0].is_ascii_digit()
-        && version
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+')))
-    .then_some(version)
-}
-
 /// 规范发往官方 ChatGPT Codex 后端的客户端身份。
 ///
 /// 可信本地 Codex 请求只有在恰好携带一个官方 first-party 值时才保留原值；缺失、
 /// 重复、未知值以及 External API/协议转换请求统一回退到官方 CLI 默认值。这样既避免
 /// `originator=cc-switch` 触发模型准入差异，也不会把 Desktop/VS Code 误报成 CLI。
-/// `version` 只信任 first-party User-Agent 中的进程构建版本：旧配置、外部 API 或
-/// 客户端自报的独立 version 都先移除，再按可信 UA 重建。
+/// `version` 不是 Codex 默认请求头；不要把 User-Agent 里的构建版本合成为另一个
+/// 身份头。旧配置、外部 API 或客户端自报的独立 version 均不向官方上游转发。
 fn enforce_codex_oauth_originator(
     headers: &mut http::HeaderMap,
     is_codex_official_upstream: bool,
@@ -6635,15 +6616,6 @@ fn enforce_codex_oauth_originator(
         headers.remove("x-oai-attestation");
     }
     if preserve_client_originator {
-        let user_agent = headers
-            .get(http::header::USER_AGENT)
-            .and_then(|value| value.to_str().ok());
-        if let Some(version) = user_agent.and_then(codex_client_version_from_user_agent) {
-            if let Ok(version) = http::HeaderValue::from_str(version) {
-                headers.insert(http::HeaderName::from_static("version"), version);
-            }
-        }
-
         let preserved_value = {
             let mut values = headers.get_all(&originator_name).iter();
             match (values.next(), values.next()) {
@@ -8532,6 +8504,7 @@ fn raw_passthrough_header_should_skip(name: &http::HeaderName) -> bool {
         lower.as_str(),
         "host"
             | "content-length"
+            | "version"
             | "transfer-encoding"
             | "connection"
             | "keep-alive"
@@ -9771,6 +9744,21 @@ mod tests {
                 .get("x-user-header")
                 .and_then(|value| value.to_str().ok()),
             Some("kept")
+        );
+    }
+
+    #[test]
+    fn codex_raw_passthrough_drops_inbound_version_before_provider_overrides() {
+        let mut source = HeaderMap::new();
+        source.insert("version", HeaderValue::from_static("0.158.0-alpha.2.1"));
+        source.insert("x-user-header", HeaderValue::from_static("kept"));
+
+        let rebuilt = build_raw_passthrough_headers(&source, &[], None, None);
+
+        assert!(rebuilt.get("version").is_none());
+        assert_eq!(
+            rebuilt.get("x-user-header"),
+            Some(&HeaderValue::from_static("kept"))
         );
     }
 
@@ -11642,9 +11630,8 @@ mod tests {
     }
 
     #[test]
-    /// 自定义 OpenAI provider 不继承内建 provider 的 version 头；最终出站前必须从
-    /// 同一可信 Codex 客户端的 User-Agent 恢复真实版本，不能继续使用 CCSM 硬编码版本。
-    fn codex_oauth_identity_restores_version_from_matching_native_user_agent() {
+    /// 官方 Codex 的 User-Agent 已表达构建版本，不能额外合成 version 头。
+    fn codex_oauth_identity_does_not_synthesize_version_from_native_user_agent() {
         let mut headers = HeaderMap::new();
         headers.insert("originator", HeaderValue::from_static("Codex Desktop"));
         headers.insert(
@@ -11656,16 +11643,31 @@ mod tests {
 
         enforce_codex_oauth_originator(&mut headers, true, true);
 
+        assert!(headers.get("version").is_none());
+    }
+
+    #[test]
+    fn codex_official_identity_does_not_synthesize_alpha_version_from_user_agent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("Codex Desktop"));
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("Codex Desktop/0.158.0-alpha.2.1 (Windows 11; x86_64)"),
+        );
+
+        enforce_codex_oauth_originator(&mut headers, true, true);
+
+        assert!(headers.get("version").is_none());
         assert_eq!(
-            headers.get("version"),
-            Some(&HeaderValue::from_static("0.151.0"))
+            headers.get("originator"),
+            Some(&HeaderValue::from_static("Codex Desktop"))
         );
     }
 
     #[test]
     /// 官方 Codex 的 User-Agent 描述进程身份，originator 允许被线程级来源覆盖；
-    /// 两者不相同时仍应恢复进程携带的真实版本。
-    fn codex_oauth_identity_restores_version_when_thread_originator_differs_from_process() {
+    /// 两者不相同时也不额外合成 version。
+    fn codex_oauth_identity_keeps_thread_originator_without_synthesizing_version() {
         let mut headers = HeaderMap::new();
         headers.insert("originator", HeaderValue::from_static("codex_vscode"));
         headers.insert(
@@ -11677,10 +11679,7 @@ mod tests {
 
         enforce_codex_oauth_originator(&mut headers, true, true);
 
-        assert_eq!(
-            headers.get("version"),
-            Some(&HeaderValue::from_static("0.151.0"))
-        );
+        assert!(headers.get("version").is_none());
         assert_eq!(
             headers.get("originator"),
             Some(&HeaderValue::from_static("codex_vscode"))
@@ -11688,9 +11687,8 @@ mod tests {
     }
 
     #[test]
-    /// 本地 Codex 的线程来源头即使损坏并回退到 CLI，可信 User-Agent 中的真实版本
-    /// 仍应保留，避免再次形成只有 originator 没有 version 的半套身份。
-    fn codex_oauth_identity_restores_version_before_invalid_originator_fallback() {
+    /// 本地 Codex 的线程来源头即使损坏并回退到 CLI，也不额外合成 version。
+    fn codex_oauth_identity_falls_back_without_synthesizing_version() {
         let mut headers = HeaderMap::new();
         headers.insert("originator", HeaderValue::from_static("unknown-client"));
         headers.insert(
@@ -11702,10 +11700,7 @@ mod tests {
 
         enforce_codex_oauth_originator(&mut headers, true, true);
 
-        assert_eq!(
-            headers.get("version"),
-            Some(&HeaderValue::from_static("0.151.0"))
-        );
+        assert!(headers.get("version").is_none());
         assert_eq!(
             headers.get("originator"),
             Some(&HeaderValue::from_static("codex_cli_rs"))
@@ -11727,7 +11722,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_official_identity_overwrites_stale_version_from_trusted_user_agent() {
+    fn codex_official_identity_strips_stale_version_even_with_trusted_user_agent() {
         let mut headers = HeaderMap::new();
         headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
         headers.insert(
@@ -11738,10 +11733,7 @@ mod tests {
 
         enforce_codex_oauth_originator(&mut headers, true, true);
 
-        assert_eq!(
-            headers.get("version"),
-            Some(&HeaderValue::from_static("0.151.0"))
-        );
+        assert!(headers.get("version").is_none());
     }
 
     #[test]
@@ -11769,7 +11761,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_native_auth_passthrough_identity_restores_version() {
+    fn codex_native_auth_passthrough_does_not_synthesize_version() {
         let mut headers = HeaderMap::new();
         headers.insert("originator", HeaderValue::from_static("Codex Desktop"));
         headers.insert(
@@ -11785,10 +11777,7 @@ mod tests {
             true,
         );
 
-        assert_eq!(
-            headers.get("version"),
-            Some(&HeaderValue::from_static("0.151.0"))
-        );
+        assert!(headers.get("version").is_none());
     }
 
     #[test]
@@ -12564,6 +12553,7 @@ mod tests {
             "x-client-request-id",
             "x-codex-window-id",
             "openai-beta",
+            "version",
             "openai-organization",
             "openai-project",
             "x-stainless-lang",

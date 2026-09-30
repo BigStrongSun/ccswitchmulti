@@ -408,6 +408,9 @@ pub(crate) fn apply_provider_body_policy(provider: &Provider, body: Value) -> Va
 }
 
 pub(crate) fn apply_provider_header_policy(provider: &Provider, headers: &mut HeaderMap) {
+    // `version` belongs to the Codex client identity, not an arbitrary Responses
+    // gateway. A provider may explicitly opt in through its header overrides below.
+    headers.remove("version");
     apply_provider_header_overrides(
         headers,
         provider
