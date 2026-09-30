@@ -54,14 +54,14 @@ tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-window-state = "2"
-dirs = "6.0"
-toml = "0.8"
-toml_edit = "0.22"
+dirs = "7.0"
+toml = "1.0"
+toml_edit = "0.25"
 reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
 arboard = "3.6"
 flate2 = "1"
 filetime = "0.2"
-brotli = "8"
+brotli = "9"
 zstd = "0.14"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
 tokio-tungstenite = "0.30"
@@ -71,7 +71,7 @@ bytes = "1.5"
 axum = { version = "0.8", features = ["ws"] }
 multer = "3"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.7", features = ["cors"] }
 hyper = { version = "1.0", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1", "client-legacy"] }
 hyper-rustls = { version = "0.27", features = ["http1", "tls12", "ring", "webpki-tokio"] }
@@ -84,10 +84,10 @@ rustls = "0.23"
 webpki-roots = "1.0"
 rustls-native-certs = "0.8"
 regex = "1.10"
-rquickjs = { version = "0.13", features = ["array-buffer", "classes"] }
+rquickjs = { version = "0.14", features = ["array-buffer", "classes"] }
 thiserror = "2.0"
 anyhow = "1.0"
-zip = "4.6"
+zip = "8.6"
 serde_yaml = "0.9"
 semver = "1"
 tempfile = "3"
@@ -95,7 +95,7 @@ url = "2.5"
 auto-launch = "0.6"
 once_cell = "1.21.3"
 base64 = "0.23"
-rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks"] }
+rusqlite = { version = "0.40", features = ["bundled", "backup", "hooks"] }
 indexmap = { version = "2", features = ["serde"] }
 rust_decimal = "1.33"
 uuid = { version = "1.11", features = ["v4"] }
@@ -119,7 +119,7 @@ webkit2gtk = { version = "2.0.1", features = ["v2_16"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winreg = "0.55"
+winreg = "0.56"
 windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_UI_Shell",
