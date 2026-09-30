@@ -6,6 +6,12 @@
 - 本地发布流水线于 2026-09-30 13:14 +08:00 成功退出，生成 `release/v3.20.4-2-local` 下 Windows NSIS 安装包、portable 包、raw exe、签名与 `latest.json`。元数据指向上述提交及版本 `3.20.4-2`，`SHA256SUMS.txt` 所列 16 项逐一重算均匹配。这个目录是本地候选，不代表 GitHub 已发布或正在运行的桌面程序已安装升级。
 - 本轮没有可用的真实 Sol 账号端到端准入验证；需要安装该候选并在用户现有代理配置下再次比较请求头及上游响应，才能确认现场问题消除。
 
+## 正式发布（2026-09-30）
+
+- 用户授权发布后，提交 `9af4cb480ebc7e84cebe600ceb51c8bfa9b3b127` 更新正式版说明（不改程序代码），并将 `main` 与 annotated tag `v3.20.4-2` 推送到 `BigStrongSun/ccswitchmulti`。标签指向该提交；本地候选程序来自其前一个文档提交之前的 `acfacae4`，程序源码和版本号在两者间未变。正式 GitHub Actions 自标签重新跨平台构建。
+- Release run `36676386857` 的五个平台构建、Publish GitHub Release、Assemble latest.json 共七个 job 全部 success。正式 Release `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.20.4-2` 非 draft、非 prerelease，19 个公开资产下载到项目内忽略目录 `release/v3.20.4-2-remote-check` 后逐项核对大小和 SHA-256 digest，19/19 匹配。`latest.json` 版本为 `3.20.4-2`，六个平台 URL 与下载的 `.sig` 内容逐项一致。
+- 这证明正式资产发布与完整性，不证明本机已安装升级，也不证明用户账号下 Sol/Astra 等模型已经完成安装态端到端验收。本轮未重启正在运行的 CCSM 或 Codex。
+
 - 用户提供的同账号、同 token、同模型和正文对照：额外带 `version: 0.158.0-alpha.2.1` 得 HTTP 400“ 不支持该模型 ”，不带则得 HTTP 200。此附件是排查线索，不等于本机完整运行态验收。
 - 当前运行中的 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 文件版本为 `3.20.2-22`，不是刚发布但未安装的 `3.20.4-1`。因此不能把当前运行失败归因于新版已安装。没有改动运行进程、凭据或用户配置。
 - 根因链：旧提交 `fb2adf271` 为追求原生请求等价，在官方 Codex 转发末端从可信 User-Agent 提取构建号并合成独立 `version`；`forwarder.rs` 的普通 JSON、raw 与 WebSocket 路径都会调用该函数。官方 Codex `default_client.rs::default_headers()` 的一手源码默认只放 `originator` 和 `User-Agent`，并不默认放 `version`。同一个值作为 UA 内信息与独立请求头可触发不同上游模型准入，不能把它们视为等价。
