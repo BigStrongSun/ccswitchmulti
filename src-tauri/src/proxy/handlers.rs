@@ -1566,23 +1566,41 @@ pub async fn handle_image_generations(
     };
 
     let endpoint = endpoint_with_query(&uri, "/images/generations");
-    let providers = resolve_codex_image_generation_provider(&state, &ctx.provider, &body)?
+    let image_provider = resolve_codex_image_generation_provider(&state, &ctx.provider, &body)?;
+    let use_raw_images = !is_external_openai_client && image_provider.is_some();
+    let providers = image_provider
         .map(|provider| vec![provider])
         .unwrap_or_else(|| ctx.get_providers());
 
     let forwarder = ctx.create_forwarder(&state);
-    let mut result = match forwarder
-        .forward_with_retry(
-            &AppType::Codex,
-            method,
-            &endpoint,
-            body,
-            headers,
-            extensions,
-            providers,
-        )
-        .await
-    {
+    // Official Images requests must not inherit the text route's model rewriting.
+    let result = if use_raw_images {
+        forwarder
+            .forward_raw_with_retry(
+                &AppType::Codex,
+                method,
+                &endpoint,
+                body,
+                body_bytes,
+                headers,
+                extensions,
+                providers,
+            )
+            .await
+    } else {
+        forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                method,
+                &endpoint,
+                body,
+                headers,
+                extensions,
+                providers,
+            )
+            .await
+    };
+    let mut result = match result {
         Ok(result) => result,
         Err(mut err) => {
             update_context_provider_for_forward_error(&state, &mut ctx, err.provider.take());
@@ -1951,6 +1969,8 @@ fn provider_is_codex_image_generation_oauth_target(provider: &crate::provider::P
     provider.is_codex_oauth()
         || provider.uses_managed_account_auth()
         || is_codex_official_managed_oauth_provider(provider)
+        || (super::providers::is_codex_official_provider(provider)
+            && super::providers::provider_uses_native_codex_auth(provider))
 }
 
 /// 清理图片请求不应继承的文本 route 模型覆盖。
