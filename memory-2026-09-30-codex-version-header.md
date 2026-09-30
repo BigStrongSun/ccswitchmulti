@@ -1,5 +1,11 @@
 # Codex `version` 请求头与新模型拒绝（2026-09-30）
 
+## 本地候选验收结果
+
+- 修复提交 `acfacae4a08b31b9ce56df982eff3bdb646a72b3`，作者与提交者均为孙大壮；串行 Rust 测试 4296 通过、9 忽略，`pnpm typecheck`、`cargo fmt --check`、`git diff --check` 与中文文件 UTF-8 严格检查通过。
+- 本地发布流水线于 2026-09-30 13:14 +08:00 成功退出，生成 `release/v3.20.4-2-local` 下 Windows NSIS 安装包、portable 包、raw exe、签名与 `latest.json`。元数据指向上述提交及版本 `3.20.4-2`，`SHA256SUMS.txt` 所列 16 项逐一重算均匹配。这个目录是本地候选，不代表 GitHub 已发布或正在运行的桌面程序已安装升级。
+- 本轮没有可用的真实 Sol 账号端到端准入验证；需要安装该候选并在用户现有代理配置下再次比较请求头及上游响应，才能确认现场问题消除。
+
 - 用户提供的同账号、同 token、同模型和正文对照：额外带 `version: 0.158.0-alpha.2.1` 得 HTTP 400“ 不支持该模型 ”，不带则得 HTTP 200。此附件是排查线索，不等于本机完整运行态验收。
 - 当前运行中的 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 文件版本为 `3.20.2-22`，不是刚发布但未安装的 `3.20.4-1`。因此不能把当前运行失败归因于新版已安装。没有改动运行进程、凭据或用户配置。
 - 根因链：旧提交 `fb2adf271` 为追求原生请求等价，在官方 Codex 转发末端从可信 User-Agent 提取构建号并合成独立 `version`；`forwarder.rs` 的普通 JSON、raw 与 WebSocket 路径都会调用该函数。官方 Codex `default_client.rs::default_headers()` 的一手源码默认只放 `originator` 和 `User-Agent`，并不默认放 `version`。同一个值作为 UA 内信息与独立请求头可触发不同上游模型准入，不能把它们视为等价。
