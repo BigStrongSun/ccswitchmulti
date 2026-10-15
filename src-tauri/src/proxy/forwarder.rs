@@ -4107,9 +4107,15 @@ impl RequestForwarder {
         };
 
         let send_once = || {
-            send_upstream_request_with_transport_retry(adapter.name(), || {
-                send_upstream_request(ordered_headers.clone(), body_bytes.clone())
-            })
+            send_upstream_request_with_transport_retry(
+                adapter.name(),
+                should_retry_native_codex_responses_before_headers(
+                    app_type,
+                    endpoint,
+                    request_is_streaming,
+                ),
+                || send_upstream_request(ordered_headers.clone(), body_bytes.clone()),
+            )
         };
         let mut response = if matches!(app_type, AppType::Codex) {
             send_codex_request_with_rate_limit_retry(
@@ -4953,33 +4959,41 @@ impl RequestForwarder {
             endpoint,
             request_model_for_log
         );
-        let response = send_upstream_request_with_transport_retry(adapter.name(), || {
-            let method = method.clone();
-            let url = url.clone();
-            let target_for_log = target_for_log.clone();
-            let ordered_headers = ordered_headers.clone();
-            let extensions = extensions.clone();
-            let body_bytes = body_bytes.clone();
-            let upstream_proxy_url = upstream_proxy_url.clone();
-            async move {
-                send_forwarder_upstream_request(
-                    method,
-                    url,
-                    target_for_log,
-                    ordered_headers,
-                    extensions,
-                    body_bytes,
-                    timeout,
-                    request_is_streaming,
-                    self.non_streaming_timeout,
-                    self.streaming_first_byte_timeout,
-                    is_socks_proxy,
-                    preserve_exact_header_case,
-                    upstream_proxy_url.as_deref(),
-                )
-                .await
-            }
-        })
+        let response = send_upstream_request_with_transport_retry(
+            adapter.name(),
+            should_retry_native_codex_responses_before_headers(
+                app_type,
+                endpoint,
+                request_is_streaming,
+            ),
+            || {
+                let method = method.clone();
+                let url = url.clone();
+                let target_for_log = target_for_log.clone();
+                let ordered_headers = ordered_headers.clone();
+                let extensions = extensions.clone();
+                let body_bytes = body_bytes.clone();
+                let upstream_proxy_url = upstream_proxy_url.clone();
+                async move {
+                    send_forwarder_upstream_request(
+                        method,
+                        url,
+                        target_for_log,
+                        ordered_headers,
+                        extensions,
+                        body_bytes,
+                        timeout,
+                        request_is_streaming,
+                        self.non_streaming_timeout,
+                        self.streaming_first_byte_timeout,
+                        is_socks_proxy,
+                        preserve_exact_header_case,
+                        upstream_proxy_url.as_deref(),
+                    )
+                    .await
+                }
+            },
+        )
         .await
         .inspect_err(|err| {
             if let Some(trace_id) = codex_trace_id.as_deref() {
@@ -7037,6 +7051,17 @@ fn should_create_responses_stream_reconnector(
                 && super::providers::is_codex_responses_endpoint(endpoint)))
 }
 
+/// Only native Codex Responses streaming requests can opt into replay before response headers.
+fn should_retry_native_codex_responses_before_headers(
+    app_type: &AppType,
+    endpoint: &str,
+    request_is_streaming: bool,
+) -> bool {
+    request_is_streaming
+        && matches!(app_type, AppType::Codex)
+        && super::providers::is_codex_responses_endpoint(endpoint)
+}
+
 /// 生成 Codex Responses-Lite fallback 的能力缓存 key。
 ///
 /// 参数:
@@ -7210,11 +7235,13 @@ async fn send_forwarder_upstream_request_inner(
 
 /// 对“还没有收到上游 HTTP 状态”的传输失败做有界重试。
 ///
-/// 只重试 `ForwardFailed`（连接失败、请求构造失败、hyper/reqwest 发送阶段失败）；
-/// `ResponsePending` 表示请求可能已经到达上游，不能重发。每个 attempt 都重新执行
-/// 传入的发送闭包，因此重试使用的是同一份已经转换好的 headers/body。
+/// 默认只重试 `ForwardFailed`（连接失败、请求构造失败、hyper/reqwest 发送阶段失败）。
+/// `ResponsePending` 只有在调用方确认是原生 Codex Responses 流式请求时才允许有界重试；
+/// 此处尚未取得上游响应头，也未向客户端提交语义输出，但上游是否处理请求仍未确认。
+/// 每个 attempt 都重新执行传入的发送闭包，因此重试使用同一份 headers/body。
 async fn send_upstream_request_with_transport_retry<F, Fut>(
     app_tag: &str,
+    retry_pre_response_pending: bool,
     mut send: F,
 ) -> Result<ProxyResponse, ProxyError>
 where
@@ -7226,16 +7253,28 @@ where
         match send().await {
             Ok(response) => return Ok(response),
             Err(error) if attempt < UPSTREAM_TRANSPORT_RETRY_LIMIT => {
-                if !matches!(error, ProxyError::ForwardFailed(_)) {
+                let retry_pending =
+                    retry_pre_response_pending && matches!(error, ProxyError::ResponsePending(_));
+                if !matches!(error, ProxyError::ForwardFailed(_)) && !retry_pending {
                     return Err(error);
                 }
                 let backoff = upstream_transport_retry_backoff(attempt);
-                log::warn!(
-                    "[{app_tag}] 上游传输阶段失败，同一 Provider 重试 {}/{}（等待 {}ms）: {error}",
-                    attempt + 1,
-                    UPSTREAM_TRANSPORT_RETRY_LIMIT,
-                    backoff.as_millis()
-                );
+                if retry_pending {
+                    log::warn!(
+                        "[{app_tag}] 原生 Codex Responses 尚未收到上游响应头，未向客户端提交语义输出；上游处理结果未确认，仅在有界预算内尝试重发 {}/{}（最多 {} 次，等待 {}ms），不会无限重试: {error}",
+                        attempt + 1,
+                        UPSTREAM_TRANSPORT_RETRY_LIMIT,
+                        UPSTREAM_TRANSPORT_RETRY_LIMIT,
+                        backoff.as_millis()
+                    );
+                } else {
+                    log::warn!(
+                        "[{app_tag}] 上游传输阶段失败，同一 Provider 重试 {}/{}（等待 {}ms）: {error}",
+                        attempt + 1,
+                        UPSTREAM_TRANSPORT_RETRY_LIMIT,
+                        backoff.as_millis()
+                    );
+                }
                 tokio::time::sleep(backoff).await;
                 attempt += 1;
             }
@@ -9940,6 +9979,35 @@ mod tests {
             "/v1/models",
             true,
             None,
+        ));
+    }
+
+    #[test]
+    fn only_native_codex_responses_streams_opt_into_pre_response_retry() {
+        assert!(should_retry_native_codex_responses_before_headers(
+            &AppType::Codex,
+            "/v1/responses/compact",
+            true,
+        ));
+        assert!(!should_retry_native_codex_responses_before_headers(
+            &AppType::Codex,
+            "/v1/responses",
+            false,
+        ));
+        assert!(!should_retry_native_codex_responses_before_headers(
+            &AppType::Codex,
+            "/v1/chat/completions",
+            true,
+        ));
+        assert!(!should_retry_native_codex_responses_before_headers(
+            &AppType::Claude,
+            "/v1/responses",
+            true,
+        ));
+        assert!(!should_retry_native_codex_responses_before_headers(
+            &AppType::OpenCode,
+            "/v1/responses",
+            true,
         ));
     }
 
@@ -13934,7 +14002,7 @@ mod tests {
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let attempts_for_send = attempts.clone();
 
-        let result = send_upstream_request_with_transport_retry("test", || {
+        let result = send_upstream_request_with_transport_retry("test", false, || {
             let attempts = attempts_for_send.clone();
             async move {
                 if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
@@ -13957,11 +14025,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upstream_transport_retry_does_not_replay_response_pending() {
+    async fn upstream_transport_retry_without_pending_opt_in_does_not_replay_response_pending() {
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let attempts_for_send = attempts.clone();
 
-        let result = send_upstream_request_with_transport_retry("test", || {
+        let result = send_upstream_request_with_transport_retry("test", false, || {
             let attempts = attempts_for_send.clone();
             async move {
                 attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -13976,12 +14044,39 @@ mod tests {
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn upstream_transport_retry_with_pending_opt_in_recovers_before_response_headers() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = send_upstream_request_with_transport_retry("test", true, || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Err(ProxyError::ResponsePending(
+                        "SendRequest: connection closed before message completed".to_string(),
+                    ))
+                } else {
+                    Ok(ProxyResponse::buffered(
+                        http::StatusCode::OK,
+                        http::HeaderMap::new(),
+                        Bytes::new(),
+                    ))
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn upstream_transport_retry_stops_after_bounded_attempts() {
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let attempts_for_send = attempts.clone();
 
-        let result = send_upstream_request_with_transport_retry("test", || {
+        let result = send_upstream_request_with_transport_retry("test", false, || {
             let attempts = attempts_for_send.clone();
             async move {
                 attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -14004,7 +14099,7 @@ mod tests {
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let attempts_for_send = attempts.clone();
 
-        let result = send_upstream_request_with_transport_retry("test", || {
+        let result = send_upstream_request_with_transport_retry("test", false, || {
             let attempts = attempts_for_send.clone();
             async move {
                 if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 5 {
