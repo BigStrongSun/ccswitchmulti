@@ -1111,9 +1111,11 @@ pub fn create_responses_sse_stream_from_chat_with_context_and_projection<
 
                         let data = data_parts.join("\n");
                         if data.trim() == "[DONE]" {
-                            // Chat's [DONE] sentinel closes the SSE transport. It
-                            // does not carry the model's terminal semantics.
-                            continue;
+                            // Preserve normal finalization but never consume post-DONE input.
+                            for event in state.finalize() {
+                                yield Ok(event);
+                            }
+                            return;
                         }
 
                         let chunk: Value = match serde_json::from_str(&data) {
@@ -1214,6 +1216,7 @@ where
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
         let mut stream_failed = false;
+        let mut done_received = false;
 
         'rounds: loop {
             while let Some(chunk) = current_stream.next().await {
@@ -1244,9 +1247,9 @@ where
                             }
                             let data = data_parts.join("\n");
                             if data.trim() == "[DONE]" {
-                                // Transport closure is classified only after an
-                                // explicit finish_reason has been observed.
-                                continue;
+                                // Let the existing round finalizer preserve hosted continuation semantics.
+                                done_received = true;
+                                break;
                             }
                             let chunk: Value = match serde_json::from_str(&data) {
                                 Ok(value) => value,
@@ -1298,7 +1301,7 @@ where
                                 }
                             }
                         }
-                        if stream_failed {
+                        if stream_failed || done_received {
                             break;
                         }
                     }
@@ -1327,6 +1330,12 @@ where
             }
 
             if stream_failed || state.completed {
+                break;
+            }
+            if done_received {
+                for event in state.finalize() {
+                    yield Ok(event);
+                }
                 break;
             }
             if state.finish_reason.is_some() {
@@ -1390,6 +1399,86 @@ mod tests {
         let converted = create_responses_sse_stream_from_chat_with_context(upstream, tool_context);
         let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
         String::from_utf8(bytes.concat()).unwrap()
+    }
+
+    fn collect_with_transport_error(
+        chunks: Vec<Result<Bytes, std::io::Error>>,
+    ) -> impl std::future::Future<Output = String> {
+        async move {
+            create_responses_sse_stream_from_chat(stream::iter(chunks))
+                .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+                .collect::<Vec<_>>()
+                .await
+                .concat()
+        }
+    }
+
+    #[tokio::test]
+    async fn done_ignores_same_chunk_and_later_transport_input() {
+        let terminal = Bytes::from_static(b"data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"visible\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\ndata: [DONE]\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n");
+        let expected = collect_with_transport_error(vec![Ok(terminal.clone())]).await;
+        let actual = collect_with_transport_error(vec![
+            Ok(terminal),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "late",
+            )),
+        ])
+        .await;
+        assert_eq!(actual, expected);
+        assert_eq!(actual.matches("event: response.completed\n").count(), 1);
+        assert!(actual.contains("\"input_tokens\":7"));
+        assert!(actual.contains("\"output_tokens\":3"));
+        assert!(actual.contains("visible"));
+        assert!(!actual.contains("late"));
+    }
+
+    #[tokio::test]
+    async fn done_closes_without_waiting_for_upstream_eof() {
+        let upstream = stream::once(async {
+            Ok::<_, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"))
+        })
+        .chain(stream::pending());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            create_responses_sse_stream_from_chat(upstream).collect::<Vec<_>>(),
+        )
+        .await
+        .expect("DONE should terminate the converter without awaiting EOF");
+    }
+
+    #[tokio::test]
+    async fn finish_reason_without_done_still_reports_transport_error() {
+        let output = collect_with_transport_error(vec![
+            Ok(Bytes::from_static(
+                b"data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"visible\"},\"finish_reason\":\"stop\"}]}\n\n",
+            )),
+            Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset")),
+        ])
+        .await;
+        assert_eq!(output.matches("event: response.failed\n").count(), 1);
+        assert!(!output.contains("event: response.completed\n"));
+        assert!(output.contains("reset"));
+    }
+
+    #[tokio::test]
+    async fn hosted_loop_done_terminates_input_and_finalizes_response() {
+        let input = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
+            b"data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"visible\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\ndata: {\"error\":{\"message\":\"late\"}}\n\n",
+        ))]);
+        let output = create_responses_sse_stream_from_chat_with_hosted_loop(
+            Box::pin(input),
+            CodexToolContext::default(),
+            None,
+            |_calls, _assistant| async { Ok(None) },
+        )
+        .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+        .collect::<Vec<_>>()
+        .await
+        .concat();
+        assert_eq!(output.matches("event: response.completed\n").count(), 1);
+        assert!(output.contains("visible"));
+        assert!(!output.contains("late"));
     }
 
     async fn collect_with_projection(chunks: Vec<&str>, projection: ReasoningProjection) -> String {

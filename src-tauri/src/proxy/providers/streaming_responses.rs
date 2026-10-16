@@ -2107,6 +2107,9 @@ pub(crate) fn create_anthropic_sse_stream_from_responses_with_web_search_options
                     }
                 }
                 Err(e) => {
+                    if terminated {
+                        break;
+                    }
                     let chain = crate::proxy::error::error_chain_message(&e);
                     log::error!("Responses stream error: {chain}");
                     yield Ok(retryable_stream_error_sse(
@@ -2213,6 +2216,63 @@ mod tests {
             .into_iter()
             .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
             .collect()
+    }
+
+    async fn convert_stream_with_late_error(prefix: &str) -> String {
+        create_anthropic_sse_stream_from_responses(stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from(prefix.to_string())),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "late",
+            )),
+        ]))
+        .map(|chunk| String::from_utf8(chunk.unwrap().to_vec()).unwrap())
+        .collect::<Vec<_>>()
+        .await
+        .concat()
+    }
+
+    #[tokio::test]
+    async fn terminal_responses_ignore_late_transport_error() {
+        for (event, response, message_stops, errors) in [
+            (
+                "response.completed",
+                r#"{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+                1,
+                0,
+            ),
+            (
+                "response.incomplete",
+                r#"{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":1}}"#,
+                1,
+                0,
+            ),
+            (
+                "response.failed",
+                r#"{"status":"failed","error":{"type":"server_error","message":"failed"}}"#,
+                0,
+                1,
+            ),
+        ] {
+            let prefix = format!(
+                "event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_1\",\"model\":\"gpt-5\"}}}}\n\nevent: {event}\ndata: {{\"type\":\"{event}\",\"response\":{response}}}\n\n"
+            );
+            let expected = convert_stream_text(prefix.clone()).await;
+            let actual = convert_stream_with_late_error(&prefix).await;
+            assert_eq!(actual, expected, "late error after {event}");
+            assert_eq!(
+                actual.matches("event: message_stop\n").count(),
+                message_stops
+            );
+            assert_eq!(actual.matches("event: error\n").count(), errors);
+        }
+
+        let truncated = concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\"}}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"visible\"}\n\n",
+        );
+        let output = convert_stream_with_late_error(truncated).await;
+        assert_eq!(output.matches("event: error\n").count(), 1);
     }
 
     async fn convert_stream_text_with_web_search_limit(

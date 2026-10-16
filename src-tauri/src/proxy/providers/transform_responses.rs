@@ -572,6 +572,8 @@ pub fn anthropic_to_responses_with_cache_retention(
             } else if forced_hosted_web_search_name.is_none() {
                 let mut response_tool = json!({
                     "type": "function",
+                    // Responses must not strictify optional Anthropic parameters.
+                    "strict": false,
                     "name": tool.get("name").and_then(|n| n.as_str()).unwrap_or(""),
                     "parameters": super::transform::clean_schema(
                         tool.get("input_schema").cloned().unwrap_or(json!({}))
@@ -1902,6 +1904,33 @@ mod tests {
     }
 
     #[test]
+    fn upstream_sync_function_tools_preserve_optional_parameters() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "isolation": {"type": "string", "enum": ["worktree", "remote"]}
+            },
+            "required": ["prompt"]
+        });
+        for oauth in [false, true] {
+            let result = anthropic_to_responses(
+                json!({
+                    "model": "gpt-5.6", "messages": [],
+                    "tools": [{"name": "Agent", "input_schema": schema.clone()}]
+                }),
+                None,
+                oauth,
+                false,
+            )
+            .unwrap();
+            assert_eq!(result["tools"][0]["strict"], json!(false));
+            assert_eq!(result["tools"][0]["parameters"], schema);
+            assert!(result["tools"][0].get("description").is_none());
+        }
+    }
+
+    #[test]
     fn test_anthropic_to_responses_defaults_missing_tool_schema_type() {
         let input = json!({
             "model": "gpt-4o",
@@ -2699,6 +2728,25 @@ mod tests {
 
         let result = anthropic_to_responses(input, None, false, false).unwrap();
         assert_eq!(result["reasoning"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn upstream_sync_responses_preserves_explicit_max_effort() {
+        for model in ["gpt-6-sol", "gpt-6-luna"] {
+            for oauth in [false, true] {
+                let result = anthropic_to_responses(
+                    json!({
+                        "model": model, "messages": [],
+                        "output_config": {"effort": "max"}
+                    }),
+                    None,
+                    oauth,
+                    false,
+                )
+                .unwrap();
+                assert_eq!(result["reasoning"]["effort"], "max");
+            }
+        }
     }
 
     #[test]
