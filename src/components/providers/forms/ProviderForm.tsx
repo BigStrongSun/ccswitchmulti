@@ -1792,10 +1792,8 @@ function ProviderFormFull({
           shouldPersistCodexLocalConfig && (codexConfig ?? "").trim()
             ? setCodexWireApi(codexConfig ?? "", "responses")
             : (codexConfig ?? "");
-        const shouldPersistCodexCatalog = shouldPersistCodexLocalConfig;
-        const normalizedCatalogModels = shouldPersistCodexCatalog
-          ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
-          : [];
+        const normalizedCatalogModels =
+          normalizeCodexCatalogModelsForSave(codexCatalogModels);
         const enabledCatalogModels = normalizedCatalogModels.filter(
           (item) => item.enabled !== false,
         );
@@ -1817,6 +1815,7 @@ function ProviderFormFull({
             item.enabled === false && item.model === currentDefaultModel,
         );
         if (
+          shouldPersistCodexLocalConfig &&
           enabledCatalogModels.length > 0 &&
           (!currentDefaultModel || defaultModelDisabled)
         ) {

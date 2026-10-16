@@ -7,6 +7,7 @@ import { ProviderForm } from "@/components/providers/forms/ProviderForm";
 const codexCandidateApiMocks = vi.hoisted(() => ({
   validateProviderCandidate: vi.fn(),
   getTeProviderDescriptor: vi.fn().mockResolvedValue(null),
+  authGetStatus: vi.fn().mockResolvedValue({ authenticated: false }),
 }));
 
 vi.mock("@/lib/query", () => ({
@@ -30,7 +31,7 @@ vi.mock("@/lib/api", async () => {
   return {
     ...actual,
     authApi: {
-      authGetStatus: vi.fn().mockResolvedValue({ authenticated: false }),
+      authGetStatus: codexCandidateApiMocks.authGetStatus,
       authStartLogin: vi.fn(),
       authPollForAccount: vi.fn(),
       authLogout: vi.fn(),
@@ -49,6 +50,7 @@ vi.mock("@/lib/api", async () => {
     },
     providersApi: {
       ...actual.providersApi,
+      migrateCodexOfficialAuthOwnership: vi.fn().mockResolvedValue(null),
       getTeProviderDescriptor: (...args: unknown[]) =>
         codexCandidateApiMocks.getTeProviderDescriptor(...args),
     },
@@ -241,9 +243,79 @@ const legacyTeProviderSettings = {
 
 describe("ProviderForm Codex preset selection", () => {
   beforeEach(() => {
+    codexCandidateApiMocks.authGetStatus
+      .mockReset()
+      .mockResolvedValue({ authenticated: false });
     codexCandidateApiMocks.validateProviderCandidate
       .mockReset()
       .mockResolvedValue(undefined);
+  });
+
+  it("preserves the official catalog and native config when switching authentication", async () => {
+    codexCandidateApiMocks.authGetStatus.mockResolvedValue({
+      authenticated: true,
+      accounts: [
+        {
+          id: "managed-account",
+          login: "test-account",
+          is_default: true,
+          requires_reauth: false,
+        },
+      ],
+    });
+    const onSubmit = vi.fn();
+    const config = 'model = "official-disabled"\n';
+    const catalog = {
+      models: [
+        {
+          model: "official-active",
+          upstreamModel: "upstream-active",
+          contextWindow: 272000,
+        },
+        { model: "official-disabled", enabled: false },
+      ],
+      spawnAgentModels: ["official-active"],
+    };
+    renderProviderForm({
+      providerId: "codex-official",
+      showButtons: true,
+      submitLabel: "Save",
+      onSubmit,
+      initialData: {
+        name: "OpenAI Official",
+        category: "official",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: null },
+          config,
+          modelCatalog: catalog,
+        },
+        meta: { codexOfficialAuth: { mode: "desktop_current_login" } },
+      },
+    });
+
+    fireEvent.change(
+      await screen.findByRole("combobox", { name: "官方认证方式" }),
+      {
+        target: { value: "managed_oauth" },
+      },
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", { name: "CCSM OAuth 固定账号" }),
+      ).toHaveValue("managed-account"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    const saved = onSubmit.mock.calls[0][0];
+    expect(saved.meta.codexOfficialAuth).toEqual({
+      mode: "managed_oauth",
+      accountId: "managed-account",
+    });
+    const settings = JSON.parse(saved.settingsConfig);
+    expect(settings.modelCatalog).toMatchObject(catalog);
+    expect(settings.config).toBe(config);
+    expect(settings).not.toHaveProperty("codexRouting");
   });
 
   it("defaults new Codex providers to model menu projection", async () => {
