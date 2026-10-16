@@ -1,5 +1,9 @@
 # CC Switch Repository Memory
 
+## 2026-10-16 官方 4.0 集成尝试
+
+- 目标、233 个三方冲突的边界、4.0.13 改动解释、可靠性适配批次与后续配置事务迁移顺序见 [memory-2026-10-16-v4-integration.md](memory-2026-10-16-v4-integration.md)。集成基线为 CCSM `f78cbeddd` 与官方 `8c2c89e0b`，不得把本批局部适配标记为完整 4.0 架构迁移；不改变 CCSM 品牌、schema 25、版本号或发布目标。
+
 ## 2026-10-16 官方 main 语义同步
 
 - 远端边界、4.0.13 差异、本批可靠性修复和未完成迁移项见 [memory-2026-10-16-upstream-main-sync.md](memory-2026-10-16-upstream-main-sync.md)。`fork/main` 是公开 CCSM，`origin/main` 才是官方 CCS；不能把 fetch 或局部移植说成两支完全同步。

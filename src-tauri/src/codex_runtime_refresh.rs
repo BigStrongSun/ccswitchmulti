@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 
 #[path = "codex_paginated_history_repair.rs"]
-mod paginated_history;
+pub(crate) mod paginated_history;
 
 static CODEX_RUNTIME_REFRESH_LOCK: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));

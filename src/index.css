@@ -113,7 +113,8 @@
   border-top: 2px solid hsl(var(--border));
 }
 
-[data-tauri-drag-region] {
+/* Windows 使用 Tauri 事件拖拽；WebView2 的原生 CSS 拖拽区可能导致主线程挂起。 */
+.is-mac [data-tauri-drag-region] {
   -webkit-app-region: drag;
 }
 

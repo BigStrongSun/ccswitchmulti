@@ -434,7 +434,6 @@ export const hasTomlCommonConfigSnippet = (
 
 // ========== Codex base_url utils ==========
 
-const TOML_SECTION_HEADER_PATTERN = /^\s*\[([^\]\r\n]+)\]\s*$/;
 const TOML_BASE_URL_PATTERN =
   /^\s*base_url\s*=\s*(?:"((?:\\.|[^"\\\r\n])*)"|'([^'\r\n]*)')\s*(?:#.*)?$/;
 const TOML_OPENAI_BASE_URL_PATTERN =
@@ -479,6 +478,7 @@ interface TomlSectionRange {
 }
 
 interface TomlAssignmentMatch {
+  arrayTable?: boolean;
   index: number;
   sectionName?: string;
   value: string;
@@ -490,30 +490,135 @@ const finalizeTomlText = (lines: string[]): string =>
     .replace(/\n{3,}/g, "\n\n")
     .replace(/^\n+/, "");
 
+const tomlTableName = (...segments: string[]): string =>
+  segments
+    .map((segment) =>
+      /^[A-Za-z0-9_-]+$/.test(segment) ? segment : tomlBasicString(segment),
+    )
+    .join(".");
+
+const getTomlTablePath = (
+  value: unknown,
+  path: string[] = [],
+): string[] | undefined => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 0) return path;
+  if (entries.length !== 1) return undefined;
+  return getTomlTablePath(entries[0][1], [...path, entries[0][0]]);
+};
+
+const normalizeTomlTableName = (header: string): string => {
+  try {
+    const tablePath = getTomlTablePath(parseToml(`[${header}]`));
+    return tablePath?.length ? tomlTableName(...tablePath) : header;
+  } catch {
+    return header;
+  }
+};
+
+interface TomlTableHeader {
+  arrayTable: boolean;
+  name?: string;
+}
+
+const hasArrayValue = (value: unknown): boolean => {
+  if (Array.isArray(value)) return true;
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value).some(hasArrayValue);
+};
+
+const getTomlTableHeader = (line: string): TomlTableHeader | undefined => {
+  const candidate = line.trimStart();
+  if (!candidate.startsWith("[")) return undefined;
+
+  try {
+    const parsed = parseToml(candidate);
+    const tablePath = getTomlTablePath(parsed);
+    if (tablePath?.length) {
+      return { arrayTable: false, name: tomlTableName(...tablePath) };
+    }
+    if (hasArrayValue(parsed)) return { arrayTable: true };
+  } catch {
+    // Invalid or non-header TOML lines are ignored by the source-preserving scan.
+  }
+  return undefined;
+};
+
+const getTomlMultilineStringLines = (lines: string[]): boolean[] => {
+  let delimiter: '"""' | "'''" | undefined;
+  return lines.map((line) => {
+    const insideString = delimiter !== undefined;
+    let index = 0;
+    while (index < line.length) {
+      if (delimiter) {
+        if (delimiter === '"""' && line[index] === "\\") {
+          index += 2;
+          continue;
+        }
+        if (line.startsWith(delimiter, index)) {
+          const quote = delimiter[0];
+          let end = index + 3;
+          while (end < index + 5 && line[end] === quote) end += 1;
+          delimiter = undefined;
+          index = end;
+          continue;
+        }
+        index += 1;
+        continue;
+      }
+
+      const ch = line[index];
+      if (ch === "#") break;
+      if (line.startsWith('"""', index) || line.startsWith("'''", index)) {
+        delimiter = line.startsWith('"""', index) ? '"""' : "'''";
+        index += 3;
+        continue;
+      }
+      if (ch === '"') {
+        index += 1;
+        while (index < line.length && line[index] !== '"') {
+          index += line[index] === "\\" ? 2 : 1;
+        }
+        index += 1;
+        continue;
+      }
+      if (ch === "'") {
+        const end = line.indexOf("'", index + 1);
+        index = end === -1 ? line.length : end + 1;
+        continue;
+      }
+      index += 1;
+    }
+    return insideString;
+  });
+};
+
 const getTomlSectionRange = (
   lines: string[],
   sectionName: string,
 ): TomlSectionRange | undefined => {
+  const targetName = normalizeTomlTableName(sectionName);
+  const stringLines = getTomlMultilineStringLines(lines);
   let headerLineIndex = -1;
 
   for (let index = 0; index < lines.length; index += 1) {
-    const match = lines[index].match(TOML_SECTION_HEADER_PATTERN);
-    if (!match) {
-      continue;
-    }
+    if (stringLines[index]) continue;
+    const header = getTomlTableHeader(lines[index]);
+    if (!header) continue;
 
-    if (headerLineIndex === -1) {
-      if (match[1] === sectionName) {
-        headerLineIndex = index;
-      }
-      continue;
+    if (headerLineIndex !== -1) {
+      return {
+        bodyStartIndex: headerLineIndex + 1,
+        bodyEndIndex: index,
+        headerLineIndex,
+      };
     }
+    if (header.arrayTable || !header.name) continue;
 
-    return {
-      bodyStartIndex: headerLineIndex + 1,
-      bodyEndIndex: index,
-      headerLineIndex,
-    };
+    if (header.name === targetName) headerLineIndex = index;
   }
 
   if (headerLineIndex === -1) {
@@ -528,8 +633,10 @@ const getTomlSectionRange = (
 };
 
 const getTopLevelEndIndex = (lines: string[]): number => {
-  const firstSectionIndex = lines.findIndex((line) =>
-    TOML_SECTION_HEADER_PATTERN.test(line),
+  const stringLines = getTomlMultilineStringLines(lines);
+  const firstSectionIndex = lines.findIndex(
+    (line, index) =>
+      !stringLines[index] && getTomlTableHeader(line) !== undefined,
   );
   return firstSectionIndex === -1 ? lines.length : firstSectionIndex;
 };
@@ -573,7 +680,9 @@ const getCodexProviderSectionName = (
   configText: string,
 ): string | undefined => {
   const providerName = getCodexModelProviderName(configText);
-  return providerName ? `model_providers.${providerName}` : undefined;
+  return providerName
+    ? tomlTableName("model_providers", providerName)
+    : undefined;
 };
 
 const isCodexBuiltinOpenAiProviderName = (
@@ -591,7 +700,7 @@ const getCodexCustomProviderSectionName = (
 ): string | undefined => {
   const providerName = getCodexModelProviderName(configText);
   return providerName && isCustomCodexModelProviderId(providerName)
-    ? `model_providers.${providerName}`
+    ? tomlTableName("model_providers", providerName)
     : undefined;
 };
 
@@ -602,7 +711,9 @@ const findTomlAssignmentInRange = (
   endIndex: number,
   sectionName?: string,
 ): TomlAssignmentMatch | undefined => {
+  const stringLines = getTomlMultilineStringLines(lines);
   for (let index = startIndex; index < endIndex; index += 1) {
+    if (stringLines[index]) continue;
     const match = lines[index].match(pattern);
     const value = match?.[2] ?? match?.[1];
     if (value) {
@@ -625,8 +736,10 @@ const findTomlAssignmentsInRange = (
   sectionName?: string,
 ): TomlAssignmentMatch[] => {
   const matches: TomlAssignmentMatch[] = [];
+  const stringLines = getTomlMultilineStringLines(lines);
 
   for (let index = startIndex; index < endIndex; index += 1) {
+    if (stringLines[index]) continue;
     const match = lines[index].match(pattern);
     const value = match?.[2] ?? match?.[1];
     if (value) {
@@ -643,8 +756,9 @@ const findTomlLineInRange = (
   startIndex: number,
   endIndex: number,
 ): number => {
+  const stringLines = getTomlMultilineStringLines(lines);
   for (let index = startIndex; index < endIndex; index += 1) {
-    if (pattern.test(lines[index])) {
+    if (!stringLines[index] && pattern.test(lines[index])) {
       return index;
     }
   }
@@ -658,11 +772,17 @@ const findTomlAssignments = (
 ): TomlAssignmentMatch[] => {
   const assignments: TomlAssignmentMatch[] = [];
   let currentSectionName: string | undefined;
+  let currentArrayTable = false;
+  const stringLines = getTomlMultilineStringLines(lines);
 
   lines.forEach((line, index) => {
-    const sectionMatch = line.match(TOML_SECTION_HEADER_PATTERN);
-    if (sectionMatch) {
-      currentSectionName = sectionMatch[1];
+    if (stringLines[index]) return;
+    const sectionHeader = getTomlTableHeader(line);
+    if (sectionHeader) {
+      currentArrayTable = sectionHeader.arrayTable;
+      currentSectionName = sectionHeader.arrayTable
+        ? undefined
+        : sectionHeader.name;
       return;
     }
 
@@ -673,6 +793,7 @@ const findTomlAssignments = (
     }
 
     assignments.push({
+      arrayTable: currentArrayTable,
       index,
       sectionName: currentSectionName,
       value,
@@ -702,7 +823,8 @@ const getRecoverableBaseUrlAssignments = (
   targetSectionName: string | undefined,
 ): TomlAssignmentMatch[] =>
   assignments.filter(
-    ({ sectionName }) =>
+    ({ arrayTable, sectionName }) =>
+      !arrayTable &&
       sectionName !== targetSectionName &&
       !isMcpServerSection(sectionName) &&
       !isOtherProviderSection(sectionName, targetSectionName),
@@ -711,15 +833,12 @@ const getRecoverableBaseUrlAssignments = (
 const getRecoverableCodexProviderAssignments = getRecoverableBaseUrlAssignments;
 
 const getTopLevelModelProviderLineIndex = (lines: string[]): number => {
-  const topLevelEndIndex = getTopLevelEndIndex(lines);
-
-  for (let index = 0; index < topLevelEndIndex; index += 1) {
-    if (TOML_MODEL_PROVIDER_LINE_PATTERN.test(lines[index])) {
-      return index;
-    }
-  }
-
-  return -1;
+  return findTomlLineInRange(
+    lines,
+    TOML_MODEL_PROVIDER_LINE_PATTERN,
+    0,
+    getTopLevelEndIndex(lines),
+  );
 };
 
 const hasTomlSectionBodyContent = (
@@ -1373,14 +1492,15 @@ export const setCodexBaseUrl = (
     if (isBuiltinOpenAi) {
       const removalIndexes = [
         ...findTomlAssignments(lines, TOML_OPENAI_BASE_URL_PATTERN)
-          .filter((match) => !match.sectionName)
+          .filter((match) => !match.arrayTable && !match.sectionName)
           .map((match) => match.index),
         ...allAssignments
           .filter(
             (match) =>
-              !match.sectionName ||
-              match.sectionName ===
-                `model_providers.${CODEX_OPENAI_MODEL_PROVIDER_ID}`,
+              !match.arrayTable &&
+              (!match.sectionName ||
+                match.sectionName ===
+                  `model_providers.${CODEX_OPENAI_MODEL_PROVIDER_ID}`),
           )
           .map((match) => match.index),
       ];
@@ -1423,9 +1543,10 @@ export const setCodexBaseUrl = (
     const staleBaseUrlIndexes = allAssignments
       .filter(
         (match) =>
-          !match.sectionName ||
-          match.sectionName ===
-            `model_providers.${CODEX_OPENAI_MODEL_PROVIDER_ID}`,
+          !match.arrayTable &&
+          (!match.sectionName ||
+            match.sectionName ===
+              `model_providers.${CODEX_OPENAI_MODEL_PROVIDER_ID}`),
       )
       .map((match) => match.index);
     [...new Set(staleBaseUrlIndexes)]

@@ -143,9 +143,21 @@ fn history_base_is_consistent(
     parent_path: &Path,
     base: &RolloutHistoryBase,
 ) -> Result<bool, String> {
-    Ok(ordinal_before_boundary(parent_path, base.end_byte_offset)?
+    history_base_boundary_is_consistent(
+        parent_path,
+        base.end_byte_offset,
+        base.end_ordinal_exclusive,
+    )
+}
+
+pub(super) fn history_base_boundary_is_consistent(
+    parent_path: &Path,
+    end_byte_offset: u64,
+    end_ordinal_exclusive: u64,
+) -> Result<bool, String> {
+    Ok(ordinal_before_boundary(parent_path, end_byte_offset)?
         .and_then(|ordinal| ordinal.checked_add(1))
-        == Some(base.end_ordinal_exclusive))
+        == Some(end_ordinal_exclusive))
 }
 
 fn first_record(path: &Path) -> Result<Vec<u8>, String> {

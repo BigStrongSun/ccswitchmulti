@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parse as parseToml } from "smol-toml";
 import {
   extractCodexBaseUrl,
   extractCodexExperimentalBearerToken,
@@ -10,7 +11,9 @@ import {
   setCodexBaseUrl,
   setCodexGoalMode,
   setCodexModelName,
+  setCodexRemoteCompaction,
   setCodexTopLevelInt,
+  setCodexWireApi,
   updateCodexExperimentalBearerToken,
 } from "@/utils/providerConfigUtils";
 
@@ -65,11 +68,9 @@ describe("Codex TOML utils", () => {
   });
 
   it("writes built-in OpenAI base URL through openai_base_url", () => {
-    const input = [
-      'model_provider = "openai"',
-      'model = "gpt-5.5"',
-      "",
-    ].join("\n");
+    const input = ['model_provider = "openai"', 'model = "gpt-5.5"', ""].join(
+      "\n",
+    );
 
     const output = setCodexBaseUrl(input, " http://127.0.0.1:15721/v1 ");
 
@@ -94,13 +95,11 @@ describe("Codex TOML utils", () => {
 
     const output = setCodexBaseUrl(input, "http://127.0.0.1:15721/v1");
 
-    expect(output).toContain(
-      'openai_base_url = "http://127.0.0.1:15721/v1"',
-    );
+    expect(output).toContain('openai_base_url = "http://127.0.0.1:15721/v1"');
     expect(output).not.toContain("stale-top-level");
     expect(output).not.toContain("stale-table");
     expect(output).not.toMatch(/^\s*base_url\s*=/m);
-    expect(output).toContain("[model_providers.openai]\nname = \"OpenAI\"");
+    expect(output).toContain('[model_providers.openai]\nname = "OpenAI"');
   });
 
   it("prefers openai_base_url over stale built-in OpenAI provider tables", () => {
@@ -151,9 +150,9 @@ describe("Codex TOML utils", () => {
       "",
       "[model_providers.custom]",
       'name = "custom"',
-      "base_url = \"https://su'us.codes/v1\"",
+      'base_url = "https://su\'us.codes/v1"',
       'wire_api = "responses"',
-      'requires_openai_auth = true',
+      "requires_openai_auth = true",
       "",
     ].join("\n");
 
@@ -174,7 +173,7 @@ describe("Codex TOML utils", () => {
       'base_url = "https://old.example/v1"',
       'base_url = "https://older.example/v1"',
       'wire_api = "responses"',
-      'requires_openai_auth = true',
+      "requires_openai_auth = true",
       "",
     ].join("\n");
 
@@ -206,6 +205,99 @@ describe("Codex TOML utils", () => {
       '[model_providers.custom]\nname = "custom"\nwire_api = "responses"\nbase_url = "https://api.example.com/v1"',
     );
     expect(extractCodexBaseUrl(output)).toBe("https://api.example.com/v1");
+  });
+
+  it("matches quoted provider table headers by parsed TOML key path", () => {
+    const headers = [
+      '[model_providers."custom"]',
+      '[model_providers."custom"] # note with ] and #',
+      "[model_providers.'custom']",
+      "[ model_providers . custom ]",
+      '["model_providers".custom]',
+    ];
+
+    for (const header of headers) {
+      const input = [
+        'model_provider = "custom"',
+        "",
+        header,
+        'name = "Custom"',
+        'wire_api = "responses"',
+        "",
+        '[model_providers."custom.archive"]',
+        'base_url = "https://archive.invalid/v1"',
+        "",
+      ].join("\n");
+      const output = setCodexBaseUrl(input, "https://relay.example/v1");
+      const parsed = parseToml(output) as Record<string, any>;
+
+      expect(parsed.model_providers.custom.base_url, header).toBe(
+        "https://relay.example/v1",
+      );
+      expect(parsed.model_providers["custom.archive"].base_url, header).toBe(
+        "https://archive.invalid/v1",
+      );
+      expect(output).toContain(header);
+      expect(
+        extractCodexBaseUrl(setCodexBaseUrl(output, "")),
+        header,
+      ).toBeUndefined();
+    }
+  });
+
+  it("quotes escaped and dotted provider ids without touching other tables", () => {
+    const providerId = 'relay.#]"quoted';
+    const providerKey = JSON.stringify(providerId);
+    const input = [
+      `model_provider = ${providerKey}`,
+      "",
+      `[model_providers.${providerKey}]`,
+      'name = "Selected"',
+      'experimental_bearer_token = "old-token"',
+      "",
+      '[model_providers."relay"] # note with ]',
+      'base_url = "https://other.invalid/v1"',
+      "",
+    ].join("\n");
+
+    const output = updateCodexExperimentalBearerToken(
+      setCodexBaseUrl(input, "https://selected.example/v1"),
+      "new-token",
+    );
+    const parsed = parseToml(output) as Record<string, any>;
+
+    expect(parsed.model_providers[providerId]).toMatchObject({
+      name: "Selected",
+      base_url: "https://selected.example/v1",
+      experimental_bearer_token: "new-token",
+    });
+    expect(parsed.model_providers.relay.base_url).toBe(
+      "https://other.invalid/v1",
+    );
+  });
+
+  it("keeps array-of-table headers outside the provider table range", () => {
+    const input = [
+      'model_provider = "custom"',
+      "",
+      "[model_providers.custom]",
+      'name = "Custom"',
+      "",
+      "[[model_providers.custom.models]]",
+      'id = "model-1"',
+      "",
+    ].join("\n");
+
+    const output = setCodexBaseUrl(input, "https://relay.example/v1");
+    const parsed = parseToml(output) as Record<string, any>;
+
+    expect(parsed.model_providers.custom.base_url).toBe(
+      "https://relay.example/v1",
+    );
+    expect(parsed.model_providers.custom.models[0]).toEqual({ id: "model-1" });
+    expect(
+      output.indexOf('base_url = "https://relay.example/v1"'),
+    ).toBeLessThan(output.indexOf("[[model_providers.custom.models]]"));
   });
 
   it("recovers a single misplaced base_url from another section", () => {
@@ -258,6 +350,51 @@ describe("Codex TOML utils", () => {
     expect(output).toContain(
       '[mcp_servers.my_server]\nbase_url = "http://localhost:8080"',
     );
+  });
+
+  it("never recovers provider fields from an array-of-tables row", () => {
+    const input = [
+      'model_provider = "custom"',
+      "",
+      "[model_providers.custom]",
+      'name = "Custom"',
+      "",
+      "[[model_providers.custom.models]]",
+      'id = "model-1"',
+      'name = "Array Name"',
+      'base_url = "https://array.invalid/v1"',
+      'wire_api = "responses"',
+      'experimental_bearer_token = "array-token"',
+      "",
+    ].join("\n");
+
+    const withBaseUrl = setCodexBaseUrl(input, "https://relay.example/v1");
+    const withWireApi = setCodexWireApi(input, "chat");
+    const withToken = updateCodexExperimentalBearerToken(input, "new-token");
+    const withName = setCodexRemoteCompaction(input, true);
+
+    const baseUrlConfig = parseToml(withBaseUrl) as Record<string, any>;
+    const wireApiConfig = parseToml(withWireApi) as Record<string, any>;
+    const tokenConfig = parseToml(withToken) as Record<string, any>;
+    const nameConfig = parseToml(withName) as Record<string, any>;
+
+    expect(baseUrlConfig.model_providers.custom.base_url).toBe(
+      "https://relay.example/v1",
+    );
+    expect(baseUrlConfig.model_providers.custom.models[0].base_url).toBe(
+      "https://array.invalid/v1",
+    );
+    expect(wireApiConfig.model_providers.custom.wire_api).toBe("chat");
+    expect(wireApiConfig.model_providers.custom.models[0].wire_api).toBe(
+      "responses",
+    );
+    expect(tokenConfig.model_providers.custom.models[0]).toMatchObject({
+      name: "Array Name",
+      experimental_bearer_token: "array-token",
+    });
+    expect(withToken).toBe(input);
+    expect(nameConfig.model_providers.custom.name).toBe("OpenAI");
+    expect(nameConfig.model_providers.custom.models[0].name).toBe("Array Name");
   });
 
   it("reads model only from the top-level config", () => {

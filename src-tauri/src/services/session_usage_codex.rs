@@ -31,7 +31,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 #[cfg(unix)]
@@ -82,6 +82,7 @@ fn take_codex_append_bytes_read(file: &Path) -> u64 {
 
 #[derive(Debug)]
 struct CodexCheckpoint {
+    source_path: String,
     last_byte_offset: i64,
     file_size: i64,
     head_window_len: Option<i64>,
@@ -316,7 +317,18 @@ struct ParsedTokenEvent {
 enum ParentResolution {
     None,
     Parent(String),
+    Continuation {
+        ancestor_parent_id: Option<String>,
+        history_base: Option<ContinuationLink>,
+    },
     Deferred(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContinuationLink {
+    physical_id: String,
+    end_ordinal_exclusive: u64,
+    end_byte_offset: u64,
 }
 
 /// Persisted semantic parser state for append-only Codex JSONL files.  This is
@@ -333,6 +345,8 @@ struct CodexParserState {
     is_subagent: bool,
     current_model: String,
     total_high_water: Option<CumulativeTokens>,
+    #[serde(default)]
+    continuation_reset_pending: bool,
     // JSON object keys cannot be Option<String>; the empty string is the
     // exact on-disk representation of the parser's None rate-limit lane.
     last_signature_by_source: HashMap<String, TokenUsageSignature>,
@@ -355,6 +369,7 @@ impl CodexParserState {
             is_subagent: false,
             current_model: "unknown".to_string(),
             total_high_water: None,
+            continuation_reset_pending: false,
             last_signature_by_source: HashMap::new(),
             previous_token_signature: None,
             event_index: 0,
@@ -435,6 +450,7 @@ pub(crate) fn read_verified_codex_rollout_usage(
     let parsed = parse_codex_file(file_path, thread_id_from_filename(file_path))?;
     let replay_prefix = match &parsed.parent {
         ParentResolution::None => 0,
+        ParentResolution::Continuation { .. } => 0,
         ParentResolution::Deferred(_) => return Ok(None),
         ParentResolution::Parent(parent_id) => {
             let Some(cutoff) = parsed.root_timestamp else {
@@ -694,6 +710,168 @@ fn explicit_parent_from_meta(payload: &serde_json::Value) -> ParentResolution {
     }
 }
 
+fn explicit_history_base(payload: &serde_json::Value) -> Option<ContinuationLink> {
+    let base = payload.get("history_base")?;
+    let physical_id =
+        non_empty_string(base.get("thread_id")).and_then(|id| normalize_thread_id(&id))?;
+    let end_ordinal_exclusive = base.get("end_ordinal_exclusive")?.as_u64()?;
+    let end_byte_offset = base.get("end_byte_offset")?.as_u64()?;
+    (end_ordinal_exclusive > 0 && end_byte_offset > 0).then_some(ContinuationLink {
+        physical_id,
+        end_ordinal_exclusive,
+        end_byte_offset,
+    })
+}
+
+fn normalize_thread_id(id: &str) -> Option<String> {
+    uuid::Uuid::parse_str(id)
+        .ok()
+        .map(|value| value.hyphenated().to_string())
+}
+
+fn continuation_from_meta(
+    payload: &serde_json::Value,
+    file_path: &Path,
+    meta_id: Option<&str>,
+) -> Option<ParentResolution> {
+    let logical_id = meta_id?;
+    if leading_thread_id_from_filename(file_path).as_deref() != Some(logical_id) {
+        return None;
+    }
+    let base = explicit_history_base(payload);
+    let paginated = payload
+        .get("history_mode")
+        .and_then(serde_json::Value::as_str)
+        == Some("paginated");
+    let parent = explicit_parent_from_meta(payload);
+    let has_parent = matches!(parent, ParentResolution::Parent(_));
+    if !(paginated || base.is_some() && has_parent) {
+        return None;
+    }
+    let ancestor_parent_id = match parent {
+        ParentResolution::Parent(parent) => normalize_thread_id(&parent),
+        ParentResolution::None => None,
+        _ => return None,
+    };
+    Some(ParentResolution::Continuation {
+        ancestor_parent_id,
+        history_base: base,
+    })
+}
+
+fn read_first_continuation_meta(
+    path: &Path,
+) -> Result<Option<(String, ParentResolution)>, AppError> {
+    let file = fs::File::open(path)
+        .map_err(|error| AppError::Config(format!("打开 Codex session_meta 失败: {error}")))?;
+    for line in BufReader::new(file).lines() {
+        let line = line
+            .map_err(|error| AppError::Config(format!("读取 Codex session_meta 失败: {error}")))?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
+        let Some(meta_id) = non_empty_string(
+            payload
+                .get("id")
+                .or_else(|| payload.get("thread_id"))
+                .or_else(|| payload.get("threadId")),
+        )
+        .map(|id| normalize_thread_id(&id).unwrap_or(id)) else {
+            return Ok(None);
+        };
+        return Ok(continuation_from_meta(payload, path, Some(&meta_id))
+            .map(|continuation| (meta_id, continuation)));
+    }
+    Ok(None)
+}
+
+enum LegacyContinuationCheckpoint {
+    NotLegacy,
+    HasLedger,
+    Alias,
+    Reset,
+}
+
+fn migrate_empty_legacy_continuation_checkpoint(
+    db: &Database,
+    file_path: &Path,
+    checkpoint: &CodexCheckpoint,
+    pass: &mut CodexSyncPass,
+) -> Result<LegacyContinuationCheckpoint, AppError> {
+    let old_unclassified_state = matches!(
+        &checkpoint.state.parent,
+        ParentResolution::Parent(_) | ParentResolution::None
+    );
+    let uninitialized_continuation = matches!(
+        (&checkpoint.state.parent, &checkpoint.state.total_high_water),
+        (ParentResolution::Continuation { .. }, None)
+    );
+    if (!old_unclassified_state && !uninitialized_continuation)
+        || leading_thread_id_from_filename(file_path).as_deref()
+            != checkpoint.state.meta_thread_id.as_deref()
+    {
+        return Ok(LegacyContinuationCheckpoint::NotLegacy);
+    }
+    let Some((_, continuation)) = read_first_continuation_meta(file_path)? else {
+        return Ok(LegacyContinuationCheckpoint::NotLegacy);
+    };
+    if !matches!(continuation, ParentResolution::Continuation { .. })
+        || (!old_unclassified_state && !uninitialized_continuation)
+    {
+        return Ok(LegacyContinuationCheckpoint::NotLegacy);
+    }
+    let Some(physical_id) = thread_id_from_filename(file_path) else {
+        return Ok(LegacyContinuationCheckpoint::NotLegacy);
+    };
+    let path = file_path.to_string_lossy().to_string();
+    let request_prefix = format!("{CODEX_THREAD_REQUEST_ID_PREFIX}:{physical_id}:");
+    let conn = lock_conn!(db.conn);
+    let tx = conn.unchecked_transaction().map_err(|error| {
+        AppError::Database(format!(
+            "开启 Codex 旧 continuation checkpoint 事务失败: {error}"
+        ))
+    })?;
+    let ledger_rows: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM proxy_request_logs WHERE data_source='codex_session' AND request_id LIKE ?1",
+        [&format!("{request_prefix}%")],
+        |row| row.get(0),
+    ).map_err(|error| AppError::Database(format!("检查 Codex continuation 账本失败: {error}")))?;
+    if ledger_rows > 0 {
+        tx.commit().map_err(|error| {
+            AppError::Database(format!("提交 Codex continuation 账本检查失败: {error}"))
+        })?;
+        return Ok(if checkpoint.source_path != path {
+            LegacyContinuationCheckpoint::Alias
+        } else {
+            LegacyContinuationCheckpoint::HasLedger
+        });
+    }
+    if checkpoint.source_path == path {
+        tx.execute(
+            "DELETE FROM codex_usage_file_checkpoints WHERE file_path=?1",
+            [&path],
+        )
+        .map_err(|error| {
+            AppError::Database(format!(
+                "清理空 Codex continuation checkpoint 失败: {error}"
+            ))
+        })?;
+    }
+    tx.execute("DELETE FROM session_log_sync WHERE file_path=?1", [&path])
+        .map_err(|error| {
+            AppError::Database(format!("清理空 Codex continuation cursor 失败: {error}"))
+        })?;
+    tx.commit().map_err(|error| {
+        AppError::Database(format!("提交 Codex continuation 游标清理失败: {error}"))
+    })?;
+    pass.cursors.remove(&path);
+    Ok(LegacyContinuationCheckpoint::Reset)
+}
+
 fn parse_timestamp(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
     value
         .and_then(serde_json::Value::as_str)
@@ -785,7 +963,7 @@ fn load_codex_checkpoint(
         .unwrap_or_default();
     let conn = lock_conn!(db.conn);
     let mut statement = conn.prepare(
-        "SELECT last_byte_offset, file_size, head_window_len, head_fingerprint, tail_fingerprint, parser_state
+        "SELECT file_path, last_byte_offset, file_size, head_window_len, head_fingerprint, tail_fingerprint, parser_state
          FROM codex_usage_file_checkpoints
          WHERE file_path = ?1 OR ((file_path LIKE ?2 OR file_path LIKE ?3) AND ?4 <> '')
          ORDER BY CASE WHEN file_path = ?1 THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
@@ -798,19 +976,21 @@ fn load_codex_checkpoint(
             file_name
         ],
         |row| {
-            let state_text: String = row.get(5)?;
+            let state_text: String = row.get(6)?;
             Ok((
-                row.get::<_, i64>(0)?,
+                row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, i64>(2)?,
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
                 state_text,
             ))
         },
     );
     match result {
         Ok((
+            source_path,
             last_byte_offset,
             file_size,
             head_window_len,
@@ -822,6 +1002,7 @@ fn load_codex_checkpoint(
             Ok(state
                 .filter(CodexParserState::valid)
                 .map(|state| CodexCheckpoint {
+                    source_path,
                     last_byte_offset,
                     file_size,
                     head_window_len,
@@ -1246,6 +1427,11 @@ fn parse_codex_file(
                         .map(|value| value.hyphenated().to_string())
                         .unwrap_or(id)
                 });
+                if let Some(continuation) =
+                    continuation_from_meta(payload, file_path, meta_thread_id.as_deref())
+                {
+                    parent = continuation;
+                }
                 if let (Some(filename_id), Some(meta_id)) =
                     (&root_thread_id, meta_thread_id.as_ref())
                 {
@@ -1444,6 +1630,11 @@ fn parse_codex_incremental_line(
                     .map(|value| value.hyphenated().to_string())
                     .unwrap_or(id)
             });
+            if let Some(continuation) =
+                continuation_from_meta(payload, file_path, state.meta_thread_id.as_deref())
+            {
+                state.parent = continuation;
+            }
             if let (Some(filename_id), Some(meta_id)) =
                 (&state.root_thread_id, state.meta_thread_id.as_ref())
             {
@@ -1513,6 +1704,16 @@ fn parse_codex_incremental_line(
                 return None;
             }
             let has_total_snapshot = total.is_some();
+            let continuation_counter_reset = state.continuation_reset_pending
+                && last.is_none()
+                && matches!(&state.parent, ParentResolution::Continuation { .. })
+                && state.total_high_water.is_some()
+                && total.as_ref().is_some_and(|total| {
+                    state
+                        .total_high_water
+                        .as_ref()
+                        .is_some_and(|baseline| total.input < baseline.input)
+                });
             let duplicate_snapshot = has_total_snapshot
                 && (state.last_signature_by_source.get(&lane) == Some(&signature)
                     || state.previous_token_signature.as_ref() == Some(&signature));
@@ -1535,12 +1736,23 @@ fn parse_codex_incremental_line(
                     output: last.output as u32,
                 }
             } else if let Some(total) = total.as_ref() {
-                compute_delta(&state.total_high_water, total)
+                if continuation_counter_reset {
+                    DeltaTokens {
+                        input: total.input.min(u32::MAX as u64) as u32,
+                        cached_input: total.cached_input.min(u32::MAX as u64) as u32,
+                        output: total.output.min(u32::MAX as u64) as u32,
+                    }
+                } else {
+                    compute_delta(&state.total_high_water, total)
+                }
             } else {
                 return None;
             };
             if let Some(total) = total {
-                if let Some(high_water) = state.total_high_water.as_mut() {
+                state.continuation_reset_pending = false;
+                if continuation_counter_reset {
+                    state.total_high_water = Some(total);
+                } else if let Some(high_water) = state.total_high_water.as_mut() {
                     update_high_water(high_water, &total);
                 } else {
                     state.total_high_water = Some(total);
@@ -1595,7 +1807,10 @@ fn parse_codex_incremental_line(
 /// Read one bounded file snapshot.  The caller captures size/mtime once and
 /// this reader is capped at that size, so a concurrent append is deliberately
 /// left for the next pass rather than being accidentally checkpointed.
-fn parse_codex_snapshot(file_path: &Path) -> Result<CodexParseSnapshot, AppError> {
+fn parse_codex_snapshot(
+    file_path: &Path,
+    baseline: Option<CumulativeTokens>,
+) -> Result<CodexParseSnapshot, AppError> {
     let metadata = fs::metadata(file_path)
         .map_err(|e| AppError::Config(format!("读取 Codex snapshot 元数据失败: {e}")))?;
     let file_size = metadata.len() as i64;
@@ -1608,6 +1823,8 @@ fn parse_codex_snapshot(file_path: &Path) -> Result<CodexParseSnapshot, AppError
         .map_err(|e| AppError::Config(format!("定位 Codex snapshot 失败: {e}")))?;
     let mut reader = BufReader::new(file.take(file_size.max(0) as u64));
     let mut state = CodexParserState::initial(thread_id_from_filename(file_path));
+    state.total_high_water = baseline;
+    state.continuation_reset_pending = state.total_high_water.is_some();
     let mut events = Vec::new();
     let mut buffer = Vec::new();
     let mut complete_bytes = 0i64;
@@ -1653,6 +1870,177 @@ fn parse_codex_snapshot(file_path: &Path) -> Result<CodexParseSnapshot, AppError
         head_fingerprint,
         tail_fingerprint,
     })
+}
+
+#[derive(Debug)]
+struct ContinuationSource {
+    meta_id: String,
+    timestamp: Option<DateTime<Utc>>,
+    history_base: Option<ContinuationLink>,
+    continuation: bool,
+    latest_total: Option<CumulativeTokens>,
+    has_total_without_last: bool,
+}
+
+fn read_continuation_source(
+    path: &Path,
+    cutoff: Option<&ContinuationLink>,
+) -> Result<ContinuationSource, String> {
+    let file = fs::File::open(path)
+        .map_err(|error| format!("cannot open predecessor {}: {error}", path.display()))?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| format!("cannot stat predecessor {}: {error}", path.display()))?
+        .len();
+    let read_limit = if let Some(cutoff) = cutoff {
+        if cutoff.end_ordinal_exclusive == 0 || cutoff.end_byte_offset > file_len {
+            return Err(format!(
+                "invalid history_base cutoff: ordinal={}, offset={}, predecessor length={file_len}",
+                cutoff.end_ordinal_exclusive, cutoff.end_byte_offset
+            ));
+        }
+        if !crate::codex_runtime_refresh::paginated_history::history_base_cutoff_is_consistent(
+            path,
+            cutoff.end_byte_offset,
+            cutoff.end_ordinal_exclusive,
+        )? {
+            return Err(format!(
+                "history_base cutoff for {} is not consistent",
+                cutoff.physical_id
+            ));
+        }
+        cutoff.end_byte_offset
+    } else {
+        file_len
+    };
+    let mut meta_id = None;
+    let mut timestamp = None;
+    let mut history_base = None;
+    let mut continuation = false;
+    let mut latest_total = None;
+    let mut has_total_without_last = false;
+    for line in BufReader::new(file.take(read_limit)).lines() {
+        let line =
+            line.map_err(|error| format!("cannot read predecessor {}: {error}", path.display()))?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("session_meta") if meta_id.is_none() => {
+                let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
+                meta_id = non_empty_string(
+                    payload
+                        .get("id")
+                        .or_else(|| payload.get("thread_id"))
+                        .or_else(|| payload.get("threadId")),
+                )
+                .map(|id| normalize_thread_id(&id).unwrap_or(id));
+                timestamp = parse_timestamp(value.get("timestamp"));
+                history_base = explicit_history_base(payload);
+                continuation = meta_id
+                    .as_deref()
+                    .and_then(|id| continuation_from_meta(payload, path, Some(id)))
+                    .is_some();
+            }
+            Some("event_msg")
+                if value
+                    .get("payload")
+                    .and_then(|payload| payload.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("token_count") =>
+            {
+                let info = value.get("payload").and_then(|payload| payload.get("info"));
+                let total = info
+                    .and_then(|info| info.get("total_token_usage"))
+                    .and_then(parse_cumulative_tokens);
+                let last = info
+                    .and_then(|info| info.get("last_token_usage"))
+                    .and_then(parse_cumulative_tokens);
+                if total.is_some() && last.is_none() {
+                    has_total_without_last = true;
+                }
+                if let Some(total) = total {
+                    if let Some(high_water) = latest_total.as_mut() {
+                        update_high_water(high_water, &total);
+                    } else {
+                        latest_total = Some(total);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(ContinuationSource {
+        meta_id: meta_id
+            .ok_or_else(|| format!("predecessor {} has no session_meta", path.display()))?,
+        timestamp,
+        history_base,
+        continuation,
+        latest_total,
+        has_total_without_last,
+    })
+}
+
+fn resolve_continuation_baseline(
+    file_path: &Path,
+    logical_id: &str,
+    initial_link: &ContinuationLink,
+    current_timestamp: Option<DateTime<Utc>>,
+    rollout_index: &RolloutIndex,
+) -> Result<CumulativeTokens, String> {
+    let current_id = thread_id_from_filename(file_path)
+        .ok_or_else(|| "continuation filename has no physical UUID".to_string())?;
+    let mut visited = HashSet::from([current_id.clone()]);
+    let mut next_link = initial_link.clone();
+    let mut later_timestamp = Some(
+        current_timestamp
+            .ok_or_else(|| "continuation session_meta has no valid timestamp".to_string())?,
+    );
+    let mut direct_baseline = None;
+    loop {
+        let base_id = normalize_thread_id(&next_link.physical_id)
+            .ok_or_else(|| format!("invalid history_base thread_id: {}", next_link.physical_id))?;
+        if !visited.insert(base_id.clone()) {
+            return Err(format!("history_base chain contains a cycle at {base_id}"));
+        }
+        let candidates = rollout_index
+            .get(&base_id)
+            .ok_or_else(|| format!("missing history_base predecessor {base_id}"))?;
+        if candidates.len() != 1 {
+            return Err(format!(
+                "history_base physical UUID {base_id} resolves to {} files",
+                candidates.len()
+            ));
+        }
+        let source = read_continuation_source(&candidates[0], Some(&next_link))?;
+        if source.meta_id != logical_id {
+            return Err(format!(
+                "history_base predecessor {base_id} belongs to logical thread {}, expected {logical_id}",
+                source.meta_id
+            ));
+        }
+        let predecessor_time = source
+            .timestamp
+            .ok_or_else(|| format!("predecessor {base_id} has no valid session_meta timestamp"))?;
+        if later_timestamp.is_some_and(|later| predecessor_time >= later) {
+            return Err(format!(
+                "history_base predecessor {base_id} is not earlier than its successor"
+            ));
+        }
+        if direct_baseline.is_none() {
+            direct_baseline = source.latest_total.clone();
+        }
+        if !source.continuation {
+            return direct_baseline
+                .ok_or_else(|| format!("predecessor {base_id} has no cumulative token baseline"));
+        }
+        later_timestamp = source.timestamp;
+        next_link = source
+            .history_base
+            .as_ref()
+            .ok_or_else(|| format!("continuation predecessor {base_id} has no history_base"))?
+            .clone();
+    }
 }
 
 fn parent_signatures_before(
@@ -1832,6 +2220,10 @@ fn save_codex_session_metadata_on_conn(
     };
     let parent_thread_id = match &state.parent {
         ParentResolution::Parent(parent) => Some(parent.as_str()),
+        ParentResolution::Continuation {
+            ancestor_parent_id: Some(parent),
+            ..
+        } => Some(parent.as_str()),
         _ => None,
     };
     // Only the structured thread_spawn path is a subagent. forked_from_id is
@@ -1993,7 +2385,34 @@ fn sync_single_codex_file(
     // modified *and* appended cannot be proven without a full hash, so this
     // collector never claims absolute detection for that adversarial race and
     // exposes no compensating full-hash scan here.
-    let checkpoint = load_codex_checkpoint(db, file_path)?;
+    let mut checkpoint = load_codex_checkpoint(db, file_path)?;
+    if let Some(legacy) = checkpoint.as_ref() {
+        match migrate_empty_legacy_continuation_checkpoint(db, file_path, legacy, pass)? {
+            LegacyContinuationCheckpoint::NotLegacy => {}
+            LegacyContinuationCheckpoint::HasLedger => {
+                return Ok(mark_deferred(
+                    file_path,
+                    file_modified,
+                    file_size,
+                    PendingReason::Stable(
+                        "旧版 paginated continuation 已有账本记录；需受控 Codex 重建，禁止自动重放"
+                            .to_string(),
+                    ),
+                ));
+            }
+            LegacyContinuationCheckpoint::Alias => {
+                return Ok(mark_deferred(
+                    file_path,
+                    file_modified,
+                    file_size,
+                    PendingReason::Stable(
+                        "迁移 checkpoint 来自旧路径/别名，需要受控重建".to_string(),
+                    ),
+                ));
+            }
+            LegacyContinuationCheckpoint::Reset => checkpoint = None,
+        }
+    }
     let has_checkpoint = checkpoint.is_some();
     if let Some(checkpoint) = checkpoint {
         let Some(head_window_len) = checkpoint.head_window_len else {
@@ -2075,7 +2494,43 @@ fn sync_single_codex_file(
         }
     }
 
-    let snapshot = parse_codex_snapshot(file_path)?;
+    let continuation_source = read_continuation_source(file_path, None).ok();
+    let mut continuation_baseline = None;
+    if let Some(source) = continuation_source
+        .as_ref()
+        .filter(|source| source.continuation)
+    {
+        let physical_id = thread_id_from_filename(file_path);
+        let history_base = source.history_base.as_ref();
+        let baseline_result = match (physical_id.as_deref(), history_base) {
+            (Some(current), Some(base)) if current != base.physical_id => {
+                resolve_continuation_baseline(
+                    file_path,
+                    &source.meta_id,
+                    base,
+                    source.timestamp,
+                    rollout_index,
+                )
+            }
+            (Some(_), Some(_)) => {
+                Err("history_base points to the current physical rollout".to_string())
+            }
+            _ => Err("paginated continuation has no explicit history_base".to_string()),
+        };
+        match baseline_result {
+            Ok(baseline) => continuation_baseline = Some(baseline),
+            Err(reason) if source.has_total_without_last => {
+                return Ok(mark_deferred(
+                    file_path,
+                    file_modified,
+                    file_size,
+                    PendingReason::Retryable(reason),
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+    let snapshot = parse_codex_snapshot(file_path, continuation_baseline)?;
     if snapshot.file_size != file_size as i64 || snapshot.file_modified != file_modified {
         return Err(AppError::Config(
             "Codex rollout 在读取 snapshot 期间变化；下轮重试".to_string(),
@@ -2121,6 +2576,7 @@ fn sync_single_codex_file(
 
     let replay_prefix = match &parsed.parent {
         ParentResolution::None => 0,
+        ParentResolution::Continuation { .. } => 0,
         ParentResolution::Deferred(reason) => {
             return Ok(mark_deferred(
                 file_path,
@@ -2453,15 +2909,25 @@ mod tests {
     const PARENT_ID: &str = "00000000-0000-4000-8000-000000000001";
     const CHILD_A_ID: &str = "00000000-0000-4000-8000-000000000002";
     const CHILD_B_ID: &str = "00000000-0000-4000-8000-000000000003";
+    const CHILD_A_PAGE_1_ID: &str = "00000000-0000-4000-8000-000000000004";
+    const CHILD_A_PAGE_2_ID: &str = "00000000-0000-4000-8000-000000000005";
 
     fn write_jsonl(path: &Path, values: &[serde_json::Value]) {
-        let contents = values
+        fs::write(path, jsonl_contents(values)).unwrap();
+    }
+
+    fn jsonl_contents(values: &[serde_json::Value]) -> String {
+        values
             .iter()
-            .map(serde_json::Value::to_string)
+            .enumerate()
+            .map(|(ordinal, value)| {
+                let mut value = value.clone();
+                value["ordinal"] = serde_json::json!(ordinal as u64);
+                value.to_string()
+            })
             .collect::<Vec<_>>()
             .join("\n")
-            + "\n";
-        fs::write(path, contents).unwrap();
+            + "\n"
     }
 
     fn rollout_path(dir: &Path, thread_id: &str) -> PathBuf {
@@ -2497,6 +2963,42 @@ mod tests {
 
     fn session_meta(thread_id: &str) -> serde_json::Value {
         session_meta_at(thread_id, None, None, "2026-07-10T03:00:00Z")
+    }
+
+    fn paginated_session_meta_at(
+        thread_id: &str,
+        forked_from_id: Option<&str>,
+        history_base_thread_id: Option<&str>,
+        history_base_cutoff: Option<(u64, u64)>,
+        timestamp: &str,
+    ) -> serde_json::Value {
+        let mut payload = serde_json::json!({
+            "id": thread_id,
+            "forked_from_id": forked_from_id,
+            "source": "cli",
+            "history_mode": "paginated",
+        });
+        if let Some(history_base_thread_id) = history_base_thread_id {
+            let (end_ordinal_exclusive, end_byte_offset) =
+                history_base_cutoff.expect("history_base requires a verified cutoff fixture");
+            payload["history_base"] = serde_json::json!({
+                "thread_id": history_base_thread_id,
+                "end_ordinal_exclusive": end_ordinal_exclusive,
+                "end_byte_offset": end_byte_offset,
+            });
+        }
+        serde_json::json!({
+            "timestamp": timestamp,
+            "type": "session_meta",
+            "payload": payload,
+        })
+    }
+
+    fn history_base_cutoff(path: &Path, end_ordinal_exclusive: u64) -> (u64, u64) {
+        (
+            end_ordinal_exclusive,
+            fs::metadata(path).expect("history_base fixture file").len(),
+        )
     }
 
     fn turn_context_for_model_at(model: &str, timestamp: &str) -> serde_json::Value {
@@ -2643,6 +3145,504 @@ mod tests {
             .collect::<Vec<_>>();
         let mut pass = CodexSyncPass::load(db)?;
         sync_single_codex_file(db, file, &build_rollout_index(&files), &mut pass)
+    }
+
+    #[test]
+    fn upstream_4_paginated_fork_pages_use_linked_cumulative_baselines_and_deduplicate(
+    ) -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let parent = rollout_path(dir.path(), PARENT_ID);
+        let root = rollout_path(dir.path(), CHILD_A_ID);
+        let page1 = dir.path().join(format!(
+            "rollout-2026-07-10T03-00-00-{CHILD_A_ID}_{CHILD_A_PAGE_1_ID}.jsonl"
+        ));
+        let page2 = dir.path().join(format!(
+            "rollout-2026-07-10T03-00-00-{CHILD_A_ID}_{CHILD_A_PAGE_2_ID}.jsonl"
+        ));
+        write_jsonl(
+            &parent,
+            &[
+                session_meta_at(PARENT_ID, None, None, "2026-07-10T03:00:30Z"),
+                token_count_at(1000, 100, 100, "2026-07-10T03:00:10Z"),
+            ],
+        );
+        write_jsonl(
+            &root,
+            &[
+                session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:15Z"),
+                token_count_at(1000, 100, 100, "2026-07-10T03:00:15Z"),
+                token_count_at(1500, 150, 150, "2026-07-10T03:00:20Z"),
+            ],
+        );
+        write_jsonl(
+            &page1,
+            &[
+                paginated_session_meta_at(
+                    CHILD_A_ID,
+                    Some(PARENT_ID),
+                    Some(CHILD_A_ID),
+                    Some(history_base_cutoff(&root, 3)),
+                    "2026-07-10T03:01:00Z",
+                ),
+                token_count_at(1700, 170, 170, "2026-07-10T03:01:01Z"),
+            ],
+        );
+        write_jsonl(
+            &page2,
+            &[
+                paginated_session_meta_at(
+                    CHILD_A_ID,
+                    Some(PARENT_ID),
+                    Some(CHILD_A_PAGE_1_ID),
+                    Some(history_base_cutoff(&page1, 2)),
+                    "2026-07-10T03:02:00Z",
+                ),
+                token_count_at(2000, 200, 200, "2026-07-10T03:02:01Z"),
+            ],
+        );
+        let files = [
+            parent.as_path(),
+            root.as_path(),
+            page1.as_path(),
+            page2.as_path(),
+        ];
+        let db = Database::memory()?;
+        for file in [
+            parent.as_path(),
+            root.as_path(),
+            page1.as_path(),
+            page2.as_path(),
+        ] {
+            let result = sync_test_file(&db, file, &files)?;
+            assert!(!result.deferred, "{} deferred: {result:?}", file.display());
+        }
+        assert_eq!(sync_test_file(&db, &page1, &files)?.imported, 0);
+        assert_eq!(sync_test_file(&db, &page2, &files)?.imported, 0);
+        let conn = lock_conn!(db.conn);
+        let (rows, input): (i64, i64) = conn.query_row("SELECT COUNT(*), COALESCE(SUM(input_tokens),0) FROM proxy_request_logs WHERE data_source='codex_session'", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        assert_eq!(rows, 4);
+        assert_eq!(input, 1000 + 500 + 200 + 300);
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_4_paginated_fork_page_defers_when_explicit_predecessor_is_missing(
+    ) -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let page = dir.path().join(format!(
+            "rollout-2026-07-10T03-00-00-{CHILD_A_ID}_{CHILD_A_PAGE_2_ID}.jsonl"
+        ));
+        write_jsonl(
+            &page,
+            &[
+                paginated_session_meta_at(
+                    CHILD_A_ID,
+                    Some(PARENT_ID),
+                    Some(CHILD_A_PAGE_1_ID),
+                    Some((100, 5000)),
+                    "2026-07-10T03:02:00Z",
+                ),
+                token_count_at(2000, 200, 200, "2026-07-10T03:02:01Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        let result = sync_test_file(&db, &page, &[&page])?;
+        assert!(result.deferred);
+        let conn = lock_conn!(db.conn);
+        let rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE data_source='codex_session'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(rows, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_4_paginated_fork_page_uses_exact_last_usage_without_predecessor(
+    ) -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let page = dir.path().join(format!(
+            "rollout-2026-07-10T03-00-00-{CHILD_A_ID}_{CHILD_A_PAGE_2_ID}.jsonl"
+        ));
+        write_jsonl(
+            &page,
+            &[
+                paginated_session_meta_at(
+                    CHILD_A_ID,
+                    Some(PARENT_ID),
+                    Some(CHILD_A_PAGE_1_ID),
+                    Some((100, 5000)),
+                    "2026-07-10T03:02:00Z",
+                ),
+                token_count_with_last_at(2000, 200, 200, 14, 4, 6, "test", "2026-07-10T03:02:01Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        let result = sync_test_file(&db, &page, &[&page])?;
+        assert_eq!((result.imported, result.deferred), (1, false));
+        let conn = lock_conn!(db.conn);
+        let input: i64 = conn.query_row(
+            "SELECT SUM(input_tokens) FROM proxy_request_logs WHERE data_source='codex_session'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(input, 14);
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_4_paginated_fork_page_counter_reset_counts_current_total() -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let root = rollout_path(dir.path(), CHILD_A_ID);
+        let page = dir.path().join(format!(
+            "rollout-2026-07-10T03-00-00-{CHILD_A_ID}_{CHILD_A_PAGE_1_ID}.jsonl"
+        ));
+        write_jsonl(
+            &root,
+            &[
+                session_meta(CHILD_A_ID),
+                token_count_at(1500, 150, 150, "2026-07-10T03:00:20Z"),
+            ],
+        );
+        write_jsonl(
+            &page,
+            &[
+                paginated_session_meta_at(
+                    CHILD_A_ID,
+                    Some(PARENT_ID),
+                    Some(CHILD_A_ID),
+                    Some(history_base_cutoff(&root, 2)),
+                    "2026-07-10T03:01:00Z",
+                ),
+                token_count_at(180, 18, 18, "2026-07-10T03:01:01Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        let files = [root.as_path(), page.as_path()];
+        assert_eq!(sync_test_file(&db, &root, &files)?.imported, 1);
+        assert_eq!(sync_test_file(&db, &page, &files)?.imported, 1);
+        let conn = lock_conn!(db.conn);
+        let (rows, input): (i64, i64) = conn.query_row("SELECT COUNT(*), SUM(input_tokens) FROM proxy_request_logs WHERE data_source='codex_session'", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        assert_eq!((rows, input), (2, 1680));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_4_paginated_cutoff_uses_prefix_and_componentwise_high_water() -> Result<(), AppError>
+    {
+        let dir = tempdir().unwrap();
+        let root = rollout_path(dir.path(), CHILD_A_ID);
+        let page = dir.path().join(format!(
+            "rollout-2026-07-10T03-00-00-{CHILD_A_ID}_{CHILD_A_PAGE_1_ID}.jsonl"
+        ));
+        let root_prefix = [
+            session_meta(CHILD_A_ID),
+            token_count_at(1000, 100, 100, "2026-07-10T03:00:10Z"),
+            // A stale rate-limit lane must not lower the inherited baseline.
+            token_count_at(700, 70, 70, "2026-07-10T03:00:11Z"),
+        ];
+        write_jsonl(&root, &root_prefix);
+        let cutoff = history_base_cutoff(&root, root_prefix.len() as u64);
+        write_jsonl(
+            &page,
+            &[
+                paginated_session_meta_at(
+                    CHILD_A_ID,
+                    Some(PARENT_ID),
+                    Some(CHILD_A_ID),
+                    Some(cutoff),
+                    "2026-07-10T03:01:00Z",
+                ),
+                token_count_at(1100, 110, 110, "2026-07-10T03:01:01Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        let files = [root.as_path(), page.as_path()];
+        assert_eq!(sync_test_file(&db, &root, &files)?.imported, 1);
+
+        // This later predecessor append is beyond the child's frozen cutoff.
+        use std::io::Write;
+        let appended = token_count_at(2000, 200, 200, "2026-07-10T03:00:12Z").to_string() + "\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&root)
+            .unwrap()
+            .write_all(appended.as_bytes())
+            .unwrap();
+        assert_eq!(sync_test_file(&db, &root, &files)?.imported, 1);
+        assert_eq!(sync_test_file(&db, &page, &files)?.imported, 1);
+
+        let conn = lock_conn!(db.conn);
+        let input: i64 = conn.query_row(
+            "SELECT SUM(input_tokens) FROM proxy_request_logs WHERE data_source='codex_session'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(input, 2100);
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_4_paginated_invalid_cutoff_defers_without_billing() -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let root = rollout_path(dir.path(), CHILD_A_ID);
+        let values = [
+            session_meta(CHILD_A_ID),
+            token_count_at(1000, 100, 100, "2026-07-10T03:00:10Z"),
+        ];
+        write_jsonl(&root, &values);
+        let page = dir.path().join(format!(
+            "rollout-2026-07-10T03-00-00-{CHILD_A_ID}_{CHILD_A_PAGE_1_ID}.jsonl"
+        ));
+        let valid_offset = fs::metadata(&root).unwrap().len();
+        let invalid_cutoffs = [
+            (values.len() as u64, valid_offset - 1),
+            ((values.len() + 1) as u64, valid_offset),
+        ];
+        for (end_ordinal_exclusive, end_byte_offset) in invalid_cutoffs {
+            write_jsonl(
+                &page,
+                &[
+                    paginated_session_meta_at(
+                        CHILD_A_ID,
+                        Some(PARENT_ID),
+                        Some(CHILD_A_ID),
+                        Some((end_ordinal_exclusive, end_byte_offset)),
+                        "2026-07-10T03:01:00Z",
+                    ),
+                    token_count_at(1200, 120, 120, "2026-07-10T03:01:01Z"),
+                ],
+            );
+            let db = Database::memory()?;
+            let result = sync_test_file(&db, &page, &[&root, &page])?;
+            assert!(
+                result.deferred,
+                "accepted cutoff ({end_ordinal_exclusive}, {end_byte_offset})"
+            );
+            let conn = lock_conn!(db.conn);
+            let rows: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE data_source='codex_session'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(rows, 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_total_only_counter_rollback_keeps_incremental_high_water() -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let file = rollout_path(dir.path(), PARENT_ID);
+        write_jsonl(
+            &file,
+            &[
+                session_meta(PARENT_ID),
+                token_count_at(100, 10, 10, "2026-07-10T03:00:01Z"),
+                token_count_at(40, 4, 4, "2026-07-10T03:00:02Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        let result = sync_test_file(&db, &file, &[&file])?;
+        assert_eq!(result.imported, 1);
+        let conn = lock_conn!(db.conn);
+        let (rows, input): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), SUM(input_tokens) FROM proxy_request_logs WHERE data_source='codex_session'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!((rows, input), (1, 100));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_4_paginated_marker_does_not_exempt_single_uuid_fork() -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let parent = rollout_path(dir.path(), PARENT_ID);
+        let child = dir
+            .path()
+            .join(format!("rollout-2026-07-10T03-00-00-{CHILD_B_ID}.jsonl"));
+        write_jsonl(
+            &parent,
+            &[
+                session_meta(PARENT_ID),
+                token_count_at(1000, 100, 100, "2026-07-10T03:00:10Z"),
+            ],
+        );
+        write_jsonl(
+            &child,
+            &[
+                paginated_session_meta_at(
+                    CHILD_B_ID,
+                    Some(PARENT_ID),
+                    Some(PARENT_ID),
+                    Some((2, 1)),
+                    "2026-07-10T03:01:00Z",
+                ),
+                token_count_at(1200, 120, 120, "2026-07-10T03:01:01Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        let result = sync_test_file(&db, &child, &[&parent, &child])?;
+        assert!(result.deferred);
+        let conn = lock_conn!(db.conn);
+        let rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE data_source='codex_session'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(rows, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_4_paginated_append_restart_uses_checkpoint_high_water() -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let root = rollout_path(dir.path(), CHILD_A_ID);
+        let page = dir.path().join(format!(
+            "rollout-2026-07-10T03-00-00-{CHILD_A_ID}_{CHILD_A_PAGE_1_ID}.jsonl"
+        ));
+        write_jsonl(
+            &root,
+            &[
+                session_meta(CHILD_A_ID),
+                token_count_at(1500, 150, 150, "2026-07-10T03:00:20Z"),
+            ],
+        );
+        write_jsonl(
+            &page,
+            &[
+                paginated_session_meta_at(
+                    CHILD_A_ID,
+                    Some(PARENT_ID),
+                    Some(CHILD_A_ID),
+                    Some(history_base_cutoff(&root, 2)),
+                    "2026-07-10T03:01:00Z",
+                ),
+                token_count_at(1700, 170, 170, "2026-07-10T03:01:01Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        let files = [root.as_path(), page.as_path()];
+        assert_eq!(sync_test_file(&db, &root, &files)?.imported, 1);
+        assert_eq!(sync_test_file(&db, &page, &files)?.imported, 1);
+        use std::io::Write;
+        let appended = token_count_at(1800, 180, 180, "2026-07-10T03:01:02Z").to_string() + "\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&page)
+            .unwrap()
+            .write_all(appended.as_bytes())
+            .unwrap();
+        assert_eq!(sync_test_file(&db, &page, &files)?.imported, 1);
+        assert_eq!(sync_test_file(&db, &page, &files)?.imported, 0);
+        let conn = lock_conn!(db.conn);
+        let (rows, input): (i64, i64) = conn.query_row("SELECT COUNT(*), SUM(input_tokens) FROM proxy_request_logs WHERE data_source='codex_session'", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        assert_eq!((rows, input), (3, 1800));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_4_paginated_old_billed_checkpoint_defers_without_replaying() -> Result<(), AppError>
+    {
+        let dir = tempdir().unwrap();
+        let root = rollout_path(dir.path(), CHILD_A_ID);
+        let page = dir.path().join(format!(
+            "rollout-2026-07-10T03-00-00-{CHILD_A_ID}_{CHILD_A_PAGE_1_ID}.jsonl"
+        ));
+        write_jsonl(
+            &root,
+            &[
+                session_meta(CHILD_A_ID),
+                token_count_at(1500, 150, 150, "2026-07-10T03:00:20Z"),
+            ],
+        );
+        write_jsonl(
+            &page,
+            &[
+                paginated_session_meta_at(
+                    CHILD_A_ID,
+                    Some(PARENT_ID),
+                    Some(CHILD_A_ID),
+                    Some(history_base_cutoff(&root, 2)),
+                    "2026-07-10T03:01:00Z",
+                ),
+                token_count_at(1700, 170, 170, "2026-07-10T03:01:01Z"),
+            ],
+        );
+        let db = Database::memory()?;
+        let files = [root.as_path(), page.as_path()];
+        sync_test_file(&db, &root, &files)?;
+        sync_test_file(&db, &page, &files)?;
+        let mut checkpoint = load_codex_checkpoint(&db, &page)?.unwrap();
+        checkpoint.state.parent = ParentResolution::Parent(PARENT_ID.to_string());
+        let checkpoint_json = serde_json::to_string(&checkpoint.state).unwrap();
+        lock_conn!(db.conn).execute(
+            "UPDATE codex_usage_file_checkpoints SET parser_state=?1 WHERE file_path=?2",
+            rusqlite::params![checkpoint_json, page.to_string_lossy().to_string()],
+        )?;
+        let alias_dir = dir.path().join("alias");
+        fs::create_dir(&alias_dir).unwrap();
+        let alias_page = alias_dir.join(page.file_name().unwrap());
+        fs::rename(&page, &alias_page).unwrap();
+        use std::io::Write;
+        let appended = token_count_at(1800, 180, 180, "2026-07-10T03:01:02Z").to_string() + "\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&alias_page)
+            .unwrap()
+            .write_all(appended.as_bytes())
+            .unwrap();
+        let files = [root.as_path(), alias_page.as_path()];
+        let result = sync_test_file(&db, &alias_page, &files)?;
+        assert!(result.deferred);
+        let conn = lock_conn!(db.conn);
+        let (rows, input): (i64, i64) = conn.query_row("SELECT COUNT(*), SUM(input_tokens) FROM proxy_request_logs WHERE data_source='codex_session'", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        assert_eq!((rows, input), (2, 1700));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_4_paginated_empty_checkpoint_reinitializes_when_predecessor_arrives(
+    ) -> Result<(), AppError> {
+        let dir = tempdir().unwrap();
+        let root = rollout_path(dir.path(), CHILD_A_ID);
+        let page = dir.path().join(format!(
+            "rollout-2026-07-10T03-00-00-{CHILD_A_ID}_{CHILD_A_PAGE_1_ID}.jsonl"
+        ));
+        let root_values = [
+            session_meta(CHILD_A_ID),
+            token_count_at(1500, 150, 150, "2026-07-10T03:00:20Z"),
+        ];
+        let root_cutoff = (2, jsonl_contents(&root_values).len() as u64);
+        write_jsonl(
+            &page,
+            &[paginated_session_meta_at(
+                CHILD_A_ID,
+                Some(PARENT_ID),
+                Some(CHILD_A_ID),
+                Some(root_cutoff),
+                "2026-07-10T03:01:00Z",
+            )],
+        );
+        let db = Database::memory()?;
+        assert!(!sync_test_file(&db, &page, &[&page])?.deferred);
+        write_jsonl(&root, &root_values);
+        use std::io::Write;
+        let appended = token_count_at(1700, 170, 170, "2026-07-10T03:01:01Z").to_string() + "\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&page)
+            .unwrap()
+            .write_all(appended.as_bytes())
+            .unwrap();
+        let files = [root.as_path(), page.as_path()];
+        assert_eq!(sync_test_file(&db, &page, &files)?.imported, 1);
+        let conn = lock_conn!(db.conn);
+        let (rows, input): (i64, i64) = conn.query_row("SELECT COUNT(*), SUM(input_tokens) FROM proxy_request_logs WHERE data_source='codex_session'", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        assert_eq!((rows, input), (1, 200));
+        Ok(())
     }
 
     #[test]

@@ -16,6 +16,18 @@ use serde::{Deserialize, Serialize};
 #[path = "codex_paginated_history_migration_recovery.rs"]
 mod migration_recovery;
 
+pub(crate) fn history_base_cutoff_is_consistent(
+    parent_path: &Path,
+    end_byte_offset: u64,
+    end_ordinal_exclusive: u64,
+) -> Result<bool, String> {
+    migration_recovery::history_base_boundary_is_consistent(
+        parent_path,
+        end_byte_offset,
+        end_ordinal_exclusive,
+    )
+}
+
 #[cfg(test)]
 static REPAIR_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 

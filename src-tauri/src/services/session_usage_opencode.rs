@@ -34,6 +34,8 @@ struct OpenCodeMessageData {
     cost: f64,
     model_id: String,
     timestamp_ms: i64,
+    // Offline logs have message timing, not a measured first-token timestamp.
+    latency_ms: i64,
 }
 
 struct OpenCodeMessageQueryResult {
@@ -302,6 +304,15 @@ fn parse_message_data(value: &serde_json::Value) -> Option<OpenCodeMessageData> 
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
+    let latency_ms = match value
+        .get("time")
+        .and_then(|t| t.get("completed"))
+        .and_then(|v| v.as_i64())
+    {
+        Some(completed) if timestamp_ms > 0 && completed > timestamp_ms => completed - timestamp_ms,
+        _ => 0,
+    };
+
     Some(OpenCodeMessageData {
         input_tokens,
         output_tokens,
@@ -311,6 +322,7 @@ fn parse_message_data(value: &serde_json::Value) -> Option<OpenCodeMessageData> 
         cost,
         model_id,
         timestamp_ms,
+        latency_ms,
     })
 }
 
@@ -421,7 +433,7 @@ fn insert_opencode_message(
             cache_read_cost,
             cache_creation_cost,
             total_cost,
-            0i64,                  // latency_ms
+            msg.latency_ms,
             Option::<i64>::None,   // first_token_ms
             200i64,                // status_code
             Option::<String>::None,// error_message
@@ -473,6 +485,63 @@ mod tests {
         assert!((data.cost - 0.0023113).abs() < 1e-10);
         assert_eq!(data.model_id, "deepseek-v4-pro");
         assert_eq!(data.timestamp_ms, 1779755333700);
+        assert_eq!(data.latency_ms, 16939);
+    }
+
+    #[test]
+    fn test_parse_message_data_latency_fallbacks() {
+        for time in [
+            serde_json::json!({"created": 1000}),
+            serde_json::json!({"created": 2000, "completed": 1000}),
+            serde_json::json!({"created": 1000, "completed": 1000}),
+            serde_json::json!({"completed": 1779755350639i64}),
+            serde_json::json!({"created": -1, "completed": i64::MAX}),
+            serde_json::json!({"created": "1000", "completed": 2000}),
+            serde_json::json!({"created": 1000, "completed": null}),
+        ] {
+            let value = serde_json::json!({
+                "tokens": {"input": 1000, "output": 200},
+                "modelID": "m",
+                "time": time,
+            });
+            assert_eq!(parse_message_data(&value).unwrap().latency_ms, 0);
+        }
+    }
+
+    #[test]
+    fn test_insert_opencode_preserves_latency_without_inventing_first_token() -> Result<(), AppError>
+    {
+        let db = Database::memory().unwrap();
+        let value = serde_json::json!({
+            "tokens": {"input": 1000, "output": 200, "reasoning": 10},
+            "cost": 0.25,
+            "modelID": "test-timing-model",
+            "time": {"created": 1000000, "completed": 1001500},
+        });
+        let msg = parse_message_data(&value).unwrap();
+        let request_id = "opencode_session:timing:message";
+        assert!(insert_opencode_message(&db, request_id, &msg, "timing").unwrap());
+        assert!(!insert_opencode_message(&db, request_id, &msg, "timing").unwrap());
+        let conn = lock_conn!(db.conn);
+        let row = conn
+            .query_row(
+                "SELECT latency_ms, first_token_ms, input_tokens, output_tokens, total_cost_usd, COUNT(*)
+                 FROM proxy_request_logs WHERE request_id = ?1",
+                [request_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, u32>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row, (1500, None, 1000, 210, "0.25".into(), 1));
+        Ok(())
     }
 
     #[test]

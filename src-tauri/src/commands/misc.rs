@@ -3,6 +3,7 @@
 use crate::app_config::AppType;
 use crate::init_status::{InitErrorPayload, SkillsMigrationPayload};
 use crate::services::ProviderService;
+use indexmap::IndexSet;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
@@ -1328,24 +1329,25 @@ fn try_get_version_wsl(
     ShellProbe::NotFound("WSL check not supported on this platform".to_string())
 }
 
-fn push_unique_path(paths: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf) {
+fn push_unique_path(paths: &mut IndexSet<std::path::PathBuf>, path: std::path::PathBuf) {
     if path.as_os_str().is_empty() {
         return;
     }
 
-    if !paths.iter().any(|existing| existing == &path) {
-        paths.push(path);
-    }
+    paths.insert(path);
 }
 
-fn push_env_single_dir(paths: &mut Vec<std::path::PathBuf>, value: Option<std::ffi::OsString>) {
+fn push_env_single_dir(
+    paths: &mut IndexSet<std::path::PathBuf>,
+    value: Option<std::ffi::OsString>,
+) {
     if let Some(raw) = value {
         push_unique_path(paths, std::path::PathBuf::from(raw));
     }
 }
 
 fn extend_from_path_list(
-    paths: &mut Vec<std::path::PathBuf>,
+    paths: &mut IndexSet<std::path::PathBuf>,
     value: Option<std::ffi::OsString>,
     suffix: Option<&str>,
 ) {
@@ -1361,7 +1363,7 @@ fn extend_from_path_list(
 }
 
 fn extend_from_cli_path_env(
-    paths: &mut Vec<std::path::PathBuf>,
+    paths: &mut IndexSet<std::path::PathBuf>,
     value: Option<std::ffi::OsString>,
 ) {
     if let Some(raw) = value {
@@ -1400,7 +1402,7 @@ fn is_windows_app_execution_alias_dir(path: &Path) -> bool {
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn push_env_child_dir(
-    paths: &mut Vec<std::path::PathBuf>,
+    paths: &mut IndexSet<std::path::PathBuf>,
     value: Option<std::ffi::OsString>,
     child: &str,
 ) {
@@ -1411,7 +1413,7 @@ fn push_env_child_dir(
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn extend_existing_child_search_paths(
-    paths: &mut Vec<std::path::PathBuf>,
+    paths: &mut IndexSet<std::path::PathBuf>,
     base: &Path,
     suffix: Option<&str>,
 ) {
@@ -1433,7 +1435,7 @@ fn extend_existing_child_search_paths(
 }
 
 #[cfg(target_os = "windows")]
-fn extend_windows_cli_manager_search_paths(paths: &mut Vec<std::path::PathBuf>, home: &Path) {
+fn extend_windows_cli_manager_search_paths(paths: &mut IndexSet<std::path::PathBuf>, home: &Path) {
     push_env_single_dir(paths, std::env::var_os("PNPM_HOME"));
     push_env_child_dir(paths, std::env::var_os("VOLTA_HOME"), "bin");
     push_env_single_dir(paths, std::env::var_os("NVM_SYMLINK"));
@@ -1478,7 +1480,7 @@ fn opencode_extra_search_paths(
     xdg_bin_dir: Option<std::ffi::OsString>,
     gopath: Option<std::ffi::OsString>,
 ) -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
+    let mut paths = IndexSet::new();
 
     push_env_single_dir(&mut paths, opencode_install_dir);
     push_env_single_dir(&mut paths, xdg_bin_dir);
@@ -1492,7 +1494,7 @@ fn opencode_extra_search_paths(
 
     extend_from_path_list(&mut paths, gopath, Some("bin"));
 
-    paths
+    paths.into_iter().collect()
 }
 
 /// Grok's official installer writes the launcher to `$GROK_BIN_DIR` or, by
@@ -1503,12 +1505,12 @@ fn grok_extra_search_paths(
     home: &Path,
     grok_bin_dir: Option<std::ffi::OsString>,
 ) -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
+    let mut paths = IndexSet::new();
     push_env_single_dir(&mut paths, grok_bin_dir);
     if !home.as_os_str().is_empty() {
         push_unique_path(&mut paths, home.join(".grok").join("bin"));
     }
-    paths
+    paths.into_iter().collect()
 }
 
 fn tool_executable_candidates(tool: &str, dir: &Path) -> Vec<std::path::PathBuf> {
@@ -1531,7 +1533,7 @@ fn tool_executable_candidates(tool: &str, dir: &Path) -> Vec<std::path::PathBuf>
     }
 }
 
-fn extend_mise_node_search_paths(paths: &mut Vec<std::path::PathBuf>, home: &Path) {
+fn extend_mise_node_search_paths(paths: &mut IndexSet<std::path::PathBuf>, home: &Path) {
     if home.as_os_str().is_empty() {
         return;
     }
@@ -1663,7 +1665,8 @@ fn build_tool_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
 
     // 常见的安装路径（原生安装优先）
-    let mut search_paths: Vec<std::path::PathBuf> = Vec::new();
+    // Preserve search priority without scanning all previous paths for every insertion.
+    let mut search_paths = IndexSet::new();
     if tool == "grok" {
         let extra_paths = grok_extra_search_paths(&home, std::env::var_os("GROK_BIN_DIR"));
         for path in extra_paths {
@@ -1796,7 +1799,7 @@ fn build_tool_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
 
     let path_env = effective_path_os();
     extend_from_cli_path_env(&mut search_paths, path_env);
-    search_paths
+    search_paths.into_iter().collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -6388,7 +6391,7 @@ mod tests {
 
         let path_env = std::env::join_paths([first.clone(), second.clone(), first.clone()])
             .expect("test path env should be joinable");
-        let mut paths = vec![first.clone()];
+        let mut paths = IndexSet::from([first.clone()]);
 
         extend_from_cli_path_env(&mut paths, Some(path_env));
 
@@ -6403,7 +6406,7 @@ mod tests {
         let bin = base.join("25.8.0").join("bin");
         std::fs::create_dir_all(&bin).expect("version bin should be created");
 
-        let mut paths = Vec::new();
+        let mut paths = IndexSet::new();
         extend_existing_child_search_paths(&mut paths, &base, Some("bin"));
 
         assert!(paths.contains(&bin));
@@ -6412,12 +6415,15 @@ mod tests {
     #[test]
     fn env_child_dir_appends_child_and_dedupes() {
         let base = std::ffi::OsString::from("/custom/toolchain");
-        let mut paths = Vec::new();
+        let mut paths = IndexSet::new();
 
         push_env_child_dir(&mut paths, Some(base.clone()), "bin");
         push_env_child_dir(&mut paths, Some(base), "bin");
 
-        assert_eq!(paths, vec![PathBuf::from("/custom/toolchain").join("bin")]);
+        assert_eq!(
+            paths.into_iter().collect::<Vec<_>>(),
+            vec![PathBuf::from("/custom/toolchain").join("bin")]
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -6526,11 +6532,75 @@ mod tests {
             .join("bin");
         std::fs::create_dir_all(&node_bin).expect("node bin should be created");
 
-        let mut paths = Vec::new();
+        let mut paths = IndexSet::new();
         extend_mise_node_search_paths(&mut paths, home);
 
         assert!(paths.contains(&home.join(".local/share/mise/shims")));
         assert!(paths.contains(&node_bin));
+    }
+
+    #[test]
+    fn unique_search_paths_preserve_order_and_skip_empty_entries() {
+        let first = PathBuf::from("first/bin");
+        let second = PathBuf::from("second/bin");
+        let third = PathBuf::from("third/bin");
+        let mut paths = IndexSet::new();
+
+        for path in [
+            PathBuf::new(),
+            first.clone(),
+            second.clone(),
+            first.clone(),
+            PathBuf::new(),
+            third.clone(),
+            second.clone(),
+        ] {
+            push_unique_path(&mut paths, path);
+        }
+
+        assert_eq!(
+            paths.into_iter().collect::<Vec<_>>(),
+            vec![first, second, third]
+        );
+    }
+
+    #[test]
+    fn unique_search_paths_keep_path_equality_and_first_spelling() {
+        let first = PathBuf::from("node//bin");
+        let equivalent = PathBuf::from("node/./bin");
+        let parent = PathBuf::from("node/../node/bin");
+        let different_case = PathBuf::from("Node/bin");
+        assert_eq!(first, equivalent);
+        let mut paths = IndexSet::new();
+
+        for path in [
+            first.clone(),
+            equivalent,
+            parent.clone(),
+            different_case.clone(),
+        ] {
+            push_unique_path(&mut paths, path);
+        }
+
+        assert_eq!(paths[0].as_os_str(), first.as_os_str());
+        assert_eq!(
+            paths.into_iter().collect::<Vec<_>>(),
+            vec![first, parent, different_case]
+        );
+    }
+
+    #[test]
+    fn unique_search_paths_handle_many_entries_and_late_duplicates() {
+        let expected: Vec<_> = (0..4096)
+            .map(|index| PathBuf::from(format!("multishells/{index}/bin")))
+            .collect();
+        let mut paths = IndexSet::new();
+
+        for path in expected.iter().chain(expected.iter().rev()) {
+            push_unique_path(&mut paths, path.clone());
+        }
+
+        assert_eq!(paths.into_iter().collect::<Vec<_>>(), expected);
     }
 
     #[cfg(not(target_os = "windows"))]
