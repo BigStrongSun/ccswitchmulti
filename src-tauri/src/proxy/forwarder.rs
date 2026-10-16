@@ -11698,20 +11698,22 @@ mod tests {
     }
 
     #[test]
-    /// 官方 Codex 的 User-Agent 已表达构建版本，不能额外合成 version 头。
+    /// HTTP 转发保留真实客户端身份，不从 User-Agent 合成影响模型准入的 version 头。
     fn codex_oauth_identity_does_not_synthesize_version_from_native_user_agent() {
         let mut headers = HeaderMap::new();
         headers.insert("originator", HeaderValue::from_static("Codex Desktop"));
         headers.insert(
             http::header::USER_AGENT,
             HeaderValue::from_static(
-                "Codex Desktop/0.151.0 (Windows 11; x86_64) codex-terminal/1.0",
+                "Codex Desktop/0.158.0-alpha.2.1 (Windows 11; x86_64) codex-terminal/1.0",
             ),
         );
 
+        let original = headers.clone();
         enforce_codex_oauth_originator(&mut headers, true, true);
 
-        assert!(headers.get("version").is_none());
+        assert_eq!(headers, original);
+        assert!(!headers.contains_key("version"));
     }
 
     #[test]
@@ -11790,7 +11792,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_official_identity_strips_stale_version_even_with_trusted_user_agent() {
+    fn codex_official_identity_strips_stale_version_preserving_other_headers() {
         let mut headers = HeaderMap::new();
         headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
         headers.insert(
@@ -11798,10 +11800,24 @@ mod tests {
             HeaderValue::from_static("codex_cli_rs/0.151.0 (Windows 11; x86_64) terminal/1.0"),
         );
         headers.insert("version", HeaderValue::from_static("0.150.2"));
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        headers.insert(
+            "chatgpt-account-id",
+            HeaderValue::from_static("test-account"),
+        );
+        headers.insert(
+            "x-oai-attestation",
+            HeaderValue::from_static("test-attestation"),
+        );
+        let mut expected = headers.clone();
+        expected.remove("version");
 
         enforce_codex_oauth_originator(&mut headers, true, true);
 
-        assert!(headers.get("version").is_none());
+        assert_eq!(headers, expected);
     }
 
     #[test]
