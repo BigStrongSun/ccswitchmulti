@@ -4,9 +4,9 @@ use std::time::Duration;
 use tokio::sync::{watch, Mutex};
 
 use crate::codex_desktop::{
-    candidate_debug_ports, detect_running_codex_main_process, list_cdp_targets,
-    load_cc_switch_model_catalog_projection, pick_codex_page_targets,
-    try_inject_on_candidate_ports, DEFAULT_CODEX_DEBUG_PORT,
+    candidate_debug_ports, detect_running_codex_main_process, discover_codex_page_targets,
+    load_cc_switch_model_catalog_projection, try_inject_on_candidate_ports_for_work,
+    CodexRendererWork, DEFAULT_CODEX_DEBUG_PORT,
 };
 
 const GUARDIAN_CHECK_INTERVAL: Duration = Duration::from_secs(3);
@@ -34,6 +34,7 @@ struct GuardianInner {
 /// 守护的外部句柄；丢弃后守护自动停止。
 pub(crate) struct GuardianHandle {
     shutdown_tx: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
     pub(crate) status: Arc<Mutex<CodexGuardianStatus>>,
 }
 
@@ -62,19 +63,33 @@ pub(crate) fn start_codex_guardian() -> GuardianHandle {
 
     let s = status.clone();
     let i = inner.clone();
-    tokio::spawn(async move {
-        guardian_loop(s, i, shutdown_rx).await;
+    let work = CodexRendererWork::new();
+    let task = tokio::spawn(async move {
+        match crate::codex_desktop::unlock_codex_model_picker_for_work(work).await {
+            Ok(result) if result.injected => log::info!(
+                "Codex Desktop 模型菜单白名单已注入，models={}",
+                result.model_count
+            ),
+            Ok(result) => log::warn!("Codex Desktop 模型白名单未注入: {}", result.message),
+            Err(error) => log::warn!("Codex Desktop 模型白名单注入失败: {error}"),
+        }
+        guardian_loop(s, i, shutdown_rx, work).await;
     });
 
     GuardianHandle {
         shutdown_tx,
+        task,
         status,
     }
 }
 
 impl GuardianHandle {
-    pub(crate) fn stop(self) {
+    pub(crate) async fn stop_and_wait(self) {
+        crate::codex_desktop::cancel_codex_renderer_work();
         let _ = self.shutdown_tx.send(true);
+        if let Err(error) = self.task.await {
+            log::warn!("Codex guardian stopped unexpectedly: {error}");
+        }
     }
 }
 
@@ -82,7 +97,21 @@ async fn guardian_loop(
     status: Arc<Mutex<CodexGuardianStatus>>,
     inner: Arc<Mutex<GuardianInner>>,
     mut shutdown: watch::Receiver<bool>,
+    work: CodexRendererWork,
 ) {
+    #[cfg(test)]
+    if std::env::var_os("CC_SWITCH_TEST_HOME").is_some()
+        && !crate::codex_desktop::isolated_cdp_fixture_enabled()
+    {
+        loop {
+            let stopped = *shutdown.borrow();
+            if stopped || shutdown.changed().await.is_err() {
+                break;
+            }
+        }
+        status.lock().await.active = false;
+        return;
+    }
     loop {
         if *shutdown.borrow() {
             let mut s = status.lock().await;
@@ -92,7 +121,7 @@ async fn guardian_loop(
             return;
         }
 
-        run_guardian_cycle(&status, &inner).await;
+        run_guardian_cycle(&status, &inner, work).await;
 
         tokio::select! {
             _ = tokio::time::sleep(GUARDIAN_CHECK_INTERVAL) => {},
@@ -110,7 +139,11 @@ async fn guardian_loop(
 async fn run_guardian_cycle(
     status: &Arc<Mutex<CodexGuardianStatus>>,
     inner: &Arc<Mutex<GuardianInner>>,
+    work: CodexRendererWork,
 ) {
+    if work.check().is_err() {
+        return;
+    }
     // 1. 检查 Codex 主进程是否在运行。
     let running = detect_running_codex_main_process();
     if running.is_none() {
@@ -133,20 +166,13 @@ async fn run_guardian_cycle(
     let mut current_ids: Vec<String> = Vec::new();
     let mut cdp_available = false;
 
-    for port in &ports {
-        match list_cdp_targets(*port).await {
-            Ok(targets) => match pick_codex_page_targets(&targets, *port) {
-                Ok(pages) => {
-                    cdp_available = true;
-                    for t in &pages {
-                        if !current_ids.contains(&t.id) {
-                            current_ids.push(t.id.clone());
-                        }
-                    }
-                }
-                Err(_) => continue,
-            },
-            Err(_) => continue,
+    let Ok(targets) = work.discover(discover_codex_page_targets(&ports)).await else {
+        return;
+    };
+    for (_, target) in targets {
+        cdp_available = true;
+        if !current_ids.contains(&target.id) {
+            current_ids.push(target.id);
         }
     }
 
@@ -240,7 +266,7 @@ async fn run_guardian_cycle(
         };
     }
 
-    match try_inject_on_candidate_ports(&catalog, &ports).await {
+    match try_inject_on_candidate_ports_for_work(&catalog, &ports, work).await {
         Some(result) if result.injected => {
             let mut guard = inner.lock().await;
             // 记录注入成功的 target
@@ -301,6 +327,55 @@ fn guardian_should_inject(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stopping_guardian_cancels_real_cycle_discovery() {
+        use tokio::io::AsyncReadExt;
+        let home = tempfile::tempdir().unwrap();
+        let original_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+        std::fs::write(
+            crate::codex_config::get_codex_config_path(),
+            "model_provider='fixture'\n[model_providers.fixture]\nbase_url='http://127.0.0.1:1'\n",
+        )
+        .unwrap();
+        let initial_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let initial = initial_calls.clone();
+        *crate::codex_desktop::TEST_RENDERER_UNLOCK.lock().unwrap() = Some(Arc::new(move || {
+            initial.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                Err("initial picker deliberately completed before the cycle".to_string())
+            })
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        *crate::codex_desktop::TEST_CDP_PORTS.lock().unwrap() = Some(vec![port]);
+        *crate::codex_desktop::TEST_CODEX_RUNNING.lock().unwrap() = Some(true);
+        let (entered, received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            socket.read(&mut request).await.unwrap();
+            entered.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let guardian = start_codex_guardian();
+        let entered = tokio::time::timeout(Duration::from_secs(3), received).await;
+        let stopped = tokio::time::timeout(Duration::from_secs(1), guardian.stop_and_wait()).await;
+        server.abort();
+        *crate::codex_desktop::TEST_CDP_PORTS.lock().unwrap() = None;
+        *crate::codex_desktop::TEST_CODEX_RUNNING.lock().unwrap() = None;
+        *crate::codex_desktop::TEST_RENDERER_UNLOCK.lock().unwrap() = None;
+        match original_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        assert_eq!(initial_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        entered.unwrap().unwrap();
+        stopped.expect("real guardian cycle discovery must be cancellable");
+    }
 
     #[test]
     fn guardian_reinjects_existing_targets_when_catalog_changes() {

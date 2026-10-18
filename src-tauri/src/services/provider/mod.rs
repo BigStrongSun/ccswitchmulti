@@ -51,11 +51,10 @@ use live::{
 };
 use usage::validate_usage_script;
 
-/// The built-in Codex official provider is safe to select during takeover:
-/// Codex keeps ownership of its ChatGPT login and the proxy only forwards the
-/// authenticated request. Other official providers retain the existing block.
+/// Explicitly managed official modes may use takeover; native mode releases it.
 pub fn official_provider_supports_proxy_takeover(app_type: &AppType, provider: &Provider) -> bool {
     matches!(app_type, AppType::Codex)
+        && !provider.uses_native_codex()
         && crate::proxy::providers::is_codex_official_provider(provider)
 }
 
@@ -182,6 +181,7 @@ fn validate_codex_manual_protocol_settings(provider: &Provider) -> Result<(), Ap
 /// 当前供应商非官方（或不存在）时为 no-op：注入只作用于官方配置，
 /// 第三方 live 配置不受开关影响。
 pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, AppError> {
+    let _guard = block_on_tauri_runtime(state.proxy_service.lock_switch_for_app("codex"));
     let current_id = ProviderService::current(state, AppType::Codex)?;
     if current_id.is_empty() {
         return Ok(false);
@@ -190,7 +190,7 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
     let Some(provider) = providers.get(&current_id) else {
         return Ok(false);
     };
-    if provider.category.as_deref() != Some("official") {
+    if provider.category.as_deref() != Some("official") || provider.uses_native_codex() {
         return Ok(false);
     }
 
@@ -531,6 +531,9 @@ mod tests {
         original_home: Option<String>,
         #[cfg(windows)]
         original_local_app_data: Option<String>,
+        #[cfg(windows)]
+        original_app_data: Option<String>,
+        original_hermes_home: Option<String>,
         original_userprofile: Option<String>,
         original_test_home: Option<String>,
     }
@@ -541,23 +544,34 @@ mod tests {
             let original_home = env::var("HOME").ok();
             #[cfg(windows)]
             let original_local_app_data = env::var("LOCALAPPDATA").ok();
+            #[cfg(windows)]
+            let original_app_data = env::var("APPDATA").ok();
+            let original_hermes_home = env::var("HERMES_HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
             let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
 
             env::set_var("HOME", dir.path());
             #[cfg(windows)]
             env::set_var("LOCALAPPDATA", dir.path().join("AppData").join("Local"));
+            #[cfg(windows)]
+            env::set_var("APPDATA", dir.path().join("AppData").join("Roaming"));
+            env::set_var("HERMES_HOME", dir.path().join(".hermes"));
             env::set_var("USERPROFILE", dir.path());
             env::set_var("CC_SWITCH_TEST_HOME", dir.path());
 
-            Self {
+            let home = Self {
                 dir,
                 original_home,
                 #[cfg(windows)]
                 original_local_app_data,
+                #[cfg(windows)]
+                original_app_data,
+                original_hermes_home,
                 original_userprofile,
                 original_test_home,
-            }
+            };
+            crate::settings::reload_settings().expect("load isolated settings cache");
+            home
         }
     }
 
@@ -574,6 +588,15 @@ mod tests {
                     Some(value) => env::set_var("LOCALAPPDATA", value),
                     None => env::remove_var("LOCALAPPDATA"),
                 }
+                match &self.original_app_data {
+                    Some(value) => env::set_var("APPDATA", value),
+                    None => env::remove_var("APPDATA"),
+                }
+            }
+
+            match &self.original_hermes_home {
+                Some(value) => env::set_var("HERMES_HOME", value),
+                None => env::remove_var("HERMES_HOME"),
             }
 
             match &self.original_userprofile {
@@ -585,6 +608,7 @@ mod tests {
                 Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
                 None => env::remove_var("CC_SWITCH_TEST_HOME"),
             }
+            let _ = crate::settings::reload_settings();
         }
     }
 
@@ -615,26 +639,117 @@ mod tests {
 
     fn with_test_home<T>(test: impl FnOnce(&AppState, &Path) -> T) -> T {
         let _guard = test_guard();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
+        let home = TempHome::new();
 
         let db = Arc::new(Database::memory().expect("in-memory database"));
         let state = AppState::new(db);
-        let result = test(&state, temp.path());
+        test(&state, home.dir.path())
+    }
 
-        match old_test_home {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
-        match old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
+    #[test]
+    #[serial]
+    fn test_home_restores_outer_environment_and_settings_cache() {
+        let outer = TempHome::new();
+        let mut preferences = crate::settings::get_settings();
+        preferences.language = Some("ja".to_string());
+        crate::settings::update_settings(preferences).expect("seed outer preferences");
+        let outer_hermes = crate::hermes_config::get_hermes_dir();
 
-        result
+        with_test_home(|_, inner| {
+            assert!(crate::hermes_config::get_hermes_dir().starts_with(inner));
+            assert!(crate::config::get_app_config_dir().starts_with(inner));
+            assert_ne!(
+                crate::settings::get_settings().language.as_deref(),
+                Some("ja")
+            );
+        });
+
+        assert_eq!(crate::config::get_home_dir(), outer.dir.path());
+        assert_eq!(crate::hermes_config::get_hermes_dir(), outer_hermes);
+        assert_eq!(
+            crate::settings::get_settings().language.as_deref(),
+            Some("ja")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn native_official_save_and_automatic_sync_preserve_codex_owned_files() {
+        with_test_home(|state, _| {
+            crate::settings::reload_settings().expect("reload isolated settings");
+            let mut provider = Provider::with_id(
+                crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+                "OpenAI Official".to_string(),
+                json!({"auth": {}, "config": "model_reasoning_effort = \"low\"\napproval_policy = \"untrusted\"\n"}),
+                None,
+            );
+            provider.category = Some("official".to_string());
+            state
+                .db
+                .save_provider("codex", &provider)
+                .expect("save provider");
+            state
+                .db
+                .set_current_provider("codex", &provider.id)
+                .expect("select provider");
+            crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id)).unwrap();
+            let config = crate::codex_config::get_codex_config_path();
+            let live = "# written by Codex\nmodel = \"native-user-choice\"\nmodel_reasoning_effort = \"high\"\napproval_policy = \"never\"\n[features]\nmemories = true\n[future_native_options]\ncustom_value = \"preserve\"\n";
+            crate::config::write_text_file(&config, live).expect("write native config");
+            let auth = crate::codex_config::get_codex_auth_path();
+            let login = b"{\"tokens\":{\"refresh_token\":\"native-login\"}}";
+            crate::config::atomic_write(&auth, login).expect("write native login");
+
+            ProviderService::sync_current_provider_for_app(state, AppType::Codex).unwrap();
+            ProviderService::update(state, AppType::Codex, None, provider.clone()).unwrap();
+            McpService::sync_all_enabled_automatically(state).unwrap();
+            let settings = crate::env_injection::EnvInjectionSettings {
+                enabled: true,
+                targets: crate::env_injection::EnvInjectionTargets {
+                    claude: false,
+                    codex: true,
+                },
+                variables: std::collections::BTreeMap::from([(
+                    "CCSM_TEST_NATIVE".to_string(),
+                    "injected".to_string(),
+                )]),
+            };
+            crate::env_injection::sync_to_live_configs_automatically(&settings, state);
+
+            assert_eq!(fs::read(&config).unwrap(), live.as_bytes());
+            assert_eq!(fs::read(&auth).unwrap(), login);
+            assert_eq!(
+                state
+                    .db
+                    .get_provider_by_id(&provider.id, "codex")
+                    .unwrap()
+                    .unwrap()
+                    .meta
+                    .unwrap()
+                    .codex_local_model_mapping,
+                Some(false)
+            );
+            let user_config = "# configured directly in Codex after release\nmodel = \"user-model\"\nmodel_provider = \"user-provider\"\n[model_providers.user-provider]\nbase_url = \"https://user.example/v1\"\nwire_api = \"responses\"\n[future_native_options]\ncustom_value = \"preserve\"\n";
+            crate::config::write_text_file(&config, user_config).unwrap();
+            ProviderService::sync_current_provider_for_app(state, AppType::Codex).unwrap();
+            ProviderService::update(state, AppType::Codex, None, provider.clone()).unwrap();
+            block_on_tauri_runtime(
+                state
+                    .proxy_service
+                    .reconcile_codex_owned_projection_on_startup(),
+            )
+            .unwrap();
+            assert_eq!(fs::read(&config).unwrap(), user_config.as_bytes());
+
+            ProviderService::switch(state, AppType::Codex, &provider.id).unwrap();
+            let selected = fs::read_to_string(&config).unwrap();
+            let selected: toml::Value = toml::from_str(&selected).unwrap();
+            assert_eq!(selected["model_provider"].as_str(), Some("openai"));
+            assert_eq!(
+                selected["future_native_options"]["custom_value"].as_str(),
+                Some("preserve")
+            );
+        });
     }
 
     fn codex_settings(base_url: &str, api_key: &str) -> Value {
@@ -6039,6 +6154,34 @@ requires_openai_auth = true
 }
 
 impl ProviderService {
+    pub(crate) fn current_codex_uses_native(state: &AppState) -> Result<bool, AppError> {
+        Self::codex_database_uses_native(&state.db)
+    }
+
+    /// Transport intent is application state, independent of model mapping and
+    /// the provider's native auxiliary/configuration ownership boundary.
+    pub(crate) fn current_codex_transport_uses_native(state: &AppState) -> Result<bool, AppError> {
+        Self::codex_database_transport_uses_native(&state.db)
+    }
+
+    pub(crate) fn codex_database_transport_uses_native(
+        db: &crate::database::Database,
+    ) -> Result<bool, AppError> {
+        let enabled = block_on_tauri_runtime(db.get_proxy_config_for_app("codex"))?.enabled;
+        Ok(Self::codex_database_uses_native(db)? && !enabled)
+    }
+
+    pub(crate) fn codex_database_uses_native(
+        db: &crate::database::Database,
+    ) -> Result<bool, AppError> {
+        let Some(id) = crate::settings::get_effective_current_provider(db, &AppType::Codex)? else {
+            return Ok(false);
+        };
+        Ok(db
+            .get_provider_by_id(&id, "codex")?
+            .is_some_and(|provider| provider.uses_native_codex()))
+    }
+
     /// Move legacy Router-owned official authentication into the canonical
     /// OpenAI Official Provider. Conflicts are reported without any write;
     /// consistent changes are committed as one multi-Provider transaction.
@@ -6054,6 +6197,19 @@ impl ProviderService {
             .as_ref()
             .and_then(|meta| meta.codex_official_auth.clone())
             .map(normalize_codex_official_auth_config);
+
+        // Opening an editor must not inherit an inactive Router's managed login
+        // into the native Provider currently selected by the user.
+        if existing_auth.is_none()
+            && official.uses_native_codex()
+            && Self::current_codex_uses_native(state)?
+        {
+            return Ok(CodexOfficialAuthMigrationStatus {
+                state: CodexOfficialAuthMigrationState::AlreadyCurrent,
+                inherited_auth: Some(Default::default()),
+                conflicting_router_ids: Vec::new(),
+            });
+        }
 
         let mut router_policies = Vec::<(String, crate::provider::CodexOfficialAuthConfig)>::new();
         let mut conflicting_router_ids = Vec::<String>::new();
@@ -6361,25 +6517,14 @@ impl ProviderService {
     /// 请求转换/分流后再访问真实上游。若这里漏判，Codex 会直接请求上游 `/responses`，
     /// 例如 DeepSeek 官方 API 会返回 404。
     pub(crate) fn codex_provider_requires_local_proxy(provider: &Provider) -> bool {
+        if provider.uses_native_codex() {
+            return false;
+        }
         if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
             return true;
         }
 
-        let Some(routing) = provider.settings_config.get("codexRouting") else {
-            return false;
-        };
-
-        let enabled = routing
-            .get("enabled")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let has_routes = routing
-            .get("routes")
-            .and_then(|value| value.as_array())
-            .map(|routes| !routes.is_empty())
-            .unwrap_or(false);
-
-        enabled || has_routes
+        provider.codex_local_routing_enabled()
     }
 
     /// List all providers for an app type
@@ -6711,6 +6856,13 @@ impl ProviderService {
             }
             return pi::update(state, original_id, provider);
         }
+        let _switch_guard = if app_type == AppType::Codex {
+            Some(block_on_tauri_runtime(
+                state.proxy_service.lock_switch_for_app("codex"),
+            ))
+        } else {
+            None
+        };
         let original_id = original_id.unwrap_or(provider.id.as_str()).to_string();
         let existing_provider = state
             .db
@@ -6914,7 +7066,9 @@ impl ProviderService {
 
         if is_current && !Self::is_codex_schema_v2_router(&app_type, &provider) {
             let outcome = sync_live_for_provider_respecting_takeover(state, &app_type, &provider)?;
-            if outcome == LiveSyncOutcome::WroteLive {
+            if outcome == LiveSyncOutcome::WroteLive
+                && (app_type != AppType::Codex || !provider.uses_native_codex())
+            {
                 // 重写 live 后只重投影本应用的 MCP：全量 sync_all_enabled 会把
                 // 无关应用的 live 损坏（如 ~/.claude.json 坏 JSON）牵连进保存
                 // 流程。走到这里 DB 与 live 都已按新配置落盘，保存事实上已
@@ -7388,6 +7542,12 @@ impl ProviderService {
     ) -> Result<Provider, AppError> {
         Self::ensure_codex_provider_is_user_operable(app_type, &provider)?;
         Self::normalize_provider_if_claude(app_type, &mut provider);
+        if *app_type == AppType::Codex && provider.uses_native_codex() {
+            let meta = provider.meta.get_or_insert_with(Default::default);
+            meta.codex_local_model_mapping = Some(false);
+            meta.codex_official_auth
+                .get_or_insert_with(Default::default);
+        }
         let te_descriptor = if *app_type == AppType::OpenClaw && provider.is_token_exchange() {
             if !provider.has_token_exchange_descriptor() {
                 let registered = state
@@ -7635,7 +7795,7 @@ impl ProviderService {
     }
 
     fn is_codex_schema_v2_router(app_type: &AppType, provider: &Provider) -> bool {
-        if *app_type != AppType::Codex {
+        if *app_type != AppType::Codex || provider.uses_native_codex() {
             return false;
         }
         provider
@@ -7656,7 +7816,7 @@ impl ProviderService {
         app_type: &AppType,
         provider: &Provider,
     ) -> Result<(), AppError> {
-        if *app_type != AppType::Codex {
+        if *app_type != AppType::Codex || provider.uses_native_codex() {
             return Ok(());
         }
         let Some(routing) = provider
@@ -8214,9 +8374,10 @@ impl ProviderService {
 
         // Block switching to official providers when proxy takeover is active.
         // Using a proxy with official APIs (Anthropic/OpenAI/Google) may cause account bans.
-        if should_hot_switch
-            && _provider.category.as_deref() == Some("official")
-            && !official_provider_supports_proxy_takeover(&app_type, _provider)
+        if (matches!(app_type, AppType::Codex) && _provider.uses_native_codex())
+            || (should_hot_switch
+                && _provider.category.as_deref() == Some("official")
+                && !official_provider_supports_proxy_takeover(&app_type, _provider))
         {
             log::info!(
                 "provider switch 正在退出 {} takeover：target_provider={} category=official has_backup={} live_taken_over={}",
@@ -8227,21 +8388,39 @@ impl ProviderService {
             );
             // 官方兜底 provider 不是走本地代理热切，而是退出当前 app 的接管态后
             // 写回干净 live 配置；否则 Codex 会继续命中旧的本地 router。
-            block_on_tauri_runtime(
-                state
-                    .proxy_service
-                    .disable_takeover_for_app_after_switch_lock(&app_type),
-            )
+            block_on_tauri_runtime(async {
+                if matches!(app_type, AppType::Codex) && _provider.uses_native_codex() {
+                    state
+                        .proxy_service
+                        .disable_native_codex_after_switch_lock()
+                        .await
+                } else {
+                    state
+                        .proxy_service
+                        .disable_takeover_for_app_after_switch_lock(&app_type)
+                        .await
+                }
+            })
             .map_err(|e| AppError::Message(format!("关闭代理接管失败: {e}")))?;
 
             crate::settings::set_current_provider(&app_type, Some(id))?;
             state.db.set_current_provider(app_type.as_str(), id)?;
             if matches!(app_type, AppType::Codex) {
-                write_codex_config_only_with_common_config(state.db.as_ref(), _provider)?;
+                if _provider.uses_native_codex() {
+                    crate::codex_config::select_native_codex_live_config()?;
+                } else {
+                    write_codex_config_only_with_common_config(state.db.as_ref(), _provider)?;
+                }
             } else {
                 write_live_with_common_config(state.db.as_ref(), &app_type, _provider)?;
             }
-            McpService::sync_all_enabled(state)?;
+            if !matches!(app_type, AppType::Codex) || !_provider.uses_native_codex() {
+                if app_type == AppType::Codex {
+                    McpService::sync_all_enabled(state)?;
+                } else {
+                    McpService::sync_all_enabled_automatically(state)?;
+                }
+            }
             return Ok(SwitchResult::default());
         }
 
@@ -8621,6 +8800,13 @@ impl ProviderService {
         if app_type.is_additive_mode() {
             return sync_current_provider_for_app_to_live(state, &app_type);
         }
+        let _switch_guard = if app_type == AppType::Codex {
+            Some(block_on_tauri_runtime(
+                state.proxy_service.lock_switch_for_app("codex"),
+            ))
+        } else {
+            None
+        };
 
         let current_id = match Self::user_operable_current_provider_id(state, &app_type)? {
             Some(id) => id,
@@ -8633,6 +8819,10 @@ impl ProviderService {
         };
 
         Self::sync_active_profile_provider_snapshot(state, &app_type, &provider.id)?;
+
+        if app_type == AppType::Codex && provider.uses_native_codex() {
+            return Ok(());
+        }
 
         if Self::is_codex_schema_v2_router(&app_type, provider) {
             sync_codex_router_provider(state, provider)?;

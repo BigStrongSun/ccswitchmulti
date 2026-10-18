@@ -1,4 +1,38 @@
 {
+  "codexHistoryContentRepair": {
+    "title": "Repair older conversations",
+    "close": "Close conversation repair",
+    "description": "Restores a known format where older CCSM Router versions stored readable replies as encrypted_content, causing invalid_encrypted_content after returning to official Codex. Actual ciphertext is preserved; this does not resolve every conversation error.",
+    "scope": "Scans all ordinary and compressed history in the Codex home, including archives and subtasks. Preview reads history and saves a plan. Before applying, switch to the official native OpenAI configuration and fully exit Codex. The backend rechecks the configuration, processes and plan, then fully backs up history, the session index and valid SQLite snapshots before restoring and verifying content.",
+    "home": "Codex home",
+    "homePlaceholder": "Default: ~/.codex",
+    "preview": "Preview conversation repair",
+    "apply": "Apply conversation repair",
+    "scanning": "Scanning ordinary, compressed, archived and subtask history…",
+    "applying": "Checking exit status, backing up, writing and verifying…",
+    "noChanges": "No recognized mislabeled plaintext found. No repair is needed.",
+    "waitingForExit": "Waiting for Codex to exit",
+    "ready": "Preview complete. Exit Codex before applying.",
+    "completed": "Restoration complete. Reopen official Codex to continue your conversations.",
+    "idle": "Preview the scan results before applying restoration.",
+    "nativeRequired": "Switch to the official native OpenAI configuration, then fully exit Codex before applying. The current configuration will be checked again.",
+    "scannedFiles": "Scanned files",
+    "affectedFiles": "Affected files",
+    "compressedFiles": "Affected compressed files",
+    "pendingParts": "Content parts to restore",
+    "repairedParts": "Restored content parts",
+    "stage": "Backend stage: {{stage}}",
+    "stages": {
+      "preview": "Preview complete",
+      "completed": "Restoration complete"
+    },
+    "resolvedHome": "Codex home: {{path}}",
+    "plan": "Preview plan",
+    "backup": "Complete backup",
+    "copiedPath": "Copied {{label}} path",
+    "copyPath": "Copy {{label}} path",
+    "copyFailed": "Copy failed"
+  },
   "app": {
     "title": "CCSwitchMulti",
     "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
@@ -275,6 +309,7 @@
     "openclawNoModels": "No models configured",
     "backfillWarning": "Switched successfully, but failed to save changes back to the previous provider",
     "windowControlFailed": "Window control failed: {{error}}",
+    "nativeCodexConfigOwned": "Codex manages its configuration in native mode. CCSM compatibility injection is not needed.",
     "recovery": {
       "unknown": "A recovery issue needs attention",
       "app": "Affected scope: {{app}}.",
@@ -290,7 +325,8 @@
         "providerOnlyRestored": "Only provider fields were restored; some user settings remain unconfirmed",
         "unrecoverableUserTables": "Configuration recovery failed; user settings may not have been restored",
         "portOwnedByUnknownOwner": "The proxy port has an unverified owner, so CCSwitchMulti refused takeover",
-        "startupTakeoverFailed": "Proxy takeover could not be restored at startup"
+        "startupTakeoverFailed": "Proxy takeover could not be restored at startup",
+        "codexRendererReleasePending": "Codex local routing has stopped, but the previous menu compatibility layer could not be fully released"
       },
       "nextStep": {
         "closeOtherInstanceOrInspectProcess": "Close the other instance or inspect its process.",
@@ -298,7 +334,8 @@
         "openLogsOrRestoreUserBackup": "Open the logs and restore a user backup if needed.",
         "changeProxyPortOrInspectOwner": "Inspect the port owner or choose another proxy port.",
         "openLogsOrRetryTakeover": "Open the logs, then enable proxy takeover again.",
-        "retryingTakeoverRestore": "Takeover is retried automatically once the port is free."
+        "retryingTakeoverRestore": "Takeover is retried automatically once the port is free.",
+        "restartCodexToReleaseMenu": "Fully quit and reopen Codex to clear the previous menu. Check the logs if the issue persists."
       }
     },
     "officialBlockedByProxy": "Cannot switch to official provider while local routing is active. Using routing with official APIs may cause account bans.",
@@ -2837,6 +2874,7 @@
         "description": "Enable this if Codex sends 127.0.0.1:15721 into your proxy; loopback addresses will follow the system bypass rules."
       },
       "enabled": "{{app}} routing enabled",
+      "codexEnabledPendingApply": "Codex local routing is enabled. Restart Codex or run state repair to apply it.",
       "disabled": "{{app}} routing disabled",
       "failed": "Failed to toggle routing: {{detail}}",
       "tooltip": {

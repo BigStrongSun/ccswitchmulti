@@ -1,9 +1,12 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import i18n from "i18next";
+import zh from "@/i18n/locales/zh.json";
 
 import type {
   CodexConfigConsistencyReport,
   CodexRuntimeRefreshProgress,
+  CodexRuntimeRefreshPreflight,
   CodexRuntimeRefreshResult,
 } from "@/lib/api/codexConfigConsistency";
 import { codexConfigConsistencyApi } from "@/lib/api/codexConfigConsistency";
@@ -42,6 +45,199 @@ const drift: CodexConfigConsistencyReport = {
 };
 
 describe("useCodexConfigConsistency", () => {
+  it.each([
+    ["recheck", false],
+    ["recheck", true],
+    ["resolve", false],
+    ["resolve", true],
+  ] as const)(
+    "discards stale %s after native switch (reject=%s)",
+    async (entry, reject) => {
+      vi.mocked(codexConfigConsistencyApi.inspect).mockResolvedValue(drift);
+      let onEvent:
+        | ((payload: CodexConfigConsistencyReport) => void)
+        | undefined;
+      vi.mocked(useTauriEvent).mockImplementation((name, handler) => {
+        if (name === "codex-config-consistency")
+          onEvent = handler as typeof onEvent;
+      });
+      const { result } = renderHook(() => useCodexConfigConsistency());
+      await waitFor(() => expect(result.current.report).toEqual(drift));
+      let resolveRequest!: (value: CodexConfigConsistencyReport) => void;
+      let rejectRequest!: (error: Error) => void;
+      const request = new Promise<CodexConfigConsistencyReport>(
+        (resolve, reject) => {
+          resolveRequest = resolve;
+          rejectRequest = reject;
+        },
+      );
+      if (entry === "recheck")
+        vi.mocked(codexConfigConsistencyApi.inspect).mockReturnValue(request);
+      else
+        vi.mocked(codexConfigConsistencyApi.resolve).mockReturnValue(request);
+      let pending!: Promise<void>;
+      await act(async () => {
+        pending =
+          entry === "recheck"
+            ? result.current.recheck()
+            : result.current.resolve("apply_ccsm");
+      });
+      act(() =>
+        onEvent?.({
+          ...drift,
+          state: "not_applicable",
+          reason: "native_codex_config",
+        }),
+      );
+      const pendingAfterNative = result.current.pending;
+      await act(async () => {
+        if (reject) rejectRequest(new Error("stale managed request failed"));
+        else resolveRequest(drift);
+        await pending;
+      });
+      expect(pendingAfterNative).toBe(false);
+      expect(result.current.report).toBeNull();
+      expect(result.current.error).toBeNull();
+      expect(result.current.pending).toBe(false);
+      expect(result.current.refresh.phase).toBe("idle");
+    },
+  );
+
+  it.each([
+    ["automatic", false],
+    ["automatic", true],
+    ["confirm", false],
+    ["confirm", true],
+    ["status", false],
+    ["status", true],
+  ] as const)(
+    "discards stale %s preflight after native switch (reject=%s)",
+    async (entry, reject) => {
+      const consistent = {
+        ...drift,
+        state: "consistent" as const,
+        reason: null,
+      };
+      vi.mocked(codexConfigConsistencyApi.inspect).mockResolvedValue(
+        entry === "automatic" ? consistent : drift,
+      );
+      let resolvePreflight!: (value: CodexRuntimeRefreshPreflight) => void;
+      let rejectPreflight!: (error: Error) => void;
+      vi.mocked(
+        codexConfigConsistencyApi.inspectRuntimeRefresh,
+      ).mockReturnValue(
+        new Promise((resolve, reject) => {
+          resolvePreflight = resolve;
+          rejectPreflight = reject;
+        }),
+      );
+      let onEvent:
+        | ((payload: CodexConfigConsistencyReport) => void)
+        | undefined;
+      vi.mocked(useTauriEvent).mockImplementation((name, handler) => {
+        if (name === "codex-config-consistency")
+          onEvent = handler as typeof onEvent;
+      });
+      const { result } = renderHook(() => useCodexConfigConsistency());
+      let pending: Promise<void> | undefined;
+      if (entry !== "automatic") {
+        await waitFor(() => expect(result.current.report).toEqual(drift));
+        await act(async () => {
+          pending =
+            entry === "confirm"
+              ? result.current.inspectRuntimeRefresh()
+              : result.current.openStatusPanel();
+        });
+      }
+      await waitFor(() =>
+        expect(
+          codexConfigConsistencyApi.inspectRuntimeRefresh,
+        ).toHaveBeenCalledOnce(),
+      );
+      act(() =>
+        onEvent?.({
+          ...consistent,
+          state: "not_applicable",
+          reason: "native_codex_config",
+        }),
+      );
+      expect(result.current.refresh.phase).toBe("idle");
+      await act(async () => {
+        if (reject) rejectPreflight(new Error("stale inspection error"));
+        else
+          resolvePreflight({
+            supported: true,
+            canRefresh: true,
+            snapshotToken: "stale-managed-snapshot",
+            desktopProcessCount: 1,
+            appServerProcessCount: 1,
+            processCount: 2,
+            launchTarget: "Codex.exe",
+            warning: null,
+            paginatedHistory: {
+              affectedRolloutCount: 1,
+              duplicateOrdinalCount: 1,
+              affectedBytes: 100,
+              blockedRolloutCount: 0,
+              blockedReason: null,
+            },
+          });
+        await pending;
+      });
+      expect(result.current.refresh.phase).toBe("idle");
+      expect(result.current.refresh.preflight).toBeNull();
+      expect(result.current.refresh.error).toBeNull();
+      expect(result.current.report).toBeNull();
+    },
+  );
+
+  it("does not inspect CCSM runtime or history damage for native Codex", async () => {
+    vi.mocked(codexConfigConsistencyApi.inspect).mockResolvedValue({
+      ...drift,
+      state: "not_applicable",
+      reason: "native_codex_config",
+      runtimeActivation: {
+        state: "unknown",
+        appServerStartedAt: null,
+        configModifiedAt: null,
+        reason: "native_codex_config",
+      },
+    });
+    const { result } = renderHook(() => useCodexConfigConsistency());
+
+    await act(async () => {});
+
+    expect(codexConfigConsistencyApi.inspect).toHaveBeenCalledOnce();
+    expect(
+      codexConfigConsistencyApi.inspectRuntimeRefresh,
+    ).not.toHaveBeenCalled();
+    expect(result.current.refresh.phase).toBe("idle");
+    expect(result.current.report).toBeNull();
+  });
+
+  it("shows localized native ownership without inspecting history when opening status", async () => {
+    i18n.addResourceBundle("zh", "translation", zh, true, true);
+    vi.mocked(codexConfigConsistencyApi.inspect).mockResolvedValue({
+      ...drift,
+      state: "not_applicable",
+      reason: "native_codex_config",
+    });
+    const { result } = renderHook(() => useCodexConfigConsistency());
+    await act(async () => {});
+
+    await act(async () => result.current.openStatusPanel());
+
+    expect(
+      codexConfigConsistencyApi.inspectRuntimeRefresh,
+    ).not.toHaveBeenCalled();
+    expect(result.current.refresh.error).toBe(
+      zh.notifications.nativeCodexConfigOwned,
+    );
+    expect(
+      codexConfigConsistencyApi.refreshRuntimeState,
+    ).not.toHaveBeenCalled();
+  });
+
   it("deduplicates the startup event and fallback query by actual fingerprint", async () => {
     vi.mocked(codexConfigConsistencyApi.inspect).mockResolvedValue(drift);
     let onEvent: ((payload: CodexConfigConsistencyReport) => void) | undefined;

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   codexConfigConsistencyApi,
@@ -75,6 +76,16 @@ function emptyRuntimeRefresh(): CodexRuntimeRefreshWorkflow {
 }
 
 export function useCodexConfigConsistency(): CodexConfigConsistencyState {
+  const { t } = useTranslation();
+  const refreshErrorMessage = useCallback(
+    (cause: unknown, fallback: string) => {
+      const message = extractErrorMessage(cause);
+      return message === "native_codex_config"
+        ? t("notifications.nativeCodexConfigOwned")
+        : message || fallback;
+    },
+    [t],
+  );
   const [report, setReport] = useState<CodexConfigConsistencyReport | null>(
     null,
   );
@@ -90,6 +101,15 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
   const lastProgressAtRef = useRef<number | null>(null);
 
   const acceptReport = useCallback((next: CodexConfigConsistencyReport) => {
+    if (next.reason === "native_codex_config") {
+      runtimeRefreshActiveRef.current = false;
+      refreshRunIdRef.current += 1;
+      setRefresh(emptyRuntimeRefresh());
+      setReport(null);
+      setError(null);
+      setPending(false);
+      return;
+    }
     if (runtimeRefreshActiveRef.current) return;
     const attentionKey =
       next.state === "external_drift" && next.actualFingerprint
@@ -191,17 +211,24 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
       if (runtimeRefreshActiveRef.current) return;
       if (requestPending) return;
       requestPending = true;
+      const runId = refreshRunIdRef.current;
       try {
         const next = await codexConfigConsistencyApi.inspect();
-        if (!active) return;
+        if (!active || refreshRunIdRef.current !== runId) return;
         acceptReport(next);
+        if (next.reason === "native_codex_config") return;
         const configNeedsAttention =
           next.state === "external_drift" ||
           next.runtimeActivation?.state === "restart_required";
         if (configNeedsAttention || runtimeRefreshActiveRef.current) return;
         const preflight =
           await codexConfigConsistencyApi.inspectRuntimeRefresh();
-        if (!active || runtimeRefreshActiveRef.current) return;
+        if (
+          !active ||
+          refreshRunIdRef.current !== runId ||
+          runtimeRefreshActiveRef.current
+        )
+          return;
         const history = preflight.paginatedHistory;
         // 只有“存在可安全修复项”时才自动弹出状态面板。被保护性跳过
         // （保持原样）的文件不是待办项：把它当作需要处理会导致每次开机都
@@ -229,7 +256,8 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
           stageStartedAt: null,
         });
       } catch (cause) {
-        if (active) console.debug("[CodexConsistency] inspect failed", cause);
+        if (active && refreshRunIdRef.current === runId)
+          console.debug("[CodexConsistency] inspect failed", cause);
       } finally {
         requestPending = false;
       }
@@ -238,6 +266,7 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
     const interval = window.setInterval(() => void inspect(), 30_000);
     return () => {
       active = false;
+      refreshRunIdRef.current += 1;
       window.clearInterval(interval);
     };
   }, [acceptReport]);
@@ -248,23 +277,29 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
     setRefresh(emptyRuntimeRefresh());
     setReport(null);
     setError(null);
+    setPending(false);
   }, []);
 
   const resolve = useCallback(
     async (action: CodexConfigConsistencyAction) => {
       if (!report) return;
       if (action === "later") {
-        if (report.actualFingerprint) {
-          void codexConfigConsistencyApi
-            .resolve(report.actualFingerprint, action)
-            .catch((cause) =>
-              console.debug("[CodexConsistency] defer failed", cause),
-            );
-        }
+        const fingerprint = report.actualFingerprint;
         close();
+        const runId = refreshRunIdRef.current;
+        if (fingerprint) {
+          void codexConfigConsistencyApi
+            .resolve(fingerprint, action)
+            .catch((cause) => {
+              if (refreshRunIdRef.current === runId) {
+                console.debug("[CodexConsistency] defer failed", cause);
+              }
+            });
+        }
         return;
       }
       if (!report.actualFingerprint) return;
+      const runId = ++refreshRunIdRef.current;
       setPending(true);
       setError(null);
       try {
@@ -272,6 +307,7 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
           report.actualFingerprint,
           action,
         );
+        if (refreshRunIdRef.current !== runId) return;
         if (
           next.state === "external_drift" ||
           next.runtimeActivation?.state === "restart_required"
@@ -281,19 +317,22 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
           close();
         }
       } catch (cause) {
+        if (refreshRunIdRef.current !== runId) return;
         setError(extractErrorMessage(cause) || "Codex 配置处理失败");
       } finally {
-        setPending(false);
+        if (refreshRunIdRef.current === runId) setPending(false);
       }
     },
     [close, report],
   );
 
   const recheck = useCallback(async () => {
+    const runId = ++refreshRunIdRef.current;
     setPending(true);
     setError(null);
     try {
       const next = await codexConfigConsistencyApi.inspect();
+      if (refreshRunIdRef.current !== runId) return;
       if (
         next.state === "external_drift" ||
         next.runtimeActivation?.state === "restart_required"
@@ -303,13 +342,16 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
         close();
       }
     } catch (cause) {
+      if (refreshRunIdRef.current !== runId) return;
       setError(extractErrorMessage(cause) || "Codex 配置检测失败");
     } finally {
-      setPending(false);
+      if (refreshRunIdRef.current === runId) setPending(false);
     }
   }, [close]);
 
   const inspectRuntimeRefresh = useCallback(async () => {
+    const runId = ++refreshRunIdRef.current;
+    setPending(false);
     runtimeRefreshActiveRef.current = true;
     setRefresh({
       phase: "inspecting",
@@ -323,6 +365,10 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
     });
     try {
       const preflight = await codexConfigConsistencyApi.inspectRuntimeRefresh();
+      if (refreshRunIdRef.current !== runId) return;
+      if (preflight.warning === "native_codex_config") {
+        throw new Error("native_codex_config");
+      }
       if (!preflight.supported || !preflight.canRefresh) {
         setRefresh({
           phase: "failed",
@@ -349,20 +395,23 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
         stageStartedAt: null,
       });
     } catch (cause) {
+      if (refreshRunIdRef.current !== runId) return;
       setRefresh({
         phase: "failed",
         preflight: null,
         progress: null,
         result: null,
-        error: extractErrorMessage(cause) || "Codex 运行状态检查失败",
+        error: refreshErrorMessage(cause, "Codex 运行状态检查失败"),
         logs: [],
         lastProgressAt: null,
         stageStartedAt: null,
       });
     }
-  }, []);
+  }, [refreshErrorMessage]);
 
   const openStatusPanel = useCallback(async () => {
+    const runId = ++refreshRunIdRef.current;
+    setPending(false);
     runtimeRefreshActiveRef.current = true;
     setRefresh({
       phase: "inspecting",
@@ -376,10 +425,16 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
     });
     setError(null);
     try {
-      const [nextReport, preflight] = await Promise.all([
-        codexConfigConsistencyApi.inspect(),
-        codexConfigConsistencyApi.inspectRuntimeRefresh(),
-      ]);
+      const nextReport = await codexConfigConsistencyApi.inspect();
+      if (refreshRunIdRef.current !== runId) return;
+      if (nextReport.reason === "native_codex_config") {
+        throw new Error("native_codex_config");
+      }
+      const preflight = await codexConfigConsistencyApi.inspectRuntimeRefresh();
+      if (refreshRunIdRef.current !== runId) return;
+      if (preflight.warning === "native_codex_config") {
+        throw new Error("native_codex_config");
+      }
       setReport(nextReport);
       setRefresh({
         phase: "status",
@@ -392,24 +447,26 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
         stageStartedAt: null,
       });
     } catch (cause) {
+      if (refreshRunIdRef.current !== runId) return;
       setRefresh({
         phase: "failed",
         preflight: null,
         progress: null,
         result: null,
-        error: extractErrorMessage(cause) || "Codex 状态检查失败",
+        error: refreshErrorMessage(cause, "Codex 状态检查失败"),
         logs: [],
         lastProgressAt: null,
         stageStartedAt: null,
       });
     }
-  }, []);
+  }, [refreshErrorMessage]);
 
   const confirmRuntimeRefresh = useCallback(async () => {
     const preflight = refresh.preflight;
     if (!preflight || refresh.phase !== "confirm") return;
     const runId = refreshRunIdRef.current + 1;
     refreshRunIdRef.current = runId;
+    setPending(false);
     const startedAt = Date.now();
     refreshStartedAtRef.current = startedAt;
     lastProgressAtRef.current = startedAt;
@@ -441,27 +498,31 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
       setRefresh((current) => ({
         ...current,
         phase: "failed",
-        error: extractErrorMessage(cause) || "Codex 状态刷新失败",
+        error: refreshErrorMessage(cause, "Codex 状态刷新失败"),
       }));
     }
-  }, [refresh.phase, refresh.preflight]);
+  }, [refresh.phase, refresh.preflight, refreshErrorMessage]);
 
   const cancelRuntimeRefresh = useCallback(() => {
     const completed = refresh.phase === "completed";
     refreshRunIdRef.current += 1;
     runtimeRefreshActiveRef.current = false;
+    setPending(false);
     setRefresh(emptyRuntimeRefresh());
     if (completed) close();
   }, [close, refresh.phase]);
 
   const retryRendererCompatibility = useCallback(async () => {
     if (!refresh.result) return;
+    const runId = ++refreshRunIdRef.current;
+    setPending(false);
     setRefresh((current) => ({
       ...current,
       rendererRetryPending: true,
     }));
     try {
       const retry = await proxyApi.unlockCodexModelPicker();
+      if (refreshRunIdRef.current !== runId) return;
       const ready = Boolean(
         retry.injected &&
           retry.allProviderHistoryPatched &&
@@ -475,11 +536,14 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
               ...current.result,
               outcome: ready ? "completed" : "completed_with_warnings",
               rendererCompatibilityStatus: ready ? "ready" : "warning",
-              rendererCompatibilityMessage: ready ? null : retry.message,
+              rendererCompatibilityMessage: ready
+                ? null
+                : refreshErrorMessage(retry.message, ""),
             }
           : null,
       }));
     } catch (cause) {
+      if (refreshRunIdRef.current !== runId) return;
       setRefresh((current) => ({
         ...current,
         rendererRetryPending: false,
@@ -488,13 +552,15 @@ export function useCodexConfigConsistency(): CodexConfigConsistencyState {
               ...current.result,
               outcome: "completed_with_warnings",
               rendererCompatibilityStatus: "warning",
-              rendererCompatibilityMessage:
-                extractErrorMessage(cause) || "Codex 历史查询兼容层重试失败",
+              rendererCompatibilityMessage: refreshErrorMessage(
+                cause,
+                "Codex 历史查询兼容层重试失败",
+              ),
             }
           : null,
       }));
     }
-  }, [refresh.result]);
+  }, [refresh.result, refreshErrorMessage]);
 
   return {
     report,

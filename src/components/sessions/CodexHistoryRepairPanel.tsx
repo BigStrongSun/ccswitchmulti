@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -40,6 +41,7 @@ import type {
 } from "@/types/proxy";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { SessionMessageItem } from "./SessionMessageItem";
+import { CodexHistoryContentRepairDialog } from "./CodexHistoryContentRepairPanel";
 
 const AUTO_TARGET = "__auto__";
 const DEFAULT_SOURCE_FILTER = "all";
@@ -58,6 +60,11 @@ export function CodexHistoryRepairPanel({
   onClose,
   onRepairApplied,
 }: CodexHistoryRepairPanelProps) {
+  const { t } = useTranslation();
+  const appRepairMessage = (message: string) =>
+    message === "native_codex_config"
+      ? t("notifications.nativeCodexConfigOwned")
+      : message;
   const [codexHome, setCodexHome] = useState("");
   const [stateDbPath, setStateDbPath] = useState("");
   const [projectPath, setProjectPath] = useState("");
@@ -124,7 +131,7 @@ export function CodexHistoryRepairPanel({
       if (result.historySyncRequested) {
         toast.success("已触发新版 Codex App 原生历史目录重建");
       } else {
-        toast.info(result.message);
+        toast.info(appRepairMessage(result.message));
       }
     } catch (error) {
       const message = extractErrorMessage(error) || String(error);
@@ -363,6 +370,7 @@ export function CodexHistoryRepairPanel({
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
+            <CodexHistoryContentRepairDialog />
             <Button
               size="sm"
               variant="outline"
@@ -432,7 +440,10 @@ export function CodexHistoryRepairPanel({
                   : "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-200",
             )}
           >
-            {appRepairError ?? appRepairResult?.message}
+            {appRepairError ??
+              (appRepairResult
+                ? appRepairMessage(appRepairResult.message)
+                : null)}
           </div>
         ) : null}
 

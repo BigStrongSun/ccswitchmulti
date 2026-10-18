@@ -2805,7 +2805,40 @@ mod native_query_credentials_tests {
 }
 
 #[cfg(test)]
+mod protocol_preflight_test_home {
+    pub(super) struct TestHomeGuard {
+        directory: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TestHomeGuard {
+        pub(super) fn new() -> Self {
+            let guard = Self {
+                directory: tempfile::tempdir().expect("create isolated protocol preflight home"),
+                previous: std::env::var_os("CC_SWITCH_TEST_HOME"),
+            };
+            std::env::set_var("CC_SWITCH_TEST_HOME", guard.directory.path());
+            crate::settings::reload_settings().expect("load isolated protocol preflight settings");
+            assert!(crate::codex_config::get_codex_config_dir().starts_with(guard.directory.path()));
+            assert!(crate::config::get_app_config_dir().starts_with(guard.directory.path()));
+            guard
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            let _ = crate::settings::reload_settings();
+        }
+    }
+}
+
+#[cfg(test)]
 mod codex_protocol_preflight_save_tests {
+    use super::protocol_preflight_test_home::TestHomeGuard;
     use super::{
         build_codex_provider_adaptation_preview, get_codex_logical_provider_for_editing_internal,
         get_codex_provider_editor_snapshot_internal, update_provider_internal_with_probe,
@@ -2925,7 +2958,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn ordinary_update_keeps_manual_official_and_router_metadata_editable() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone());
         let mut manual = codex_provider();
@@ -2961,7 +2996,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn ordinary_update_reuses_complete_evidence_without_refreshing_its_lifetime() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone());
         let provider = codex_provider();
@@ -2997,7 +3034,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn ordinary_update_requires_explicit_probe_without_network_or_writes() {
+        let _home = TestHomeGuard::new();
         for scenario in ["missing", "expired", "changed-credential"] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
@@ -3061,7 +3100,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn ordinary_update_reuses_owned_split_evidence_but_keeps_confirmation_gate() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone());
         let mut provider = codex_provider();
@@ -3112,7 +3153,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn ordinary_codex_update_runs_preflight_and_atomically_saves_its_profile() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let provider = codex_provider();
@@ -3179,7 +3222,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn schema_v2_router_update_atomically_saves_both_protocol_observations() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let source = codex_provider();
@@ -3236,7 +3281,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn invalid_codex_update_is_rejected_before_any_probe_request() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db);
         let mut provider = codex_provider();
@@ -3261,7 +3308,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn ordinary_codex_update_probe_failure_is_zero_write() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let original = codex_provider();
@@ -3286,7 +3335,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn advanced_manual_protocol_mode_preserves_user_transport_without_probing() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut provider = codex_provider();
@@ -3346,7 +3397,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn legacy_per_model_protocols_migrate_inside_the_provider_set_save_transaction() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut provider = codex_provider();
@@ -3436,7 +3489,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn per_model_manual_mode_still_probes_follow_auto_models_and_materializes_a_split() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut provider = codex_provider();
@@ -3513,7 +3568,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn split_facade_editing_restores_one_logical_provider_draft() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut source = codex_provider();
@@ -3594,7 +3651,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn editor_snapshot_restores_split_protocols_and_independent_transport_evidence() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut source = codex_provider();
@@ -3702,7 +3761,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn preflight_adaptation_preview_exposes_the_split_without_mutating_the_draft() {
+        let _home = TestHomeGuard::new();
         let mut source = codex_provider();
         source.settings_config["modelCatalog"]["models"][0]
             .as_object_mut()
@@ -3797,7 +3858,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn preflight_preview_uses_probe_evidence_when_manual_mode_has_no_transport() {
+        let _home = TestHomeGuard::new();
         let mut source = codex_provider();
         let meta = source.meta.get_or_insert_with(ProviderMeta::default);
         meta.codex_protocol_mode = Some(CodexProtocolMode::Manual);
@@ -3852,7 +3915,9 @@ mod codex_protocol_preflight_save_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn advanced_manual_update_collapses_owned_split_leaves() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut source = codex_provider();
@@ -3965,6 +4030,7 @@ mod codex_protocol_preflight_save_tests {
 
 #[cfg(test)]
 mod universal_codex_protocol_preflight_tests {
+    use super::protocol_preflight_test_home::TestHomeGuard;
     use super::{
         commit_universal_provider_set_internal,
         commit_universal_provider_set_internal_with_publisher,
@@ -4144,7 +4210,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_sync_rejects_mismatched_codex_child_before_writing_other_children() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -4186,8 +4254,10 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_save_and_sync_rolls_back_definition_and_children_when_child_insert_fails(
     ) -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -4237,7 +4307,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn legacy_universal_save_and_sync_accepts_the_automatic_split() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -4329,8 +4401,10 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn disabling_split_universal_codex_removes_facade_owned_leaves_and_profiles_atomically(
     ) -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -4431,7 +4505,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_mixed_prepare_is_zero_write_and_accept_auto_commits_split_once() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -4558,7 +4634,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_projection_failure_reports_committed_warning_without_rolling_back_data() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let (universal, receipt_ids) =
@@ -4631,7 +4709,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_disable_collects_dependent_router_projection_failure_after_atomic_delete() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let (mut universal, receipt_ids) = mixed_universal_fixture(
@@ -4736,7 +4816,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_per_model_manual_override_commits_a_split_with_only_auto_receipts() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let (mut universal, receipt_ids) =
@@ -4800,7 +4882,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_provider_set_commit_rejects_receipts_claimed_by_another_commit() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let (universal, receipt_ids) =
@@ -4853,7 +4937,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_partial_model_is_blocked_and_never_writes_children() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let (universal, receipt_ids) =
@@ -4908,7 +4994,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_prepare_digest_binds_definition_children_and_current_provider() {
+        let _home = TestHomeGuard::new();
         assert_universal_digest_change_is_rejected(|state, universal| {
             let mut changed = universal.clone();
             changed.name = "Concurrent definition edit".to_string();
@@ -4954,7 +5042,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_manual_override_commits_probe_observations_and_consumes_receipt() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -5038,7 +5128,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_manual_override_database_failure_keeps_receipt_and_writes_no_observations() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -5134,7 +5226,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn universal_save_and_sync_commits_definition_all_children_and_profile_together() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -5241,7 +5335,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn universal_without_codex_skips_probe_and_atomically_saves_other_children() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -5293,7 +5389,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_sync_rejects_foreign_probe_profile_before_writing_other_children() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -5352,7 +5450,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_sync_rejects_foreign_probe_observation_before_writing_other_children() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -5421,8 +5521,10 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_sync_rolls_back_every_child_and_profile_when_gemini_insert_fails(
     ) -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -5508,7 +5610,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_sync_rolls_back_codex_disable_when_gemini_update_fails() -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -5569,8 +5673,10 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn universal_sync_disables_existing_codex_child_without_manual_deletion() -> Result<(), AppError>
     {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -5621,7 +5727,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn universal_codex_sync_runs_preflight_and_atomically_saves_its_profile() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(
@@ -5722,7 +5830,9 @@ mod universal_codex_protocol_preflight_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn legacy_universal_sync_accepts_the_automatic_split() {
+        let _home = TestHomeGuard::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let state = AppState::new(db.clone());
         let mut universal = UniversalProvider::new(

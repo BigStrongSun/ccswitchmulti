@@ -131,4 +131,89 @@ describe("useProxyStatus", () => {
     expect(invokeMock).toHaveBeenCalledWith("start_proxy_server");
     expect(invokeMock).toHaveBeenCalledWith("stop_proxy_server");
   });
+
+  it("reports native Codex remaining direct instead of claiming requested takeover", async () => {
+    const { wrapper, queryClient } = createWrapper();
+    const { result } = renderHook(() => useProxyStatus(), { wrapper });
+    await waitFor(() => expect(result.current.takeoverStatus).toBeDefined());
+
+    await act(async () => {
+      await result.current.setTakeoverForApp({
+        appType: "codex",
+        enabled: true,
+      });
+    });
+
+    expect(toastSuccessMock).toHaveBeenLastCalledWith("已恢复 Codex 配置", {
+      closeButton: true,
+    });
+    expect(queryClient.getQueryData(proxyKeys.takeoverStatus)).toMatchObject({
+      codex: false,
+    });
+    expect(
+      invokeMock.mock.calls.some(([command]) =>
+        String(command).includes("switch"),
+      ),
+    ).toBe(false);
+  });
+
+  it("reports managed takeover using the resulting state", async () => {
+    const baseInvoke = invokeMock.getMockImplementation()!;
+    let enabled = false;
+    invokeMock.mockImplementation((command: string, args?: unknown) => {
+      if (command === "set_proxy_takeover_for_app") {
+        enabled = true;
+        return Promise.resolve(null);
+      }
+      if (command === "get_proxy_takeover_status") {
+        return Promise.resolve({
+          codex: enabled,
+          claude: false,
+          gemini: false,
+        });
+      }
+      return baseInvoke(command, args);
+    });
+    const { wrapper } = createWrapper();
+    const { result } = renderHook(() => useProxyStatus(), { wrapper });
+    await waitFor(() => expect(result.current.takeoverStatus).toBeDefined());
+    await act(async () => {
+      await result.current.setTakeoverForApp({
+        appType: "codex",
+        enabled: true,
+      });
+    });
+    expect(toastSuccessMock).toHaveBeenLastCalledWith(
+      "Codex 本地路由已开启；重启 Codex 或执行状态修复后应用",
+      { closeButton: true },
+    );
+    await waitFor(() =>
+      expect(result.current.takeoverStatus?.codex).toBe(true),
+    );
+  });
+
+  it("does not claim success if the resulting takeover state cannot be read", async () => {
+    const baseInvoke = invokeMock.getMockImplementation()!;
+    let changed = false;
+    invokeMock.mockImplementation((command: string, args?: unknown) => {
+      if (command === "set_proxy_takeover_for_app") {
+        changed = true;
+        return Promise.resolve(null);
+      }
+      if (command === "get_proxy_takeover_status" && changed) {
+        return Promise.reject(new Error("state unavailable"));
+      }
+      return baseInvoke(command, args);
+    });
+    const { wrapper } = createWrapper();
+    const { result } = renderHook(() => useProxyStatus(), { wrapper });
+    await waitFor(() => expect(result.current.takeoverStatus).toBeDefined());
+    await act(async () => {
+      await expect(
+        result.current.setTakeoverForApp({ appType: "codex", enabled: true }),
+      ).rejects.toThrow("state unavailable");
+    });
+    expect(toastSuccessMock).not.toHaveBeenCalled();
+    expect(toastErrorMock).toHaveBeenCalledWith("操作失败: state unavailable");
+  });
 });

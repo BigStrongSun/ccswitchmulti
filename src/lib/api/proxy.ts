@@ -19,6 +19,7 @@ import type {
   CodexHistorySessionListOutcome,
   CodexHistoryVisibilityRepairOptions,
   CodexHistoryVisibilityRepairOutcome,
+  CodexHistoryContentRepairOutcome,
   CodexGuardianStatus,
 } from "@/types/proxy";
 
@@ -68,6 +69,18 @@ export const proxyApi = {
     options: CodexHistoryVisibilityRepairOptions,
   ): Promise<CodexHistoryVisibilityRepairOutcome> {
     return invoke("repair_codex_history_visibility", { options });
+  },
+
+  async previewCodexHistoryContentRepair(
+    codexHome?: string | null,
+  ): Promise<CodexHistoryContentRepairOutcome> {
+    return invoke("preview_codex_history_content_repair", { codexHome });
+  },
+
+  async applyCodexHistoryContentRepair(
+    previewToken: string,
+  ): Promise<CodexHistoryContentRepairOutcome> {
+    return invoke("apply_codex_history_content_repair", { previewToken });
   },
 
   async listCodexHistorySessions(

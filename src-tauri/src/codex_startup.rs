@@ -66,7 +66,7 @@ fn config_state_from_report(report: &CodexConfigConsistencyReport) -> CodexStart
         CodexConfigConsistencyState::NotApplicable
             if matches!(
                 report.reason.as_deref(),
-                Some("proxy_takeover_active" | "no_current_provider")
+                Some("proxy_takeover_active" | "no_current_provider" | "native_codex_config")
             ) =>
         {
             CodexStartupConfigState::Ready
@@ -82,6 +82,47 @@ fn config_state_from_report(report: &CodexConfigConsistencyReport) -> CodexStart
 
 struct SystemCodexStartupOperations<'a> {
     state: &'a AppState,
+}
+
+fn launch_codex_for_ownership<Native, Managed>(
+    native: bool,
+    launch_native: Native,
+    launch_managed: Managed,
+) -> Result<bool, String>
+where
+    Native: FnOnce() -> Result<bool, String>,
+    Managed: FnOnce() -> Result<bool, String>,
+{
+    if native {
+        launch_native()
+    } else {
+        launch_managed()
+    }
+}
+
+async fn launch_current_codex<Prepare, Preparation, Native, Managed>(
+    state: &AppState,
+    prepare_managed: Prepare,
+    launch_native: Native,
+    launch_managed: Managed,
+) -> Result<bool, String>
+where
+    Prepare: FnOnce() -> Preparation,
+    Preparation: std::future::Future<Output = ()>,
+    Native: FnOnce() -> Result<bool, String>,
+    Managed: FnOnce() -> Result<bool, String>,
+{
+    if !crate::services::provider::ProviderService::current_codex_uses_native(state)
+        .map_err(String::from)?
+    {
+        // Network detection only updates CCSM's cached timezone. Keep it outside
+        // the switch lock, then select the committed ownership again before spawn.
+        prepare_managed().await;
+    }
+    let _switch_guard = state.proxy_service.lock_switch_for_app("codex").await;
+    let native = crate::services::provider::ProviderService::current_codex_uses_native(state)
+        .map_err(String::from)?;
+    launch_codex_for_ownership(native, launch_native, launch_managed)
 }
 
 impl CodexStartupOperations for SystemCodexStartupOperations<'_> {
@@ -106,7 +147,13 @@ impl CodexStartupOperations for SystemCodexStartupOperations<'_> {
     }
 
     async fn launch_codex(&mut self) -> Result<bool, String> {
-        crate::codex_desktop::launch_codex_desktop_with_ccswitch(true)
+        launch_current_codex(
+            self.state,
+            crate::codex_egress_timezone::refresh_automatic_timezone_before_codex_launch,
+            || crate::codex_desktop::launch_native_codex_desktop_with_ccswitch(true),
+            || crate::codex_desktop::launch_codex_desktop_with_ccswitch(true),
+        )
+        .await
     }
 }
 
@@ -123,6 +170,131 @@ pub(crate) async fn launch_after_startup_reconciliation(
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    #[test]
+    fn native_startup_uses_clean_launch_without_managed_launch() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let launched = launch_codex_for_ownership(
+            true,
+            || {
+                events.borrow_mut().push("native");
+                Ok(true)
+            },
+            || {
+                events.borrow_mut().push("managed");
+                Ok(true)
+            },
+        )
+        .expect("native startup should launch");
+
+        assert!(launched);
+        assert_eq!(*events.borrow(), ["native"]);
+    }
+
+    fn startup_state(native: bool) -> AppState {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("memory db"));
+        let mut provider = crate::provider::Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            serde_json::json!({"auth": {}, "config": ""}),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_local_model_mapping: Some(!native),
+            ..Default::default()
+        });
+        db.save_provider("codex", &provider).expect("save provider");
+        db.set_current_provider("codex", &provider.id)
+            .expect("set provider");
+        AppState::new(db)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn native_startup_skips_timezone_preparation_and_managed_launch() {
+        let state = startup_state(true);
+        let events = std::cell::RefCell::new(Vec::new());
+        launch_current_codex(
+            &state,
+            || async {
+                events.borrow_mut().push("timezone");
+            },
+            || {
+                events.borrow_mut().push("native");
+                Ok(true)
+            },
+            || {
+                events.borrow_mut().push("managed");
+                Ok(true)
+            },
+        )
+        .await
+        .expect("native launch");
+        assert_eq!(*events.borrow(), ["native"]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn managed_startup_prepares_timezone_before_managed_launch() {
+        let state = startup_state(false);
+        let events = std::cell::RefCell::new(Vec::new());
+        launch_current_codex(
+            &state,
+            || async {
+                events.borrow_mut().push("timezone");
+            },
+            || {
+                events.borrow_mut().push("native");
+                Ok(true)
+            },
+            || {
+                events.borrow_mut().push("managed");
+                Ok(true)
+            },
+        )
+        .await
+        .expect("managed launch");
+        assert_eq!(*events.borrow(), ["timezone", "managed"]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ownership_changed_during_preparation_is_rechecked_before_launch() {
+        let state = startup_state(false);
+        let events = std::cell::RefCell::new(Vec::new());
+        launch_current_codex(
+            &state,
+            || async {
+                events.borrow_mut().push("timezone");
+                let mut provider = state
+                    .db
+                    .get_provider_by_id("codex-official", "codex")
+                    .expect("read provider")
+                    .expect("provider exists");
+                provider
+                    .meta
+                    .as_mut()
+                    .expect("metadata")
+                    .codex_local_model_mapping = Some(false);
+                state
+                    .db
+                    .save_provider("codex", &provider)
+                    .expect("switch to native");
+            },
+            || {
+                events.borrow_mut().push("native");
+                Ok(true)
+            },
+            || {
+                events.borrow_mut().push("managed");
+                Ok(true)
+            },
+        )
+        .await
+        .expect("launch rechecks ownership");
+        assert_eq!(*events.borrow(), ["timezone", "native"]);
+    }
 
     fn report(
         state: CodexConfigConsistencyState,
@@ -302,6 +474,18 @@ mod tests {
                 CodexConfigConsistencyState::NotApplicable,
                 None,
                 Some("no_current_provider"),
+            )),
+            CodexStartupConfigState::Ready
+        );
+    }
+
+    #[test]
+    fn native_official_config_is_ready_without_repair() {
+        assert_eq!(
+            config_state_from_report(&report(
+                CodexConfigConsistencyState::NotApplicable,
+                Some("codex-official"),
+                Some("native_codex_config"),
             )),
             CodexStartupConfigState::Ready
         );

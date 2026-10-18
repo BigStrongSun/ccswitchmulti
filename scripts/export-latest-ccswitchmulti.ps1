@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$releaseBuildConfigHelperPath = Join-Path (Split-Path -Parent $PSCommandPath) "release-build-config.ps1"
+$releaseBuildConfigHelperPath = Join-Path (Split-Path -Parent $PSCommandPath) "production-artifacts.ps1"
 . $releaseBuildConfigHelperPath
 
 # Windows PowerShell 5.1's -Encoding UTF8 writes a BOM. Release metadata is
@@ -331,8 +331,15 @@ $version = [string]$packageJson.version
 $githubRepo = "BigStrongSun/ccswitchmulti"
 $defaultSigningKeyPath = Join-Path $env:USERPROFILE ".ccswitchmulti\tauri-update.key"
 $hasUpdaterSigningKey = Initialize-TauriSigningKey -DefaultKeyPath $defaultSigningKeyPath
+$buildReceiptPath = Join-Path $releaseDir 'PRODUCTION-BUILD.json'
+if ($SkipBuild -and -not (Test-Path -LiteralPath $buildReceiptPath -PathType Leaf)) {
+    throw "production build receipt is missing; build through the release entry point before SkipBuild"
+}
+$sourceIdentity = Get-ReleaseSourceIdentity -RepoRoot $repoRoot
+if ($sourceIdentity.TrackedWorktree -ne 'clean') { throw "production export requires clean tracked source" }
 
 if (-not $SkipBuild) {
+    [System.IO.File]::Delete($buildReceiptPath)
     Push-Location $repoRoot
     $buildConfigPath = New-TauriBuildConfigFile
     try {
@@ -344,12 +351,14 @@ if (-not $SkipBuild) {
         if ($LASTEXITCODE -ne 0) {
             throw "tauri build failed with exit code $LASTEXITCODE"
         }
+        Write-ProductionBuildReceipt -RepoRoot $repoRoot -CargoTargetDir $cargoTargetDir -Identity $sourceIdentity
     } finally {
         Remove-TauriBuildConfigFile -Path $buildConfigPath
         Pop-Location
     }
 }
 
+$buildReceipt = Assert-ProductionBuildReceipt -RepoRoot $repoRoot -CargoTargetDir $cargoTargetDir -Identity $sourceIdentity
 Clear-ExportRoot -Root $exportRoot
 
 $windowsInstaller = Join-Path $exportRoot "windows\installer"
@@ -377,6 +386,7 @@ if (Test-Path -LiteralPath $sourceExe) {
 
 Copy-RawExe -SourceExe $sourceExe -Destination $windowsRawExe -Version $version
 Write-NsisInstalledExeHash -SourceExe $sourceExe -Destination $windowsInstaller -Version $version
+Write-ExportProductionManifest -Root $exportRoot -BuildReceipt $buildReceipt
 Copy-HistoryRepairPythonTool -SourceDir (Join-Path $repoRoot "scripts\codex-history-tool") -Destination $historyTool
 
 Write-PlatformNote -Path (Join-Path $exportRoot "linux") -Platform "Linux" -Reason "Run pnpm tauri build on a Linux host with Rust, Node/pnpm, and Tauri WebKit/GTK dependencies installed, then run this export script."

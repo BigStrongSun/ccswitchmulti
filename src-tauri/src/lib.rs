@@ -12,6 +12,7 @@ mod codex_egress_timezone;
 #[cfg(test)]
 mod codex_egress_timezone_tests;
 mod codex_guardian;
+pub mod codex_history_content_repair;
 pub mod codex_history_migration;
 pub mod codex_multirouter;
 pub mod codex_runtime_refresh;
@@ -862,7 +863,17 @@ pub fn run() {
 
             {
                 let db_for_codex_history_migration = app_state.db.clone();
+                let proxy_for_codex_history_migration = app_state.proxy_service.clone();
                 tauri::async_runtime::spawn_blocking(move || {
+                    let _guard = crate::services::provider::block_on_tauri_runtime(
+                        proxy_for_codex_history_migration.lock_switch_for_app("codex"),
+                    );
+                    if crate::services::provider::ProviderService::codex_database_uses_native(
+                        &db_for_codex_history_migration,
+                    ).unwrap_or(true) {
+                        log::debug!("Native Codex owns its history; automatic migration skipped");
+                        return;
+                    }
                     match crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(
                         &db_for_codex_history_migration,
                     ) {
@@ -1396,8 +1407,6 @@ pub fn run() {
                     .unwrap_or(0);
                 crate::watchdog::spawn_supervisor(&crate::config::get_app_config_dir(), watchdog_port);
 
-                crate::codex_egress_timezone::refresh_automatic_timezone_before_codex_launch()
-                    .await;
                 match crate::codex_startup::launch_after_startup_reconciliation(
                     &state,
                     codex_takeover_restore_ready,
@@ -1771,6 +1780,8 @@ pub fn run() {
             commands::get_codex_guardian_status,
             commands::sync_codex_history_to_multirouter,
             commands::repair_codex_history_visibility,
+            commands::preview_codex_history_content_repair,
+            commands::apply_codex_history_content_repair,
             commands::list_codex_history_sessions,
             commands::read_codex_history_session,
             commands::start_external_openai_api_server,

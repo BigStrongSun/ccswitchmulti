@@ -111,9 +111,21 @@ export function useProxyStatus() {
 
   // 按应用开启/关闭接管
   const setTakeoverForAppMutation = useMutation({
-    mutationFn: ({ appType, enabled }: { appType: string; enabled: boolean }) =>
-      proxyApi.setProxyTakeoverForApp(appType, enabled),
-    onSuccess: (_data, variables) => {
+    mutationFn: async ({
+      appType,
+      enabled,
+    }: {
+      appType: string;
+      enabled: boolean;
+    }) => {
+      await proxyApi.setProxyTakeoverForApp(appType, enabled);
+      return proxyApi.getProxyTakeoverStatus();
+    },
+    onSuccess: (takeover, variables) => {
+      queryClient.setQueryData(proxyKeys.takeoverStatus, takeover);
+      const enabled = Boolean(
+        takeover[variables.appType as keyof typeof takeover],
+      );
       const appLabel =
         variables.appType === "claude"
           ? "Claude"
@@ -126,11 +138,16 @@ export function useProxyStatus() {
                 : "OpenCode";
 
       toast.success(
-        variables.enabled
-          ? t("proxy.takeover.enabled", {
-              app: appLabel,
-              defaultValue: `已接管 ${appLabel} 配置（请求将走本地代理）`,
-            })
+        enabled
+          ? variables.appType === "codex"
+            ? t("proxy.takeover.codexEnabledPendingApply", {
+                defaultValue:
+                  "Codex 本地路由已开启；重启 Codex 或执行状态修复后应用",
+              })
+            : t("proxy.takeover.enabled", {
+                app: appLabel,
+                defaultValue: `已接管 ${appLabel} 配置（请求将走本地代理）`,
+              })
           : t("proxy.takeover.disabled", {
               app: appLabel,
               defaultValue: `已恢复 ${appLabel} 配置`,

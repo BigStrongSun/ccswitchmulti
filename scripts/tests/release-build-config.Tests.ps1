@@ -1,4 +1,4 @@
-$helperPath = Join-Path (Split-Path -Parent $PSScriptRoot) "release-build-config.ps1"
+﻿$helperPath = Join-Path (Split-Path -Parent $PSScriptRoot) "release-build-config.ps1"
 
 Describe "CCSwitchMulti local release build config" {
     function Get-CargoPackageVersion {
@@ -478,6 +478,7 @@ Remove-LocalReleaseCargoTargetDir -RepoRoot '$($fixtureRoot.Replace("'", "''"))'
         $hadPreviousTarget = Test-Path Env:CARGO_TARGET_DIR
         $previousTarget = $env:CARGO_TARGET_DIR
         $previousUserProfile = $env:USERPROFILE
+        $previousFixtureNodePath = $env:NODE_PATH
         [System.IO.Directory]::CreateDirectory($fixtureScripts) | Out-Null
         [System.IO.Directory]::CreateDirectory($fixtureTauri) | Out-Null
         [System.IO.Directory]::CreateDirectory($bundleDir) | Out-Null
@@ -485,6 +486,8 @@ Remove-LocalReleaseCargoTargetDir -RepoRoot '$($fixtureRoot.Replace("'", "''"))'
         try {
             Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\export-latest-ccswitchmulti.ps1") -Destination $fixtureScripts
             Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\release-build-config.ps1") -Destination $fixtureScripts
+            Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\production-artifacts.ps1") -Destination $fixtureScripts
+            Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verify-production-assets.cjs") -Destination $fixtureScripts
             [System.IO.File]::WriteAllText(
                 (Join-Path $fixtureRoot "package.json"),
                 '{"version":"9.9.9"}',
@@ -505,7 +508,60 @@ Remove-LocalReleaseCargoTargetDir -RepoRoot '$($fixtureRoot.Replace("'", "''"))'
             )
             $env:CARGO_TARGET_DIR = $cargoTarget
             $env:USERPROFILE = $fixtureRoot
+            $env:NODE_PATH = (Join-Path $repoRoot 'node_modules')
 
+            [System.IO.Directory]::CreateDirectory($outputRoot) | Out-Null
+            $sentinel = Join-Path $outputRoot "retained.txt"
+            [System.IO.File]::WriteAllText($sentinel, "previous good release")
+            { & (Join-Path $fixtureScripts "export-latest-ccswitchmulti.ps1") -SkipBuild -ReleaseRoot $outputRoot } |
+                Should Throw "production build receipt"
+            [System.IO.File]::ReadAllText($sentinel) | Should Be "previous good release"
+
+            $assetFixtureScript = Join-Path $fixtureRoot 'make-assets.cjs'
+            [IO.File]::WriteAllText($assetFixtureScript, @'
+const fs=require("fs"), p=require("path"), z=require("zlib");
+const root=process.argv[2], target=process.argv[3];
+fs.mkdirSync(p.join(root,"dist/assets"),{recursive:true});
+const html=Buffer.from('<script src="/assets/app.js"></script>');
+fs.writeFileSync(p.join(root,"dist/index.html"),html);
+const js=Buffer.from("console.log(42);"), compressed=z.brotliCompressSync(js);
+fs.writeFileSync(p.join(root,"dist/assets/app.js"),js);
+const cache=p.join(target,"release/build/cc-switch-fixture/out/tauri-codegen-assets");
+fs.mkdirSync(cache,{recursive:true});fs.writeFileSync(p.join(cache,"content.js"),compressed);
+const embeddedHtml=z.brotliCompressSync(html);fs.writeFileSync(p.join(cache,"content.html"),embeddedHtml);
+fs.writeFileSync(p.join(target,"release/cc-switch.exe"),Buffer.concat([Buffer.from("MZ__TAURI_BUNDLE_TYPE_VAR_UNK/assets/app.js/index.html"),compressed,embeddedHtml]));
+'@)
+            & node $assetFixtureScript $fixtureRoot $cargoTarget
+            if ($LASTEXITCODE -ne 0) { throw 'asset fixture generation failed' }
+            & git -C $fixtureRoot init -q
+            & git -C $fixtureRoot add -- package.json scripts
+            & git -C $fixtureRoot -c user.name=Fixture -c user.email=fixture@localhost -c core.hooksPath= commit -q -m fixture
+            . (Join-Path $fixtureScripts "production-artifacts.ps1")
+            $identity = Get-ReleaseSourceIdentity -RepoRoot $fixtureRoot
+            Write-ProductionBuildReceipt -RepoRoot $fixtureRoot -CargoTargetDir $cargoTarget -Identity $identity
+            $receiptPath = Join-Path $releaseDir 'PRODUCTION-BUILD.json'
+            $originalReceipt = [IO.File]::ReadAllBytes($receiptPath)
+            $receipt = [IO.File]::ReadAllText($receiptPath) | ConvertFrom-Json
+            $receipt.source.Commit = ('0' * 40)
+            Write-ProductionJson -Path $receiptPath -Value $receipt
+            { & (Join-Path $fixtureScripts 'export-latest-ccswitchmulti.ps1') -SkipBuild -ReleaseRoot $outputRoot } |
+                Should Throw 'source/version'
+            [IO.File]::ReadAllText($sentinel) | Should Be 'previous good release'
+            [IO.File]::WriteAllBytes($receiptPath, $originalReceipt)
+            $installerPath = Join-Path $bundleDir 'CCSwitchMulti_9.9.9_x64-setup.exe'
+            $originalInstaller = [IO.File]::ReadAllBytes($installerPath)
+            [IO.File]::WriteAllText($installerPath, 'swapped installer')
+            { & (Join-Path $fixtureScripts 'export-latest-ccswitchmulti.ps1') -SkipBuild -ReleaseRoot $outputRoot } |
+                Should Throw 'installer hash mismatch'
+            [IO.File]::ReadAllText($sentinel) | Should Be 'previous good release'
+            [IO.File]::WriteAllBytes($installerPath, $originalInstaller)
+            $htmlPath = Join-Path $fixtureRoot 'dist\index.html'
+            $originalHtml = [IO.File]::ReadAllBytes($htmlPath)
+            [IO.File]::AppendAllText($htmlPath, '<title>changed after build</title>')
+            { & (Join-Path $fixtureScripts 'export-latest-ccswitchmulti.ps1') -SkipBuild -ReleaseRoot $outputRoot } |
+                Should Throw 'frontend'
+            [IO.File]::ReadAllText($sentinel) | Should Be 'previous good release'
+            [IO.File]::WriteAllBytes($htmlPath, $originalHtml)
             & (Join-Path $fixtureScripts "export-latest-ccswitchmulti.ps1") -SkipBuild -ReleaseRoot $outputRoot
 
             (Test-Path -LiteralPath (Join-Path $outputRoot "windows\installer\CCSwitchMulti_9.9.9_x64-setup.exe") -PathType Leaf) |
@@ -519,8 +575,14 @@ Remove-LocalReleaseCargoTargetDir -RepoRoot '$($fixtureRoot.Replace("'", "''"))'
                 Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
             }
             $env:USERPROFILE = $previousUserProfile
+            $env:NODE_PATH = $previousFixtureNodePath
             if (Test-Path -LiteralPath $fixtureRoot) {
-                [System.IO.Directory]::Delete($fixtureRoot, $true)
+                $resolvedFixture = [IO.Path]::GetFullPath($fixtureRoot)
+                if ([IO.Path]::GetDirectoryName($resolvedFixture) -ne [IO.Path]::GetTempPath().TrimEnd('\') -or
+                    -not [IO.Path]::GetFileName($resolvedFixture).StartsWith('ccsm-export-target-')) {
+                    throw 'unsafe export fixture cleanup target'
+                }
+                Remove-Item -LiteralPath $resolvedFixture -Recurse -Force
             }
         }
     }

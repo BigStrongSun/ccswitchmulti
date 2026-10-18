@@ -23,7 +23,8 @@ export type RecoveryOutcomeKind =
   | "portOwnedByCompatibleInstance"
   | "portOwnedByUnknownOwner"
   | "startupTakeoverRestored"
-  | "startupTakeoverFailed";
+  | "startupTakeoverFailed"
+  | "codexRendererReleasePending";
 
 export interface RecoveryOutcome {
   id: string;

@@ -15,6 +15,7 @@ const visibleKinds = [
   "unrecoverableUserTables",
   "portOwnedByUnknownOwner",
   "startupTakeoverFailed",
+  "codexRendererReleasePending",
 ] as const;
 const nextSteps = [
   "closeOtherInstanceOrInspectProcess",
@@ -23,12 +24,14 @@ const nextSteps = [
   "changeProxyPortOrInspectOwner",
   "openLogsOrRetryTakeover",
   "retryingTakeoverRestore",
+  "restartCodexToReleaseMenu",
 ] as const;
 
 describe("recovery outcome translations", () => {
   it.each(Object.entries(locales))(
     "%s covers every user-visible outcome and action",
     (_locale, messages) => {
+      expect(messages.notifications.nativeCodexConfigOwned.trim()).not.toBe("");
       for (const kind of visibleKinds) {
         expect(messages.notifications.recovery.kind[kind].trim()).not.toBe("");
       }

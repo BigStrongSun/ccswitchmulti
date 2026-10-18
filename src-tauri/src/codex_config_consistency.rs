@@ -645,6 +645,16 @@ pub fn inspect(state: &AppState) -> Result<CodexConfigConsistencyReport, AppErro
         .db
         .get_provider_by_id(&provider_id, AppType::Codex.as_str())?
         .ok_or_else(|| AppError::Config("Codex current provider is missing".to_string()))?;
+    if provider.uses_native_codex() {
+        return Ok(report(
+            CodexConfigConsistencyState::NotApplicable,
+            Some(provider_id),
+            None,
+            None,
+            Vec::new(),
+            Some("native_codex_config"),
+        ));
+    }
     let expected_text = match build_codex_live_config_for_provider(&state.db, &provider) {
         Ok(text) => text,
         Err(error) => {
@@ -725,6 +735,9 @@ pub fn resolve(
     expected_fingerprint: String,
     action: CodexConfigConsistencyAction,
 ) -> Result<CodexConfigConsistencyReport, AppError> {
+    let _guard = crate::services::provider::block_on_tauri_runtime(
+        state.proxy_service.lock_switch_for_app("codex"),
+    );
     let current = inspect(state)?;
     if action == CodexConfigConsistencyAction::Later {
         return Ok(current);
@@ -835,7 +848,12 @@ async fn resolve_for_command(
 pub(crate) async fn reproject_current_ccsm_config(
     state: &AppState,
 ) -> Result<CodexConfigConsistencyReport, AppError> {
+    let _switch_guard = state.proxy_service.lock_switch_for_app("codex").await;
     let provider_id = crate::settings::get_effective_current_provider(&state.db, &AppType::Codex)?
+        .ok_or_else(|| AppError::Config("Codex current provider is missing".to_string()))?;
+    let provider = state
+        .db
+        .get_provider_by_id(&provider_id, AppType::Codex.as_str())?
         .ok_or_else(|| AppError::Config("Codex current provider is missing".to_string()))?;
     let takeover_expected = state
         .db
@@ -844,19 +862,19 @@ pub(crate) async fn reproject_current_ccsm_config(
         .map(|config| config.enabled)
         .unwrap_or(false);
 
+    if provider.uses_native_codex() && !takeover_expected {
+        return inspect(state);
+    }
+
     if takeover_expected {
         state
             .proxy_service
-            .set_takeover_for_app(AppType::Codex.as_str(), true)
+            .takeover_app_and_switch_provider_after_switch_lock(&AppType::Codex, &provider_id)
             .await
             .map_err(AppError::Message)?;
         return inspect(state);
     }
 
-    let provider = state
-        .db
-        .get_provider_by_id(&provider_id, AppType::Codex.as_str())?
-        .ok_or_else(|| AppError::Config("Codex current provider is missing".to_string()))?;
     let live_path = codex_config::get_codex_config_path();
     let backup_path = live_path.with_file_name(format!(
         "config.toml.ccsm-runtime-refresh-{}.bak",
@@ -946,6 +964,79 @@ mod tests {
         crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
             .expect("set local current provider");
         (crate::store::AppState::new(db), provider.id)
+    }
+
+    fn seed_native_official_provider() -> crate::store::AppState {
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+        let mut provider = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({"auth": {}, "config": "model = \"gpt-5.5\"\n"}),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_local_model_mapping: Some(false),
+            ..Default::default()
+        });
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("save native official provider");
+        db.set_current_provider(AppType::Codex.as_str(), &provider.id)
+            .expect("set current native official provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
+            .expect("set local current native official provider");
+        crate::store::AppState::new(db)
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_leaves_native_official_model_selection_to_codex() {
+        let _home = TestHomeGuard::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let state = seed_native_official_provider();
+        let live = "# selected in Codex Desktop\nmodel = \"gpt-5.5-pro\"\n";
+        codex_config::write_codex_live_config_atomic(Some(live))
+            .expect("write native model selection");
+
+        let result = inspect(&state).expect("inspect native official config");
+
+        assert_eq!(result.state, CodexConfigConsistencyState::NotApplicable);
+        assert_eq!(result.reason.as_deref(), Some("native_codex_config"));
+        assert!(result.changed_keys.is_empty());
+        assert_eq!(
+            fs::read_to_string(codex_config::get_codex_config_path()).expect("read native config"),
+            live
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn runtime_refresh_does_not_reproject_native_official_config() {
+        let _home = TestHomeGuard::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let state = seed_native_official_provider();
+        let live = "# selected in Codex Desktop\nmodel = \"gpt-5.5-pro\"\n";
+        codex_config::write_codex_live_config_atomic(Some(live))
+            .expect("write native model selection");
+
+        let result = reproject_current_ccsm_config(&state)
+            .await
+            .expect("refresh native official config");
+
+        assert_eq!(result.state, CodexConfigConsistencyState::NotApplicable);
+        assert_eq!(
+            fs::read_to_string(codex_config::get_codex_config_path()).expect("read native config"),
+            live
+        );
+        assert!(
+            !fs::read_dir(codex_config::get_codex_config_path().parent().unwrap())
+                .expect("read config directory")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("ccsm-runtime-refresh"))
+        );
     }
 
     #[test]

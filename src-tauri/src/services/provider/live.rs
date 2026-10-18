@@ -766,6 +766,9 @@ pub(crate) fn write_live_with_common_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<(), AppError> {
+    if *app_type == AppType::Codex && provider.uses_native_codex() {
+        return crate::codex_config::release_cc_switch_codex_live_config();
+    }
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;
@@ -794,7 +797,7 @@ pub(crate) fn write_live_with_common_config(
                 crate::codex_multirouter::schema::CodexRoutingDocument::V2(_)
             )
         });
-        if is_v2_router {
+        if is_v2_router && !effective_provider.uses_native_codex() {
             let artifact = crate::codex_multirouter::projection::build_projection_artifact(
                 db,
                 &effective_provider.id,
@@ -812,16 +815,21 @@ pub(crate) fn write_live_with_common_config(
 
 /// 为 Codex live 写入构造配置：保留 DB 中的 `modelCatalog` 元数据，但只有菜单映射开启时才投射到 live。
 fn codex_settings_for_live_projection(provider: &Provider) -> Result<Value, AppError> {
-    let should_project = provider
-        .meta
-        .as_ref()
-        .map(|meta| meta.codex_model_catalog_projection_enabled(&provider.settings_config))
-        .unwrap_or_else(|| provider.settings_config.get("modelCatalog").is_some());
+    let should_project = provider.projects_codex_model_catalog();
 
     let mut settings = provider.settings_config.clone();
     if !should_project {
         if let Some(obj) = settings.as_object_mut() {
             obj.remove("modelCatalog");
+        }
+    }
+    if provider.uses_native_codex() {
+        if let Some(obj) = settings.as_object_mut() {
+            obj.remove("codexRouting");
+            obj.remove("codexRoutingProjection");
+            let config = obj.get("config").and_then(Value::as_str).unwrap_or("");
+            let native = crate::codex_config::merge_codex_provider_config_texts(config, "")?;
+            obj.insert("config".to_string(), Value::String(native));
         }
     }
 
@@ -843,12 +851,19 @@ pub(crate) fn write_codex_config_only_with_common_config(
     db: &Database,
     provider: &Provider,
 ) -> Result<(), AppError> {
+    if provider.uses_native_codex() {
+        return crate::codex_config::release_cc_switch_codex_live_config();
+    }
     let config_text = build_codex_live_config_for_provider(db, provider)?;
     let settings_for_live = codex_settings_for_live_projection(provider)?;
     let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
     crate::codex_config::write_codex_provider_config_only_with_catalog_and_provider_context(
         &settings_for_live,
-        provider.category.as_deref(),
+        if provider.uses_native_codex() {
+            None
+        } else {
+            provider.category.as_deref()
+        },
         Some(&config_text),
         crate::codex_config::CodexCatalogToolProfile::from_api_format(
             provider
@@ -883,7 +898,7 @@ pub(crate) fn build_codex_live_config_for_provider(
                 crate::codex_multirouter::schema::CodexRoutingDocument::V2(_)
             )
         });
-    if is_v2_router {
+    if is_v2_router && !effective_provider.uses_native_codex() {
         let artifact = crate::codex_multirouter::projection::build_projection_artifact(
             db,
             &effective_provider.id,
@@ -908,7 +923,8 @@ pub(crate) fn build_codex_live_config_for_provider(
             profile,
             &provider_context,
         )?;
-    let prepared = if effective_provider.category.as_deref() == Some("official")
+    let prepared = if !effective_provider.uses_native_codex()
+        && effective_provider.category.as_deref() == Some("official")
         && crate::settings::unify_codex_session_history()
     {
         crate::codex_config::inject_codex_unified_session_bucket(&prepared)?
@@ -1405,6 +1421,9 @@ fn write_codex_live_snapshot(
     provider_context: Option<&crate::codex_config::ProviderClassificationContext>,
 ) -> Result<(), AppError> {
     let settings_for_live = codex_settings_for_live_projection(provider)?;
+    if provider.uses_native_codex() {
+        return crate::codex_config::release_cc_switch_codex_live_config();
+    }
     let obj = settings_for_live
         .as_object()
         .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
@@ -1478,6 +1497,13 @@ pub(crate) fn sync_current_provider_for_app_to_live(
     state: &AppState,
     app_type: &AppType,
 ) -> Result<(), AppError> {
+    let _guard = if *app_type == AppType::Codex {
+        Some(block_on_tauri_runtime(
+            state.proxy_service.lock_switch_for_app("codex"),
+        ))
+    } else {
+        None
+    };
     if app_type.is_additive_mode() {
         sync_all_providers_to_live(state, app_type)?;
     } else {
@@ -1489,6 +1515,9 @@ pub(crate) fn sync_current_provider_for_app_to_live(
 
         let providers = state.db.get_all_providers(app_type.as_str())?;
         if let Some(provider) = providers.get(&current_id) {
+            if *app_type == AppType::Codex && provider.uses_native_codex() {
+                return Ok(());
+            }
             write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
         }
     }
@@ -1547,7 +1576,8 @@ fn proxy_owns_live_config(
         return true;
     }
 
-    has_live_backup
+    *app_type != AppType::Codex
+        && has_live_backup
         && block_on_tauri_runtime(
             state
                 .proxy_service
@@ -1555,12 +1585,29 @@ fn proxy_owns_live_config(
         )
 }
 
+fn update_live_backup_for_sync(
+    state: &AppState,
+    app_type: &AppType,
+    provider: &Provider,
+) -> Result<(), String> {
+    // Codex sync callers already own the switch lock across current-provider resolution.
+    block_on_tauri_runtime(async {
+        if *app_type == AppType::Codex {
+            state
+                .proxy_service
+                .update_live_backup_from_provider_inner("codex", provider)
+                .await
+        } else {
+            state
+                .proxy_service
+                .update_live_backup_from_provider(app_type.as_str(), provider)
+                .await
+        }
+    })
+}
+
 fn refresh_stale_live_backup(state: &AppState, app_type: &AppType, provider: &Provider) {
-    if let Err(err) = block_on_tauri_runtime(
-        state
-            .proxy_service
-            .update_live_backup_from_provider(app_type.as_str(), provider),
-    ) {
+    if let Err(err) = update_live_backup_for_sync(state, app_type, provider) {
         log::warn!(
             "刷新 {} 残留 Live 备份失败（不影响本次 live 写入）: {err}",
             app_type.as_str()
@@ -1573,6 +1620,14 @@ pub(crate) fn sync_live_for_provider_respecting_takeover(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<LiveSyncOutcome, AppError> {
+    if *app_type == AppType::Codex && provider.uses_native_codex() {
+        block_on_tauri_runtime(state.proxy_service.disable_native_codex_after_switch_lock())
+            .map_err(|error| {
+                AppError::Message(format!("关闭 Codex 原生模式代理接管失败: {error}"))
+            })?;
+        write_codex_config_only_with_common_config(state.db.as_ref(), provider)?;
+        return Ok(LiveSyncOutcome::WroteLive);
+    }
     // Claude Desktop takeover owns its generated 3P profile, not the ordinary
     // settings file or the legacy backup row. Keep that projection direct.
     if matches!(app_type, AppType::ClaudeDesktop) {
@@ -1589,12 +1644,8 @@ pub(crate) fn sync_live_for_provider_respecting_takeover(
         return Ok(LiveSyncOutcome::WroteLive);
     }
 
-    block_on_tauri_runtime(
-        state
-            .proxy_service
-            .update_live_backup_from_provider(app_type.as_str(), provider),
-    )
-    .map_err(|err| AppError::Message(format!("更新 Live 备份失败: {err}")))?;
+    update_live_backup_for_sync(state, app_type, provider)
+        .map_err(|err| AppError::Message(format!("更新 Live 备份失败: {err}")))?;
 
     if !block_on_tauri_runtime(state.proxy_service.is_running()) {
         return Ok(LiveSyncOutcome::BackupOnly);
@@ -1631,12 +1682,8 @@ pub(crate) fn sync_codex_router_provider(
 ) -> Result<(), AppError> {
     let (has_live_backup, live_taken_over) = live_takeover_evidence(state, &AppType::Codex);
     if proxy_owns_live_config(state, &AppType::Codex, has_live_backup, live_taken_over) {
-        block_on_tauri_runtime(
-            state
-                .proxy_service
-                .update_live_backup_from_provider("codex", provider),
-        )
-        .map_err(|e| AppError::Message(format!("更新 Codex Live 备份失败: {e}")))?;
+        update_live_backup_for_sync(state, &AppType::Codex, provider)
+            .map_err(|e| AppError::Message(format!("更新 Codex Live 备份失败: {e}")))?;
     } else {
         if has_live_backup {
             refresh_stale_live_backup(state, &AppType::Codex, provider);
@@ -1657,6 +1704,13 @@ fn sync_current_provider_for_app_respecting_takeover(
     state: &AppState,
     app_type: &AppType,
 ) -> Result<(), AppError> {
+    let _guard = if *app_type == AppType::Codex {
+        Some(block_on_tauri_runtime(
+            state.proxy_service.lock_switch_for_app("codex"),
+        ))
+    } else {
+        None
+    };
     let current_id =
         match super::ProviderService::user_operable_current_provider_id(state, app_type)? {
             Some(id) => id,
@@ -1673,6 +1727,10 @@ fn sync_current_provider_for_app_respecting_takeover(
     // Repair that ownership view before a Router projection checks which
     // Provider is allowed to publish the shared Codex catalog.
     super::ProviderService::sync_active_profile_provider_snapshot(state, app_type, &provider.id)?;
+
+    if *app_type == AppType::Codex && provider.uses_native_codex() {
+        return Ok(());
+    }
 
     if matches!(app_type, AppType::Codex)
         && provider
@@ -1717,7 +1775,7 @@ fn sync_current_provider_for_app_respecting_takeover(
             block_on_tauri_runtime(
                 state
                     .proxy_service
-                    .set_takeover_for_app(app_type.as_str(), true),
+                    .takeover_app_and_switch_provider_after_switch_lock(app_type, &provider.id),
             )
             .map_err(|e| AppError::Message(format!("启用 MultiRouter 接管失败: {e}")))?;
             return Ok(());
@@ -1754,10 +1812,15 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
     // MCP sync（best-effort 逐应用投影，内部已聚合失败）。错误暂存到
     // Skill 同步之后再返回：MCP 的失败不该跳过 Skill 同步，但调用方
     //（配置导入 / 云同步恢复）需要知道结果不完整。
-    let mcp_result = McpService::sync_all_enabled(state);
+    let mcp_result = McpService::sync_all_enabled_automatically(state);
 
     // Skill sync
+    let _guard = block_on_tauri_runtime(state.proxy_service.lock_switch_for_app("codex"));
+    let native_codex = super::ProviderService::current_codex_uses_native(state)?;
     for app_type in AppType::all() {
+        if native_codex && app_type == AppType::Codex {
+            continue;
+        }
         if let Err(e) = crate::services::skill::SkillService::sync_to_app(&state.db, &app_type) {
             log::warn!("同步 Skill 到 {app_type:?} 失败: {e}");
             // Continue syncing other apps, don't abort

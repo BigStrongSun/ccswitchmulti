@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $PSCommandPath
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..") | Select-Object -ExpandProperty Path
-. (Join-Path $scriptDir "release-build-config.ps1")
+. (Join-Path $scriptDir "production-artifacts.ps1")
 
 Push-Location $repoRoot
 try {
@@ -18,6 +18,7 @@ try {
         if ($buildExitCode -ne 0) {
             throw "tauri build failed with exit code $buildExitCode"
         }
+        [void](Invoke-ProductionAssetVerification -RepoRoot $repoRoot -CargoTargetDir $cargoTargetDir)
     }
 } finally {
     Pop-Location -ErrorAction SilentlyContinue

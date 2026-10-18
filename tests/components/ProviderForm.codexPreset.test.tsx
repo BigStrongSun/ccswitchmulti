@@ -49,6 +49,10 @@ vi.mock("@/lib/api", async () => {
     },
     providersApi: {
       ...actual.providersApi,
+      migrateCodexOfficialAuthOwnership: vi.fn().mockResolvedValue({
+        state: "already_current",
+        conflictingRouterIds: [],
+      }),
       getTeProviderDescriptor: (...args: unknown[]) =>
         codexCandidateApiMocks.getTeProviderDescriptor(...args),
     },
@@ -252,6 +256,157 @@ describe("ProviderForm Codex preset selection", () => {
     await waitFor(() => {
       expect(screen.getByTestId("codex-takeover")).toHaveTextContent("enabled");
     });
+  });
+
+  it("preserves disabled local model mapping when saving an official provider", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Official native",
+        category: "official",
+        settingsConfig: {
+          auth: {},
+          config: 'model = "gpt-5.5"\n',
+          modelCatalog: { models: [{ model: "gpt-5.5" }] },
+          codexRouting: { enabled: false, routes: [] },
+        },
+        meta: { codexLocalModelMapping: false },
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit.mock.calls[0][0].meta.codexLocalModelMapping).toBe(false);
+  });
+
+  it("keeps a legacy native official provider disabled when saving an old catalog", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      providerId: "codex-official",
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Official native legacy",
+        category: "official",
+        settingsConfig: {
+          auth: {},
+          config: 'model = "gpt-5.5"\n',
+          modelCatalog: { models: [{ model: "gpt-5.5" }] },
+          codexRouting: { enabled: false, routes: [] },
+        },
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit.mock.calls[0][0].meta.codexLocalModelMapping).toBe(false);
+  });
+
+  it.each([
+    { meta: { codexLocalModelMapping: true }, label: "explicit mapping" },
+    {
+      meta: { codexOfficialAuth: { mode: "managed_oauth" as const } },
+      label: "managed OAuth",
+    },
+    {
+      meta: { codexOfficialAuth: { mode: "account_pool" as const } },
+      label: "account pool",
+    },
+    { routing: { enabled: true, routes: [] }, label: "enabled routing" },
+  ])(
+    "keeps the legacy official catalog managed for $label",
+    async (fixture) => {
+      renderProviderForm({
+        providerId: "codex-official",
+        initialData: {
+          name: "Official managed legacy",
+          category: "official",
+          settingsConfig: {
+            auth: {},
+            config: 'model = "gpt-5.5"\n',
+            modelCatalog: { models: [{ model: "gpt-5.5" }] },
+            codexRouting: fixture.routing,
+          },
+          meta: fixture.meta,
+        },
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId("codex-takeover")).toHaveTextContent(
+          "enabled",
+        );
+      });
+    },
+  );
+
+  it.each([false, true])(
+    "preserves official routing and catalog when saving local mapping %s",
+    async (codexLocalModelMapping) => {
+      const onSubmit = vi.fn();
+      const modelCatalog = { models: [{ model: "gpt-5.5" }] };
+      const codexRouting = { enabled: true, routes: [] };
+      renderProviderForm({
+        showButtons: true,
+        submitLabel: "保存",
+        onSubmit,
+        initialData: {
+          name: "Official with routing",
+          category: "official",
+          settingsConfig: {
+            auth: {},
+            config: 'model = "gpt-5.5"\n',
+            modelCatalog,
+            codexRouting,
+          },
+          meta: { codexLocalModelMapping },
+        },
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "保存" }));
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+      const saved = onSubmit.mock.calls[0][0];
+      expect(saved.meta.codexLocalModelMapping).toBe(codexLocalModelMapping);
+      expect(JSON.parse(saved.settingsConfig)).toMatchObject({
+        modelCatalog,
+        codexRouting,
+      });
+    },
+  );
+
+  it("preserves custom-provider catalog when saving disabled local mapping", async () => {
+    const onSubmit = vi.fn();
+    const modelCatalog = { models: [{ model: "model-a" }] };
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Third-party relay",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "relay"\nmodel = "model-a"\n[model_providers.relay]\nbase_url = "https://relay.example/v1"\nwire_api = "responses"\n',
+          modelCatalog,
+        },
+        meta: {
+          apiFormat: "openai_responses",
+          codexLocalModelMapping: false,
+        },
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    const saved = onSubmit.mock.calls[0][0];
+    expect(saved.meta.codexLocalModelMapping).toBe(false);
+    expect(JSON.parse(saved.settingsConfig).modelCatalog).toMatchObject(
+      modelCatalog,
+    );
   });
 
   it("forces a saved maintained preset back to model menu projection", async () => {

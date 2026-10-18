@@ -17,7 +17,7 @@ pub(crate) fn run_post_import_sync(
     if let Err(error) = ProviderService::sync_current_to_live(&app_state) {
         failures.push(format!("live configuration: {error}"));
     }
-    if let Err(error) = PromptService::sync_all_to_live(&app_state) {
+    if let Err(error) = PromptService::sync_all_to_live_automatically(&app_state) {
         failures.push(format!("prompts: {error}"));
     }
     if let Err(error) = model_pricing::sync_local_model_pricing(&app_state.db) {

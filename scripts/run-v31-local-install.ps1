@@ -1,11 +1,16 @@
+param(
+    [Parameter(Mandatory = $true)][string]$ProductionManifestPath,
+    [Parameter(Mandatory = $true)][string]$ExpectedSourceCommit
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-. (Join-Path $PSScriptRoot "release-build-config.ps1")
+. (Join-Path $PSScriptRoot "production-artifacts.ps1")
 
-$installer = "C:\Users\sunda\Documents\LLMservice\ccswitchmulti-qwen38-original-toml-root-7e6515db\windows\installer\CCSwitchMulti_3.19.1-31_x64-setup.exe"
-$rawExecutable = Join-Path $repoRoot "src-tauri\target\release\cc-switch.exe"
+$production = Assert-ProductionManifest -ManifestPath $ProductionManifestPath -ExpectedSourceCommit $ExpectedSourceCommit -ExpectedVersion '3.19.1-31'
+$installer = $production.InstallerPath
 $installedExecutable = "C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe"
 $installDirectory = Split-Path -Parent $installedExecutable
 $uninstallExecutable = Join-Path $installDirectory "uninstall.exe"
@@ -22,11 +27,13 @@ $arguments = @(
     "-NoProfile", "-ExecutionPolicy", "Bypass",
     "-File", (Join-Path $PSScriptRoot "install-ccswitchmulti-transaction.ps1"),
     "-InstallerPath", $installer,
-    "-ExpectedInstallerHash", (Get-ReleaseFileSha256 -Path $installer),
+    "-ExpectedInstallerHash", $production.Manifest.artifacts.installer.sha256,
+    "-ProductionManifestPath", $ProductionManifestPath,
+    "-ExpectedSourceCommit", $ExpectedSourceCommit,
     "-ExpectedCurrentVersion", (Get-Item -LiteralPath $installedExecutable).VersionInfo.ProductVersion,
     "-ExpectedCurrentHash", (Get-ReleaseFileSha256 -Path $installedExecutable),
     "-ExpectedInstalledVersion", "3.19.1-31",
-    "-ExpectedInstalledHash", (Get-TauriNsisInstalledExeSha256 -Path $rawExecutable),
+    "-ExpectedInstalledHash", $production.Manifest.artifacts.rawExecutable.installedSha256,
     "-CurrentPid", [string]$listener.OwningProcess,
     "-InstalledExecutable", $installedExecutable,
     "-InstallDirectory", $installDirectory,

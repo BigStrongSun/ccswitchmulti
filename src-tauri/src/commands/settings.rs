@@ -174,7 +174,17 @@ pub async fn save_settings(
             // 后台执行存量迁移（openai 桶 → custom 桶；仅当用户勾选了迁入既有
             // 会话，函数内部自门控）。大会话目录可能要读数秒，不能阻塞设置保存；
             // 失败时不写完成标记，下次启动自动重试。
-            tauri::async_runtime::spawn_blocking(|| {
+            let db = state.db.clone();
+            let proxy = state.proxy_service.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let _guard = crate::services::provider::block_on_tauri_runtime(
+                    proxy.lock_switch_for_app("codex"),
+                );
+                if crate::services::provider::ProviderService::codex_database_uses_native(&db)
+                    .unwrap_or(true)
+                {
+                    return;
+                }
                 match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket() {
                     Ok(outcome) => {
                         if let Some(reason) = outcome.skipped_reason {
@@ -203,7 +213,8 @@ pub async fn save_settings(
             }
         }
     }
-    let env_injection = crate::env_injection::sync_to_live_configs(&env_injection);
+    let env_injection =
+        crate::env_injection::sync_to_live_configs_automatically(&env_injection, state.inner());
     Ok(SettingsSaveResult {
         settings_saved: true,
         env_injection,

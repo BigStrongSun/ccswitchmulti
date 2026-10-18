@@ -243,10 +243,20 @@ pub async fn set_proxy_takeover_for_app(
     app_type: String,
     enabled: bool,
 ) -> Result<(), String> {
-    state
+    static TAKEOVER_OPERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let operation = TAKEOVER_OPERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    let before = state.db.get_current_provider(&app_type).ok().flatten();
+    log::info!(
+        "takeover operation={operation} begin app={app_type} enabled={enabled} provider={before:?}"
+    );
+    let result = state
         .proxy_service
         .set_takeover_for_app(&app_type, enabled)
-        .await
+        .await;
+    let after = state.db.get_current_provider(&app_type).ok().flatten();
+    log::info!("takeover operation={operation} end app={app_type} enabled={enabled} provider={after:?} elapsed_ms={} success={}", started.elapsed().as_millis(), result.is_ok());
+    result
 }
 
 /// Safely replace a verified previous CCSM listener, then restore takeover.
@@ -651,8 +661,20 @@ pub async fn get_codex_guardian_status(
 }
 
 #[tauri::command]
-pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String> {
-    crate::codex_desktop::unlock_codex_model_picker().await
+pub async fn unlock_codex_model_picker(
+    state: tauri::State<'_, AppState>,
+) -> Result<CodexModelPickerUnlockResult, String> {
+    let guard = state.proxy_service.lock_switch_for_app("codex").await;
+    if crate::services::provider::ProviderService::current_codex_uses_native(state.inner())
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(crate::codex_desktop::inactive_codex_model_picker_result(
+            "native_codex_config".to_string(),
+        ));
+    }
+    let work = crate::codex_desktop::CodexRendererWork::new();
+    drop(guard);
+    crate::codex_desktop::unlock_codex_model_picker_for_work(work).await
 }
 
 /// 显式把 Codex 历史 provider 桶同步到 MultiRouter 的 `custom` 运行桶。
@@ -667,6 +689,41 @@ pub async fn sync_codex_history_to_multirouter(
         state.db.as_ref(),
     )
     .map_err(|error| error.to_string())
+}
+
+/// 显式预览旧 Router 明文误标；不迁移 Provider，也不安装 renderer 补丁。
+#[tauri::command]
+pub async fn preview_codex_history_content_repair(
+    state: tauri::State<'_, AppState>,
+    codex_home: Option<String>,
+) -> Result<crate::codex_history_content_repair::ContentRepairOutcome, String> {
+    let guard = state.proxy_service.lock_switch_for_app("codex").await;
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        crate::codex_history_content_repair::preview(codex_home)
+    })
+    .await
+    .map_err(|error| format!("历史恢复预览任务失败：{error}"))?
+}
+
+/// 执行用户已预览的续聊恢复，后台切换锁保持到完整读回结束。
+#[tauri::command]
+pub async fn apply_codex_history_content_repair(
+    state: tauri::State<'_, AppState>,
+    preview_token: String,
+) -> Result<crate::codex_history_content_repair::ContentRepairOutcome, String> {
+    let guard = state.proxy_service.lock_switch_for_app("codex").await;
+    if !crate::services::provider::ProviderService::current_codex_uses_native(state.inner())
+        .map_err(|error| error.to_string())?
+    {
+        return Err("请先切回官方原生模式并退出 Codex，再执行旧对话续聊修复。".to_string());
+    }
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        crate::codex_history_content_repair::apply(preview_token)
+    })
+    .await
+    .map_err(|error| format!("历史恢复执行任务失败：{error}"))?
 }
 
 /// 修复当前 Codex Desktop 历史侧边栏可见性；调用方应先 dry-run，再由用户确认 apply。

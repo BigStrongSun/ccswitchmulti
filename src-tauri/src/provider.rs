@@ -44,6 +44,44 @@ pub struct Provider {
 }
 
 impl Provider {
+    /// Native official mode leaves model selection and account catalogs to Codex.
+    /// Stored routes remain reusable when the user explicitly disables routing.
+    pub fn uses_native_codex(&self) -> bool {
+        self.id == crate::database::CODEX_OFFICIAL_PROVIDER_ID
+            && self.category.as_deref() == Some("official")
+            && self
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.codex_official_auth.as_ref())
+                .is_none_or(|auth| auth.mode == CodexOfficialAuthMode::DesktopCurrentLogin)
+            && self
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.codex_local_model_mapping)
+                != Some(true)
+            && !self.codex_local_routing_enabled()
+    }
+
+    pub fn codex_local_routing_enabled(&self) -> bool {
+        let Some(routing) = self.settings_config.get("codexRouting") else {
+            return false;
+        };
+        if routing.get("enabled").and_then(Value::as_bool) == Some(false) {
+            return false;
+        }
+        routing.get("enabled").and_then(Value::as_bool) == Some(true)
+            || codex_routing_has_enabled_routes(&self.settings_config)
+    }
+
+    pub fn projects_codex_model_catalog(&self) -> bool {
+        !self.uses_native_codex()
+            && (codex_routing_has_enabled_routes(&self.settings_config)
+                || self.meta.as_ref().map_or_else(
+                    || self.settings_config.get("modelCatalog").is_some(),
+                    |meta| meta.codex_model_catalog_projection_enabled(&self.settings_config),
+                ))
+    }
+
     /// 从现有ID创建供应商
     pub fn with_id(
         id: String,

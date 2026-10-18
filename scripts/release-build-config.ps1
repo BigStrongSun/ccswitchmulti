@@ -365,11 +365,23 @@ function Replace-ReleaseRootFromStage {
 }
 
 function Get-TauriNsisInstalledExeSha256 {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [scriptblock]$ReadBytes = { param($FilePath) ,[IO.File]::ReadAllBytes($FilePath) },
+        [string]$ExpectedRawHash = ''
+    )
 
     $unknownMarker = "__TAURI_BUNDLE_TYPE_VAR_UNK"
     $nsisMarker = "__TAURI_BUNDLE_TYPE_VAR_NSS"
-    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    [byte[]]$bytes = ([byte[]](& $ReadBytes $Path)).Clone()
+    if ($ExpectedRawHash) {
+        $rawHasher = [Security.Cryptography.SHA256]::Create()
+        try { $rawHash = [BitConverter]::ToString($rawHasher.ComputeHash($bytes)).Replace('-', '') }
+        finally { $rawHasher.Dispose() }
+        if (-not [string]::Equals($rawHash, $ExpectedRawHash, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'production raw executable changed while deriving installed hash'
+        }
+    }
     $latin1 = [System.Text.Encoding]::GetEncoding(28591)
     $binaryText = $latin1.GetString($bytes)
     $markerOffset = $binaryText.IndexOf(

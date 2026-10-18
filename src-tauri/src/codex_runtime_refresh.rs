@@ -358,6 +358,10 @@ struct CodexRuntimeVerification {
 }
 
 trait CodexRuntimeRefreshOperations {
+    fn uses_ccsm_desktop_compatibility(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+    fn ensure_managed(&mut self) -> Result<(), String>;
     async fn current_targets(&mut self) -> Result<CodexRuntimeRefreshTargets, String>;
     async fn request_graceful_close(
         &mut self,
@@ -395,6 +399,7 @@ where
     O: CodexRuntimeRefreshOperations,
     F: FnMut(CodexRuntimeRefreshProgress),
 {
+    operations.ensure_managed()?;
     emit(CodexRuntimeRefreshProgress::stage(
         CodexRuntimeRefreshStage::Closing,
     ));
@@ -404,6 +409,7 @@ where
         "正在检查 Codex 运行进程",
     ));
     let targets = operations.current_targets().await?;
+    operations.ensure_managed()?;
     if refresh_target_fingerprint(&targets) != expected_snapshot_token {
         return Err("runtime_changed_since_inspection".to_string());
     }
@@ -435,6 +441,7 @@ where
         return Err(error);
     }
 
+    operations.ensure_managed()?;
     emit(CodexRuntimeRefreshProgress::log(
         CodexRuntimeRefreshStage::Closing,
         "waiting_for_exit",
@@ -458,6 +465,7 @@ where
             return Err(error);
         }
     };
+    operations.ensure_managed()?;
     let force_terminated = !survivors.is_empty();
     if force_terminated {
         emit(CodexRuntimeRefreshProgress::stage(
@@ -483,6 +491,7 @@ where
             ));
             return Err(error);
         }
+        operations.ensure_managed()?;
         survivors = match await_with_heartbeat(
             operations.wait_for_exit(&targets),
             CodexRuntimeRefreshStage::ForceClosing,
@@ -501,6 +510,7 @@ where
                 return Err(error);
             }
         };
+        operations.ensure_managed()?;
         if !survivors.is_empty() {
             emit(CodexRuntimeRefreshProgress::log(
                 CodexRuntimeRefreshStage::ForceClosing,
@@ -511,57 +521,69 @@ where
         }
     }
 
-    emit(CodexRuntimeRefreshProgress::stage(
-        CodexRuntimeRefreshStage::RepairingHistory,
-    ));
-    emit(CodexRuntimeRefreshProgress::log(
-        CodexRuntimeRefreshStage::RepairingHistory,
-        "history_repair_started",
-        "开始检查并修复分页历史",
-    ));
-    let history_repair = match await_with_heartbeat(
-        operations.repair_paginated_history(),
-        CodexRuntimeRefreshStage::RepairingHistory,
-        CODEX_RUNTIME_REFRESH_HEARTBEAT_INTERVAL,
-        &mut emit,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            emit(CodexRuntimeRefreshProgress::log(
-                CodexRuntimeRefreshStage::RepairingHistory,
-                "history_repair_failed",
-                format!("历史修复失败：{error}"),
-            ));
-            emit(CodexRuntimeRefreshProgress::stage(
-                CodexRuntimeRefreshStage::Launching,
-            ));
-            emit(CodexRuntimeRefreshProgress::log(
-                CodexRuntimeRefreshStage::Launching,
-                "relaunch_after_history_failure_started",
-                "历史修复失败，正在尝试重新打开 Codex",
-            ));
-            let relaunch = operations.launch_codex().await;
-            return match relaunch {
-                Ok(()) => Err(error),
-                Err(launch_error) => Err(format!(
+    let history_repair = if operations.uses_ccsm_desktop_compatibility()? {
+        emit(CodexRuntimeRefreshProgress::stage(
+            CodexRuntimeRefreshStage::RepairingHistory,
+        ));
+        emit(CodexRuntimeRefreshProgress::log(
+            CodexRuntimeRefreshStage::RepairingHistory,
+            "history_repair_started",
+            "开始检查并修复分页历史",
+        ));
+        let history_repair = match await_with_heartbeat(
+            operations.repair_paginated_history(),
+            CodexRuntimeRefreshStage::RepairingHistory,
+            CODEX_RUNTIME_REFRESH_HEARTBEAT_INTERVAL,
+            &mut emit,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                emit(CodexRuntimeRefreshProgress::log(
+                    CodexRuntimeRefreshStage::RepairingHistory,
+                    "history_repair_failed",
+                    format!("历史修复失败：{error}"),
+                ));
+                // The blocking writer still owns the switch lock after its waiter times out.
+                // Relaunching here would wait indefinitely on that same unfinished writer.
+                if error == "codex_paginated_history_repair_timed_out" {
+                    return Err(error);
+                }
+                emit(CodexRuntimeRefreshProgress::stage(
+                    CodexRuntimeRefreshStage::Launching,
+                ));
+                emit(CodexRuntimeRefreshProgress::log(
+                    CodexRuntimeRefreshStage::Launching,
+                    "relaunch_after_history_failure_started",
+                    "历史修复失败，正在尝试重新打开 Codex",
+                ));
+                operations.ensure_managed()?;
+                let relaunch = operations.launch_codex().await;
+                return match relaunch {
+                    Ok(()) => Err(error),
+                    Err(launch_error) => Err(format!(
                     "{error}; codex_relaunch_after_history_repair_failure_failed: {launch_error}"
                 )),
-            };
-        }
+                };
+            }
+        };
+        operations.ensure_managed()?;
+        emit(CodexRuntimeRefreshProgress::log(
+            CodexRuntimeRefreshStage::RepairingHistory,
+            "history_repair_finished",
+            format!(
+                "历史修复完成：文件 {} 个，重复序号 {} 个，迁移游标 {} 个，父段引用 {} 个",
+                history_repair.repaired_rollout_count,
+                history_repair.repaired_duplicate_count,
+                history_repair.repaired_provider_migration_cursor_count,
+                history_repair.repaired_provider_migration_history_base_count,
+            ),
+        ));
+        history_repair
+    } else {
+        paginated_history::PaginatedHistoryRepairOutcome::default()
     };
-    emit(CodexRuntimeRefreshProgress::log(
-        CodexRuntimeRefreshStage::RepairingHistory,
-        "history_repair_finished",
-        format!(
-            "历史修复完成：文件 {} 个，重复序号 {} 个，迁移游标 {} 个，父段引用 {} 个",
-            history_repair.repaired_rollout_count,
-            history_repair.repaired_duplicate_count,
-            history_repair.repaired_provider_migration_cursor_count,
-            history_repair.repaired_provider_migration_history_base_count,
-        ),
-    ));
 
     emit(CodexRuntimeRefreshProgress::stage(
         CodexRuntimeRefreshStage::ApplyingConfig,
@@ -594,6 +616,7 @@ where
                 "relaunch_after_config_failure_started",
                 "配置应用失败，正在尝试重新打开 Codex",
             ));
+            operations.ensure_managed()?;
             let relaunch = operations.launch_codex().await;
             return match relaunch {
                 Ok(()) => Err(error),
@@ -603,6 +626,7 @@ where
             };
         }
     };
+    operations.ensure_managed()?;
     emit(CodexRuntimeRefreshProgress::log(
         CodexRuntimeRefreshStage::ApplyingConfig,
         "config_apply_finished",
@@ -625,6 +649,7 @@ where
         ));
         return Err(error);
     }
+    operations.ensure_managed()?;
     emit(CodexRuntimeRefreshProgress::log(
         CodexRuntimeRefreshStage::Launching,
         "launch_finished",
@@ -657,6 +682,7 @@ where
             return Err(error);
         }
     };
+    operations.ensure_managed()?;
     emit(CodexRuntimeRefreshProgress::log(
         CodexRuntimeRefreshStage::Verifying,
         "verification_finished",
@@ -885,10 +911,10 @@ fn select_launch_target(
     executable.map(CodexRuntimeLaunchTarget::DesktopExecutable)
 }
 
-fn resolve_launch_target() -> Option<CodexRuntimeLaunchTarget> {
+fn resolve_launch_target(native_launch: bool) -> Option<CodexRuntimeLaunchTarget> {
     let executable = crate::codex_desktop::resolve_codex_executable();
-    let timezone_injection_enabled =
-        crate::codex_egress_timezone::resolve_launch_timezone(&crate::settings::get_settings())
+    let timezone_injection_enabled = !native_launch
+        && crate::codex_egress_timezone::resolve_launch_timezone(&crate::settings::get_settings())
             .is_some();
     #[cfg(target_os = "windows")]
     let aumid = resolve_windows_codex_aumid();
@@ -898,7 +924,9 @@ fn resolve_launch_target() -> Option<CodexRuntimeLaunchTarget> {
 }
 
 #[cfg(not(target_os = "windows"))]
-async fn build_preflight() -> Result<CodexRuntimeRefreshPreflight, String> {
+async fn build_preflight(
+    _with_history_compatibility: bool,
+) -> Result<CodexRuntimeRefreshPreflight, String> {
     Ok(CodexRuntimeRefreshPreflight {
         supported: false,
         can_refresh: false,
@@ -913,13 +941,18 @@ async fn build_preflight() -> Result<CodexRuntimeRefreshPreflight, String> {
 }
 
 #[cfg(target_os = "windows")]
-async fn build_preflight() -> Result<CodexRuntimeRefreshPreflight, String> {
+async fn build_preflight(
+    with_history_compatibility: bool,
+) -> Result<CodexRuntimeRefreshPreflight, String> {
     let targets = query_refresh_targets().await?;
-    let launch_target = resolve_launch_target();
-    let paginated_history =
+    let launch_target = resolve_launch_target(!with_history_compatibility);
+    let paginated_history = if with_history_compatibility {
         tokio::task::spawn_blocking(paginated_history::inspect_paginated_history_repair)
             .await
-            .map_err(|error| format!("paginated_history_inspection_join_failed: {error}"))??;
+            .map_err(|error| format!("paginated_history_inspection_join_failed: {error}"))??
+    } else {
+        Default::default()
+    };
     Ok(CodexRuntimeRefreshPreflight {
         supported: true,
         can_refresh: launch_target.is_some(),
@@ -1062,7 +1095,7 @@ fn force_terminate_process(_pid: u32) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn launch_windows_aumid(aumid: &str) -> Result<(), String> {
+fn launch_windows_aumid(aumid: &str, native_launch: bool) -> Result<(), String> {
     use windows::core::HSTRING;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER,
@@ -1077,11 +1110,15 @@ fn launch_windows_aumid(aumid: &str) -> Result<(), String> {
         let manager: IApplicationActivationManager =
             unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER) }
                 .map_err(|error| format!("codex_aumid_activation_manager_failed: {error}"))?;
-        let arguments = HSTRING::from(format!(
-            "--remote-debugging-port={} --remote-allow-origins=http://127.0.0.1:{}",
-            crate::codex_desktop::DEFAULT_CODEX_DEBUG_PORT,
-            crate::codex_desktop::DEFAULT_CODEX_DEBUG_PORT
-        ));
+        let arguments = HSTRING::from(if native_launch {
+            String::new()
+        } else {
+            format!(
+                "--remote-debugging-port={} --remote-allow-origins=http://127.0.0.1:{}",
+                crate::codex_desktop::DEFAULT_CODEX_DEBUG_PORT,
+                crate::codex_desktop::DEFAULT_CODEX_DEBUG_PORT
+            )
+        });
         unsafe { manager.ActivateApplication(&HSTRING::from(aumid), &arguments, AO_NONE) }
             .map(|_| ())
             .map_err(|error| format!("codex_aumid_activation_failed: {error}"))
@@ -1092,11 +1129,20 @@ fn launch_windows_aumid(aumid: &str) -> Result<(), String> {
     result
 }
 
-fn launch_codex_target(target: &CodexRuntimeLaunchTarget) -> Result<(), String> {
+fn launch_codex_target(
+    target: &CodexRuntimeLaunchTarget,
+    native_launch: bool,
+) -> Result<(), String> {
     match target {
         #[cfg(target_os = "windows")]
-        CodexRuntimeLaunchTarget::WindowsAumid(aumid) => launch_windows_aumid(aumid),
+        CodexRuntimeLaunchTarget::WindowsAumid(aumid) => launch_windows_aumid(aumid, native_launch),
         CodexRuntimeLaunchTarget::DesktopExecutable(path) => {
+            if native_launch {
+                return crate::codex_desktop::native_codex_launch_command(path)
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|error| format!("failed to launch {}: {error}", path.display()));
+            }
             crate::codex_desktop::launch_codex_with_debug_port(
                 path,
                 crate::codex_desktop::DEFAULT_CODEX_DEBUG_PORT,
@@ -1119,8 +1165,36 @@ struct SystemCodexRuntimeRefreshOperations<'a> {
     progress: RuntimeRefreshProgressEmitter,
 }
 
+fn ensure_managed_refresh(state: &AppState) -> Result<(), String> {
+    if crate::services::provider::ProviderService::current_codex_transport_uses_native(state)
+        .map_err(String::from)?
+    {
+        return Err("native_codex_config".to_string());
+    }
+    Ok(())
+}
+
+async fn lock_managed_refresh(
+    state: &AppState,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+    let guard = state.proxy_service.lock_switch_for_app("codex").await;
+    ensure_managed_refresh(state)?;
+    Ok(guard)
+}
+
 impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
+    fn uses_ccsm_desktop_compatibility(&self) -> Result<bool, String> {
+        crate::services::provider::ProviderService::current_codex_uses_native(self.state)
+            .map(|native| !native)
+            .map_err(String::from)
+    }
+
+    fn ensure_managed(&mut self) -> Result<(), String> {
+        ensure_managed_refresh(self.state)
+    }
+
     async fn current_targets(&mut self) -> Result<CodexRuntimeRefreshTargets, String> {
+        let _switch_guard = lock_managed_refresh(self.state).await?;
         query_refresh_targets().await
     }
 
@@ -1128,6 +1202,7 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
         &mut self,
         targets: &CodexRuntimeRefreshTargets,
     ) -> Result<(), String> {
+        let _switch_guard = lock_managed_refresh(self.state).await?;
         for process in &targets.desktop_shells {
             request_windows_close(process.pid);
         }
@@ -1155,6 +1230,7 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
         &mut self,
         survivors: &[RawCodexRuntimeProcess],
     ) -> Result<(), String> {
+        let _switch_guard = lock_managed_refresh(self.state).await?;
         for process in survivors
             .iter()
             .filter(|process| is_official_codex_desktop_shell(process))
@@ -1213,10 +1289,16 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
     async fn repair_paginated_history(
         &mut self,
     ) -> Result<paginated_history::PaginatedHistoryRepairOutcome, String> {
+        let switch_guard = lock_managed_refresh(self.state).await?;
+        if !self.uses_ccsm_desktop_compatibility()? {
+            return Ok(Default::default());
+        }
         let progress = self.progress.clone();
         let repair = tokio::time::timeout(
             CODEX_HISTORY_REPAIR_TIMEOUT,
             tokio::task::spawn_blocking(move || {
+                // Keep switch ownership until the blocking writer finishes, even if its waiter times out.
+                let _switch_guard = switch_guard;
                 paginated_history::repair_paginated_history_after_codex_exit(|event| {
                     progress.emit(event.into());
                 })
@@ -1240,9 +1322,12 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
     }
 
     async fn apply_ccsm_config(&mut self) -> Result<i64, String> {
+        ensure_managed_refresh(self.state)?;
+        // Reprojection owns the switch lock itself; do not acquire it recursively here.
         crate::codex_config_consistency::reproject_current_ccsm_config(self.state)
             .await
             .map_err(String::from)?;
+        ensure_managed_refresh(self.state)?;
         let modified = std::fs::metadata(crate::codex_config::get_codex_config_path())
             .and_then(|metadata| metadata.modified())
             .map_err(|error| format!("codex_config_modified_time_unavailable: {error}"))?;
@@ -1250,7 +1335,25 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
     }
 
     async fn launch_codex(&mut self) -> Result<(), String> {
-        launch_codex_target(&self.launch_target)
+        let _switch_guard = lock_managed_refresh(self.state).await?;
+        launch_codex_target(
+            &self.launch_target,
+            !self.uses_ccsm_desktop_compatibility()?,
+        )
+    }
+
+    async fn unlock_renderer_compatibility(
+        &mut self,
+    ) -> Result<crate::codex_desktop::CodexModelPickerUnlockResult, String> {
+        let switch_guard = lock_managed_refresh(self.state).await?;
+        if !self.uses_ccsm_desktop_compatibility()? {
+            return Ok(crate::codex_desktop::inactive_codex_model_picker_result(
+                "native_transport_no_renderer_required".to_string(),
+            ));
+        }
+        let work = crate::codex_desktop::CodexRendererWork::new();
+        drop(switch_guard);
+        crate::codex_desktop::unlock_codex_model_picker_for_work(work).await
     }
 
     async fn verify_fresh_runtime(
@@ -1266,7 +1369,9 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
         // Codex 自己的物化互相覆盖。
         let mut attempted_history_followup = false;
         loop {
+            ensure_managed_refresh(self.state)?;
             let targets = query_refresh_targets().await?;
+            ensure_managed_refresh(self.state)?;
             let fresh_app_server = targets.app_servers.iter().any(|process| {
                 chrono::DateTime::parse_from_rfc3339(&process.started_at)
                     .ok()
@@ -1301,7 +1406,9 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
                         if !attempted_history_followup {
                             attempted_history_followup = true;
                             if let Some(outcome) = self.history_repair_outcome.clone() {
+                                let switch_guard = lock_managed_refresh(self.state).await?;
                                 let repaired = tokio::task::spawn_blocking(move || {
+                                    let _switch_guard = switch_guard;
                                     paginated_history::repair_newly_stalled_projection_cursors(
                                         &outcome,
                                     )
@@ -1322,6 +1429,16 @@ impl CodexRuntimeRefreshOperations for SystemCodexRuntimeRefreshOperations<'_> {
                         last_core_error =
                             Some("codex_paginated_history_projection_not_caught_up".to_string());
                     } else {
+                        if !self.uses_ccsm_desktop_compatibility()? {
+                            // Native account transport does not require history or renderer projection.
+                            return Ok(CodexRuntimeVerification {
+                                outcome: CodexRuntimeRefreshOutcome::Completed,
+                                config_status: CodexRuntimeCheckStatus::Ready,
+                                paginated_history_status: CodexRuntimeCheckStatus::Ready,
+                                renderer_compatibility_status: CodexRuntimeCheckStatus::Ready,
+                                renderer_compatibility_message: None,
+                            });
+                        }
                         return poll_renderer_compatibility(
                             CODEX_RENDERER_PATCH_READY_TIMEOUT,
                             CodexRendererProbe { operations: self },
@@ -1388,6 +1505,9 @@ where
                 }
             }
             Err(error) => {
+                if error == "native_codex_config" {
+                    return Err(error);
+                }
                 last_message = Some(format!(
                     "codex_history_compatibility_install_failed: {error}"
                 ));
@@ -1408,8 +1528,31 @@ where
 }
 
 #[tauri::command]
-pub async fn inspect_codex_runtime_refresh() -> Result<CodexRuntimeRefreshPreflight, String> {
-    build_preflight().await
+pub async fn inspect_codex_runtime_refresh(
+    state: State<'_, AppState>,
+) -> Result<CodexRuntimeRefreshPreflight, String> {
+    let _switch_guard = state.proxy_service.lock_switch_for_app("codex").await;
+    if crate::services::provider::ProviderService::current_codex_transport_uses_native(
+        state.inner(),
+    )
+    .map_err(String::from)?
+    {
+        return Ok(CodexRuntimeRefreshPreflight {
+            supported: cfg!(target_os = "windows"),
+            can_refresh: false,
+            snapshot_token: String::new(),
+            desktop_process_count: 0,
+            app_server_process_count: 0,
+            process_count: 0,
+            launch_target: None,
+            warning: Some("native_codex_config".to_string()),
+            paginated_history: Default::default(),
+        });
+    }
+    let native_features =
+        crate::services::provider::ProviderService::current_codex_uses_native(state.inner())
+            .map_err(String::from)?;
+    build_preflight(!native_features).await
 }
 
 #[tauri::command]
@@ -1418,10 +1561,14 @@ pub async fn refresh_codex_runtime_state(
     state: State<'_, AppState>,
     snapshot_token: String,
 ) -> Result<CodexRuntimeRefreshResult, String> {
+    ensure_managed_refresh(state.inner())?;
     let _refresh_guard = CODEX_RUNTIME_REFRESH_LOCK
         .try_lock()
         .map_err(|_| "codex_runtime_refresh_already_running".to_string())?;
-    let launch_target = resolve_launch_target()
+    let native_features =
+        crate::services::provider::ProviderService::current_codex_uses_native(state.inner())
+            .map_err(String::from)?;
+    let launch_target = resolve_launch_target(native_features)
         .ok_or_else(|| "codex_desktop_launch_target_not_found".to_string())?;
     let progress = RuntimeRefreshProgressEmitter::new(app);
     let mut operations = SystemCodexRuntimeRefreshOperations {
@@ -1725,6 +1872,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn renderer_poll_stops_immediately_when_codex_becomes_native() {
+        struct NativeProbe;
+        impl RendererCompatibilityProbe for NativeProbe {
+            async fn probe(
+                &mut self,
+            ) -> Result<crate::codex_desktop::CodexModelPickerUnlockResult, String> {
+                Err("native_codex_config".to_string())
+            }
+        }
+        let error = poll_renderer_compatibility(Duration::from_secs(10), NativeProbe)
+            .await
+            .expect_err("native ownership must stop compatibility polling");
+        assert_eq!(error, "native_codex_config");
+    }
+
+    #[tokio::test]
     async fn renderer_patch_poll_waits_for_convergence_instead_of_early_not_ready() {
         let verification = poll_renderer_compatibility(
             Duration::from_millis(1500),
@@ -1786,6 +1949,13 @@ mod tests {
 
     #[derive(Default)]
     struct FakeRefreshOperations {
+        transport_only: bool,
+        native: bool,
+        native_after_inspection: bool,
+        native_after_wait: bool,
+        native_after_history: bool,
+        native_after_apply: bool,
+        launch_pending: bool,
         targets: CodexRuntimeRefreshTargets,
         wait_results: VecDeque<Vec<RawCodexRuntimeProcess>>,
         log: Vec<&'static str>,
@@ -1796,8 +1966,21 @@ mod tests {
     }
 
     impl CodexRuntimeRefreshOperations for FakeRefreshOperations {
+        fn uses_ccsm_desktop_compatibility(&self) -> Result<bool, String> {
+            Ok(!self.transport_only)
+        }
+
+        fn ensure_managed(&mut self) -> Result<(), String> {
+            if self.native {
+                Err("native_codex_config".to_string())
+            } else {
+                Ok(())
+            }
+        }
+
         async fn current_targets(&mut self) -> Result<CodexRuntimeRefreshTargets, String> {
             self.log.push("inspect");
+            self.native |= self.native_after_inspection;
             Ok(self.targets.clone())
         }
 
@@ -1814,6 +1997,7 @@ mod tests {
             _targets: &CodexRuntimeRefreshTargets,
         ) -> Result<Vec<RawCodexRuntimeProcess>, String> {
             self.log.push("wait_for_exit");
+            self.native |= self.native_after_wait;
             Ok(self.wait_results.pop_front().unwrap_or_default())
         }
 
@@ -1829,6 +2013,7 @@ mod tests {
             &mut self,
         ) -> Result<paginated_history::PaginatedHistoryRepairOutcome, String> {
             self.log.push("repair_history");
+            self.native |= self.native_after_history;
             match self.history_repair_error.take() {
                 Some(error) => Err(error),
                 None => Ok(paginated_history::PaginatedHistoryRepairOutcome {
@@ -1841,6 +2026,7 @@ mod tests {
 
         async fn apply_ccsm_config(&mut self) -> Result<i64, String> {
             self.log.push("apply_config");
+            self.native |= self.native_after_apply;
             match self.apply_error.take() {
                 Some(error) => Err(error),
                 None => Ok(1_788_200_000_000),
@@ -1849,6 +2035,9 @@ mod tests {
 
         async fn launch_codex(&mut self) -> Result<(), String> {
             self.log.push("launch");
+            if self.launch_pending {
+                return std::future::pending().await;
+            }
             Ok(())
         }
 
@@ -1869,6 +2058,110 @@ mod tests {
             r"C:\Program Files\WindowsApps\OpenAI.Codex_26.825.6671.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe",
             r#""ChatGPT.exe""#,
         )])
+    }
+
+    #[tokio::test]
+    async fn transport_only_refresh_applies_and_relaunches_without_history_repair() {
+        let mut operations = FakeRefreshOperations {
+            transport_only: true,
+            targets: one_shell_target(),
+            history_repair_error: Some("history must remain untouched".to_string()),
+            ..Default::default()
+        };
+        let token = refresh_target_fingerprint(&operations.targets);
+        let mut events = Vec::new();
+        let result =
+            execute_refresh_transaction(&mut operations, &token, |event| events.push(event))
+                .await
+                .expect("transport-only refresh must apply without touching history");
+        assert_eq!(result.outcome, CodexRuntimeRefreshOutcome::Completed);
+        assert_eq!(result.repaired_history_rollout_count, 0);
+        assert!(!operations.log.contains(&"repair_history"));
+        assert!(operations.log.contains(&"apply_config"));
+        assert!(operations.log.contains(&"launch"));
+        assert!(operations.log.contains(&"verify"));
+        assert!(!events
+            .iter()
+            .any(|event| event.stage == CodexRuntimeRefreshStage::RepairingHistory));
+    }
+
+    #[tokio::test]
+    async fn native_refresh_does_not_inspect_close_repair_or_launch() {
+        let mut operations = FakeRefreshOperations {
+            native: true,
+            targets: one_shell_target(),
+            ..Default::default()
+        };
+        let token = refresh_target_fingerprint(&operations.targets);
+        let error = execute_refresh_transaction(&mut operations, &token, |_| {})
+            .await
+            .expect_err("native refresh must be inactive");
+        assert_eq!(error, "native_codex_config");
+        assert!(operations.log.is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_writer_timeout_returns_without_waiting_for_a_relaunch_lock() {
+        let mut operations = FakeRefreshOperations {
+            targets: one_shell_target(),
+            history_repair_error: Some("codex_paginated_history_repair_timed_out".to_string()),
+            launch_pending: true,
+            ..Default::default()
+        };
+        let token = refresh_target_fingerprint(&operations.targets);
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            execute_refresh_transaction(&mut operations, &token, |_| {}),
+        )
+        .await
+        .expect("the transaction must return while the timed-out writer still owns its lock")
+        .expect_err("history timeout must remain visible");
+        assert_eq!(error, "codex_paginated_history_repair_timed_out");
+        assert!(!operations.log.contains(&"launch"));
+        assert!(!operations.log.contains(&"apply_config"));
+    }
+
+    #[tokio::test]
+    async fn switching_to_native_during_refresh_stops_before_the_next_mutation() {
+        for transition in [
+            "inspect",
+            "wait",
+            "history",
+            "apply",
+            "history_error",
+            "apply_error",
+        ] {
+            let mut operations = FakeRefreshOperations {
+                native_after_inspection: transition == "inspect",
+                native_after_wait: transition == "wait",
+                native_after_history: transition.starts_with("history"),
+                native_after_apply: transition.starts_with("apply"),
+                history_repair_error: (transition == "history_error")
+                    .then(|| "repair failed".to_string()),
+                apply_error: (transition == "apply_error").then(|| "apply failed".to_string()),
+                targets: one_shell_target(),
+                // A surviving process would be force-terminated without the ownership check.
+                wait_results: VecDeque::from([one_shell_target().desktop_shells]),
+                ..Default::default()
+            };
+            if transition != "wait" {
+                operations.wait_results.clear();
+            }
+            let token = refresh_target_fingerprint(&operations.targets);
+            let error = execute_refresh_transaction(&mut operations, &token, |_| {})
+                .await
+                .expect_err("ownership change must stop refresh");
+            assert_eq!(error, "native_codex_config", "{transition}");
+            assert!(!operations.log.contains(&"force_terminate"), "{transition}");
+            assert!(!operations.log.contains(&"launch"), "{transition}");
+            assert!(!operations.log.contains(&"verify"), "{transition}");
+            if matches!(transition, "inspect" | "wait") {
+                assert!(!operations.log.contains(&"repair_history"), "{transition}");
+            }
+            if transition == "inspect" {
+                assert!(!operations.log.contains(&"graceful_close"));
+            }
+        }
     }
 
     #[tokio::test]

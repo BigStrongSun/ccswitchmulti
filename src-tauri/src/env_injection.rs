@@ -727,6 +727,26 @@ fn failed_report(error: impl ToString) -> EnvInjectionSyncReport {
 }
 
 pub fn sync_to_live_configs(settings: &EnvInjectionSettings) -> EnvInjectionSyncReport {
+    sync_to_live_configs_with_codex(settings, true)
+}
+
+pub(crate) fn sync_to_live_configs_automatically(
+    settings: &EnvInjectionSettings,
+    state: &crate::store::AppState,
+) -> EnvInjectionSyncReport {
+    let _guard = crate::services::provider::block_on_tauri_runtime(
+        state.proxy_service.lock_switch_for_app("codex"),
+    );
+    match crate::services::provider::ProviderService::current_codex_uses_native(state) {
+        Ok(native) => sync_to_live_configs_with_codex(settings, !native),
+        Err(error) => failed_report(error),
+    }
+}
+
+fn sync_to_live_configs_with_codex(
+    settings: &EnvInjectionSettings,
+    sync_codex: bool,
+) -> EnvInjectionSyncReport {
     let _guard = match ownership_lock().lock() {
         Ok(guard) => guard,
         Err(error) => {
@@ -739,7 +759,15 @@ pub fn sync_to_live_configs(settings: &EnvInjectionSettings) -> EnvInjectionSync
     };
 
     let claude = sync_claude_target(settings, &mut ledger);
-    let codex = sync_codex_target(settings, &mut ledger);
+    let codex = if sync_codex {
+        sync_codex_target(settings, &mut ledger)
+    } else {
+        EnvInjectionTargetSyncStatus::success(
+            false,
+            &ledger.codex,
+            EnvInjectionTargetReport::default(),
+        )
+    };
     let codex_include_allowlist = crate::codex_config::read_codex_config_text()
         .is_ok_and(|text| codex_env_policy_has_include_allowlist(&text));
     EnvInjectionSyncReport::new(claude, codex, codex_include_allowlist)

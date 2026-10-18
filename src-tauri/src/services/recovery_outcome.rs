@@ -48,6 +48,7 @@ pub enum RecoveryOutcomeKind {
     PortOwnedByUnknownOwner,
     StartupTakeoverRestored,
     StartupTakeoverFailed,
+    CodexRendererReleasePending,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

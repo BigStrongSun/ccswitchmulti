@@ -16,8 +16,81 @@ pub(crate) const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
 pub(crate) const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
-const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV9";
+const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV10";
+type ModelPickerDocumentScripts = HashMap<String, Vec<(String, String)>>;
+static MODEL_PICKER_DOCUMENT_SCRIPTS: std::sync::LazyLock<
+    std::sync::Mutex<ModelPickerDocumentScripts>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static MODEL_PICKER_UNTRACKED_DOCUMENTS: std::sync::LazyLock<std::sync::Mutex<BTreeSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeSet::new()));
+static MODEL_PICKER_TIMEZONES: std::sync::LazyLock<std::sync::Mutex<BTreeSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeSet::new()));
+static RENDERER_EFFECTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static RENDERER_GENERATION: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(0).0);
+
+#[derive(Clone, Copy)]
+pub(crate) struct CodexRendererWork(u64);
+
+impl CodexRendererWork {
+    pub(crate) fn new() -> Self {
+        Self(*RENDERER_GENERATION.borrow())
+    }
+
+    pub(crate) fn check(self) -> Result<(), String> {
+        if self.0 != *RENDERER_GENERATION.borrow() {
+            Err("Codex renderer work cancelled by a provider transition".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Only use this for discovery/connection futures with no issued effects.
+    pub(crate) async fn discover<F: std::future::Future>(
+        self,
+        future: F,
+    ) -> Result<F::Output, String> {
+        let mut generation = RENDERER_GENERATION.subscribe();
+        self.check()?;
+        tokio::select! {
+            biased;
+            _ = generation.changed() => Err("Codex renderer discovery cancelled".to_string()),
+            value = future => { self.check()?; Ok(value) }
+        }
+    }
+}
+
+pub(crate) fn cancel_codex_renderer_work() {
+    RENDERER_GENERATION.send_modify(|generation| *generation = generation.wrapping_add(1));
+}
+#[cfg(test)]
+pub(crate) static TEST_RENDERER_RELEASE: std::sync::Mutex<
+    Option<std::sync::Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+> = std::sync::Mutex::new(None);
+#[cfg(test)]
+type RendererUnlockTest = dyn Fn() -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CodexModelPickerUnlockResult, String>> + Send>,
+    > + Send
+    + Sync;
+#[cfg(test)]
+pub(crate) static TEST_RENDERER_UNLOCK: std::sync::Mutex<
+    Option<std::sync::Arc<RendererUnlockTest>>,
+> = std::sync::Mutex::new(None);
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
+#[cfg(test)]
+pub(crate) static TEST_CDP_PORTS: std::sync::Mutex<Option<Vec<u16>>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+pub(crate) static TEST_CODEX_RUNNING: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+pub(crate) fn isolated_cdp_fixture_enabled() -> bool {
+    #[cfg(test)]
+    {
+        return TEST_CDP_PORTS.lock().unwrap().is_some();
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
 #[cfg(any(target_os = "macos", test))]
 const CODEX_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.openai.codex";
 /// Codex App 历史目录与模型兼容层安装命令的执行结果。
@@ -100,15 +173,45 @@ pub(crate) struct CdpTarget {
 /// - 若发现已开放 CDP 的 Codex renderer，会触发新版历史目录同步并修复模型菜单；
 /// - 若未发现 CDP 且 Codex 未运行，会以 remote debugging 参数启动 Codex。
 pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String> {
-    let catalog = load_cc_switch_model_catalog_projection().unwrap_or_else(|_| {
+    unlock_codex_model_picker_for_work(CodexRendererWork::new()).await
+}
+
+pub(crate) async fn unlock_codex_model_picker_for_work(
+    work: CodexRendererWork,
+) -> Result<CodexModelPickerUnlockResult, String> {
+    work.check()?;
+    let intent = match read_codex_desktop_projection_intent() {
+        Ok(intent) => intent,
+        Err(reason) => return Ok(inactive_codex_model_picker_result(reason)),
+    };
+    #[cfg(test)]
+    {
+        let unlock = TEST_RENDERER_UNLOCK.lock().unwrap().clone();
+        if let Some(unlock) = unlock {
+            return work.discover(unlock()).await?;
+        }
+    }
+    #[cfg(test)]
+    if std::env::var_os("CC_SWITCH_TEST_HOME").is_some() {
+        return Err(
+            "Codex Desktop process control is disabled for isolated test homes".to_string(),
+        );
+    }
+    let catalog = load_codex_desktop_catalog_for_intent(&intent).unwrap_or_else(|_| {
         let mut projection = CodexModelCatalogProjection::empty();
-        projection.model_provider = read_current_codex_model_provider();
+        projection.model_provider = codex_desktop_config_string(&intent.config, "model_provider");
         projection
     });
     let attempted_ports = candidate_debug_ports(DEFAULT_CODEX_DEBUG_PORT);
 
-    if let Some(result) = try_inject_on_candidate_ports(&catalog, &attempted_ports).await {
+    if let Some(result) =
+        try_inject_on_candidate_ports_for_work(&catalog, &attempted_ports, work).await
+    {
         return Ok(result);
+    }
+    work.check()?;
+    if let Err(reason) = read_codex_desktop_projection_intent() {
+        return Ok(inactive_codex_model_picker_result(reason));
     }
 
     let running_main = detect_running_codex_main_process();
@@ -142,12 +245,17 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
 
     let executable =
         resolve_codex_executable().ok_or_else(codex_desktop_executable_not_found_message)?;
+    work.check()?;
+    if let Err(reason) = read_codex_desktop_projection_intent() {
+        return Ok(inactive_codex_model_picker_result(reason));
+    }
     launch_codex_with_debug_port(&executable, DEFAULT_CODEX_DEBUG_PORT)?;
 
     let mut last_result = None;
     for _ in 0..30 {
         if let Some(result) =
-            try_inject_on_candidate_ports(&catalog, &[DEFAULT_CODEX_DEBUG_PORT]).await
+            try_inject_on_candidate_ports_for_work(&catalog, &[DEFAULT_CODEX_DEBUG_PORT], work)
+                .await
         {
             return Ok(CodexModelPickerUnlockResult {
                 launched: true,
@@ -174,7 +282,8 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
             message: "Codex was launched with remote debugging; waiting for the renderer target."
                 .to_string(),
         });
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        work.discover(tokio::time::sleep(Duration::from_millis(500)))
+            .await?;
     }
 
     Ok(last_result.unwrap_or(CodexModelPickerUnlockResult {
@@ -198,6 +307,27 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
     }))
 }
 
+pub(crate) fn inactive_codex_model_picker_result(message: String) -> CodexModelPickerUnlockResult {
+    CodexModelPickerUnlockResult {
+        attempted_ports: Vec::new(),
+        debug_port: None,
+        target_id: None,
+        target_title: None,
+        target_url: None,
+        model_count: 0,
+        model_names: Vec::new(),
+        injected: false,
+        launched: false,
+        codex_executable: None,
+        history_sync_requested: false,
+        history_catalog_complete: None,
+        history_catalog_count: None,
+        all_provider_history_patched: false,
+        history_refresh_requested: false,
+        message,
+    }
+}
+
 /// 在用户显式开启的“随 CCSwitchMulti 启动 Codex Desktop”设置下启动 Codex。
 ///
 /// 这个入口不属于系统自启注册流程；调用方必须先读取独立设置。已有 Codex
@@ -212,6 +342,39 @@ pub(crate) fn launch_codex_desktop_with_ccswitch(enabled: bool) -> Result<bool, 
         resolve_codex_executable().ok_or_else(codex_desktop_executable_not_found_message)?;
     launch_codex_with_debug_port(&executable, DEFAULT_CODEX_DEBUG_PORT)?;
     Ok(true)
+}
+
+/// Start native Codex without adding CCSM renderer or timezone arguments.
+pub(crate) fn launch_native_codex_desktop_with_ccswitch(enabled: bool) -> Result<bool, String> {
+    if !should_launch_codex_desktop_with_ccswitch(enabled, is_codex_desktop_running()) {
+        return Ok(false);
+    }
+    let executable =
+        resolve_codex_executable().ok_or_else(codex_desktop_executable_not_found_message)?;
+    native_codex_launch_command(&executable)
+        .spawn()
+        .map_err(|error| format!("failed to launch {}: {error}", executable.display()))?;
+    Ok(true)
+}
+
+pub(crate) fn native_codex_launch_command(executable: &Path) -> Command {
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = macos_codex_bundle_for_executable(executable) {
+        let mut command = Command::new("open");
+        command.arg(bundle);
+        return command;
+    }
+    let mut command = Command::new(executable);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
 }
 
 pub(crate) fn is_codex_desktop_running() -> bool {
@@ -241,12 +404,53 @@ fn codex_desktop_executable_not_found_message() -> String {
 /// 从 cc-switch 生成的 catalog 中读取模型名和 renderer 需要的最小描述。
 pub(crate) fn load_cc_switch_model_catalog_projection(
 ) -> Result<CodexModelCatalogProjection, String> {
-    let catalog_path = crate::codex_config::get_codex_model_catalog_path();
-    let default_model = read_current_codex_default_model();
-    let model_provider = read_current_codex_model_provider();
+    let intent = read_codex_desktop_projection_intent()?;
+    load_codex_desktop_catalog_for_intent(&intent)
+}
+
+struct CodexDesktopProjectionIntent {
+    config: toml::Value,
+    catalog_path: PathBuf,
+}
+
+/// Only current live configuration can authorize reading the routed catalog.
+/// Residual files and inactive provider tables cannot opt native Codex back in.
+fn read_codex_desktop_projection_intent() -> Result<CodexDesktopProjectionIntent, String> {
+    let text = crate::codex_config::read_codex_config_text().map_err(|error| error.to_string())?;
+    let config = text
+        .parse::<toml::Value>()
+        .map_err(|error| format!("Cannot read Codex Desktop live configuration: {error}"))?;
+    let owned_catalog = crate::codex_config::resolve_cc_switch_catalog_path(
+        &text,
+        &crate::codex_config::get_codex_config_dir(),
+    );
+    let active_custom_provider = codex_desktop_config_string(&config, "model_provider")
+        .filter(|provider| provider != "openai")
+        .is_some_and(|provider| {
+            config
+                .get("model_providers")
+                .and_then(|providers| providers.get(provider.as_str()))
+                .is_some_and(toml::Value::is_table)
+        });
+    if owned_catalog.is_none() && !active_custom_provider {
+        return Err("native_codex_config".to_string());
+    }
+    Ok(CodexDesktopProjectionIntent {
+        config,
+        catalog_path: owned_catalog
+            .unwrap_or_else(crate::codex_config::get_codex_model_catalog_path),
+    })
+}
+
+fn load_codex_desktop_catalog_for_intent(
+    intent: &CodexDesktopProjectionIntent,
+) -> Result<CodexModelCatalogProjection, String> {
+    let catalog_path = &intent.catalog_path;
+    let default_model = codex_desktop_config_string(&intent.config, "model");
+    let model_provider = codex_desktop_config_string(&intent.config, "model_provider");
     let mut candidates = Vec::new();
 
-    if let Ok(catalog) = crate::config::read_json_file::<Value>(&catalog_path) {
+    if let Ok(catalog) = crate::config::read_json_file::<Value>(catalog_path) {
         candidates.push(catalog);
     }
 
@@ -257,7 +461,7 @@ pub(crate) fn load_cc_switch_model_catalog_projection(
         }
     }
 
-    if let Some(inline_catalog) = read_active_codex_provider_inline_model_catalog() {
+    if let Some(inline_catalog) = read_active_codex_provider_inline_model_catalog(&intent.config) {
         candidates.push(inline_catalog);
     }
 
@@ -300,13 +504,11 @@ fn codex_model_catalog_projection_from_value(
 /// 生成 live config 时，CCSM 会把同一份路由目录同时投射到 JSON catalog、models cache
 /// 和活动 provider 内联数组。任一 JSON 文件短暂不可读时，内联数组仍能避免整次 Desktop
 /// 会话安装空白名单；这里仅读取活动 provider，不能把未启用 provider 的模型重新注入。
-fn read_active_codex_provider_inline_model_catalog() -> Option<Value> {
-    let text = crate::codex_config::read_codex_config_text().ok()?;
-    let parsed = text.parse::<toml::Value>().ok()?;
-    let provider_id = parsed.get("model_provider").and_then(toml::Value::as_str)?;
-    let models = parsed
+fn read_active_codex_provider_inline_model_catalog(config: &toml::Value) -> Option<Value> {
+    let provider_id = codex_desktop_config_string(config, "model_provider")?;
+    let models = config
         .get("model_providers")
-        .and_then(|providers| providers.get(provider_id))
+        .and_then(|providers| providers.get(provider_id.as_str()))
         .and_then(|provider| provider.get("models"))
         .and_then(toml::Value::as_array)?
         .clone();
@@ -385,24 +587,9 @@ fn project_codex_model_descriptor(entry: &Value, model_name: &str) -> Value {
     Value::Object(object)
 }
 
-/// 读取当前 Codex 默认模型，用于 renderer 动态配置的 default_model。
-fn read_current_codex_default_model() -> Option<String> {
-    let text = crate::codex_config::read_codex_config_text().ok()?;
-    let parsed = text.parse::<toml::Value>().ok()?;
-    parsed
-        .get("model")
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-/// 读取当前 live Codex Provider，供 renderer 在冷恢复旧任务时覆盖历史 Provider 标签。
-fn read_current_codex_model_provider() -> Option<String> {
-    let text = crate::codex_config::read_codex_config_text().ok()?;
-    let parsed = text.parse::<toml::Value>().ok()?;
-    parsed
-        .get("model_provider")
+fn codex_desktop_config_string(config: &toml::Value, key: &str) -> Option<String> {
+    config
+        .get(key)
         .and_then(toml::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -410,30 +597,36 @@ fn read_current_codex_model_provider() -> Option<String> {
 }
 
 /// 在候选 CDP 端口中寻找 Codex renderer 并安装模型白名单补丁。
-pub(crate) async fn try_inject_on_candidate_ports(
+pub(crate) async fn try_inject_on_candidate_ports_for_work(
     catalog: &CodexModelCatalogProjection,
     ports: &[u16],
+    work: CodexRendererWork,
 ) -> Option<CodexModelPickerUnlockResult> {
+    work.check().ok()?;
+    read_codex_desktop_projection_intent().ok()?;
     let launch_timezone =
         crate::codex_egress_timezone::resolve_launch_timezone(&crate::settings::get_settings());
+    let discovered = work
+        .discover(discover_codex_page_targets(ports))
+        .await
+        .ok()?;
     for port in ports {
-        let targets = match list_cdp_targets(*port).await {
-            Ok(targets) => targets,
-            Err(_) => continue,
-        };
-        let targets = match pick_codex_page_targets(&targets, *port) {
-            Ok(targets) => targets,
-            Err(_) => continue,
-        };
+        let targets: Vec<_> = discovered
+            .iter()
+            .filter(|(candidate, _)| candidate == port)
+            .map(|(_, target)| target)
+            .collect();
         let script = build_model_picker_unlock_script(catalog);
         let mut injected_target = None;
         let mut compatibility_evidence = CodexAppCompatibilityEvidence::default();
         for target in targets {
+            read_codex_desktop_projection_intent().ok()?;
             let Some(websocket_url) = target.web_socket_debugger_url.as_deref() else {
                 continue;
             };
             if let Ok(evidence) =
-                install_script(websocket_url, &script, launch_timezone.as_deref()).await
+                install_script_for_work(websocket_url, &script, launch_timezone.as_deref(), work)
+                    .await
             {
                 if evidence.history_sync_requested
                     || evidence.history_catalog_complete.is_some()
@@ -450,9 +643,9 @@ pub(crate) async fn try_inject_on_candidate_ports(
         return Some(CodexModelPickerUnlockResult {
             attempted_ports: ports.to_vec(),
             debug_port: Some(*port),
-            target_id: Some(target.id),
-            target_title: Some(target.title),
-            target_url: Some(target.url),
+            target_id: Some(target.id.clone()),
+            target_title: Some(target.title.clone()),
+            target_url: Some(target.url.clone()),
             model_count: catalog.model_names.len(),
             model_names: catalog.model_names.clone(),
             injected: true,
@@ -478,6 +671,10 @@ pub(crate) async fn try_inject_on_candidate_ports(
 
 /// 生成去重后的 CDP 端口探测列表。
 pub(crate) fn candidate_debug_ports(preferred: u16) -> Vec<u16> {
+    #[cfg(test)]
+    if let Some(ports) = TEST_CDP_PORTS.lock().unwrap().clone() {
+        return ports;
+    }
     let mut ports = vec![preferred, DEFAULT_CODEX_DEBUG_PORT, 9222, 9223, 9230, 9231];
     ports.sort_unstable();
     ports.dedup();
@@ -496,8 +693,16 @@ pub(crate) async fn list_cdp_targets(debug_port: u16) -> Result<Vec<CdpTarget>, 
         format!("http://[::1]:{debug_port}/json"),
     ];
     let mut errors = Vec::new();
+    let mut requests = futures::stream::FuturesUnordered::new();
     for url in urls {
-        match client.get(&url).send().await {
+        let client = client.clone();
+        requests.push(async move {
+            let response = client.get(&url).send().await;
+            (url, response)
+        });
+    }
+    while let Some((url, response)) = requests.next().await {
+        match response {
             Ok(response) => match response.error_for_status() {
                 Ok(response) => match response.json::<Vec<CdpTarget>>().await {
                     Ok(targets) => return Ok(targets),
@@ -509,6 +714,26 @@ pub(crate) async fn list_cdp_targets(debug_port: u16) -> Result<Vec<CdpTarget>, 
         }
     }
     Err(errors.join("; "))
+}
+
+/// Discover independent debug endpoints concurrently, keeping the HTTP timeout
+/// as the total discovery budget instead of multiplying it by port count.
+pub(crate) async fn discover_codex_page_targets(ports: &[u16]) -> Vec<(u16, CdpTarget)> {
+    futures::future::join_all(ports.iter().map(|port| async move {
+        let targets = list_cdp_targets(*port).await.ok()?;
+        let targets = pick_codex_page_targets(&targets, *port).ok()?;
+        Some(
+            targets
+                .into_iter()
+                .map(|target| (*port, target))
+                .collect::<Vec<_>>(),
+        )
+    }))
+    .await
+    .into_iter()
+    .flatten()
+    .flatten()
+    .collect()
 }
 
 /// 选择最可能属于 Codex Desktop 的 renderer 页面。
@@ -551,18 +776,55 @@ fn target_matches_codex_desktop(target: &CdpTarget) -> bool {
 }
 
 /// 使用 CDP 同时安装新文档脚本并立即 patch 当前页面。
+#[cfg(test)]
 pub(crate) async fn install_script(
     websocket_url: &str,
     script: &str,
     timezone: Option<&str>,
 ) -> Result<CodexAppCompatibilityEvidence, String> {
-    let (socket, _) = tokio::time::timeout(CDP_CONNECT_TIMEOUT, connect_async(websocket_url))
-        .await
+    install_script_for_work(websocket_url, script, timezone, CodexRendererWork::new()).await
+}
+
+async fn install_script_for_work(
+    websocket_url: &str,
+    script: &str,
+    timezone: Option<&str>,
+    work: CodexRendererWork,
+) -> Result<CodexAppCompatibilityEvidence, String> {
+    let _effects = RENDERER_EFFECTS.lock().await;
+    work.check()?;
+    read_codex_desktop_projection_intent()?;
+    let (socket, _) = work
+        .discover(tokio::time::timeout(
+            CDP_CONNECT_TIMEOUT,
+            connect_async(websocket_url),
+        ))
+        .await?
         .map_err(|_| "timed out connecting CDP websocket".to_string())?
         .map_err(|error| format!("failed to connect CDP websocket: {error}"))?;
     let mut session = CdpSession::new(socket);
     session.send_command(1, "Runtime.enable", json!({})).await?;
+    work.check()?;
+    read_codex_desktop_projection_intent()?;
+    let authorized = session
+        .send_command(
+            6,
+            "Runtime.evaluate",
+            json!({
+                "expression": renderer_authorize_core_script(), "returnByValue": true,
+            }),
+        )
+        .await?;
+    let activation_epoch = authorized
+        .pointer("/result/result/value")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "Codex renderer did not authorize an activation epoch".to_string())?;
+    work.check()?;
     if let Some(timezone) = timezone {
+        MODEL_PICKER_TIMEZONES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(websocket_url.to_string());
         // `TZ` is inherited by a directly launched Desktop/app-server process,
         // while Chromium has its own ICU timezone controller. Apply the same
         // user-selected IANA identifier to the renderer through the documented
@@ -579,14 +841,79 @@ pub(crate) async fn install_script(
             log::warn!("Codex renderer timezone override was not applied: {error}");
         }
     }
+    work.check()?;
     session.send_command(3, "Page.enable", json!({})).await?;
-    session
+    work.check()?;
+    read_codex_desktop_projection_intent()?;
+    // Replace acknowledged registrations instead of accumulating old catalogs
+    // that would race the latest generation after a normal document navigation.
+    let previous = MODEL_PICKER_DOCUMENT_SCRIPTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(websocket_url)
+        .cloned()
+        .unwrap_or_default();
+    for (index, (nonce, identifier)) in previous.iter().enumerate() {
+        session
+            .send_command(
+                10 + index as u64,
+                "Page.removeScriptToEvaluateOnNewDocument",
+                json!({"identifier":identifier}),
+            )
+            .await?;
+        if let Some(known) = MODEL_PICKER_DOCUMENT_SCRIPTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(websocket_url)
+        {
+            known.retain(|(known_nonce, _)| known_nonce != nonce);
+        }
+        work.check()?;
+    }
+    let nonce = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let nonce_json = serde_json::to_string(&nonce).map_err(|error| error.to_string())?;
+    let timezone_owned = timezone.is_some();
+    let document_registration = format!("(window.__ccSwitchCodexDocumentScripts ||= new Map()).set({nonce_json}, null); window.__ccSwitchCodexTimezoneOwned = {timezone_owned};");
+    let document_source =
+        build_epoch_fenced_document_script(script, activation_epoch, &document_registration);
+    MODEL_PICKER_UNTRACKED_DOCUMENTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(websocket_url.to_string());
+    let registered = session
         .send_command(
             4,
             "Page.addScriptToEvaluateOnNewDocument",
-            json!({ "source": script }),
+            json!({ "source": document_source }),
         )
         .await?;
+    let identifier = registered
+        .pointer("/result/identifier")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Codex renderer returned no document script identifier".to_string())?
+        .to_string();
+    MODEL_PICKER_DOCUMENT_SCRIPTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(websocket_url.to_string())
+        .or_default()
+        .push((nonce.clone(), identifier.clone()));
+    MODEL_PICKER_UNTRACKED_DOCUMENTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(websocket_url);
+    work.check()?;
+    read_codex_desktop_projection_intent()?;
+    let identifier_json = serde_json::to_string(&identifier).map_err(|error| error.to_string())?;
+    let registration = format!("(window.__ccSwitchCodexDocumentScripts ||= new Map()).set({nonce_json}, {identifier_json}); window.__ccSwitchCodexTimezoneOwned = {timezone_owned};");
+    let expression = build_epoch_fenced_document_script(script, activation_epoch, &registration);
     // 只有 Runtime.evaluate 会返回当前 renderer 的执行结果；新文档脚本注册命令只返回
     // identifier，不能用来判断 localThreadCatalog 是否真正触发。
     let evaluation = session
@@ -594,7 +921,7 @@ pub(crate) async fn install_script(
             5,
             "Runtime.evaluate",
             json!({
-                "expression": script,
+                "expression": expression,
                 "awaitPromise": true,
                 "returnByValue": true,
                 "allowUnsafeEvalBlockedByCSP": true
@@ -606,6 +933,53 @@ pub(crate) async fn install_script(
 
 fn codex_timezone_override_parameters(timezone: &str) -> Value {
     json!({ "timezoneId": timezone })
+}
+
+fn renderer_authorize_core_script() -> &'static str {
+    r#"(() => {
+      const current = Number.isSafeInteger(window.__ccSwitchCodexOwnershipEpoch) ? window.__ccSwitchCodexOwnershipEpoch : 0;
+      window.__ccSwitchCodexOwnershipEpoch = current + 1;
+      return window.__ccSwitchCodexOwnershipEpoch;
+    })()"#
+}
+
+fn renderer_activation_guard_core_script() -> &'static str {
+    r#"
+  const activationEpoch = typeof ccSwitchActivationEpoch === "number" ? ccSwitchActivationEpoch : null;
+  const rendererActivationCurrent = () => activationEpoch === null || window.__ccSwitchCodexOwnershipEpoch === activationEpoch;
+  if (!rendererActivationCurrent()) return { cancelled: true };
+"#
+}
+
+fn renderer_release_fence_core_script() -> &'static str {
+    r#"const currentEpoch = Number.isSafeInteger(window.__ccSwitchCodexOwnershipEpoch) ? window.__ccSwitchCodexOwnershipEpoch : 0;
+    window.__ccSwitchCodexOwnershipEpoch = currentEpoch + 1;"#
+}
+
+fn build_epoch_fenced_document_script(script: &str, epoch: u64, registration: &str) -> String {
+    format!(
+        r#"(async () => {{
+      const ccSwitchActivationEpoch = {epoch};
+      const currentEpoch = window.__ccSwitchCodexOwnershipEpoch;
+      if (currentEpoch !== undefined && currentEpoch > ccSwitchActivationEpoch) return {{ cancelled: true }};
+      // A registered script may run in a fresh document. Unknown registrations
+      // that cannot be removed are reported pending and require a restart.
+      if (currentEpoch === undefined || currentEpoch < ccSwitchActivationEpoch) window.__ccSwitchCodexOwnershipEpoch = ccSwitchActivationEpoch;
+      {registration}
+      return await {script};
+    }})()"#
+    )
+}
+
+fn build_native_model_picker_release_script() -> String {
+    let fence = renderer_release_fence_core_script();
+    let release_script = build_model_picker_release_script();
+    format!(
+        r#"(async () => {{
+      {fence}
+      return await {release_script};
+    }})()"#
+    )
 }
 
 /// 从 CDP `Runtime.evaluate` 结果中提取原生历史同步状态，并把脚本异常转为明确错误。
@@ -704,10 +1078,217 @@ async fn evaluate_cdp_expression(websocket_url: &str, expression: &str) -> Resul
             json!({
                 "expression": expression,
                 "returnByValue": true,
+                "awaitPromise": true,
                 "allowUnsafeEvalBlockedByCSP": true
             }),
         )
         .await
+}
+
+pub(crate) fn has_owned_codex_renderer_state() -> bool {
+    !MODEL_PICKER_DOCUMENT_SCRIPTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_empty()
+        || !MODEL_PICKER_TIMEZONES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+        || !MODEL_PICKER_UNTRACKED_DOCUMENTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+}
+
+/// Release the running renderer's CCSM hooks without launching or closing Codex.
+pub(crate) async fn release_codex_model_picker_projection() -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(release) = TEST_RENDERER_RELEASE.lock().unwrap().clone() {
+        return release();
+    }
+    // The test home is an isolation boundary for both files and running applications.
+    if std::env::var_os("CC_SWITCH_TEST_HOME").is_some() && !isolated_cdp_fixture_enabled() {
+        return Ok(());
+    }
+    let _effects = RENDERER_EFFECTS.lock().await;
+    let script = build_native_model_picker_release_script();
+    let mut known_urls: BTreeSet<String> = MODEL_PICKER_DOCUMENT_SCRIPTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .keys()
+        .cloned()
+        .collect();
+    known_urls.extend(
+        MODEL_PICKER_TIMEZONES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .cloned(),
+    );
+    known_urls.extend(
+        MODEL_PICKER_UNTRACKED_DOCUMENTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .cloned(),
+    );
+    let targets =
+        discover_codex_page_targets(&candidate_debug_ports(DEFAULT_CODEX_DEBUG_PORT)).await;
+    let mut urls = BTreeSet::new();
+    for (_, target) in targets {
+        if let Some(url) = target.web_socket_debugger_url {
+            urls.insert(url);
+        }
+    }
+    if urls.is_empty() && is_codex_desktop_running() {
+        return Err("CCSM renderer ownership cannot be inspected without CDP; restart Codex to finish releasing compatibility hooks".to_string());
+    }
+    // Cleanup includes draining issued renderer work and preserving untracked
+    // registrations as an explicit pending/restart result.
+    let results = futures::future::join_all(urls.iter().map(|url| {
+        let script = &script;
+        async move {
+            let documents = release_owned_codex_document_state(url).await;
+            let renderer = match evaluate_cdp_expression(url, script).await {
+                Ok(result) => verify_codex_renderer_release(&result),
+                Err(error) => Err(error),
+            };
+            documents.and(renderer)
+        }
+    }))
+    .await;
+    let mut errors: Vec<String> = results.into_iter().filter_map(Result::err).collect();
+    if known_urls.difference(&urls).next().is_some() {
+        // A remembered socket may now belong to a different application. Keep
+        // its registrations pending instead of clearing an unverified target.
+        errors.push("Previously owned Codex targets could not be verified; restart Codex to finish releasing compatibility hooks".to_string());
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to release Codex Desktop compatibility hooks: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
+fn codex_document_release_plan(
+    snapshot: &Value,
+    known: &[(String, String)],
+) -> (bool, BTreeSet<String>, bool) {
+    let known_by_nonce: HashMap<_, _> = known.iter().cloned().collect();
+    let mut identifiers: BTreeSet<String> = known.iter().map(|(_, id)| id.clone()).collect();
+    let mut unknown = false;
+    let entries = snapshot.get("registrations").and_then(Value::as_array);
+    for entry in entries.into_iter().flatten() {
+        let id = entry.get(1).and_then(Value::as_str).or_else(|| {
+            entry
+                .get(0)
+                .and_then(Value::as_str)
+                .and_then(|nonce| known_by_nonce.get(nonce).map(String::as_str))
+        });
+        if let Some(id) = id {
+            identifiers.insert(id.to_string());
+        } else {
+            unknown = true;
+        }
+    }
+    let owned = snapshot.get("owned").and_then(Value::as_bool) == Some(true)
+        || !identifiers.is_empty()
+        || unknown;
+    (owned, identifiers, unknown)
+}
+
+async fn release_owned_codex_document_state(websocket_url: &str) -> Result<(), String> {
+    let snapshot = evaluate_cdp_expression(websocket_url, &format!(r#"(() => ({{
+      owned: Boolean(window["{MODEL_PICKER_PATCH_KEY}"] || window.__ccSwitchCodexAppCompatibilityV9),
+      registrations: Array.from(window.__ccSwitchCodexDocumentScripts?.entries() || []),
+      timezoneOwned: window.__ccSwitchCodexTimezoneOwned
+    }}))()"#)).await?;
+    let snapshot = snapshot
+        .pointer("/result/result/value")
+        .ok_or_else(|| "Codex renderer document ownership inspection failed".to_string())?;
+    let known = MODEL_PICKER_DOCUMENT_SCRIPTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(websocket_url)
+        .cloned()
+        .unwrap_or_default();
+    let (mut owned, identifiers, mut unknown) = codex_document_release_plan(snapshot, &known);
+    let timezone_owned = snapshot.get("timezoneOwned").and_then(Value::as_bool) == Some(true)
+        || MODEL_PICKER_TIMEZONES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(websocket_url);
+    unknown |= MODEL_PICKER_UNTRACKED_DOCUMENTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains(websocket_url);
+    unknown |= owned
+        && known.is_empty()
+        && snapshot
+            .get("timezoneOwned")
+            .and_then(Value::as_bool)
+            .is_none();
+    owned |= timezone_owned || unknown;
+    if !owned {
+        return Ok(());
+    }
+    let (socket, _) = tokio::time::timeout(CDP_CONNECT_TIMEOUT, connect_async(websocket_url))
+        .await
+        .map_err(|_| "timed out connecting CDP document cleanup".to_string())?
+        .map_err(|error| format!("failed to connect CDP document cleanup: {error}"))?;
+    let mut session = CdpSession::new(socket);
+    session.send_command(1, "Page.enable", json!({})).await?;
+    if timezone_owned {
+        session
+            .send_command(
+                2,
+                "Emulation.setTimezoneOverride",
+                codex_timezone_override_parameters(""),
+            )
+            .await?;
+        MODEL_PICKER_TIMEZONES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(websocket_url);
+    }
+    let mut request_id = 3;
+    for identifier in identifiers {
+        session
+            .send_command(
+                request_id,
+                "Page.removeScriptToEvaluateOnNewDocument",
+                json!({"identifier": identifier}),
+            )
+            .await?;
+        request_id += 1;
+    }
+    if unknown {
+        return Err("Untracked CCSM document scripts remain; restart Codex to release legacy compatibility scripts".to_string());
+    }
+    session.send_command(request_id, "Runtime.evaluate", json!({"expression": "delete window.__ccSwitchCodexDocumentScripts; delete window.__ccSwitchCodexTimezoneOwned", "returnByValue": true})).await?;
+    MODEL_PICKER_DOCUMENT_SCRIPTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(websocket_url);
+    Ok(())
+}
+
+fn verify_codex_renderer_release(evaluation: &Value) -> Result<(), String> {
+    if evaluation.pointer("/result/exceptionDetails").is_some() {
+        return Err("Codex renderer hook release raised an exception".to_string());
+    }
+    let value = evaluation.pointer("/result/result/value").ok_or_else(|| {
+        "Codex renderer did not return completed hook release evidence".to_string()
+    })?;
+    if value.get("disposed").and_then(Value::as_bool).is_none()
+        || value.get("incomplete").and_then(Value::as_bool) != Some(false)
+    {
+        return Err("Codex renderer hook release is incomplete; restart Codex to release legacy or pending compatibility work".to_string());
+    }
+    Ok(())
 }
 
 /// Read the timezone from a currently running Codex renderer. This verifies the
@@ -835,6 +1416,24 @@ fn cdp_command_result(response: Value, method: &str) -> Result<Value, String> {
 /// 容器遍历和改写。
 fn model_picker_patch_core_script() -> &'static str {
     r#"
+  const modelProjectionEnabled = () => state.modelProjectionEnabled !== false;
+  const setProjectedValue = (target, key, value) => {
+    const owned = Object.prototype.hasOwnProperty.call(target, key);
+    const original = target[key];
+    target[key] = value;
+    (state.modelRestorations ||= []).push(() => {
+      if (target[key] !== value) return;
+      if (owned) target[key] = original;
+      else delete target[key];
+    });
+  };
+  const appendProjectedValue = (target, value) => {
+    target.push(value);
+    (state.modelRestorations ||= []).push(() => {
+      const index = target.indexOf(value);
+      if (index >= 0) target.splice(index, 1);
+    });
+  };
   const currentPayload = () => state.payload || {};
   const modelNames = () => {
     const payload = currentPayload();
@@ -857,55 +1456,58 @@ fn model_picker_patch_core_script() -> &'static str {
   const stringArray = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
   const modelArray = (value, allowEmpty = false) => Array.isArray(value) && (allowEmpty || value.length > 0) && value.every((item) => item && typeof item === "object" && typeof item.model === "string");
   const patchModelNameArray = (models) => {
-    if (!stringArray(models)) return false;
+    if (!modelProjectionEnabled() || !stringArray(models)) return false;
     let changed = false;
     for (const name of modelNames()) {
       if (!models.includes(name)) {
-        models.push(name);
+        appendProjectedValue(models, name);
         changed = true;
       }
     }
     return changed;
   };
   const patchModelArray = (models, allowEmpty = false) => {
-    if (!modelArray(models, allowEmpty)) return false;
+    if (!modelProjectionEnabled() || !modelArray(models, allowEmpty)) return false;
     const names = modelNames();
     const existing = new Map(models.map((model) => [model.model, model]));
     let changed = false;
     for (const model of models) {
       if (names.includes(model.model) && model.hidden !== false) {
-        model.hidden = false;
+        setProjectedValue(model, "hidden", false);
         changed = true;
       }
     }
     for (const name of names) {
       if (!existing.has(name)) {
-        models.push(descriptorFor(name));
+        appendProjectedValue(models, descriptorFor(name));
         changed = true;
       }
     }
     return changed;
   };
   const removeHiddenNames = (container, key) => {
-    if (!Array.isArray(container?.[key])) return false;
+    if (!modelProjectionEnabled() || !Array.isArray(container?.[key])) return false;
     const names = new Set(modelNames());
     const before = container[key].length;
-    container[key] = container[key].filter((name) => !names.has(name));
+    const remaining = container[key].filter((name) => !names.has(name));
+    if (remaining.length === before) return false;
+    setProjectedValue(container, key, remaining);
     return before !== container[key].length;
   };
   const patchNameSet = (setLike) => {
-    if (!(setLike instanceof Set)) return false;
+    if (!modelProjectionEnabled() || !(setLike instanceof Set)) return false;
     let changed = false;
     for (const name of modelNames()) {
       if (!setLike.has(name)) {
         setLike.add(name);
+        (state.modelRestorations ||= []).push(() => setLike.delete(name));
         changed = true;
       }
     }
     return changed;
   };
   const patchModelContainer = (value) => {
-    if (!value || typeof value !== "object") return false;
+    if (!modelProjectionEnabled() || !value || typeof value !== "object") return false;
     const looksLikeModelGate = "availableModels" in value || "available_models" in value || "useHiddenModels" in value || "use_hidden_models" in value || "defaultModel" in value || "default_model" in value;
     if (!looksLikeModelGate) return false;
 
@@ -926,24 +1528,131 @@ fn model_picker_patch_core_script() -> &'static str {
     if (removeHiddenNames(value, "hiddenModels")) changed = true;
     if (removeHiddenNames(value, "hidden_models")) changed = true;
     if ("useHiddenModels" in value && value.useHiddenModels !== false) {
-      value.useHiddenModels = false;
+      setProjectedValue(value, "useHiddenModels", false);
       changed = true;
     }
     if ("use_hidden_models" in value && value.use_hidden_models !== false) {
-      value.use_hidden_models = false;
+      setProjectedValue(value, "use_hidden_models", false);
       changed = true;
     }
     if ("default_model" in value && typeof value.default_model === "string" && modelNames().length && !modelNames().includes(value.default_model)) {
-      value.default_model = modelNames()[0];
+      setProjectedValue(value, "default_model", modelNames()[0]);
       changed = true;
     }
     if ("defaultModel" in value && value.defaultModel == null && modelNames().length > 0) {
-      value.defaultModel = descriptorFor(modelNames()[0]);
+      setProjectedValue(value, "defaultModel", descriptorFor(modelNames()[0]));
       changed = true;
     }
     return changed;
   };
 "#
+}
+
+/// Keep renderer hooks reversible when live routing returns to Codex's native catalog.
+fn model_picker_lifecycle_core_script() -> &'static str {
+    r#"
+  state.modelProjectionEnabled = true;
+  state.lifecycleVersion = "2";
+  state.generation ||= 1;
+  const compatibilityGeneration = state.generation;
+  const compatibilityActive = () => !state.disposed && state.generation === compatibilityGeneration;
+  state.pendingRequests ||= new Set();
+  state.historyRestorations ||= new Set();
+  const trackCompatibilityRequest = (work) => {
+    if (!compatibilityActive()) return Promise.resolve();
+    let request;
+    try { request = Promise.resolve(work()); } catch (error) { request = Promise.reject(error); }
+    state.pendingRequests.add(request);
+    request.then(() => state.pendingRequests.delete(request), () => state.pendingRequests.delete(request));
+    return request;
+  };
+  const rememberHistoryRestoration = (restore) => {
+    state.historyRestorations.add(restore);
+    return () => state.historyRestorations.delete(restore);
+  };
+  state.hookRestorations ||= [];
+  const installCompatibilityHook = (target, key, value) => {
+    if (!compatibilityActive()) return;
+    const owned = Object.prototype.hasOwnProperty.call(target, key);
+    const original = target[key];
+    target[key] = value;
+    state.hookRestorations.push(() => {
+      if (target[key] !== value) return;
+      if (owned) target[key] = original;
+      else delete target[key];
+    });
+  };
+  state.dispose = () => {
+    if (state.disposalPromise) return state.disposalPromise;
+    state.modelProjectionEnabled = false;
+    state.disposed = true;
+    state.generation += 1;
+    const failures = [];
+    const release = (work) => { try { work(); } catch (error) { failures.push(String(error?.message || error)); } };
+    if (state.interval) release(() => clearInterval(state.interval));
+    state.interval = null;
+    release(() => state.reactRootObserver?.disconnect());
+    state.reactRootObserver = null;
+    if (state.messageListener) release(() => window.removeEventListener("message", state.messageListener, true));
+    state.messageListener = null;
+    for (const restore of state.hookRestorations.splice(0).reverse()) {
+      release(restore);
+    }
+    state.requestIds?.clear();
+    state.pendingReactNodes?.clear();
+    state.payload = { modelNames: [], models: [] };
+    // Restore our fields before waiting: the CDP caller can time out while a
+    // native RPC remains in flight. Its later settlement must never trigger
+    // a delayed rollback over a new native conversation or model selection.
+    for (const restore of state.historyRestorations) release(restore);
+    state.historyRestorations.clear();
+    state.historyManagerCandidates?.clear();
+    for (const restore of (state.modelRestorations || []).splice(0).reverse()) release(restore);
+    const pending = [...state.pendingRequests, state.runPromise, state.reactDiscoveryPromise,
+      state.historyQueryRefreshPromise, state.historyLineageHydrationPromise, state.historySyncPromise].filter(Boolean);
+    state.disposalPromise = Promise.allSettled(pending).then(() => {
+      if (window[patchKey] === state) delete window[patchKey];
+      return { disposed: true, drained: true, incomplete: failures.length > 0 || state.inheritedIncomplete === true, failures };
+    });
+    return state.disposalPromise;
+  };
+"#
+}
+
+fn build_model_picker_release_script() -> String {
+    format!(
+        r#"(async () => {{
+  const current = window["{MODEL_PICKER_PATCH_KEY}"];
+  let disposed = false;
+  let incomplete = Boolean(current && typeof current.dispose !== "function");
+  if (typeof current?.dispose === "function") {{
+    const pending = [current.runPromise, current.reactDiscoveryPromise, current.historyQueryRefreshPromise,
+      current.historyLineageHydrationPromise, current.historySyncPromise].filter(Boolean);
+    const result = await current.dispose();
+    await Promise.allSettled(pending);
+    disposed = result?.disposed === true;
+    incomplete = result?.drained !== true || result?.incomplete === true;
+  }}
+  const legacy = window.__ccSwitchCodexAppCompatibilityV9;
+  if (!legacy) return {{ disposed, incomplete }};
+  if (legacy.interval) clearInterval(legacy.interval);
+  legacy.interval = null;
+  try {{ legacy.reactRootObserver?.disconnect(); }} catch {{}}
+  legacy.payload = {{ modelNames: [], models: [] }};
+  const root = window.__STATSIG__ || globalThis.__STATSIG__;
+  const clients = [root?.firstInstance, ...(Object.values(root?.instances || {{}}))];
+  try {{ if (typeof root?.instance === "function") clients.push(root.instance()); }} catch {{}}
+  for (const client of clients) {{
+    if (typeof client?.__ccSwitchOriginalGetDynamicConfig !== "function") continue;
+    client.getDynamicConfig = client.__ccSwitchOriginalGetDynamicConfig;
+    delete client.__ccSwitchStatsigPatchVersion;
+  }}
+  delete window.__ccSwitchCodexAppCompatibilityV9;
+  await Promise.allSettled([legacy.runPromise, legacy.reactDiscoveryPromise, legacy.historyQueryRefreshPromise,
+    legacy.historyLineageHydrationPromise, legacy.historySyncPromise].filter(Boolean));
+  return {{ disposed: true, incomplete: true, legacy: true }};
+}})()"#
+    )
 }
 
 /// The V5 renderer patch accidentally added model-whitelist fields to every
@@ -1021,7 +1730,7 @@ fn guardian_v2_compatibility_patch_core_script() -> &'static str {
 /// 覆盖历史线程保存的旧入口标签，使跨 Provider 历史在冷恢复后重新经过 CCSM Router。
 fn app_server_request_normalization_core_script() -> &'static str {
     r#"
-  const appServerRequestPatchVersion = "9";
+  const appServerRequestPatchVersion = "10";
   const appServerRequestClientNeedsPatch = (client) => client?.__ccSwitchModelRequestPatch !== appServerRequestPatchVersion;
   const appServerMethod = (method, params) => method === "send-cli-request-for-host" && params?.method ? String(params.method) : String(method || "");
   const currentModelProvider = () => {
@@ -1058,6 +1767,8 @@ fn app_server_request_normalization_core_script() -> &'static str {
 /// deferred so the compatibility layer never interrupts live work.
 fn history_lineage_hydration_core_script() -> &'static str {
     r#"
+  const historyWorkActive = () => typeof compatibilityActive !== "function" || compatibilityActive();
+  const issueHistoryRequest = (work) => typeof trackCompatibilityRequest === "function" ? trackCompatibilityRequest(work) : work();
   const normalizedRolloutPath = (value) => typeof value === "string"
     ? value.replaceAll("\\", "/").replace(/^\/\/?\?\//, "").toLowerCase()
     : "";
@@ -1103,36 +1814,67 @@ fn history_lineage_hydration_core_script() -> &'static str {
     return { repair, deferred };
   };
   const rehydrateStaleHistoryLineages = async (manager) => {
+    if (!historyWorkActive()) return { repaired: [], deferred: [], failed: [] };
     const plan = planHistoryLineageRehydration(manager);
     const repaired = [];
     const failed = [];
     for (const id of plan.repair) {
+      if (!historyWorkActive()) break;
       const previous = manager.getConversation(id);
       const activePath = manager.threadStore.threadsById.get(id)?.path;
+      const owned = [];
+      const owns = (value, entry) => Object.prototype.hasOwnProperty.call(value, entry.key) === entry.afterOwn && value[entry.key] === entry.after;
+      const restoreOwned = () => {
+        const current = manager.getConversation(id);
+        if (!current) return;
+        // These cache fields form one lineage. A native resume or user update
+        // that replaced any of them owns the new lineage; do not mix old turns
+        // or an old rollout path into that result.
+        if (owned.some((entry) => !owns(current, entry))) return;
+        const unchanged = owned.filter((entry) => owns(current, entry));
+        if (!unchanged.length) return;
+        manager.updateConversationState(id, (value) => {
+          for (const entry of unchanged) {
+            if (entry.beforeOwn) value[entry.key] = entry.before;
+            else delete value[entry.key];
+          }
+        });
+      };
+      const retireRestoration = typeof rememberHistoryRestoration === "function"
+        ? rememberHistoryRestoration(restoreOwned) : () => {};
       try {
+        if (!historyWorkActive()) break;
         manager.updateConversationState(id, (conversation) => {
-          conversation.rolloutPath = activePath;
-          conversation.turns = [];
+          if (!historyWorkActive()) return;
+          const replace = (key, value, present = true) => {
+            owned.push({ key, beforeOwn: Object.prototype.hasOwnProperty.call(conversation, key), before: conversation[key], afterOwn: present, after: value });
+            if (present) conversation[key] = value;
+            else delete conversation[key];
+          };
+          replace("rolloutPath", activePath);
+          replace("turns", []);
           // Codex 26.901 renders canonical turnHistory when present. Clearing only the
           // legacy turns overlay leaves the stale islands visible and causes resume to
           // merge the new tail into the broken cache instead of replacing it.
-          delete conversation.turnHistory;
-          conversation.turnsPagination = {
+          replace("turnHistory", undefined, false);
+          replace("turnsPagination", {
             olderCursor: null,
             oldestLoadedTurnId: null,
             isLoadingOlder: false,
             hasLoadedOldest: false,
-          };
-          conversation.resumeState = "needs_resume";
+          });
+          replace("resumeState", "needs_resume");
         });
-        const resume = await manager.resumeConversationForUnavailableOwner({
+        if (!historyWorkActive()) break;
+        const resume = await issueHistoryRequest(() => manager.resumeConversationForUnavailableOwner({
           conversationId: id,
           model: null,
           serviceTier: null,
           reasoningEffort: null,
           workspaceRoots: previous?.cwd ? [previous.cwd] : ["/"],
           collaborationMode: previous?.latestCollaborationMode || null,
-        });
+        }));
+        if (!historyWorkActive()) break;
         if (resume?.status === "not-ready") {
           throw new Error(`Codex App could not resume history: ${String(resume.reason || "not-ready")}`);
         }
@@ -1140,11 +1882,16 @@ fn history_lineage_hydration_core_script() -> &'static str {
         // Ask Codex's own pagination layer to close every remaining boundary so a
         // fragmented middle cannot remain hidden behind a stale virtual-list island.
         if (typeof manager.getCompleteConversationTurns === "function") {
-          await manager.getCompleteConversationTurns(id);
+          if (!historyWorkActive()) break;
+          await issueHistoryRequest(() => manager.getCompleteConversationTurns(id));
+          if (!historyWorkActive()) break;
         }
         repaired.push(id);
+        retireRestoration();
       } catch (error) {
-        if (previous) manager.setConversation(previous);
+        if (!historyWorkActive()) break;
+        restoreOwned();
+        retireRestoration();
         failed.push({ id, error: String(error?.message || error) });
       }
     }
@@ -1180,12 +1927,23 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     let request_normalization_core = app_server_request_normalization_core_script();
     let history_lineage_hydration_core = history_lineage_hydration_core_script();
     let module_client_discovery_core = app_server_module_client_discovery_core_script();
+    let lifecycle_core = model_picker_lifecycle_core_script();
+    let release_script = build_model_picker_release_script();
+    let activation_guard = renderer_activation_guard_core_script();
     format!(
         r#"
 (async () => {{
   const payload = {payload};
   const patchKey = "{MODEL_PICKER_PATCH_KEY}";
+{activation_guard}
+  let inheritedIncomplete = false;
+  if (window.__ccSwitchCodexAppCompatibilityV9 || (window[patchKey] && window[patchKey].lifecycleVersion !== "2")) {{
+    const released = await {release_script};
+    if (!rendererActivationCurrent()) return {{ cancelled: true }};
+    inheritedIncomplete = released.incomplete === true;
+  }}
   const state = window[patchKey] || {{}};
+  state.inheritedIncomplete = state.inheritedIncomplete === true || inheritedIncomplete;
   state.payload = payload;
   state.requestIds = state.requestIds || new Set();
   state.modulePromises = state.modulePromises || new Map();
@@ -1211,6 +1969,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     state.failures = state.failures.slice(-20);
   }};
   window[patchKey] = state;
+{lifecycle_core}
 {model_patch_core}
 {guardian_v2_patch_core}
 {request_normalization_core}
@@ -1219,7 +1978,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   const patchStatsigConfig = (name, config, repairLegacyPollution = false) => {{
     const prepared = prepareStatsigDynamicConfig(name, config, repairLegacyPollution);
     config = prepared.config;
-    if (!prepared.patchModelWhitelist) return config;
+    if (!modelProjectionEnabled() || !prepared.patchModelWhitelist) return config;
     const value = config?.value;
     if (!value || typeof value !== "object") return config;
     const available = Array.isArray(value.available_models) ? [...value.available_models] : [];
@@ -1233,7 +1992,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     const nextValue = {{ ...value, available_models: available, use_hidden_models: false, default_model: modelNames()[0] || value.default_model }};
     if (changed || nextValue.default_model !== value.default_model || value.use_hidden_models !== false) {{
       try {{
-        config.value = nextValue;
+        setProjectedValue(config, "value", nextValue);
       }} catch {{
         return {{ ...config, value: nextValue }};
       }}
@@ -1248,14 +2007,15 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return clients.filter((client, index, array) => client && typeof client === "object" && array.indexOf(client) === index);
   }};
   const patchStatsig = () => {{
+    if (!modelProjectionEnabled()) return;
     for (const client of statsigClients()) {{
       if (typeof client.getDynamicConfig !== "function") continue;
       if (client.__ccSwitchStatsigPatchVersion !== "2") {{
         const repairingLegacyPatch = client.__ccSwitchModelWhitelistPatched === true;
         const original = client.__ccSwitchOriginalGetDynamicConfig || client.getDynamicConfig.bind(client);
-        client.__ccSwitchOriginalGetDynamicConfig = original;
-        client.getDynamicConfig = (name, options) => patchStatsigConfig(name, original(name, options), repairingLegacyPatch);
-        client.__ccSwitchStatsigPatchVersion = "2";
+        installCompatibilityHook(client, "__ccSwitchOriginalGetDynamicConfig", original);
+        installCompatibilityHook(client, "getDynamicConfig", (name, options) => patchStatsigConfig(name, original(name, options), repairingLegacyPatch));
+        installCompatibilityHook(client, "__ccSwitchStatsigPatchVersion", "2");
       }}
       try {{ patchStatsigConfig("107580212", client.getDynamicConfig("107580212", {{ disableExposureLog: true }})); }} catch {{}}
       try {{ patchStatsigConfig(guardianV2DynamicConfigName, client.getDynamicConfig(guardianV2DynamicConfigName, {{ disableExposureLog: true }})); }} catch {{}}
@@ -1292,9 +2052,11 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return "";
   }};
   const loadAppModule = async (namePart) => {{
+    if (!compatibilityActive()) throw new Error("CCSM renderer compatibility was disposed");
     if (!state.modulePromises.has(namePart)) {{
       state.modulePromises.set(namePart, Promise.resolve().then(async () => {{
         const url = await assetUrl(namePart);
+        if (!compatibilityActive()) throw new Error("CCSM renderer compatibility was disposed");
         if (!url) throw new Error(`Codex App asset not found: ${{namePart}}`);
         return await import(url);
       }}).catch((error) => {{
@@ -1330,40 +2092,52 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   // 新版 Codex/ChatGPT App 用 localThreadCatalog 保存统一侧边栏目录。这里只调用
   // App 自己的 RPC 同步服务，不直接改 codex-dev.db 或历史 provider 元数据。
   const triggerLocalThreadCatalogSync = async () => {{
+    if (!compatibilityActive()) return {{ requested: false }};
     if (state.historySyncPromise) return await state.historySyncPromise;
     state.historySyncPromise = Promise.resolve().then(async () => {{
       const module = await loadAppModule("rpc-");
+      if (!compatibilityActive()) return {{ requested: false }};
       const catalog = localCatalogFromModule(module);
       if (!catalog || typeof catalog.requestStartupSync !== "function") throw new Error("Codex App localThreadCatalog RPC service was not found");
 
       // 26.825+ exposes readStatus and can report a complete local catalog before
       // requestStartupSync. Do not wait on a redundant startup sync RPC forever.
       try {{
-        const status = await catalog.readStatus();
+        const status = await trackCompatibilityRequest(() => catalog.readStatus());
+        if (!compatibilityActive()) return {{ requested: false }};
         const summary = summarizeCatalogStatus(status, false);
         if (summary.complete === true) {{
           state.historySync = summary;
           return summary;
         }}
         state.historySync = summarizeCatalogStatus(status, true);
-        Promise.resolve(catalog.requestStartupSync()).then(async () => {{
+        if (!compatibilityActive()) return {{ requested: false }};
+        trackCompatibilityRequest(() => catalog.requestStartupSync()).then(async () => {{
+          if (!compatibilityActive()) return;
           try {{
-            state.historySync = summarizeCatalogStatus(await catalog.readStatus(), true);
+            const status = await trackCompatibilityRequest(() => catalog.readStatus());
+            if (!compatibilityActive()) return;
+            state.historySync = summarizeCatalogStatus(status, true);
           }} catch (error) {{
             recordFailure(error);
           }}
         }}).catch(recordFailure);
         return state.historySync;
       }} catch (error) {{
+        if (!compatibilityActive()) return {{ requested: false }};
         recordFailure(error);
       }}
 
       // Older builds expose readSnapshot instead of readStatus. Preserve that
       // official cold-sweep path as a capability fallback.
       try {{
-          const before = typeof catalog.readSnapshot === "function" ? await catalog.readSnapshot() : null;
-          await catalog.requestStartupSync();
-          const after = typeof catalog.readSnapshot === "function" ? await catalog.readSnapshot() : null;
+          if (!compatibilityActive()) return {{ requested: false }};
+          const before = typeof catalog.readSnapshot === "function" ? await trackCompatibilityRequest(() => catalog.readSnapshot()) : null;
+          if (!compatibilityActive()) return {{ requested: false }};
+          await trackCompatibilityRequest(() => catalog.requestStartupSync());
+          if (!compatibilityActive()) return {{ requested: false }};
+          const after = typeof catalog.readSnapshot === "function" ? await trackCompatibilityRequest(() => catalog.readSnapshot()) : null;
+          if (!compatibilityActive()) return {{ requested: false }};
           state.historySync = {{
             requested: true,
             beforeCount: Array.isArray(before?.entries) ? before.entries.length : null,
@@ -1372,10 +2146,11 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
             source: "snapshot",
           }};
           if (after?.isComplete !== true) {{
-            setTimeout(() => {{ state.historySyncPromise = null; }}, 10000);
+            setTimeout(() => {{ if (compatibilityActive()) state.historySyncPromise = null; }}, 10000);
           }}
           return state.historySync;
       }} catch (error) {{
+        if (!compatibilityActive()) return {{ requested: false }};
         recordFailure(error);
       }}
       throw new Error("Codex App localThreadCatalog RPC service was not found");
@@ -1389,7 +2164,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   }};
   const isModelListMethod = (method) => method === "list-models-for-host" || method === "model/list";
   const patchModelListResult = (result) => {{
-    if (result == null) return false;
+    if (!modelProjectionEnabled() || result == null) return false;
     let changed = false;
     if (Array.isArray(result) && patchModelArray(result, true)) changed = true;
     if (Array.isArray(result?.data) && patchModelArray(result.data, true)) changed = true;
@@ -1409,27 +2184,31 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return result;
   }};
   const patchRequestClient = (client) => {{
-    if (!client || typeof client.sendRequest !== "function") return false;
+    if (!compatibilityActive() || !client || typeof client.sendRequest !== "function") return false;
     if (!appServerRequestClientNeedsPatch(client)) return true;
     try {{
       const original = client.__ccSwitchOriginalSendRequest || client.sendRequest.bind(client);
-      client.__ccSwitchOriginalSendRequest = original;
-      client.sendRequest = async function ccSwitchPatchedSendRequest(method, params, options) {{
+      installCompatibilityHook(client, "__ccSwitchOriginalSendRequest", original);
+      installCompatibilityHook(client, "sendRequest", async function ccSwitchPatchedSendRequest(method, params, options) {{
+        if (!compatibilityActive()) return original(method, params, options);
         const normalizedParams = normalizeAppServerRequestParams(method, params);
         const actualMethod = appServerMethod(method, params);
         try {{
-          const result = await original(method, normalizedParams, options);
+          const result = await trackCompatibilityRequest(() => original(method, normalizedParams, options));
+          if (!compatibilityActive()) return result;
           return patchAppServerResult(actualMethod, result);
         }} catch (error) {{
+          if (!compatibilityActive()) throw error;
           if (!isGuardianV2FeatureTomlError(error)) throw error;
           const fallbackParams = guardianV2FallbackRequestParams(method, normalizedParams);
           if (fallbackParams === normalizedParams) throw error;
           state.guardianV2FallbackCount = (state.guardianV2FallbackCount || 0) + 1;
-          const result = await original(method, fallbackParams, options);
+          const result = await trackCompatibilityRequest(() => original(method, fallbackParams, options));
+          if (!compatibilityActive()) return result;
           return patchAppServerResult(actualMethod, result);
         }}
-      }};
-      client.__ccSwitchModelRequestPatch = appServerRequestPatchVersion;
+      }});
+      installCompatibilityHook(client, "__ccSwitchModelRequestPatch", appServerRequestPatchVersion);
       return true;
     }} catch (error) {{
       // rpc-BaVz... also exposes immutable RpcStub objects whose method shape
@@ -1479,7 +2258,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return pending;
   }};
   const scheduleHistoryLineageHydration = (manager) => {{
-    if (!state.historyQueryRefreshCompleted
+    if (!compatibilityActive() || !state.historyQueryRefreshCompleted
         || state.historyLineageHydrationPromise
         || state.historyLineageHydrationCompleted
         || typeof manager?.getCachedConversations !== "function"
@@ -1491,8 +2270,9 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     if (wallNow < (state.historyLineageHydrationRetryAt || 0)) return;
     state.historyLineageHydrationRetryAt = wallNow + 30000;
     state.historyLineageHydrationPromise = Promise.resolve()
-      .then(() => rehydrateStaleHistoryLineages(manager))
+      .then(() => compatibilityActive() ? rehydrateStaleHistoryLineages(manager) : null)
       .then((result) => {{
+        if (!compatibilityActive() || !result) return result;
         state.historyLineageHydration = result;
         for (const failure of result.failed || []) recordFailure(failure.error);
         state.historyLineageHydrationCompleted = (result.deferred || []).length === 0 && (result.failed || []).length === 0;
@@ -1514,6 +2294,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   }});
   const monotonicNow = () => typeof performance?.now === "function" ? performance.now() : Date.now();
   const patchReactAppServerClients = async (startingNodes) => {{
+    if (!compatibilityActive()) return 0;
     if (state.reactDiscoveryPromise) return await state.reactDiscoveryPromise;
     state.reactDiscoveryPromise = (async () => {{
       const roots = [];
@@ -1521,6 +2302,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       const nodeQueue = startingNodes.filter(Boolean);
       let nodeCursor = 0;
       while (nodeCursor < nodeQueue.length) {{
+        if (!compatibilityActive()) return 0;
         const sliceDeadline = monotonicNow() + 4;
         let sliceCount = 0;
         while (nodeCursor < nodeQueue.length && sliceCount < 800 && monotonicNow() < sliceDeadline) {{
@@ -1539,6 +2321,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       let cursor = 0;
       let patched = 0;
       while (cursor < queue.length && seen.size < 140000) {{
+        if (!compatibilityActive()) return 0;
         const sliceDeadline = monotonicNow() + 4;
         let sliceCount = 0;
         while (cursor < queue.length && seen.size < 140000 && sliceCount < 800 && monotonicNow() < sliceDeadline) {{
@@ -1555,8 +2338,9 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
             state.historyManagerCandidates.add(value);
             if (!state.historyQueryRefreshPromise && !state.historyQueryRefreshCompleted && typeof value?.threadStore?.refreshRecentConversations === "function") {{
               state.historyQueryRefreshPromise = Promise.resolve().then(() =>
-                value.threadStore.refreshRecentConversations({{ mode: "expanded" }})
+                compatibilityActive() ? trackCompatibilityRequest(() => value.threadStore.refreshRecentConversations({{ mode: "expanded" }})) : null
               ).then(() => {{
+                if (!compatibilityActive()) return;
                 state.historyQueryRefreshCompleted = true;
               }}).catch((error) => {{
                 state.historyQueryRefreshPromise = null;
@@ -1594,10 +2378,11 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return await state.reactDiscoveryPromise;
   }};
   const installReactRootObserver = () => {{
-    if (state.reactRootObserver || typeof MutationObserver !== "function") return;
+    if (!compatibilityActive() || state.reactRootObserver || typeof MutationObserver !== "function") return;
     const target = document.documentElement || document.body;
     if (!target) return;
     state.reactRootObserver = new MutationObserver((records) => {{
+      if (!compatibilityActive()) return;
       for (const record of records) {{
         for (const node of record.addedNodes || []) {{
           if (!node || (typeof node !== "object" && typeof node !== "function")) continue;
@@ -1612,16 +2397,19 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     state.reactRootObserver.observe(target, {{ childList: true, subtree: true }});
   }};
   const installAppServerPatch = async () => {{
+    if (!compatibilityActive()) return;
     let patched = 0;
     let modulePatched = 0;
     const wallNow = Date.now();
     if (!state.appServerModuleRetryAt || wallNow >= state.appServerModuleRetryAt) {{
       try {{
         const module = await loadAppModule("app-server-manager-signals-");
+        if (!compatibilityActive()) return;
         modulePatched = patchAppServerModuleClients(module);
         patched += modulePatched;
         state.appServerModuleRetryAt = 0;
       }} catch (error) {{
+        if (!compatibilityActive()) return;
         recordFailure(error);
         state.appServerModuleRetryAt = wallNow + 30000;
       }}
@@ -1636,22 +2424,27 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       state.pendingReactNodes.clear();
       state.lastReactFullScanAt = wallNow;
       patched += await patchReactAppServerClients(initialReactNodes());
+      if (!compatibilityActive()) return;
       state.reactInitialDiscoveryCompleted = true;
     }} else if (incrementalScanDue) {{
       state.lastReactIncrementalScanAt = wallNow;
       patched += await patchReactAppServerClients(drainPendingReactNodes());
+      if (!compatibilityActive()) return;
     }} else if (modulePatched > 0) {{
       state.pendingReactNodes.clear();
     }}
     if (state.historyQueryRefreshPromise) {{
       try {{
         await state.historyQueryRefreshPromise;
+        if (!compatibilityActive()) return;
       }} catch {{}}
     }}
+    if (!compatibilityActive()) return;
     for (const manager of state.historyManagerCandidates) scheduleHistoryLineageHydration(manager);
     if (state.historyLineageHydrationPromise) {{
       try {{
         await state.historyLineageHydrationPromise;
+        if (!compatibilityActive()) return;
       }} catch {{}}
     }}
     state.historyQueryPatch = {{
@@ -1674,14 +2467,14 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return patchModelListResult(message?.result) || patchModelListResult(message?.result?.data);
   }};
   const installMessagePatch = () => {{
-    if (state.messagePatchInstalled) return;
+    if (state.disposed || state.messagePatchInstalled) return;
     state.messagePatchInstalled = true;
     const originalDispatchEvent = window.dispatchEvent;
-    window.dispatchEvent = function ccSwitchPatchedDispatchEvent(event) {{
+    installCompatibilityHook(window, "dispatchEvent", function ccSwitchPatchedDispatchEvent(event) {{
       try {{
         const detail = event?.detail;
         const request = detail?.request;
-        if (event?.type === "codex-message-from-view" && detail?.type === "mcp-request" && request?.method === "model/list") {{
+        if (modelProjectionEnabled() && event?.type === "codex-message-from-view" && detail?.type === "mcp-request" && request?.method === "model/list") {{
           request.params = {{ ...(request.params || {{}}), includeHidden: true }};
           if (request.id != null) state.requestIds.add(String(request.id));
         }}
@@ -1690,10 +2483,11 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
         recordFailure(error);
       }}
       return originalDispatchEvent.call(this, event);
-    }};
-    window.addEventListener("message", (event) => {{
+    }});
+    state.messageListener = (event) => {{
       try {{ patchMcpModelResponseData(event?.data); }} catch (error) {{ recordFailure(error); }}
-    }}, true);
+    }};
+    window.addEventListener("message", state.messageListener, true);
   }};
   const reactFiberKeys = (element) => Object.keys(element || {{}}).filter((key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance") || key.startsWith("__reactProps"));
   // Codex app-server 会根据 requires_openai_auth 暴露 OAuth 状态；旧配置或缓存状态
@@ -1709,10 +2503,16 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return null;
   }};
   const spoofChatGPTAuthMethod = (element) => {{
+    if (!modelProjectionEnabled()) return false;
     const auth = authContextValueFrom(element);
     if (!auth || auth.authMethod === "chatgpt") return false;
     try {{
+      const originalMethod = auth.authMethod;
       auth.setAuthMethod("chatgpt");
+      (state.modelRestorations ||= []).push(() => {{
+        const current = authContextValueFrom(element) || auth;
+        if (current.authMethod === "chatgpt") current.setAuthMethod(originalMethod);
+      }});
       return true;
     }} catch (error) {{
       recordFailure(error);
@@ -1726,10 +2526,12 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }}
   }};
   const run = async () => {{
+    if (state.disposed) return;
     if (state.runPromise) return await state.runPromise;
     state.runPromise = (async () => {{
       installMessagePatch();
       await installAppServerPatch();
+      if (state.disposed) return;
       void triggerLocalThreadCatalogSync();
       patchStatsig();
       patchReactState();
@@ -1737,7 +2539,8 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return await state.runPromise;
   }};
   await run();
-  if (!state.interval) state.interval = setInterval(() => {{ void run(); }}, 1500);
+  if (!compatibilityActive()) return {{ status: "disposed", modelCount: 0 }};
+  if (!state.disposed && !state.interval) state.interval = setInterval(() => {{ void run(); }}, 1500);
   const historySync = await triggerLocalThreadCatalogSync();
   return {{ status: "ok", modelCount: modelNames().length, available_models: modelNames(), historySync, historyQueryPatch: state.historyQueryPatch || null, patchKey }};
 }})()
@@ -1834,6 +2637,10 @@ Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'ChatGPT.exe
 
 /// 查找 Codex Desktop 主进程路径；已运行但未开放 CDP 时不能原地注入。
 pub(crate) fn detect_running_codex_main_process() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(running) = *TEST_CODEX_RUNNING.lock().unwrap() {
+        return running.then(|| PathBuf::from("fixture-codex.exe"));
+    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -2801,6 +3608,311 @@ pub(crate) fn installed_codex_desktop_version() -> Option<Vec<u32>> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn discovery_contacts_isolated_ports_concurrently() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let arrived = std::sync::Arc::new(tokio::sync::Barrier::new(5));
+        let mut ports = Vec::new();
+        let mut servers = Vec::new();
+        for index in 0..5 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            ports.push(port);
+            let arrived = arrived.clone();
+            servers.push(tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                socket.read(&mut request).await.unwrap();
+                // No response is possible until all five production requests
+                // arrive. A sequential implementation cannot pass this gate.
+                arrived.wait().await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let body = json!([{"id":format!("page-{index}"),"type":"page","title":"Codex","url":"app://codex","webSocketDebuggerUrl":format!("ws://127.0.0.1:{port}/page")}]).to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }));
+        }
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), discover_codex_page_targets(&ports)).await;
+        for server in servers {
+            server.abort();
+        }
+        assert_eq!(
+            result
+                .expect("all ports must be discovered concurrently")
+                .len(),
+            5
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn native_release_drains_issued_effect_before_disposal() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _home = TestHomeGuard::new();
+        let config_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(config_dir).unwrap();
+        std::fs::write(
+            crate::codex_config::get_codex_config_path(),
+            "model_provider='fixture'\n[model_providers.fixture]\nbase_url='http://127.0.0.1:1'\n",
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("ws://127.0.0.1:{port}/page");
+        *TEST_CDP_PORTS.lock().unwrap() = Some(vec![port]);
+        *TEST_CODEX_RUNNING.lock().unwrap() = Some(false);
+        let issued = std::sync::Arc::new(tokio::sync::Notify::new());
+        let settle = std::sync::Arc::new(tokio::sync::Notify::new());
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (issued_server, settle_server, events_server) =
+            (issued.clone(), settle.clone(), events.clone());
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let issued = issued_server.clone();
+                let settle = settle_server.clone();
+                let events = events_server.clone();
+                tokio::spawn(async move {
+                    let mut peek = [0; 4096];
+                    let n = socket.peek(&mut peek).await.unwrap();
+                    if !String::from_utf8_lossy(&peek[..n])
+                        .to_ascii_lowercase()
+                        .contains("upgrade: websocket")
+                    {
+                        socket.read(&mut peek).await.unwrap();
+                        let body = json!([{"id":"fixture","type":"page","title":"Codex","url":"app://codex","webSocketDebuggerUrl":format!("ws://127.0.0.1:{port}/page")}]).to_string();
+                        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                        return;
+                    }
+                    let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    while let Some(Ok(message)) = websocket.next().await {
+                        let Ok(text) = message.to_text() else {
+                            continue;
+                        };
+                        let request: Value = serde_json::from_str(text).unwrap();
+                        let method = request["method"].as_str().unwrap();
+                        let expression = request["params"]["expression"].as_str().unwrap_or("");
+                        let result = if method == "Page.addScriptToEvaluateOnNewDocument" {
+                            json!({"identifier":"fixture-script"})
+                        } else if method == "Runtime.evaluate" {
+                            let value = if expression.contains("fixtureEffect") {
+                                events.lock().unwrap().push("issued");
+                                issued.notify_one();
+                                settle.notified().await;
+                                events.lock().unwrap().push("settled");
+                                json!({})
+                            } else if expression.contains("owned:") {
+                                json!({"owned":true,"registrations":[],"timezoneOwned":false})
+                            } else if expression.contains("current + 1") {
+                                json!(1)
+                            } else if expression.contains("currentEpoch + 1") {
+                                events.lock().unwrap().push("disposed");
+                                json!({"disposed":true,"incomplete":false})
+                            } else {
+                                json!({})
+                            };
+                            json!({"result":{"value":value}})
+                        } else {
+                            json!({})
+                        };
+                        if websocket
+                            .send(Message::Text(
+                                json!({"id":request["id"],"result":result})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let install_url = url.clone();
+        let install = tokio::spawn(async move {
+            install_script(&install_url, "({fixtureEffect:true})", None).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), issued.notified())
+            .await
+            .expect("issued real Runtime.evaluate");
+        cancel_codex_renderer_work();
+        let release = tokio::spawn(release_codex_model_picker_projection());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let released_early = release.is_finished();
+        settle.notify_one();
+        let installed = install.await.unwrap();
+        let released = tokio::time::timeout(Duration::from_secs(3), release).await;
+        server.abort();
+        *TEST_CDP_PORTS.lock().unwrap() = None;
+        *TEST_CODEX_RUNNING.lock().unwrap() = None;
+        assert!(
+            !released_early,
+            "native disposal must wait for the already issued effect"
+        );
+        installed.unwrap();
+        released.unwrap().unwrap().unwrap();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["issued", "settled", "disposed"]
+        );
+        assert!(!has_owned_codex_renderer_state());
+    }
+
+    struct TestHomeGuard {
+        _dir: tempfile::TempDir,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl TestHomeGuard {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("create isolated desktop home");
+            let original = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            Self {
+                _dir: dir,
+                original,
+            }
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
+
+    fn seed_desktop_projection_files(config: Option<&str>) {
+        let dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&dir).expect("create isolated codex directory");
+        let config_path = crate::codex_config::get_codex_config_path();
+        if let Some(config) = config {
+            std::fs::write(config_path, config).expect("write live config");
+        } else if config_path.exists() {
+            std::fs::remove_file(config_path).expect("remove live config");
+        }
+        std::fs::write(
+            crate::codex_config::get_codex_model_catalog_path(),
+            json!({ "models": [{ "model": "stale-routed-model" }] }).to_string(),
+        )
+        .expect("write stale catalog");
+        std::fs::write(
+            dir.join("models_cache.json"),
+            json!({
+                "etag": "cc-switch-model-catalog",
+                "models": [{ "model": "stale-cached-model" }]
+            })
+            .to_string(),
+        )
+        .expect("write stale owned cache");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_official_live_loader_rejects_residual_projection_sources() {
+        let _home = TestHomeGuard::new();
+        for provider in ["", "model_provider = \"openai\"\n"] {
+            let config = format!(
+                "model = \"gpt-5.5\"\n{provider}\n[model_providers.custom]\nbase_url = \"http://127.0.0.1:15721/v1\"\nmodels = [{{ model = \"inactive-routed-model\" }}]\n"
+            );
+            seed_desktop_projection_files(Some(&config));
+            assert!(
+                load_cc_switch_model_catalog_projection().is_err(),
+                "native live config must not authorize a residual catalog, cache, or inactive provider: {provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_official_desktop_loader_rejects_projection_without_valid_live_config() {
+        let _home = TestHomeGuard::new();
+        for config in [None, Some("model_provider = [invalid")] {
+            seed_desktop_projection_files(config);
+            assert!(
+                load_cc_switch_model_catalog_projection().is_err(),
+                "unreadable live intent must not authorize stale routed models"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_official_desktop_loader_rejects_external_catalog_as_injection_authority() {
+        let _home = TestHomeGuard::new();
+        for catalog in [
+            "external-models.json",
+            "../outside/cc-switch-model-catalog.json",
+        ] {
+            seed_desktop_projection_files(Some(&format!(
+                "model_provider = \"openai\"\nmodel_catalog_json = \"{catalog}\"\n"
+            )));
+            assert!(
+                load_cc_switch_model_catalog_projection().is_err(),
+                "a user-owned catalog must not authorize residual CCSwitchMulti projection: {catalog}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_official_desktop_loader_keeps_explicit_openai_catalog_projection() {
+        let _home = TestHomeGuard::new();
+        seed_desktop_projection_files(Some(
+            "model = \"stale-routed-model\"\nmodel_provider = \"openai\"\nmodel_catalog_json = \"cc-switch-model-catalog.json\"\n",
+        ));
+        let projection = load_cc_switch_model_catalog_projection()
+            .expect("explicit managed OpenAI catalog projection remains supported");
+        assert_eq!(projection.model_names, vec!["stale-routed-model"]);
+        assert_eq!(projection.model_provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_official_desktop_loader_keeps_active_router_inline_catalog_fallback() {
+        let _home = TestHomeGuard::new();
+        seed_desktop_projection_files(Some(
+            "model = \"router-model\"\nmodel_provider = \"codex_model_router_v2\"\n\n[model_providers.codex_model_router_v2]\nbase_url = \"http://127.0.0.1:15721/v1\"\nmodels = [{ model = \"router-model\" }]\n",
+        ));
+        std::fs::remove_file(crate::codex_config::get_codex_model_catalog_path())
+            .expect("remove JSON catalog to exercise inline fallback");
+        std::fs::remove_file(crate::codex_config::get_codex_config_dir().join("models_cache.json"))
+            .expect("remove cache to exercise inline fallback");
+        let projection = load_cc_switch_model_catalog_projection()
+            .expect("active managed router inline projection remains supported");
+        assert_eq!(projection.model_names, vec!["router-model"]);
+        assert_eq!(
+            projection.model_provider.as_deref(),
+            Some("codex_model_router_v2")
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn native_official_unlock_skips_cdp_process_and_launch_actions() {
+        let _home = TestHomeGuard::new();
+        for config in [
+            Some("model = \"gpt-5.5\"\n"),
+            Some("model_provider = \"openai\"\n"),
+            None,
+            Some("model_provider = [invalid"),
+        ] {
+            seed_desktop_projection_files(config);
+            let result = unlock_codex_model_picker()
+                .await
+                .expect("native or unreadable live intent exits before desktop process control");
+            assert!(!result.injected);
+            assert!(!result.launched);
+            assert!(result.attempted_ports.is_empty());
+            assert!(result.model_names.is_empty());
+            assert!(!result.history_sync_requested);
+        }
+    }
+
     /// 返回当前测试平台的 Desktop 主程序文件名。
     fn desktop_test_executable_name() -> &'static str {
         if cfg!(target_os = "windows") {
@@ -2935,6 +4047,251 @@ mod tests {
 
         assert!(models[0].get("defaultReasoningEffort").is_none());
         assert!(models[0].get("supportedReasoningEfforts").is_none());
+    }
+
+    #[test]
+    fn native_official_disabled_model_projection_preserves_native_model_gate() {
+        let result = run_model_picker_patch_core_probe(
+            r#"
+state.modelProjectionEnabled = false;
+const gate = {
+  models: [{ model: "official-model", hidden: true }],
+  availableModels: ["official-model"],
+  hiddenModels: ["qwen3.6"],
+  useHiddenModels: true,
+  default_model: "official-model"
+};
+const before = JSON.stringify(gate);
+const changed = patchModelContainer(gate);
+JSON.stringify({ changed, unchanged: JSON.stringify(gate) === before });
+"#,
+        );
+        assert_eq!(result["changed"], false);
+        assert_eq!(result["unchanged"], true);
+    }
+
+    #[test]
+    fn native_official_dispose_restores_owned_renderer_hooks_and_model_changes() {
+        let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
+        let script = format!(
+            r#"
+(async () => {{
+const window = globalThis;
+const patchKey = "{MODEL_PICKER_PATCH_KEY}";
+let timerCleared = false;
+let observerDisconnected = false;
+let listenerRemoved = false;
+const clearInterval = () => {{ timerCleared = true; }};
+window.removeEventListener = (name, listener, capture) => {{ listenerRemoved = name === "message" && listener === state.messageListener && capture; }};
+const state = {{ payload: {{ modelNames: ["routed-model"] }}, interval: 7, reactRootObserver: {{ disconnect() {{ observerDisconnected = true; }} }}, messageListener() {{}} }};
+window[patchKey] = state;
+{lifecycle}
+{model_core}
+const originalSendRequest = () => "native";
+const client = {{ sendRequest: originalSendRequest }};
+installCompatibilityHook(client, "sendRequest", () => "managed");
+installCompatibilityHook(client, "__ccSwitchModelRequestPatch", "9");
+const gate = {{ availableModels: ["official-model"], models: [{{ model: "routed-model", hidden: true }}], hiddenModels: ["routed-model"], useHiddenModels: true, default_model: "official-model" }};
+patchModelContainer(gate);
+gate.availableModels.push("new-official-model");
+gate.default_model = "new-official-model";
+const released = await {release};
+const changedAfterDispose = patchModelContainer(gate);
+globalThis.__rendererDisposeResult = JSON.stringify({{ released, timerCleared, observerDisconnected, listenerRemoved, restoredMethod: client.sendRequest === originalSendRequest, removedMarker: !("__ccSwitchModelRequestPatch" in client), removedState: !window[patchKey], changedAfterDispose, gate }});
+}})();
+"#,
+            lifecycle = model_picker_lifecycle_core_script(),
+            model_core = model_picker_patch_core_script(),
+            release = build_model_picker_release_script(),
+        );
+        context.with(|ctx| {
+            ctx.eval::<(), _>(script).expect("start renderer disposal");
+        });
+        while runtime
+            .execute_pending_job()
+            .expect("drain renderer disposal jobs")
+        {}
+        let result: Value = context.with(|ctx| {
+            let output: String = ctx
+                .eval("globalThis.__rendererDisposeResult")
+                .expect("execute renderer disposal");
+            serde_json::from_str(&output).expect("parse renderer disposal result")
+        });
+        for key in [
+            "timerCleared",
+            "observerDisconnected",
+            "listenerRemoved",
+            "restoredMethod",
+            "removedMarker",
+            "removedState",
+        ] {
+            assert_eq!(result[key], true, "dispose must satisfy {key}");
+        }
+        assert_eq!(result["changedAfterDispose"], false);
+        assert_eq!(
+            result["gate"],
+            json!({
+                "availableModels": ["official-model", "new-official-model"],
+                "models": [{ "model": "routed-model", "hidden": true }],
+                "hiddenModels": ["routed-model"],
+                "useHiddenModels": true,
+                "default_model": "new-official-model"
+            })
+        );
+    }
+
+    fn run_renderer_history_disposal_probe(
+        preserve_native_update: bool,
+        cancel_before_start: bool,
+    ) -> Value {
+        let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
+        let script = format!(
+            r#"
+(async () => {{
+const window = globalThis;
+const patchKey = "{MODEL_PICKER_PATCH_KEY}";
+const clearInterval = () => {{}};
+window.removeEventListener = () => {{}};
+const state = {{ payload: {{}} }};
+window[patchKey] = state;
+{lifecycle}
+{history}
+let conversation = {{ id: "synthetic-thread", rolloutPath: "old.jsonl", turns: [{{id: "old-turn"}}], resumeState: "resumed" }};
+let mutations = 0;
+let completeLoads = 0;
+let finishResume;
+const manager = {{
+  getCachedConversations: () => [conversation],
+  getConversation: () => conversation,
+  isConversationStreaming: () => false,
+  threadStore: {{ threadsById: new Map([["synthetic-thread", {{path: "active.jsonl"}}]]) }},
+  updateConversationState: (_id, update) => {{ mutations += 1; const next = {{...conversation}}; update(next); conversation = next; }},
+  resumeConversationForUnavailableOwner: () => new Promise((resolve) => {{ finishResume = () => resolve({{status: "ready"}}); }}),
+  getCompleteConversationTurns: async () => {{ completeLoads += 1; }},
+}};
+if ({cancel_before_start}) await state.dispose();
+const hydration = rehydrateStaleHistoryLineages(manager);
+state.historyLineageHydrationPromise = hydration;
+let released = false;
+const disposal = Promise.resolve(state.dispose()).then(() => {{ released = true; }});
+await Promise.resolve();
+const releasedBeforeRequestSettled = released;
+if ({preserve_native_update}) {{
+  conversation.turns = [{{id: "native-turn"}}];
+  conversation.resumeState = "native-resumed";
+  conversation.rolloutPath = "native.jsonl";
+}}
+if (finishResume) finishResume();
+await hydration;
+await disposal;
+globalThis.__rendererHistoryDisposeResult = JSON.stringify({{releasedBeforeRequestSettled, mutations, completeLoads, conversation}});
+}})();
+"#,
+            lifecycle = model_picker_lifecycle_core_script(),
+            history = history_lineage_hydration_core_script(),
+        );
+        context.with(|ctx| {
+            ctx.eval::<(), _>(script)
+                .expect("start history disposal probe");
+        });
+        while runtime
+            .execute_pending_job()
+            .expect("drain history disposal jobs")
+        {}
+        context.with(|ctx| {
+            let output: String = ctx
+                .eval("globalThis.__rendererHistoryDisposeResult")
+                .expect("read history disposal result");
+            serde_json::from_str(&output).expect("parse history disposal result")
+        })
+    }
+
+    #[test]
+    fn native_official_dispose_drains_history_and_restores_owned_pending_lineage() {
+        let result = run_renderer_history_disposal_probe(false, false);
+        assert_eq!(result["releasedBeforeRequestSettled"], false);
+        assert_eq!(result["completeLoads"], 0);
+        assert_eq!(
+            result["conversation"],
+            json!({
+                "id": "synthetic-thread", "rolloutPath": "old.jsonl", "turns": [{"id": "old-turn"}], "resumeState": "resumed"
+            })
+        );
+    }
+
+    #[test]
+    fn native_official_dispose_preserves_a_superseding_native_history_update() {
+        let result = run_renderer_history_disposal_probe(true, false);
+        assert_eq!(result["completeLoads"], 0);
+        assert_eq!(result["conversation"]["rolloutPath"], "native.jsonl");
+        assert_eq!(
+            result["conversation"]["turns"],
+            json!([{"id": "native-turn"}])
+        );
+        assert_eq!(result["conversation"]["resumeState"], "native-resumed");
+    }
+
+    #[test]
+    fn native_official_disposed_history_work_cannot_start_or_mutate_a_conversation() {
+        let result = run_renderer_history_disposal_probe(false, true);
+        assert_eq!(result["mutations"], 0);
+        assert_eq!(result["completeLoads"], 0);
+    }
+
+    #[test]
+    fn native_official_release_requires_completed_renderer_evidence() {
+        assert!(verify_codex_renderer_release(
+            &json!({"result":{"result":{"type":"object","subtype":"promise"}}})
+        )
+        .is_err());
+        assert!(verify_codex_renderer_release(
+            &json!({"result":{"result":{"value":{"disposed":true,"incomplete":true}}}})
+        )
+        .is_err());
+        assert!(verify_codex_renderer_release(
+            &json!({"result":{"result":{"value":{"disposed":false,"incomplete":false}}}})
+        )
+        .is_ok());
+        assert!(verify_codex_renderer_release(
+            &json!({"result":{"result":{"value":{"disposed":true,"incomplete":false}}}})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn native_official_launch_command_has_no_ccsm_debug_or_timezone_overrides() {
+        let command = native_codex_launch_command(Path::new("codex-desktop-placeholder"));
+        assert_eq!(command.get_args().count(), 0);
+        assert!(!command.get_envs().any(|(key, _)| key == "TZ"));
+    }
+
+    #[test]
+    fn native_official_document_release_removes_only_owned_registrations_and_resets_timezone() {
+        let ordinary = codex_document_release_plan(&json!({"owned":false,"registrations":[]}), &[]);
+        assert_eq!(ordinary, (false, BTreeSet::new(), false));
+        let owned = codex_document_release_plan(
+            &json!({"owned":true,"registrations":[["reload-nonce",null],["persisted-nonce","script-2"]]}),
+            &[("reload-nonce".to_string(), "script-1".to_string())],
+        );
+        assert_eq!(
+            owned,
+            (
+                true,
+                BTreeSet::from(["script-1".to_string(), "script-2".to_string()]),
+                false
+            )
+        );
+        let unknown = codex_document_release_plan(
+            &json!({"owned":true,"registrations":[["lost-nonce",null]]}),
+            &[],
+        );
+        assert_eq!(unknown, (true, BTreeSet::new(), true));
+        assert_eq!(
+            codex_timezone_override_parameters(""),
+            json!({"timezoneId":""})
+        );
     }
 
     #[test]
@@ -3406,7 +4763,8 @@ JSON.stringify({
   v6NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "6" }),
   v7NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "7" }),
   v8NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "8" }),
-  currentNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "9" }),
+  v9NeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "9" }),
+  currentNeedsPatch: appServerRequestClientNeedsPatch({ __ccSwitchModelRequestPatch: "10" }),
   missingNeedsPatch: appServerRequestClientNeedsPatch({}),
   patchVersion: appServerRequestPatchVersion,
 });
@@ -3417,9 +4775,10 @@ JSON.stringify({
         assert_eq!(result["v6NeedsPatch"], true);
         assert_eq!(result["v7NeedsPatch"], true);
         assert_eq!(result["v8NeedsPatch"], true);
+        assert_eq!(result["v9NeedsPatch"], true);
         assert_eq!(result["currentNeedsPatch"], false);
         assert_eq!(result["missingNeedsPatch"], true);
-        assert_eq!(result["patchVersion"], "9");
+        assert_eq!(result["patchVersion"], "10");
     }
 
     #[test]
@@ -3691,8 +5050,8 @@ JSON.stringify({
         assert!(script.contains("isModelListMethod(method)"));
         assert!(script.contains("await installAppServerPatch()"));
         assert!(script.contains("!state.requestIds.has(requestId)"));
-        assert!(script.contains("__ccSwitchCodexAppCompatibilityV9"));
-        assert!(script.contains("appServerRequestPatchVersion = \"9\""));
+        assert!(script.contains("__ccSwitchCodexAppCompatibilityV10"));
+        assert!(script.contains("appServerRequestPatchVersion = \"10\""));
         assert!(script.contains("rehydrateStaleHistoryLineages(manager)"));
         assert!(
             script.contains("state.reactRequestClientPatchVersion = appServerRequestPatchVersion")

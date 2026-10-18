@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$releaseBuildConfigHelperPath = Join-Path (Split-Path -Parent $PSCommandPath) "release-build-config.ps1"
+$releaseBuildConfigHelperPath = Join-Path (Split-Path -Parent $PSCommandPath) "production-artifacts.ps1"
 . $releaseBuildConfigHelperPath
 
 # Resolve the repository root for hook, terminal, and scheduled calls.
@@ -201,6 +201,9 @@ try {
             Assert-ReleaseSourceIdentity `
                 -Expected $sourceIdentity `
                 -Actual (Get-ReleaseSourceIdentity -RepoRoot $repoRoot)
+            $production = Assert-ProductionManifest -ManifestPath (Join-Path $stageRoot 'PRODUCTION-MANIFEST.json') `
+                -ExpectedSourceCommit $sourceIdentity.Commit -ExpectedVersion $sourceIdentity.Version
+            Assert-ReleaseSourceIdentity -Expected $sourceIdentity -Actual $production.Manifest.source
             Replace-ReleaseRootFromStage -StageRoot $stageRoot -ReleaseRoot $releaseRoot
             $stageRoot = $null
 

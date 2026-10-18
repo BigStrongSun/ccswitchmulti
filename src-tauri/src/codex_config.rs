@@ -642,10 +642,13 @@ where
     let _guard = codex_live_write_lock()
         .lock()
         .map_err(|_| AppError::Config("Codex live config write lock is poisoned".to_string()))?;
-    reconcile_codex_live_config_atomic_locked(&mut build)
+    reconcile_codex_live_config_atomic_locked(&mut build, true)
 }
 
-fn reconcile_codex_live_config_atomic_locked<F>(build: &mut F) -> Result<String, AppError>
+fn reconcile_codex_live_config_atomic_locked<F>(
+    build: &mut F,
+    managed: bool,
+) -> Result<String, AppError>
 where
     F: FnMut(&str) -> Result<String, AppError>,
 {
@@ -658,7 +661,12 @@ where
             AppError::Config(format!("Codex config.toml is not valid UTF-8: {error}"))
         })?;
         let normalized_before = normalize_codex_config_text_for_live_read(&before_text)?;
-        let built = with_codex_env_injection(&build(&normalized_before)?);
+        let built = build(&normalized_before)?;
+        let built = if managed {
+            with_codex_env_injection(&built)
+        } else {
+            built
+        };
         let candidate = normalize_codex_config_text_for_live_read(&built)?;
         if !candidate.trim().is_empty() {
             toml::from_str::<toml::Table>(&candidate)
@@ -675,10 +683,15 @@ where
             );
             continue;
         }
+        if !managed && candidate.as_bytes() == before {
+            return Ok(candidate);
+        }
         atomic_write(&config_path, candidate.as_bytes())?;
         let after = read_codex_live_config_bytes(&config_path)?;
         if after == candidate.as_bytes() {
-            record_codex_managed_config_write(&candidate);
+            if managed {
+                record_codex_managed_config_write(&candidate);
+            }
             return Ok(candidate);
         }
         log::warn!(
@@ -6558,6 +6571,22 @@ fn restore_codex_models_cache_if_cc_switch_owned() -> Result<(), AppError> {
     Ok(())
 }
 
+/// Release only CCSM-generated catalog artifacts; native account caches survive.
+pub(crate) fn release_cc_switch_codex_catalog() -> Result<(), AppError> {
+    restore_codex_models_cache_if_cc_switch_owned()?;
+    for path in [
+        get_codex_model_catalog_path(),
+        get_codex_models_cache_backup_path(),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AppError::io(&path, error)),
+        }
+    }
+    Ok(())
+}
+
 /// Generate Codex `model_catalog_json` from provider settings and inject/remove
 /// the top-level TOML field that points Codex to the generated file.
 pub(crate) fn prepare_codex_config_text_with_model_catalog_without_provider_context(
@@ -6669,7 +6698,7 @@ fn prepare_codex_config_text_with_model_catalog_impl(
         )?;
         Ok(config_text)
     } else {
-        restore_codex_models_cache_if_cc_switch_owned()?;
+        release_cc_switch_codex_catalog()?;
         prune_stale_codex_managed_agent_files(&get_codex_agents_dir(), &HashSet::new())?;
         let config_text = set_codex_model_catalog_projection_fields(
             config_text,
@@ -7510,6 +7539,91 @@ pub fn remove_codex_multirouter_proxy_route(config_text: &str) -> Result<String,
 /// 将当前 `config.toml` 原子切回 Codex 内建 `openai` provider。
 pub fn force_codex_builtin_openai_live_provider() -> Result<(), AppError> {
     reconcile_codex_live_config_atomic(force_builtin_openai_provider_in_config_text).map(|_| ())
+}
+
+/// Return configuration ownership to Codex without replaying a Provider snapshot,
+/// common settings, or managed environment values over native preferences.
+pub(crate) fn release_cc_switch_codex_live_config() -> Result<(), AppError> {
+    reconcile_native_codex_live_config(false)
+}
+
+/// An explicit Provider switch may replace a user-selected provider route.
+pub(crate) fn select_native_codex_live_config() -> Result<(), AppError> {
+    reconcile_native_codex_live_config(true)
+}
+
+fn reconcile_native_codex_live_config(explicit_switch: bool) -> Result<(), AppError> {
+    let mut release = |text: &str| -> Result<String, AppError> {
+        let mut doc = text
+            .parse::<DocumentMut>()
+            .map_err(|error| AppError::Message(format!("Invalid Codex config.toml: {error}")))?;
+        if let Some(instructions) = doc.get("developer_instructions").and_then(Item::as_str) {
+            let mut user_instructions = instructions.to_string();
+            while let Some(begin) = user_instructions.find(CC_SWITCH_SUBAGENT_V2_POLICY_BEGIN) {
+                let tail = &user_instructions[begin + CC_SWITCH_SUBAGENT_V2_POLICY_BEGIN.len()..];
+                let Some(end) = tail.find(CC_SWITCH_SUBAGENT_V2_POLICY_END) else {
+                    break;
+                };
+                if tail[..end].contains(CC_SWITCH_SUBAGENT_V2_POLICY_BEGIN) {
+                    break;
+                }
+                user_instructions = strip_codex_subagent_v2_policy_block(&user_instructions);
+            }
+            if user_instructions != instructions {
+                if user_instructions.is_empty() {
+                    doc.as_table_mut().remove("developer_instructions");
+                } else {
+                    doc["developer_instructions"] = toml_edit::value(user_instructions);
+                }
+            }
+        }
+        // Every route-cleanup branch below receives the released parent policy.
+        let released_policy = doc.to_string();
+        let text = released_policy.as_str();
+        let active = doc.get("model_provider").and_then(Item::as_str);
+        let provider_route = active.is_some_and(|id| id != CODEX_OPENAI_MODEL_PROVIDER_ID)
+            || [
+                "openai_base_url",
+                "base_url",
+                "wire_api",
+                "experimental_bearer_token",
+            ]
+            .iter()
+            .any(|key| doc.get(key).is_some());
+        let owned_token = doc.get("experimental_bearer_token").and_then(Item::as_str)
+            == Some(CODEX_PROXY_AUTH_PLACEHOLDER)
+            || active
+                .and_then(|id| {
+                    doc.get("model_providers")
+                        .and_then(|providers| providers.get(id))
+                })
+                .is_some_and(codex_provider_table_has_proxy_placeholder);
+        if (explicit_switch && provider_route) || owned_token {
+            return force_builtin_openai_provider_in_config_text(text);
+        }
+        let owned_routes_removed = remove_codex_multirouter_proxy_route(
+            &remove_codex_official_proxy_route(&strip_codex_unified_session_bucket(text)?)?,
+        )?;
+        if owned_routes_removed != text {
+            return Ok(owned_routes_removed);
+        }
+        let owned_catalog = resolve_cc_switch_catalog_path(text, &get_codex_config_dir()).is_some();
+        if owned_catalog {
+            remove_cc_switch_model_catalog_json_if_stale(&mut doc);
+            remove_active_codex_provider_models(&mut doc);
+        }
+        Ok(doc.to_string())
+    };
+    let _guard = codex_live_write_lock()
+        .lock()
+        .map_err(|_| AppError::Config("Codex live config write lock is poisoned".to_string()))?;
+    let before = read_codex_live_config_bytes(&get_codex_config_path())?;
+    let text = String::from_utf8(before).map_err(|error| AppError::Config(error.to_string()))?;
+    if release(&text)? != text {
+        reconcile_codex_live_config_atomic_locked(&mut release, false)?;
+    }
+    release_cc_switch_codex_catalog()?;
+    prune_stale_codex_managed_agent_files(&get_codex_agents_dir(), &HashSet::new())
 }
 
 /// 将待切换 provider 的 Codex 配置叠加到当前 live `config.toml`。
@@ -11216,6 +11330,93 @@ wire_api = "responses"
         let written_auth: Value =
             crate::config::read_json_file(&get_codex_auth_path()).expect("read auth");
         assert_eq!(written_auth, auth);
+    }
+
+    #[test]
+    #[serial]
+    fn native_release_removes_owned_roles_and_parent_policy_preserving_user_config() {
+        let home = TestHomeGuard::new();
+        crate::settings::reload_settings().expect("load isolated settings");
+        let config_path = get_codex_config_path();
+        assert!(config_path.starts_with(home._dir.path()));
+        let agents_dir = get_codex_agents_dir();
+        fs::create_dir_all(&agents_dir).expect("create isolated agents directory");
+        for role in ["glm-visible", "qwen-local"] {
+            let managed_role = format!(
+                "{CC_SWITCH_MANAGED_AGENT_MARKER}\nname = \"{role}\"\nmodel = \"qwen-visible\"\nmodel_provider = \"codex_model_router_v2\"\n"
+            );
+            fs::write(agents_dir.join(format!("{role}.toml")), &managed_role)
+                .expect("seed managed role");
+        }
+        let user_role = "# My role\nmodel = \"user-model\"\n";
+        fs::write(agents_dir.join("user-helper.toml"), user_role).expect("seed user role");
+        fs::write(agents_dir.join("legacy.toml"), "model = \"old-model\"\n")
+            .expect("seed unmarked legacy role");
+        fs::write(agents_dir.join("other.txt"), CC_SWITCH_MANAGED_AGENT_MARKER)
+            .expect("seed other extension");
+        let instructions = format!(
+            "Keep my rule.\n\n{CC_SWITCH_SUBAGENT_V2_POLICY_BEGIN}\nUse managed roles.\n{CC_SWITCH_SUBAGENT_V2_POLICY_END}\nKeep my trailing rule."
+        );
+        let config = format!(
+            "model = \"gpt-6.1-sol\"\ndeveloper_instructions = {}\n[features]\nmy_future_feature = true\n[agents]\nmax_depth = 3\n[agents.user_helper]\nconfig_file = \"agents/user-helper.toml\"\n",
+            serde_json::to_string(&instructions).expect("encode instructions")
+        );
+        fs::write(&config_path, &config).expect("seed native config");
+
+        release_cc_switch_codex_live_config().expect("release managed native artifacts");
+
+        assert!(!agents_dir.join("glm-visible.toml").exists());
+        assert!(!agents_dir.join("qwen-local.toml").exists());
+        assert_eq!(
+            fs::read_to_string(agents_dir.join("user-helper.toml")).unwrap(),
+            user_role
+        );
+        assert!(agents_dir.join("legacy.toml").exists());
+        assert!(agents_dir.join("other.txt").exists());
+        let result = fs::read_to_string(&config_path).expect("read native config");
+        let parsed: toml::Value = toml::from_str(&result).expect("parse native config");
+        assert_eq!(
+            parsed["developer_instructions"].as_str(),
+            Some("Keep my rule.\nKeep my trailing rule.")
+        );
+        assert_eq!(parsed["model"].as_str(), Some("gpt-6.1-sol"));
+        assert_eq!(
+            parsed["features"]["my_future_feature"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(parsed["agents"]["max_depth"].as_integer(), Some(3));
+        assert_eq!(
+            parsed["agents"]["user_helper"]["config_file"].as_str(),
+            Some("agents/user-helper.toml")
+        );
+
+        release_cc_switch_codex_live_config().expect("repeat native release");
+        assert_eq!(
+            fs::read_to_string(&config_path).expect("read repeated release"),
+            result
+        );
+
+        let incomplete = format!(
+            "developer_instructions = {}\n",
+            serde_json::to_string(&format!(
+                "Keep this text. {CC_SWITCH_SUBAGENT_V2_POLICY_BEGIN}\nNo complete managed block exists."
+            ))
+            .expect("encode incomplete marker instructions")
+        );
+        fs::write(&config_path, &incomplete).expect("seed incomplete marker");
+        release_cc_switch_codex_live_config().expect("preserve incomplete marker");
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), incomplete);
+
+        let nested = format!(
+            "developer_instructions = {}\n",
+            serde_json::to_string(&format!(
+                "Keep my rule. {CC_SWITCH_SUBAGENT_V2_POLICY_BEGIN}\nKeep this user text.\n{CC_SWITCH_SUBAGENT_V2_POLICY_BEGIN}\nNested block.\n{CC_SWITCH_SUBAGENT_V2_POLICY_END}"
+            ))
+            .expect("encode nested marker instructions")
+        );
+        fs::write(&config_path, &nested).expect("seed nested markers");
+        release_cc_switch_codex_live_config().expect("preserve ambiguous nested markers");
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), nested);
     }
 
     #[test]

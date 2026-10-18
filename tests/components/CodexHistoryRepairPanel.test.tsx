@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexHistoryRepairPanel } from "@/components/sessions/CodexHistoryRepairPanel";
 import { proxyApi } from "@/lib/api/proxy";
 import { toast } from "sonner";
+import i18n from "i18next";
+import zh from "@/i18n/locales/zh.json";
 
 vi.mock("@/lib/api/proxy", () => ({
   proxyApi: {
@@ -127,6 +129,37 @@ beforeEach(() => {
 });
 
 describe("CodexHistoryRepairPanel", () => {
+  it.each(["native_codex_config", "Existing backend explanation"])(
+    "displays localized native-mode feedback while preserving other messages: %s",
+    async (message) => {
+      i18n.addResourceBundle("zh", "translation", zh, true, true);
+      vi.mocked(proxyApi.unlockCodexModelPicker).mockResolvedValue({
+        attemptedPorts: [],
+        debugPort: null,
+        targetId: null,
+        targetTitle: null,
+        targetUrl: null,
+        modelCount: 0,
+        modelNames: [],
+        injected: false,
+        launched: false,
+        codexExecutable: null,
+        message,
+      });
+      render(<CodexHistoryRepairPanel />);
+      fireEvent.click(screen.getByText("高级设置和新版目录兜底"));
+      fireEvent.click(
+        screen.getByRole("button", { name: "启动并刷新新版目录" }),
+      );
+      const expected =
+        message === "native_codex_config"
+          ? zh.notifications.nativeCodexConfigOwned
+          : message;
+      await waitFor(() => expect(toast.info).toHaveBeenCalledWith(expected));
+      expect(screen.getByText(expected)).toBeInTheDocument();
+    },
+  );
+
   it.each([
     [
       "codex_paginated_history_immutable: C:\\sessions\\rollout.jsonl: non-legacy history envelope; provider migration cannot safely rewrite byte-addressed history",

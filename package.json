@@ -20,8 +20,9 @@
     "cache:clean:dry-run": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cleanup-cargo-targets.ps1 -DryRun",
     "release:hook:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-local-release-hook.ps1",
     "release:hook:install:sync": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-local-release-hook.ps1 -Synchronous",
-    "test:unit": "vitest run",
-    "test:unit:watch": "vitest watch"
+    "test:unit": "node scripts/test-codex-desktop-native-dispose.cjs && vitest run",
+    "test:unit:watch": "vitest watch",
+    "test:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-production-release.ps1"
   },
   "keywords": [],
   "author": "Jason Young",

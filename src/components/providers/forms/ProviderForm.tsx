@@ -199,13 +199,28 @@ const codexCatalogCountFromSettings = (settingsConfig: unknown): number => {
   return 0;
 };
 
-// 读取 Codex 菜单映射开关。新配置优先读取 meta；旧配置没有 meta 时继续按 modelCatalog 存在与否启用。
+// 显式开关优先；旧官方原生登录配置默认交还 Codex，其余旧配置沿用目录推断。
 const codexLocalModelMappingFromInitialData = (
   initialData: ProviderFormProps["initialData"] | undefined,
+  providerId?: string,
 ): boolean => {
   if (!initialData) return true;
   if (typeof initialData?.meta?.codexLocalModelMapping === "boolean") {
     return initialData.meta.codexLocalModelMapping;
+  }
+  if (
+    providerId === "codex-official" &&
+    initialData.category === "official" &&
+    normalizeCodexOfficialAuth(initialData.meta?.codexOfficialAuth).mode ===
+      "desktop_current_login"
+  ) {
+    const routing = (
+      initialData.settingsConfig as { codexRouting?: CodexRoutingConfig }
+    )?.codexRouting;
+    const hasLocalRouting =
+      routing?.enabled !== false &&
+      (routing?.enabled === true || (routing?.routes?.length ?? 0) > 0);
+    if (!hasLocalRouting) return false;
   }
   return codexCatalogCountFromSettings(initialData?.settingsConfig) > 0;
 };
@@ -882,7 +897,7 @@ function ProviderFormFull({
   // Codex 菜单映射开关 —— 只控制 modelCatalog 是否投射到 /model 菜单和本地映射。
   // modelCatalog 现在也承担目录/上下文元数据职责，保存和获取模型列表不再依赖此开关。
   const [codexTakeoverEnabled, setCodexTakeoverEnabled] = useState<boolean>(
-    () => codexLocalModelMappingFromInitialData(initialData),
+    () => codexLocalModelMappingFromInitialData(initialData, providerId),
   );
 
   useEffect(() => {
@@ -890,8 +905,10 @@ function ProviderFormFull({
       setCodexTakeoverEnabled(true);
       return;
     }
-    setCodexTakeoverEnabled(codexLocalModelMappingFromInitialData(initialData));
-  }, [appId, initialData]);
+    setCodexTakeoverEnabled(
+      codexLocalModelMappingFromInitialData(initialData, providerId),
+    );
+  }, [appId, initialData, providerId]);
 
   // Auth-field choice for the Anthropic Messages upstream (defaults to the Bearer form)
   const initialCodexAnthropicAuthField: ClaudeApiKeyField =
@@ -2086,9 +2103,7 @@ function ProviderFormFull({
             : (activePreset?.presetKey ?? initialData?.meta?.codexPresetId)
           : undefined,
       codexLocalModelMapping:
-        appId === "codex" && category !== "official"
-          ? effectiveCodexMenuProjection
-          : undefined,
+        appId === "codex" ? effectiveCodexMenuProjection : undefined,
       promptCacheRouting:
         appId === "codex" &&
         category !== "official" &&

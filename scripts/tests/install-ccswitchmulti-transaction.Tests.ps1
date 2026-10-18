@@ -8,7 +8,9 @@ function New-TestSpec {
         ExpectedCurrentVersion   = "1.0.0"
         ExpectedCurrentHash      = ("B" * 64)
         ExpectedInstalledVersion = "2.0.0"
-        ExpectedInstalledHash    = ("C" * 64)
+        ExpectedInstalledHash    = '2609555de77dc53cff714b5ad8d8054d8e7322edcc395a47828f06e6797695b1'
+        ProductionManifestPath   = 'C:\artifacts\PRODUCTION-MANIFEST.json'
+        ExpectedSourceCommit     = ('D' * 40)
         CurrentPid               = 4242
         InstalledExecutable      = "C:\Program Files\CCSwitchMulti\cc-switch.exe"
         InstallDirectory         = "C:\Program Files\CCSwitchMulti"
@@ -19,6 +21,18 @@ function New-TestSpec {
         HealthUri                = "http://127.0.0.1:15721/health"
         TimeoutSeconds           = 30
         BackupRoot               = "D:\ccsm-transaction-backups"
+    }
+}
+
+function New-TestProductionManifest {
+    return [pscustomobject]@{
+        schemaVersion = 1
+        source = [pscustomobject]@{ Commit = ('D' * 40); Version = '2.0.0'; TrackedWorktree = 'clean' }
+        frontend = [pscustomobject]@{ embedded = $true; distSha256 = ('E' * 64); executableSha256 = '8c0a6e12fe7b12a51494a905aead6958e7a434b838fd6a9886bf0297979010ba'; assets = @(@{ path = 'assets/app.js'; sha256 = ('F' * 64) }) }
+        artifacts = [pscustomobject]@{
+            rawExecutable = [pscustomobject]@{ path = 'CCSwitchMulti-raw.exe'; sha256 = '8c0a6e12fe7b12a51494a905aead6958e7a434b838fd6a9886bf0297979010ba'; installedSha256 = '2609555de77dc53cff714b5ad8d8054d8e7322edcc395a47828f06e6797695b1' }
+            installer = [pscustomobject]@{ path = 'CCSwitchMulti-new-setup.exe'; sha256 = ('A' * 64) }
+        }
     }
 }
 
@@ -54,6 +68,8 @@ function New-FakeOperations {
     $script:currentProcessStartTime = "2026-08-09T08:00:00.0000000Z"
 
     return @{
+        ReadText = { param($Path) New-TestProductionManifest | ConvertTo-Json -Depth 10 }
+        ReadBytes = { param($Path) ,[Text.Encoding]::ASCII.GetBytes('before__TAURI_BUNDLE_TYPE_VAR_UNKafter') }
         ResolvePath = {
             param($Path, $Kind)
             $script:checks.Add("resolve:$Kind") | Out-Null
@@ -68,7 +84,8 @@ function New-FakeOperations {
             param($Path)
             $script:checks.Add("hash:$Path") | Out-Null
             if ($Path -like "*setup.exe") { return ("A" * 64) }
-            if ($script:installedNew) { return ("C" * 64) }
+            if ($Path -like '*-raw.exe') { return '8c0a6e12fe7b12a51494a905aead6958e7a434b838fd6a9886bf0297979010ba' }
+            if ($script:installedNew) { return '2609555de77dc53cff714b5ad8d8054d8e7322edcc395a47828f06e6797695b1' }
             return ("B" * 64)
         }
         GetFileVersion = {
@@ -356,6 +373,57 @@ function New-FakeRetainedProcessHandle {
         return $script:retainedHandleWaitForExitResult
     }
     return $handle
+}
+
+Describe "CCSM production installation preflight" {
+    It "rejects missing production evidence before any mutation" {
+        $spec = New-TestSpec
+        $spec.Remove('ProductionManifestPath')
+        Assert-PreflightRejectsWithoutMutation -Spec $spec -Message 'ProductionManifestPath'
+    }
+    It "rejects a manifest from a different source commit without mutation" {
+        $operations = New-FakeOperations
+        $operations.ReadText = { param($Path) $manifest = New-TestProductionManifest; $manifest.source.Commit = ('F' * 40); $manifest | ConvertTo-Json -Depth 10 }
+        { Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation } | Should Throw 'production manifest source/version'
+        $script:events.Count | Should Be 0
+    }
+    It "rejects a different projected installed hash without mutation" {
+        $spec = New-TestSpec
+        $spec.ExpectedInstalledHash = ('E' * 64)
+        Assert-PreflightRejectsWithoutMutation -Spec $spec -Message 'production manifest does not match'
+    }
+    It "rejects corrupted projection evidence even when the caller repeats that hash" {
+        $spec = New-TestSpec
+        $spec.ExpectedInstalledHash = ('C' * 64)
+        $operations = New-FakeOperations
+        $operations.ReadText = { param($Path) $manifest = New-TestProductionManifest; $manifest.artifacts.rawExecutable.installedSha256 = ('C' * 64); $manifest | ConvertTo-Json -Depth 10 }
+        { Invoke-CcsmReinstallTransaction -Spec $spec -Operations $operations -Simulation } | Should Throw 'projected installed hash'
+        $script:events.Count | Should Be 0
+    }
+    It "rejects a tampered raw executable before backup" {
+        $operations = New-FakeOperations
+        $operations.GetFileHash = {
+            param($Path)
+            if ($Path -like '*-raw.exe') { return ('F' * 64) }
+            if ($Path -like '*setup.exe') { return ('A' * 64) }
+            return ('B' * 64)
+        }
+        { Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation } | Should Throw 'production rawExecutable hash mismatch'
+        $script:events.Count | Should Be 0
+    }
+    It "does not launch a newly installed executable whose hash is wrong" {
+        $operations = New-FakeOperations
+        $operations.GetFileHash = {
+            param($Path)
+            if ($Path -like '*setup.exe') { return ('A' * 64) }
+            if ($Path -like '*-raw.exe') { return '8c0a6e12fe7b12a51494a905aead6958e7a434b838fd6a9886bf0297979010ba' }
+            if ($script:installedNew) { return ('F' * 64) }
+            return ('B' * 64)
+        }
+        $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
+        $result.Status | Should Be 'RolledBack'
+        ($script:events -contains 'start:new') | Should Be $false
+    }
 }
 
 Describe "CCSwitchMulti transactional reinstall orchestration" {

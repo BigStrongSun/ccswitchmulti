@@ -749,7 +749,7 @@ fn profile_switch_auto_disables_takeover_before_apply() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codex_profile_reapplies_same_multirouter_after_takeover_cleanup() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();

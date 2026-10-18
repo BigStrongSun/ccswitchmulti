@@ -81,6 +81,7 @@ CCSwitchMulti 是面向 Codex 多模型工作流维护的桌面工具。它提�
 - **稳定的 Codex 运行桶**：MultiRouter 使用 `codex_model_router_v2` 作为运行时 provider bucket，而不是 Codex 内置 `openai` 或易漂移的通用 custom bucket，从而避免重新触发官方 OpenAI WebSocket 语义，并减少 Codex 历史记录分桶混乱。
 - **Codex Desktop 模型菜单解锁**：包含运行时诊断和基于 CDP 的 renderer 注入，用于处理 Codex Desktop 里 Statsig 模型白名单导致本地/路由模型被隐藏的问题。
 - **Codex 历史显示修复**：提供独立的历史修复工作区，可先 dry-run，再修复 provider bucket、session index、project hints、user-event 标记和当前 Desktop sqlite 位置等问题。
+- **旧对话续聊恢复**：历史修复工作区提供独立明文误标恢复入口，支持普通和压缩历史；预览后在官方原生模式、Codex 退出时备份并执行。[使用说明](docs/codex-history-content-repair.md)。
 - **外部 OpenAI-compatible API sidecar**：提供单独的本地 OpenAI-compatible API 表面，给第三方客户端使用；它和 Codex takeover 端口不是同一路。
 
 ### 实现方式
@@ -115,6 +116,7 @@ Codex MultiRouter 不是简单地把 Codex 切到某一个第三方 Provider。C
 
 - 当前分支的包名/产品名是 `ccswitchmulti` / `CCSwitchMulti`。
 - Windows 发布导出使用 `pnpm release:export`；本地打包在没有签名私钥时会显式关闭 updater artifact 签名。
+- 生产构建来源、资源及安装事务校验见[本地生产构建与安装校验](docs/production-release-verification.md)；自动验证入口为 `pnpm test:release`。
 - `pnpm release:local` 会为本次构建创建隔离的 Cargo target，并在制品导出成功或失败后自动清理；不会删除其他 worktree 正在使用的构建目录。
 - `pnpm cache:clean:dry-run` 可只读列出超过 6 小时的历史 `src-tauri/target*`，确认后使用 `pnpm cache:clean` 清理；检测到任意 `cargo`/`rustc` 进程时，实际清理会整轮跳过。
 - 免安装版仍使用系统默认用户数据和配置目录，因此除非明确要共享状态，否则不要同时运行多个安装版或便携版实例。

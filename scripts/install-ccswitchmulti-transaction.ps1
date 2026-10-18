@@ -6,6 +6,8 @@ param(
     [string]$ExpectedCurrentHash = "",
     [string]$ExpectedInstalledVersion = "",
     [string]$ExpectedInstalledHash = "",
+    [string]$ProductionManifestPath = "",
+    [string]$ExpectedSourceCommit = "",
     [int]$CurrentPid = 0,
     [string]$InstalledExecutable = "",
     [string]$InstallDirectory = "",
@@ -21,6 +23,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'production-artifacts.ps1')
 
 $script:CcsmUninstallRegistryKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CCSwitchMulti"
 
@@ -351,7 +354,7 @@ function Assert-CcsmRequiredOperations {
     param([hashtable]$Operations)
 
     $required = @(
-        "ResolvePath", "TestPath", "GetFileHash", "GetFileVersion",
+        "ResolvePath", "TestPath", "GetFileHash", "GetFileVersion", "ReadText", "ReadBytes",
         "GetProcessPath", "GetProcessIdentity", "GetListenerOwner", "GetHealth", "WriteLog",
         "Backup", "StopVerifiedProcess", "WaitPortReleased", "RetireRunMarker", "SnapshotConfig", "VerifyConfigSnapshot",
         "RunUninstaller", "RunInstaller", "StartProcess", "WaitReady", "ValidateRestoreBackup",
@@ -371,7 +374,7 @@ function Resolve-CcsmTransactionContext {
         "InstallerPath", "ExpectedInstallerHash", "ExpectedCurrentVersion",
         "ExpectedCurrentHash", "ExpectedInstalledVersion", "ExpectedInstalledHash",
         "InstalledExecutable", "InstallDirectory", "UninstallExecutable",
-        "RegistryKey", "HealthUri", "BackupRoot"
+        "RegistryKey", "HealthUri", "BackupRoot", "ProductionManifestPath", "ExpectedSourceCommit"
     )
     foreach ($name in $requiredText) {
         if (-not $Spec.ContainsKey($name) -or [string]::IsNullOrWhiteSpace([string]$Spec[$name])) {
@@ -390,6 +393,7 @@ function Resolve-CcsmTransactionContext {
     Assert-CcsmRegistryKey -Key $Spec.RegistryKey
 
     $pathFields = [ordered]@{
+        ProductionManifestPath = "production-manifest"
         InstallerPath       = "installer"
         InstalledExecutable = "installed-executable"
         InstallDirectory    = "install-directory"
@@ -488,6 +492,14 @@ function Resolve-CcsmTransactionContext {
         throw "listener owner mismatch: actual=$listenerOwner expected=$($Spec.CurrentPid)"
     }
     Assert-CcsmHealthyResponse -Health (& $Operations.GetHealth $health.AbsoluteUri) -Label "preflight"
+    $production = Assert-ProductionManifest -ManifestPath $resolved.ProductionManifestPath `
+        -ExpectedSourceCommit $Spec.ExpectedSourceCommit -ExpectedVersion $Spec.ExpectedInstalledVersion `
+        -ReadText $Operations.ReadText -ReadBytes $Operations.ReadBytes -HashFile $Operations.GetFileHash
+    if (-not (Test-CcsmSamePath $production.InstallerPath $resolved.InstallerPath) -or
+        -not [string]::Equals($production.Manifest.artifacts.installer.sha256, $Spec.ExpectedInstallerHash, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($production.Manifest.artifacts.rawExecutable.installedSha256, $Spec.ExpectedInstalledHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'production manifest does not match the requested installer or installed executable hash'
+    }
 
     $transactionId = "ccsm-{0}-{1}" -f (Get-Date -Format "yyyyMMdd-HHmmss"), ([guid]::NewGuid().ToString("N"))
     return [pscustomobject]@{
@@ -497,6 +509,8 @@ function Resolve-CcsmTransactionContext {
         ExpectedCurrentHash      = $Spec.ExpectedCurrentHash.ToUpperInvariant()
         ExpectedInstalledVersion = $Spec.ExpectedInstalledVersion
         ExpectedInstalledHash    = $Spec.ExpectedInstalledHash.ToUpperInvariant()
+        ProductionManifestPath   = $resolved.ProductionManifestPath
+        SourceCommit             = $Spec.ExpectedSourceCommit
         CurrentPid               = [int]$Spec.CurrentPid
         CurrentProcessIdentity   = $processIdentity
         InstalledExecutable      = $installedExecutable
@@ -511,6 +525,16 @@ function Resolve-CcsmTransactionContext {
         TransactionId            = $transactionId
         TransactionRoot          = (Join-Path $backupRoot $transactionId)
         LogPath                  = (Join-Path (Join-Path $backupRoot $transactionId) "transaction.jsonl")
+    }
+}
+
+function Assert-CcsmInstalledFile {
+    param($Context, [hashtable]$Operations, [string]$ExpectedVersion, [string]$ExpectedHash, [string]$Label)
+    $version = & $Operations.GetFileVersion $Context.InstalledExecutable
+    if ($version -ne $ExpectedVersion) { throw "$Label version mismatch" }
+    $hash = & $Operations.GetFileHash $Context.InstalledExecutable
+    if (-not [string]::Equals($hash, $ExpectedHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label hash mismatch: actual=$hash expected=$ExpectedHash"
     }
 }
 
@@ -533,14 +557,7 @@ function Assert-CcsmRuntime {
         throw "$Label listener owner mismatch"
     }
     Assert-CcsmHealthyResponse -Health (& $Operations.GetHealth $Context.HealthUri) -Label $Label
-    $version = & $Operations.GetFileVersion $Context.InstalledExecutable
-    if ($version -ne $ExpectedVersion) {
-        throw "$Label version mismatch"
-    }
-    $hash = & $Operations.GetFileHash $Context.InstalledExecutable
-    if (-not [string]::Equals($hash, $ExpectedHash, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "$Label hash mismatch: actual=$hash expected=$ExpectedHash"
-    }
+    Assert-CcsmInstalledFile -Context $Context -Operations $Operations -ExpectedVersion $ExpectedVersion -ExpectedHash $ExpectedHash -Label $Label
 }
 
 function Test-CcsmSameProcessIdentity {
@@ -670,7 +687,12 @@ function Invoke-CcsmReinstallTransaction {
         [void](& $Operations.SnapshotConfig $context $backup)
         & $Operations.VerifyConfigSnapshot $context $backup
         & $Operations.RunUninstaller $context
+        if (-not [string]::Equals((& $Operations.GetFileHash $context.InstallerPath), $context.ExpectedInstallerHash, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'installer hash changed after production preflight'
+        }
         & $Operations.RunInstaller $context
+        Assert-CcsmInstalledFile -Context $context -Operations $Operations -ExpectedVersion $context.ExpectedInstalledVersion `
+            -ExpectedHash $context.ExpectedInstalledHash -Label 'installed candidate'
         $newPid = & $Operations.StartProcess $context "new"
         & $Operations.WaitReady $context $newPid
         Assert-CcsmRuntime -Context $context -Operations $Operations -ProcessId $newPid `
@@ -1225,6 +1247,8 @@ function New-CcsmRealOperations {
     param()
 
     $operations = @{}
+    $operations.ReadText = { param($Path) [IO.File]::ReadAllText($Path) }
+    $operations.ReadBytes = { param($Path) ,[IO.File]::ReadAllBytes($Path) }
     $operations.ResolvePath = {
         param($Path, $Kind)
         $resolved = Resolve-Path -LiteralPath $Path -ErrorAction Stop
@@ -1237,7 +1261,7 @@ function New-CcsmRealOperations {
         param($Path, $Kind)
         if (-not (Test-Path -LiteralPath $Path)) { return $false }
         $item = Get-Item -LiteralPath $Path -Force
-        if (@("installer", "installed-executable", "uninstaller") -contains $Kind) {
+        if (@("installer", "installed-executable", "uninstaller", "production-manifest") -contains $Kind) {
             return -not $item.PSIsContainer
         }
         if (@("install-directory", "backup-root", "config") -contains $Kind) {
@@ -1635,6 +1659,8 @@ if ($MyInvocation.InvocationName -ne '.') {
         ExpectedCurrentHash = $ExpectedCurrentHash
         ExpectedInstalledVersion = $ExpectedInstalledVersion
         ExpectedInstalledHash = $ExpectedInstalledHash
+        ProductionManifestPath = $ProductionManifestPath
+        ExpectedSourceCommit = $ExpectedSourceCommit
         CurrentPid = $CurrentPid
         InstalledExecutable = $InstalledExecutable
         InstallDirectory = $InstallDirectory

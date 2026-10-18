@@ -247,8 +247,27 @@ impl PromptService {
     }
 
     pub fn sync_all_to_live(state: &AppState) -> Result<(), AppError> {
+        Self::sync_apps_to_live(state, AppType::all())
+    }
+
+    /// Restore background state without replacing native Codex instructions.
+    pub(crate) fn sync_all_to_live_automatically(state: &AppState) -> Result<(), AppError> {
+        let _guard = super::provider::block_on_tauri_runtime(
+            state.proxy_service.lock_switch_for_app("codex"),
+        );
+        let native_codex = super::ProviderService::current_codex_uses_native(state)?;
+        Self::sync_apps_to_live(
+            state,
+            AppType::all().filter(|app| !native_codex || *app != AppType::Codex),
+        )
+    }
+
+    fn sync_apps_to_live(
+        state: &AppState,
+        apps: impl Iterator<Item = AppType>,
+    ) -> Result<(), AppError> {
         let mut failures = Vec::new();
-        for app in AppType::all() {
+        for app in apps {
             if matches!(app, AppType::ClaudeDesktop | AppType::Pi) {
                 continue;
             }
@@ -475,9 +494,14 @@ fn delete_pi_prompt(state: &AppState, id: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod upstream_sync_reliability_tests {
-    use super::project_prompt_set_to_path;
+    use super::{project_prompt_set_to_path, PromptService};
+    use crate::app_config::AppType;
+    use crate::database::Database;
     use crate::prompt::Prompt;
+    use crate::provider::Provider;
+    use crate::store::AppState;
     use indexmap::IndexMap;
+    use std::sync::Arc;
 
     fn prompt(id: &str, content: &str, enabled: bool) -> Prompt {
         Prompt {
@@ -533,6 +557,71 @@ mod upstream_sync_reliability_tests {
         assert_eq!(
             std::fs::read_to_string(path).expect("read"),
             "local unmanaged content"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn automatic_prompt_sync_preserves_native_codex_and_explicit_sync_still_projects() {
+        struct TestHome(Option<std::ffi::OsString>);
+        impl Drop for TestHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                    None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+                }
+                crate::settings::reload_settings().expect("restore settings cache");
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("test home");
+        let _home = TestHome(std::env::var_os("CC_SWITCH_TEST_HOME"));
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        crate::settings::reload_settings().expect("isolated settings");
+        let state = AppState::new(Arc::new(Database::memory().expect("database")));
+        let mut official = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+            "OpenAI Official".to_string(),
+            serde_json::json!({"auth": {}, "config": ""}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        state
+            .db
+            .save_provider("codex", &official)
+            .expect("provider");
+        state
+            .db
+            .set_current_provider("codex", &official.id)
+            .expect("current provider");
+        for app in ["codex", "claude"] {
+            state
+                .db
+                .save_prompt(app, &prompt("enabled", "restored instructions", true))
+                .expect("prompt");
+        }
+        let codex_path =
+            crate::prompt_files::prompt_file_path(&AppType::Codex).expect("Codex path");
+        std::fs::create_dir_all(codex_path.parent().unwrap()).expect("Codex directory");
+        std::fs::write(&codex_path, "native instructions").expect("native prompt");
+
+        PromptService::sync_all_to_live_automatically(&state).expect("automatic sync");
+
+        assert_eq!(
+            std::fs::read_to_string(&codex_path).unwrap(),
+            "native instructions"
+        );
+        let claude_path =
+            crate::prompt_files::prompt_file_path(&AppType::Claude).expect("Claude path");
+        assert_eq!(
+            std::fs::read_to_string(claude_path).unwrap(),
+            "restored instructions"
+        );
+
+        PromptService::sync_all_to_live(&state).expect("explicit sync");
+        assert_eq!(
+            std::fs::read_to_string(codex_path).unwrap(),
+            "restored instructions"
         );
     }
 }

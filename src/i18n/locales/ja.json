@@ -1,4 +1,35 @@
 {
+  "codexHistoryContentRepair": {
+    "title": "過去の会話の継続を修復",
+    "close": "会話の修復を閉じる",
+    "description": "旧 CCSM Router が読み取り可能な応答を encrypted_content として保存し、公式 Codex に戻すと invalid_encrypted_content が発生する既知の形式を復元します。実際の暗号文は保持されます。すべての会話エラーを解決するものではありません。",
+    "scope": "Codex ディレクトリ全体の通常・圧縮履歴を、アーカイブとサブタスクを含めてスキャンします。プレビューは履歴を読み取り、計画を保存します。実行前に公式のネイティブ OpenAI 設定に戻し、Codex を完全に終了してください。バックエンドが設定・プロセス・計画を再確認し、履歴、session index、有効な SQLite スナップショットを完全にバックアップしてから本文を復元・検証します。",
+    "home": "Codex ディレクトリ",
+    "homePlaceholder": "既定: ~/.codex",
+    "preview": "会話修復をプレビュー",
+    "apply": "会話修復を実行",
+    "scanning": "通常・圧縮・アーカイブ・サブタスクの履歴をスキャン中…",
+    "applying": "終了状態の確認、バックアップ、書き込み、再読み取り検証を実行中…",
+    "noChanges": "既知の誤分類された平文は見つかりませんでした。修復は不要です。",
+    "waitingForExit": "Codex の終了を待機中",
+    "ready": "プレビューが完了しました。実行前に Codex を終了してください。",
+    "completed": "復元が完了しました。公式 Codex を再度開いて会話を続けてください。",
+    "idle": "スキャン結果をプレビューしてから復元を実行してください。",
+    "nativeRequired": "公式のネイティブ OpenAI 設定に戻し、Codex を完全に終了してから実行してください。実行時に現在の設定を再確認します。",
+    "scannedFiles": "スキャン済みファイル",
+    "affectedFiles": "対象ファイル",
+    "compressedFiles": "対象の圧縮ファイル",
+    "pendingParts": "復元予定の本文部分",
+    "repairedParts": "復元済みの本文部分",
+    "stage": "バックエンドの段階: {{stage}}",
+    "stages": { "preview": "プレビュー完了", "completed": "復元完了" },
+    "resolvedHome": "Codex ディレクトリ: {{path}}",
+    "plan": "プレビュー計画",
+    "backup": "完全バックアップ",
+    "copiedPath": "{{label}}のパスをコピーしました",
+    "copyPath": "{{label}}のパスをコピー",
+    "copyFailed": "コピーに失敗しました"
+  },
   "app": {
     "title": "CCSwitchMulti",
     "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
@@ -275,6 +306,7 @@
     "openclawNoModels": "モデルが設定されていません",
     "backfillWarning": "切り替え成功しましたが、前のプロバイダーへの設定保存に失敗しました",
     "windowControlFailed": "ウィンドウ操作に失敗しました: {{error}}",
+    "nativeCodexConfigOwned": "ネイティブモードでは Codex が設定を管理するため、CCSM の互換機能の注入は不要です。",
     "recovery": {
       "unknown": "確認が必要な復旧問題があります",
       "app": "影響範囲: {{app}}。",
@@ -290,7 +322,8 @@
         "providerOnlyRestored": "プロバイダー設定のみ復旧され、一部のユーザー設定は未確認です",
         "unrecoverableUserTables": "設定の復旧に失敗し、ユーザー設定が復元されていない可能性があります",
         "portOwnedByUnknownOwner": "プロキシポートの所有者を確認できないため、CCSwitchMulti は引き継ぎを拒否しました",
-        "startupTakeoverFailed": "起動時にプロキシ引き継ぎを復旧できませんでした"
+        "startupTakeoverFailed": "起動時にプロキシ引き継ぎを復旧できませんでした",
+        "codexRendererReleasePending": "Codex のローカルルーティングは停止しましたが、以前のメニュー互換レイヤーを完全に解除できませんでした"
       },
       "nextStep": {
         "closeOtherInstanceOrInspectProcess": "別のインスタンスを閉じるか、該当プロセスを確認してください。",
@@ -298,7 +331,8 @@
         "openLogsOrRestoreUserBackup": "ログを確認し、必要に応じてユーザーバックアップを復元してください。",
         "changeProxyPortOrInspectOwner": "ポートの所有者を確認するか、別のプロキシポートを選択してください。",
         "openLogsOrRetryTakeover": "ログを確認してから、プロキシ引き継ぎを再度有効にしてください。",
-        "retryingTakeoverRestore": "ポートが解放されると、自動的に再試行して引き継ぎを復元します。"
+        "retryingTakeoverRestore": "ポートが解放されると、自動的に再試行して引き継ぎを復元します。",
+        "restartCodexToReleaseMenu": "Codex を完全に終了してから再起動し、以前のメニューを消去してください。問題が続く場合はログを確認してください。"
       }
     },
     "officialBlockedByProxy": "ローカルルーティングモード中は公式プロバイダーに切り替えできません。ルーティング経由で公式 API にアクセスするとアカウントが停止される可能性があります。",
@@ -2830,6 +2864,7 @@
     "takeover": {
       "hint": "ルーティングするアプリを選択します。有効にすると、そのアプリのリクエストはローカルルーティング経由で転送されます",
       "enabled": "{{app}} ルーティング有効",
+      "codexEnabledPendingApply": "Codex のローカルルーティングを有効にしました。Codex を再起動するか、状態修復を実行して適用してください。",
       "disabled": "{{app}} ルーティング無効",
       "failed": "ルーティングの切り替えに失敗しました: {{detail}}",
       "tooltip": {
