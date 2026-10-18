@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { UsageHero } from "@/components/usage/UsageHero";
 
 const useUsageSummaryByAppMock = vi.hoisted(() => vi.fn());
+const useUsageRecentRateMock = vi.hoisted(() => vi.fn());
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -20,6 +21,7 @@ vi.mock("framer-motion", () => ({
 vi.mock("@/lib/query/usage", () => ({
   useUsageSummaryByApp: (...args: unknown[]) =>
     useUsageSummaryByAppMock(...args),
+  useUsageRecentRate: (...args: unknown[]) => useUsageRecentRateMock(...args),
 }));
 
 const summary = {
@@ -46,6 +48,11 @@ const renderHero = (appType: string) =>
 describe("UsageHero cache-write availability", () => {
   beforeEach(() => {
     useUsageSummaryByAppMock.mockReset();
+    useUsageRecentRateMock.mockReset();
+    useUsageRecentRateMock.mockReturnValue({
+      data: { totalTokens: 0, tokensPerSecond: 0, windowSeconds: 300 },
+      isLoading: false,
+    });
   });
 
   it("marks mixed-protocol Pi usage as partial", () => {
@@ -85,5 +92,32 @@ describe("UsageHero cache-write availability", () => {
     expect(
       screen.getByTitle("OpenAI 协议不区分缓存写入，仅上报缓存命中"),
     ).toBeInTheDocument();
+  });
+
+  it("shows the rolling token rate while historical totals are loading", () => {
+    useUsageSummaryByAppMock.mockReturnValue({ data: [], isLoading: true });
+    useUsageRecentRateMock.mockReturnValue({
+      data: { totalTokens: 600, tokensPerSecond: 2, windowSeconds: 300 },
+      isLoading: false,
+      isError: false,
+    });
+
+    renderHero("all");
+
+    expect(screen.getByText("2 tok/s")).toBeInTheDocument();
+  });
+
+  it("does not show stale rate data after a failed refresh", () => {
+    useUsageSummaryByAppMock.mockReturnValue({ data: [], isLoading: false });
+    useUsageRecentRateMock.mockReturnValue({
+      data: { totalTokens: 600, tokensPerSecond: 2, windowSeconds: 300 },
+      isLoading: false,
+      isError: true,
+    });
+
+    renderHero("all");
+
+    expect(screen.queryByText("2 tok/s")).not.toBeInTheDocument();
+    expect(screen.getAllByText("--").length).toBeGreaterThan(0);
   });
 });

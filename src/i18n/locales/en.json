@@ -1650,6 +1650,8 @@
     "totalTokens": "New Tokens (Input+Output)",
     "cacheTokens": "Cache Tokens",
     "realTotal": "Tokens Processed",
+    "recentRate": "Last 5 min rate",
+    "recentRateDetail": "{{count}} Tokens in the last 5 minutes",
     "realTotalHint": "Input + Output + Cache Write + Cache Read",
     "freshInput": "Fresh Input",
     "cacheHitRate": "Cache Hit Rate",

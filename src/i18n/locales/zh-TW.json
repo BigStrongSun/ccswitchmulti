@@ -1648,6 +1648,8 @@
     "totalTokens": "新產生 Token (Input+Output)",
     "cacheTokens": "快取 Token",
     "realTotal": "真實消耗 Tokens",
+    "recentRate": "近 5 分鐘速度",
+    "recentRateDetail": "近 5 分鐘共 {{count}} Tokens",
     "realTotalHint": "Input + Output + 快取建立 + 快取命中",
     "freshInput": "新增輸入",
     "cacheHitRate": "快取命中率",

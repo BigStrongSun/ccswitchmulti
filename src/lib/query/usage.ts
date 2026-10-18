@@ -73,6 +73,14 @@ export const usageKeys = {
       filters?.providerName ?? null,
       filters?.model ?? null,
     ] as const,
+  recentRate: (appType?: string, providerName?: string, model?: string) =>
+    [
+      ...usageKeys.all,
+      "recent-rate",
+      appType ?? null,
+      providerName ?? null,
+      model ?? null,
+    ] as const,
   trends: (
     preset: UsageRangeSelection["preset"],
     customStartDate: number | undefined,
@@ -168,6 +176,14 @@ export const usageKeys = {
     [...usageKeys.all, providerId, appType] as const,
 };
 
+export interface RecentUsageRate {
+  totalTokens: number;
+  tokensPerSecond: number;
+  windowSeconds: number;
+}
+
+const RECENT_USAGE_WINDOW_SECONDS = 5 * 60;
+
 /** 把 UI 侧的 "all" 哨兵归一成 undefined（后端语义：不过滤）。 */
 function normalizeScopeFilters(filters?: UsageScopeFilters): UsageScopeFilters {
   return {
@@ -231,6 +247,43 @@ export function useUsageSummaryByApp(
     },
     refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
+  });
+}
+
+/**
+ * Reads the rolling five-minute token rate independently of the selected
+ * historical date range. The end timestamp is resolved for each fetch so
+ * polling always advances the window.
+ */
+export function useUsageRecentRate(
+  appType?: string,
+  providerName?: string,
+  model?: string,
+  options?: UsageQueryOptions,
+) {
+  const effectiveAppType = appType === "all" ? undefined : appType;
+  return useQuery<RecentUsageRate>({
+    queryKey: usageKeys.recentRate(effectiveAppType, providerName, model),
+    queryFn: async () => {
+      const endDate = Math.floor(Date.now() / 1000);
+      const startDate = endDate - RECENT_USAGE_WINDOW_SECONDS;
+      const summary = await usageApi.getUsageSummary(
+        startDate,
+        endDate,
+        effectiveAppType,
+        providerName,
+        model,
+      );
+      const totalTokens = summary.realTotalTokens;
+      return {
+        totalTokens,
+        tokensPerSecond: totalTokens / RECENT_USAGE_WINDOW_SECONDS,
+        windowSeconds: RECENT_USAGE_WINDOW_SECONDS,
+      };
+    },
+    refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
+    refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
+    enabled: options?.enabled ?? true,
   });
 }
 

@@ -1647,6 +1647,8 @@
     "totalTokens": "新規トークン (Input+Output)",
     "cacheTokens": "キャッシュトークン",
     "realTotal": "実消費トークン",
+    "recentRate": "直近5分の速度",
+    "recentRateDetail": "直近5分の合計 {{count}} Tokens",
     "realTotalHint": "Input + Output + キャッシュ書込 + キャッシュ命中",
     "freshInput": "新規入力",
     "cacheHitRate": "キャッシュヒット率",
