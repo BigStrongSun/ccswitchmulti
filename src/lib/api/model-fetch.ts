@@ -7,6 +7,7 @@ export interface FetchedModel {
   id: string;
   ownedBy: string | null;
   contextWindow?: number | null;
+  maxContextWindow?: number | null;
   inputModalities?: string[] | null;
   supportsImage?: boolean | null;
   reasoning?: CodexModelReasoningCapability | null;

@@ -35,6 +35,7 @@ import {
   AlertTriangle,
   Plus,
   Trash2,
+  RefreshCw,
 } from "lucide-react";
 import EndpointSpeedTest from "./EndpointSpeedTest";
 import { ApiKeySection, EndpointField, ModelDropdown } from "./shared";
@@ -42,6 +43,8 @@ import { XaiOAuthSection } from "./XaiOAuthSection";
 import {
   fetchModelsForConfig,
   fetchXaiOauthModels,
+  fetchCodexOauthModels,
+  fetchCodexOfficialFallbackModels,
   showFetchModelsError,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
@@ -223,6 +226,9 @@ interface CodexFormFieldsProps {
   // xAI OAuth 托管预设（Grok 订阅）：隐藏 API Key / 端点输入，挂账号选择区块
   isXaiOauthPreset?: boolean;
   isMaintainedPreset?: boolean;
+  isCanonicalOfficial?: boolean;
+  officialAccountId?: string | null;
+  officialManagedOAuth?: boolean;
   isXaiOauthAuthenticated?: boolean;
   selectedXaiAccountId?: string | null;
   onXaiAccountSelect?: (accountId: string | null) => void;
@@ -454,7 +460,9 @@ function catalogSupportsImage(model: CodexCatalogModel): boolean {
 function catalogRowUpstreamModel(
   row: Pick<CodexCatalogModel, "model" | "upstreamModel" | "upstream_model">,
 ): string {
-  return (row.upstreamModel ?? row.upstream_model ?? row.model ?? "").trim();
+  return (
+    row.upstreamModel?.trim() || row.upstream_model?.trim() || row.model.trim()
+  );
 }
 
 // Compares rows (with rowId) to incoming models (without) by data fields only,
@@ -703,6 +711,9 @@ export function CodexFormFields({
   providerName,
   isXaiOauthPreset,
   isMaintainedPreset = false,
+  isCanonicalOfficial = false,
+  officialAccountId = null,
+  officialManagedOAuth = false,
   isXaiOauthAuthenticated,
   selectedXaiAccountId,
   onXaiAccountSelect,
@@ -807,6 +818,11 @@ export function CodexFormFields({
   // 一变即自增，清空旧列表并作废在途响应——/models 结果可能按 Key 的模型
   // 授权返回，换号后残留旧列表会误导选择
   const fetchModelsSeqRef = useRef(0);
+  useEffect(() => {
+    fetchModelsSeqRef.current += 1;
+    setFetchedModels([]);
+    setIsFetchingModels(false);
+  }, [isCanonicalOfficial, officialAccountId, officialManagedOAuth]);
 
   useEffect(() => {
     fetchModelsSeqRef.current += 1;
@@ -1175,6 +1191,68 @@ export function CodexFormFields({
   );
 
   const handleFetchModels = useCallback(() => {
+    if (isCanonicalOfficial) {
+      const seq = ++fetchModelsSeqRef.current;
+      setIsFetchingModels(true);
+      const request = officialManagedOAuth
+        ? fetchCodexOauthModels(officialAccountId)
+        : fetchCodexOfficialFallbackModels();
+      request
+        .then((models) => {
+          if (seq !== fetchModelsSeqRef.current) return;
+          setFetchedModels(models);
+          const rows = [...catalogRowsRef.current];
+          for (const fetched of models) {
+            const model = fetched.id.trim();
+            if (!model) continue;
+            const index = rows.findIndex(
+              (row) =>
+                catalogRowUpstreamModel(row).trim().toLowerCase() ===
+                model.toLowerCase(),
+            );
+            if (index >= 0) {
+              rows[index] = {
+                ...rows[index],
+                ...(!rows[index].contextWindow && fetched.contextWindow
+                  ? { contextWindow: String(fetched.contextWindow) }
+                  : {}),
+              };
+            } else {
+              const visibleAliasCollision = rows.some(
+                (row) =>
+                  row.model.trim().toLowerCase() === model.toLowerCase() &&
+                  catalogRowUpstreamModel(row).toLowerCase() !==
+                    model.toLowerCase(),
+              );
+              if (visibleAliasCollision) continue;
+              rows.push(
+                createCatalogRow({
+                  model,
+                  upstreamModel: model,
+                  displayName: model,
+                  ...(fetched.contextWindow
+                    ? { contextWindow: String(fetched.contextWindow) }
+                    : {}),
+                }),
+              );
+            }
+          }
+          catalogRowsRef.current = rows;
+          setCatalogRows(rows);
+          toast.success(
+            t("providerForm.fetchModelsSuccess", { count: models.length }),
+          );
+        })
+        .catch((error) => {
+          if (seq !== fetchModelsSeqRef.current) return;
+          console.warn("[CodexOfficial] Failed to fetch models:", error);
+          toast.error(String(error));
+        })
+        .finally(() => {
+          if (seq === fetchModelsSeqRef.current) setIsFetchingModels(false);
+        });
+      return;
+    }
     // xAI OAuth 托管预设不使用表单里的 Base URL 与 API Key。
     if (isXaiOauthPreset) {
       if (!isXaiOauthAuthenticated) {
@@ -1307,6 +1385,9 @@ export function CodexFormFields({
     isXaiOauthPreset,
     isXaiOauthAuthenticated,
     selectedXaiAccountId,
+    isCanonicalOfficial,
+    officialManagedOAuth,
+    officialAccountId,
     t,
   ]);
 
@@ -1818,6 +1899,129 @@ export function CodexFormFields({
           selectedAccountId={selectedXaiAccountId}
           onAccountSelect={onXaiAccountSelect}
         />
+      )}
+
+      {isCanonicalOfficial && canEditCatalog && (
+        <section className="space-y-3 border-t border-border-default pt-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-medium">
+                {t("codexConfig.officialContextTitle", {
+                  defaultValue: "官方模型上下文窗口",
+                })}
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                {officialManagedOAuth
+                  ? `${t("codexConfig.officialAccountCatalog", { defaultValue: "认证账号模型目录" })} (${officialAccountId ?? t("codexConfig.officialDefaultAccount", { defaultValue: "默认账号" })})`
+                  : t("codexConfig.officialPublicCatalog", {
+                      defaultValue: "公共官方模型目录（非账号授权结果）",
+                    })}
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isFetchingModels}
+              onClick={handleFetchModels}
+            >
+              <RefreshCw className="mr-1 h-3.5 w-3.5" />
+              {isFetchingModels
+                ? t("codexConfig.officialCatalogFetching", {
+                    defaultValue: "正在探测…",
+                  })
+                : t("codexConfig.officialCatalogFetch", {
+                    defaultValue: "探测当前来源模型",
+                  })}
+            </Button>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm">
+              {t("codexConfig.officialMenuProjection", {
+                defaultValue: "在 Codex /model 菜单中显示官方目录",
+              })}
+            </span>
+            <Switch
+              checked={takeoverEnabled}
+              onCheckedChange={onTakeoverEnabledChange}
+              aria-label={t("codexConfig.officialMenuProjection", {
+                defaultValue: "在 Codex /model 菜单中显示官方目录",
+              })}
+            />
+          </div>
+          {catalogRows.map((row, index) => {
+            const fetched = fetchedModels.find(
+              (item) =>
+                item.id.trim().toLowerCase() ===
+                catalogRowUpstreamModel(row).trim().toLowerCase(),
+            );
+            return (
+              <div
+                key={row.rowId}
+                className="grid grid-cols-1 gap-2 border-b border-border-default pb-3 md:grid-cols-[minmax(0,1fr)_160px_160px]"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-sm">{row.model}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {fetched?.contextWindow
+                      ? `${t("codexConfig.officialContextDefault", { defaultValue: "官方默认" })} ${fetched.contextWindow.toLocaleString()}`
+                      : t("codexConfig.officialContextDefaultUnknown", {
+                          defaultValue: "官方默认值未知",
+                        })}
+                    {fetched?.maxContextWindow
+                      ? ` · ${t("codexConfig.officialContextMax", { defaultValue: "最大" })} ${fetched.maxContextWindow.toLocaleString()}`
+                      : ` · ${t("codexConfig.officialContextMaxUnknown", { defaultValue: "最大值未知" })}`}
+                  </div>
+                </div>
+                <Input
+                  aria-label={`${row.model} ${t("codexConfig.officialContextWindow", { defaultValue: "上下文窗口" })}`}
+                  inputMode="numeric"
+                  value={row.contextWindow ?? ""}
+                  placeholder={t("codexConfig.officialContextWindow", {
+                    defaultValue: "上下文窗口",
+                  })}
+                  onChange={(event) => {
+                    const value = event.target.value.replace(/[^0-9]/g, "");
+                    setCatalogRows((current) => {
+                      const next = current.map((item, rowIndex) =>
+                        rowIndex === index
+                          ? { ...item, contextWindow: value }
+                          : item,
+                      );
+                      catalogRowsRef.current = next;
+                      return next;
+                    });
+                  }}
+                />
+                {Boolean(
+                  fetched?.maxContextWindow &&
+                    fetched.maxContextWindow >= 1_000_000,
+                ) && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setCatalogRows((current) => {
+                        const next = current.map((item, rowIndex) =>
+                          rowIndex === index
+                            ? { ...item, contextWindow: "1000000" }
+                            : item,
+                        );
+                        catalogRowsRef.current = next;
+                        return next;
+                      });
+                    }}
+                  >
+                    {t("codexConfig.officialContextSet1M", {
+                      defaultValue: "设为 1M",
+                    })}
+                  </Button>
+                )}
+              </div>
+            );
+          })}
+        </section>
       )}
 
       {/* Codex API Key 输入框（托管 OAuth 预设无需 Key） */}

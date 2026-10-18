@@ -3328,29 +3328,6 @@ command = "legacy-cmd"
     }
 
     #[test]
-    fn official_context_projection_does_not_become_common_config() {
-        let projected = crate::codex_context::apply_native_context_preference(
-            "model = \"gpt-test\"\nmodel_context_window = 272000\n",
-        )
-        .unwrap();
-        let snippet =
-            ProviderService::extract_codex_common_config(&json!({"config": projected})).unwrap();
-        let doc = snippet.parse::<toml_edit::DocumentMut>().unwrap();
-        assert_eq!(doc["model_context_window"].as_integer(), Some(272000));
-        assert!(!snippet.contains("CCSM_OFFICIAL_CONTEXT"));
-        let projected =
-            crate::codex_context::apply_native_context_preference("model = \"gpt-test\"\n")
-                .unwrap();
-        let snippet =
-            ProviderService::extract_codex_common_config(&json!({"config": projected})).unwrap();
-        assert!(snippet
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap()
-            .get("model_context_window")
-            .is_none());
-    }
-
-    #[test]
     fn extract_codex_common_config_keeps_user_set_web_search() {
         let config_toml = "web_search = \"enabled\"\ndisable_response_storage = true\n";
         let settings = json!({ "config": config_toml });
@@ -4609,6 +4586,43 @@ wire_api = "responses"
             assert!(
                 error.to_string().contains("Live 投影失败"),
                 "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn official_context_save_rejects_unverified_million_before_database_mutation() {
+        with_test_home(|state, _home| {
+            let mut original = Provider::with_id(
+                "official-context-test".into(),
+                "Official".into(),
+                json!({"config":"model = \"unlisted-official-test\"\n", "modelCatalog":{"models":[{"model":"unlisted-official-test","contextWindow":272000}]}}),
+                None,
+            );
+            original.category = Some("official".into());
+            state.db.save_provider("codex", &original).unwrap();
+            let mut candidate = original.clone();
+            candidate.settings_config["modelCatalog"]["models"][0]["contextWindow"] =
+                json!(1000000);
+            candidate.settings_config["modelCatalog"]["models"][0]["maxContextWindow"] =
+                json!(1050000);
+            assert!(ProviderService::persist_provider_mutation(
+                state,
+                &AppType::Codex,
+                &candidate,
+                &[],
+                &[]
+            )
+            .is_err());
+            assert_eq!(
+                state
+                    .db
+                    .get_provider_by_id(&original.id, "codex")
+                    .unwrap()
+                    .unwrap()
+                    .settings_config,
+                original.settings_config
             );
         });
     }
@@ -7471,6 +7485,48 @@ impl ProviderService {
             return state.db.save_provider(app_type.as_str(), provider);
         }
 
+        if crate::codex_config::codex_provider_record_is_official(provider) {
+            let previous = state
+                .db
+                .get_provider_by_id(&provider.id, app_type.as_str())?;
+            let mut official =
+                crate::codex_config::codex_official_models_cache().unwrap_or_default();
+            if let Some(auth) = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.codex_official_auth.as_ref())
+                .filter(|auth| auth.mode == crate::provider::CodexOfficialAuthMode::ManagedOauth)
+            {
+                let account_id = auth.account_id.clone().or_else(|| {
+                    let manager = crate::proxy::providers::codex_oauth_auth::CodexOAuthManager::new(
+                        crate::config::get_app_config_dir(),
+                    );
+                    block_on_tauri_runtime(manager.default_account_id())
+                });
+                if let Some(account_id) = account_id {
+                    // A recent response for this account takes precedence over public metadata.
+                    let discovered =
+                        crate::services::codex_oauth_models::authenticated_model_limits(
+                            &account_id,
+                        );
+                    for model in discovered.into_iter().rev() {
+                        official.insert(
+                            0,
+                            serde_json::json!({
+                                "slug": model.id,
+                                "max_context_window": model.max_context_window,
+                            }),
+                        );
+                    }
+                }
+            }
+            crate::codex_context::validate_official_context_changes(
+                provider,
+                previous.as_ref(),
+                &official,
+            )?;
+        }
+
         let is_router = Self::is_codex_schema_v2_router(app_type, provider);
         if !is_router && provider.uses_manual_codex_protocol() {
             let existing = state
@@ -9049,7 +9105,6 @@ impl ProviderService {
             return Ok(String::new());
         }
 
-        let config_toml = crate::codex_context::restore_native_context_preference(config_toml)?;
         let mut doc = config_toml
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| AppError::Message(format!("TOML parse error: {e}")))?;

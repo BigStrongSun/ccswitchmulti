@@ -672,8 +672,6 @@ export interface Settings {
   // Whether to show the failover toggle independently on the main page
   enableFailoverToggle?: boolean;
   showProfileSwitcher?: boolean;
-  // Prefer up to 1M context when projecting the managed official Codex catalog.
-  codexOfficialContext1M?: boolean;
   // Preserve Codex ChatGPT login in auth.json when switching third-party providers
   preserveCodexOfficialAuthOnSwitch?: boolean;
   // Run official Codex under the shared "custom" provider id so future
@@ -764,16 +762,6 @@ export interface Settings {
       migratedStateRows?: number;
     };
   };
-}
-
-export interface CodexOfficialContextLimit {
-  /** Read-only calculated limits for native official settings and the managed official catalog. */
-  model: string;
-  defaultContextWindow: number | null;
-  maxContextWindow: number | null;
-  requestedContextWindow: number | null;
-  effectiveContextWindow: number | null;
-  autoCompactTokenLimit: number | null;
 }
 
 export interface EnvInjectionSettings {

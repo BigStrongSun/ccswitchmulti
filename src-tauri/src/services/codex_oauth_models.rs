@@ -8,6 +8,7 @@ use crate::services::model_fetch::FetchedModel;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -17,6 +18,9 @@ const CODEX_OAUTH_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/mode
 const CODEX_PUBLIC_MODELS_URL: &str =
     "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json";
 const CODEX_OAUTH_FETCH_TIMEOUT_SECS: u64 = 15;
+const AUTHENTICATED_MODEL_LIMITS_TTL: Duration = Duration::from_secs(15 * 60);
+const AUTHENTICATED_MODEL_LIMITS_MAX_ACCOUNTS: usize = 32;
+const AUTHENTICATED_MODEL_LIMITS_MAX_MODELS: usize = 2048;
 const CODEX_PUBLIC_MODELS_FETCH_TIMEOUT_SECS: u64 = 10;
 const CODEX_PUBLIC_MODELS_MAX_BYTES: u64 = 8 * 1024 * 1024;
 // A failed public GitHub fetch must not turn every synchronous config projection
@@ -32,6 +36,79 @@ static CODEX_PUBLIC_CATALOG_REFRESH_COMPLETED: Lazy<tokio::sync::Notify> =
     Lazy::new(tokio::sync::Notify::new);
 static CODEX_PUBLIC_CATALOG_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> =
     std::sync::OnceLock::new();
+static AUTHENTICATED_MODEL_LIMITS: Lazy<Mutex<HashMap<String, AuthenticatedModelLimits>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+struct AuthenticatedModelLimits {
+    fetched_at: Instant,
+    models: Vec<FetchedModel>,
+}
+
+/// Record the latest successful account-scoped OAuth model response.
+/// Retaining models without explicit max metadata lets account data override
+/// a larger value from a public catalog.
+pub fn record_authenticated_model_limits(account_id: &str, models: &[FetchedModel]) {
+    let account_id = account_id.trim();
+    if account_id.is_empty() {
+        return;
+    }
+
+    let mut snapshot = models
+        .iter()
+        .take(AUTHENTICATED_MODEL_LIMITS_MAX_MODELS)
+        .map(|model| FetchedModel {
+            id: model.id.clone(),
+            owned_by: None,
+            context_window: model.context_window,
+            max_context_window: model.max_context_window,
+            input_modalities: None,
+            supports_image: None,
+            reasoning: None,
+        })
+        .collect::<Vec<_>>();
+    snapshot.sort_by(|left, right| left.id.cmp(&right.id));
+    snapshot.dedup_by(|left, right| left.id == right.id);
+
+    let Ok(mut cache) = AUTHENTICATED_MODEL_LIMITS.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    cache.retain(|_, entry| now.duration_since(entry.fetched_at) < AUTHENTICATED_MODEL_LIMITS_TTL);
+    if !cache.contains_key(account_id) && cache.len() >= AUTHENTICATED_MODEL_LIMITS_MAX_ACCOUNTS {
+        if let Some(oldest_account) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.fetched_at)
+            .map(|(account_id, _)| account_id.clone())
+        {
+            cache.remove(&oldest_account);
+        }
+    }
+    cache.insert(
+        account_id.to_string(),
+        AuthenticatedModelLimits {
+            fetched_at: now,
+            models: snapshot,
+        },
+    );
+}
+
+/// Return a fresh account-scoped authenticated snapshot, including models
+/// whose response omitted explicit max-context metadata.
+pub fn authenticated_model_limits(account_id: &str) -> Vec<FetchedModel> {
+    let account_id = account_id.trim();
+    if account_id.is_empty() {
+        return Vec::new();
+    }
+    let Ok(mut cache) = AUTHENTICATED_MODEL_LIMITS.lock() else {
+        return Vec::new();
+    };
+    let now = Instant::now();
+    cache.retain(|_, entry| now.duration_since(entry.fetched_at) < AUTHENTICATED_MODEL_LIMITS_TTL);
+    cache
+        .get(account_id)
+        .map(|entry| entry.models.clone())
+        .unwrap_or_default()
+}
 
 pub(crate) fn register_public_catalog_app_handle(app_handle: tauri::AppHandle) {
     let _ = CODEX_PUBLIC_CATALOG_APP_HANDLE.set(app_handle);
@@ -507,6 +584,7 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
     if let Some(id) = entry.as_str().map(str::trim).filter(|id| !id.is_empty()) {
         models.push(FetchedModel {
             context_window: None,
+            max_context_window: None,
             id: id.to_string(),
             input_modalities: None,
             owned_by: Some("Codex".to_string()),
@@ -520,6 +598,7 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
         if let Some(id) = fallback_id.map(str::trim).filter(|id| !id.is_empty()) {
             models.push(FetchedModel {
                 context_window: None,
+                max_context_window: None,
                 id: id.to_string(),
                 input_modalities: None,
                 owned_by: Some("Codex".to_string()),
@@ -551,6 +630,7 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
     .or_else(|| Some("Codex".to_string()));
 
     let context_window = extract_context_window(obj);
+    let max_context_window = extract_max_context_window(obj);
     let input_modalities = extract_input_modalities(obj);
     let supports_image = extract_supports_image(obj, input_modalities.as_deref());
     let reasoning =
@@ -562,6 +642,7 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
 
     models.push(FetchedModel {
         context_window,
+        max_context_window,
         id,
         input_modalities,
         owned_by,
@@ -619,14 +700,16 @@ fn string_field(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<S
 ///
 /// 官方接口字段可能随客户端版本变化，只有明确的正整数才会被接受。
 fn extract_context_window(obj: &serde_json::Map<String, Value>) -> Option<u64> {
-    const KEYS: &[&str] = &[
-        "context_window",
-        "max_context_window",
-        "contextWindow",
-        "maxContextWindow",
-    ];
+    const KEYS: &[&str] = &["context_window", "contextWindow"];
 
     KEYS.iter()
+        .filter_map(|key| obj.get(*key))
+        .find_map(parse_positive_u64)
+}
+
+fn extract_max_context_window(obj: &serde_json::Map<String, Value>) -> Option<u64> {
+    ["max_context_window", "maxContextWindow"]
+        .iter()
         .filter_map(|key| obj.get(*key))
         .find_map(parse_positive_u64)
 }
@@ -896,18 +979,85 @@ mod tests {
     }
 
     #[test]
-    fn parse_codex_oauth_models_extracts_context_window() {
+    fn parse_codex_oauth_models_separates_default_and_max_context_windows() {
         let models = parse_models(json!({
             "models": [
-                { "slug": "gpt-5.4", "context_window": 272000 },
-                { "slug": "gpt-5.5", "maxContextWindow": "1000000" },
-                { "slug": "bad", "contextWindow": "128000 tokens" }
+                { "slug": "gpt-snake", "context_window": 272000, "max_context_window": 872000 },
+                { "slug": "gpt-camel", "contextWindow": 300000, "maxContextWindow": "1000000" },
+                { "slug": "gpt-max-only", "max_context_window": 1000000 },
+                { "slug": "bad", "contextWindow": "128000 tokens", "maxContextWindow": "1000000 tokens" }
             ]
         }));
 
-        assert_eq!(models[0].context_window, None);
-        assert_eq!(models[1].context_window, Some(272_000));
-        assert_eq!(models[2].context_window, Some(1_000_000));
+        let by_id = models
+            .iter()
+            .map(|model| (model.id.as_str(), model))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(by_id["gpt-snake"].context_window, Some(272_000));
+        assert_eq!(by_id["gpt-snake"].max_context_window, Some(872_000));
+        assert_eq!(by_id["gpt-camel"].context_window, Some(300_000));
+        assert_eq!(by_id["gpt-camel"].max_context_window, Some(1_000_000));
+        assert_eq!(by_id["gpt-max-only"].context_window, None);
+        assert_eq!(by_id["gpt-max-only"].max_context_window, Some(1_000_000));
+        assert_eq!(by_id["bad"].context_window, None);
+        assert_eq!(by_id["bad"].max_context_window, None);
+    }
+
+    #[test]
+    fn authenticated_model_limits_are_account_scoped_and_keep_missing_max_entries() {
+        let account_a = "test-account-snapshot-a";
+        let account_b = "test-account-snapshot-b";
+        let models_a = vec![
+            serde_json::from_value(
+                json!({"id":"gpt-shared", "contextWindow":272000, "maxContextWindow":872000}),
+            )
+            .unwrap(),
+            serde_json::from_value(json!({"id":"gpt-no-max", "contextWindow":128000})).unwrap(),
+        ];
+        let models_b = vec![serde_json::from_value(
+            json!({"id":"gpt-shared", "contextWindow":272000, "maxContextWindow":1000000}),
+        )
+        .unwrap()];
+
+        record_authenticated_model_limits(account_a, &models_a);
+        record_authenticated_model_limits(account_b, &models_b);
+
+        let snapshot_a = authenticated_model_limits(account_a);
+        let snapshot_b = authenticated_model_limits(account_b);
+        assert_eq!(
+            snapshot_a
+                .iter()
+                .find(|model| model.id == "gpt-shared")
+                .unwrap()
+                .max_context_window,
+            Some(872_000)
+        );
+        assert_eq!(
+            snapshot_a
+                .iter()
+                .find(|model| model.id == "gpt-no-max")
+                .unwrap()
+                .max_context_window,
+            None
+        );
+        assert_eq!(
+            snapshot_b
+                .iter()
+                .find(|model| model.id == "gpt-shared")
+                .unwrap()
+                .max_context_window,
+            Some(1_000_000)
+        );
+
+        let updated_without_max =
+            vec![
+                serde_json::from_value(json!({"id":"gpt-shared", "contextWindow":272000})).unwrap(),
+            ];
+        record_authenticated_model_limits(account_a, &updated_without_max);
+        assert_eq!(
+            authenticated_model_limits(account_a)[0].max_context_window,
+            None
+        );
     }
 
     #[test]

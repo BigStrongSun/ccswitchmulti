@@ -2,7 +2,7 @@
 
 ## 2026-10-18 Codex 官方上下文设置
 
-- 设置页新增官方上下文默认 / 请求 1M，官方原生配置与受管目录共用可信元数据限幅；多路由只投影官方 target，不能把全局 1M 带给第三方。实现、官方来源、可恢复归属和验证见 [memory-2026-10-18-codex-official-context.md](memory-2026-10-18-codex-official-context.md)。本批只改公开 CCSM 集成分支，不操作 AgentMesh 或上游 PR。
+- 当前方案是 OpenAI Official Provider 逐模型编辑上下文与模型发现；全局 1M 方案在未部署前撤除。只有可信官方 max 明确支持的模型允许新设 1M，不自动抬高 872K 或未知模型。实现、来源和分批验证见 [memory-2026-10-18-codex-official-context.md](memory-2026-10-18-codex-official-context.md)。只改公开 CCSM 集成分支，不操作 AgentMesh 或上游 PR。
 
 ## 2026-10-16 官方 4.0 集成尝试
 

@@ -8,7 +8,11 @@ import {
 import { useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexFormFields } from "@/components/providers/forms/CodexFormFields";
-import { fetchModelsForConfig } from "@/lib/api/model-fetch";
+import {
+  fetchModelsForConfig,
+  fetchCodexOauthModels,
+  fetchCodexOfficialFallbackModels,
+} from "@/lib/api/model-fetch";
 import { preflightCodexProviderProtocolCompatibility } from "@/lib/api/protocol-compatibility";
 import type {
   CodexProtocolCompatibilityRecord,
@@ -55,6 +59,8 @@ vi.mock("react-i18next", () => ({
 
 vi.mock("@/lib/api/model-fetch", () => ({
   fetchModelsForConfig: vi.fn(),
+  fetchCodexOauthModels: vi.fn(),
+  fetchCodexOfficialFallbackModels: vi.fn(),
   probeCodexChatForConfig: vi.fn(),
   probeCodexResponsesForConfig: vi.fn(),
   showFetchModelsError: vi.fn(),
@@ -73,6 +79,8 @@ vi.mock("@/components/ui/form", () => ({
 beforeEach(() => {
   vi.useRealTimers();
   vi.mocked(fetchModelsForConfig).mockReset();
+  vi.mocked(fetchCodexOauthModels).mockReset();
+  vi.mocked(fetchCodexOfficialFallbackModels).mockReset();
   vi.mocked(preflightCodexProviderProtocolCompatibility).mockReset();
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     configurable: true,
@@ -346,6 +354,9 @@ function renderCatalogHarness(
     historyReplay?: CodexHistoryReplay;
     codexProviderEditorSnapshot?: CodexProviderEditorSnapshot;
     protocolOverrides?: Record<string, CodexProtocolOverride>;
+    official?: boolean;
+    officialAccountId?: string | null;
+    officialManagedOAuth?: boolean;
   } = {},
 ) {
   const onCatalogChange = vi.fn();
@@ -372,10 +383,13 @@ function renderCatalogHarness(
       <CodexFormFields
         providerId="codex-thirdparty"
         providerName={options.providerName}
+        isCanonicalOfficial={options.official}
+        officialAccountId={options.officialAccountId}
+        officialManagedOAuth={options.officialManagedOAuth}
         codexProviderEditorSnapshot={options.codexProviderEditorSnapshot}
         codexApiKey={options.apiKey ?? "sk-test"}
         onApiKeyChange={vi.fn()}
-        category="custom"
+        category={options.official ? "official" : "custom"}
         shouldShowApiKeyLink={false}
         websiteUrl=""
         partnerPromotionKey={options.partnerPromotionKey}
@@ -636,6 +650,118 @@ function renderAutoSplitHarness() {
 }
 
 describe("CodexFormFields local model routing", () => {
+  it("uses the selected managed account for official model discovery", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([]);
+    renderCatalogHarness([], {
+      official: true,
+      openAdvancedOptions: false,
+      officialManagedOAuth: true,
+      officialAccountId: "account-7",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
+    await waitFor(() =>
+      expect(fetchCodexOauthModels).toHaveBeenCalledWith("account-7"),
+    );
+    expect(fetchCodexOfficialFallbackModels).not.toHaveBeenCalled();
+  });
+
+  it("matches an official model to a row with an empty upstream field", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([
+      { id: "gpt-5.6", ownedBy: "openai", contextWindow: 272000 },
+    ]);
+    renderCatalogHarness([{ model: "gpt-5.6", upstreamModel: "" }], {
+      official: true,
+      openAdvancedOptions: false,
+      officialManagedOAuth: true,
+      officialAccountId: "account-7",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("textbox", { name: "gpt-5.6 上下文窗口" }),
+      ).toHaveLength(1),
+    );
+    expect(
+      screen.getByRole("textbox", { name: "gpt-5.6 上下文窗口" }),
+    ).toHaveValue("272000");
+  });
+
+  it("does not overwrite a visible alias whose upstream model differs", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([
+      { id: "gpt-5.6", ownedBy: "openai", contextWindow: 272000 },
+    ]);
+    renderCatalogHarness(
+      [
+        {
+          model: "gpt-5.6",
+          upstreamModel: "my-gpt-alias",
+          contextWindow: "64000",
+        },
+      ],
+      {
+        official: true,
+        openAdvancedOptions: false,
+        officialManagedOAuth: true,
+        officialAccountId: "account-7",
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      screen.getAllByRole("textbox", { name: "gpt-5.6 上下文窗口" }),
+    ).toHaveLength(1);
+    expect(
+      screen.getByRole("textbox", { name: "gpt-5.6 上下文窗口" }),
+    ).toHaveValue("64000");
+  });
+
+  it("offers the 1M shortcut only when the discovered maximum is at least 1M", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([
+      {
+        id: "eligible",
+        ownedBy: "openai",
+        contextWindow: 400000,
+        maxContextWindow: 1050000,
+      },
+      {
+        id: "limited",
+        ownedBy: "openai",
+        contextWindow: 272000,
+        maxContextWindow: 872000,
+      },
+      { id: "unknown", ownedBy: "openai" },
+    ]);
+    renderCatalogHarness([], {
+      official: true,
+      openAdvancedOptions: false,
+      officialManagedOAuth: true,
+      officialAccountId: "account-7",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: "设为 1M" })).toHaveLength(
+        1,
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "设为 1M" }));
+    expect(
+      screen.getByRole("textbox", { name: "eligible 上下文窗口" }),
+    ).toHaveValue("1000000");
+    expect(
+      screen.getByRole("textbox", { name: "limited 上下文窗口" }),
+    ).toHaveValue("272000");
+    expect(
+      screen.getByRole("textbox", { name: "unknown 上下文窗口" }),
+    ).toHaveValue("");
+  });
+
   it("restores split persistence and per-model transports from the editor snapshot", async () => {
     const responsesRecord = createDeepProbeRecord(
       "gpt-5.5",

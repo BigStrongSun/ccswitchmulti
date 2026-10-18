@@ -5202,6 +5202,12 @@ impl ProxyService {
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             let prepared_config = Self::align_codex_takeover_login(&prepared_config, provider)?;
+            let prepared_config = crate::codex_config::official_catalog_context_config_for_live(
+                &prepared_config,
+                &prepared_config,
+                provider.and_then(|provider| provider.category.as_deref()),
+            )
+            .map_err(|e| format!("Prepare official model context: {e}"))?;
             crate::codex_config::write_codex_live_config_atomic(Some(&prepared_config))
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             return Ok(());
@@ -7339,6 +7345,46 @@ wire_api = "responses"
                 read_json_file(&crate::codex_config::get_codex_auth_path()).ok();
             assert_eq!(after, auth, "takeover must never mutate login material");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn official_takeover_keeps_per_model_context_without_global_override_or_auth_changes() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().unwrap();
+        let service = ProxyService::new(Arc::new(Database::memory().unwrap()));
+        let login = json!({"auth_mode":"chatgpt", "tokens":{"access_token":"fixture-token"}});
+        write_json_file(&crate::codex_config::get_codex_auth_path(), &login).unwrap();
+        let mut provider = Provider::with_id(
+            "official-context".into(),
+            "Official".into(),
+            json!({
+                "config":"model = \"gpt-long\"\nmodel_context_window = 272000\nmodel_auto_compact_token_limit = 244800\n",
+                "modelCatalog":{"models":[
+                    {"model":"gpt-long","contextWindow":1000000},
+                    {"model":"gpt-small","contextWindow":272000}
+                ]}
+            }),
+            None,
+        );
+        provider.category = Some("official".into());
+        let mut config = provider.settings_config.clone();
+        config["auth"] = json!({"OPENAI_API_KEY": "PROXY_MANAGED"});
+        service
+            .write_codex_takeover_live_for_provider(&config, Some(&provider))
+            .unwrap();
+        let text = std::fs::read_to_string(crate::codex_config::get_codex_config_path()).unwrap();
+        let doc: toml::Value = text.parse().unwrap();
+        assert!(doc.get("model_context_window").is_none());
+        assert!(doc.get("model_auto_compact_token_limit").is_none());
+        let catalog: Value = read_json_file(std::path::Path::new(
+            doc["model_catalog_json"].as_str().unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(catalog["models"][0]["context_window"], 1000000);
+        assert_eq!(catalog["models"][1]["context_window"], 272000);
+        let after: Value = read_json_file(&crate::codex_config::get_codex_auth_path()).unwrap();
+        assert_eq!(after, login);
     }
 
     #[test]

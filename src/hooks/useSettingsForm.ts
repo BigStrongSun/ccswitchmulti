@@ -117,7 +117,6 @@ export function useSettingsForm(): UseSettingsFormResult {
       launchCodexDesktopWithCcswitch:
         data.launchCodexDesktopWithCcswitch ?? false,
       codexEgressTimezone: data.codexEgressTimezone ?? { mode: "off" },
-      codexOfficialContext1M: data.codexOfficialContext1M ?? false,
       silentStartup: data.silentStartup ?? false,
       skipClaudeOnboarding: data.skipClaudeOnboarding ?? false,
       preserveCodexOfficialAuthOnSwitch:
@@ -149,7 +148,6 @@ export function useSettingsForm(): UseSettingsFormResult {
             enableClaudePluginIntegration: false,
             launchCodexDesktopWithCcswitch: false,
             codexEgressTimezone: { mode: "off" },
-            codexOfficialContext1M: false,
             skipClaudeOnboarding: false,
             preserveCodexOfficialAuthOnSwitch: false,
             unifyCodexSessionHistory: false,
@@ -191,7 +189,6 @@ export function useSettingsForm(): UseSettingsFormResult {
         launchCodexDesktopWithCcswitch:
           serverData.launchCodexDesktopWithCcswitch ?? false,
         codexEgressTimezone: serverData.codexEgressTimezone ?? { mode: "off" },
-        codexOfficialContext1M: serverData.codexOfficialContext1M ?? false,
         silentStartup: serverData.silentStartup ?? false,
         skipClaudeOnboarding: serverData.skipClaudeOnboarding ?? false,
         preserveCodexOfficialAuthOnSwitch:

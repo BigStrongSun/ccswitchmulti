@@ -17,6 +17,8 @@ pub struct FetchedModel {
     pub id: String,
     pub owned_by: Option<String>,
     pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_window: Option<u64>,
     pub input_modalities: Option<Vec<String>>,
     pub supports_image: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -288,6 +290,7 @@ fn parse_models_response(
         .into_iter()
         .map(|entry| FetchedModel {
             context_window: extract_context_window(&entry.extra),
+            max_context_window: extract_max_context_window(&entry.extra),
             id: entry.id,
             input_modalities: extract_input_modalities(&entry.extra),
             owned_by: entry.owned_by,
@@ -410,6 +413,13 @@ fn extract_context_window(obj: &serde_json::Map<String, serde_json::Value>) -> O
         .find_map(extract_context_window)
 }
 
+fn extract_max_context_window(obj: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+    ["max_context_window", "maxContextWindow"]
+        .iter()
+        .filter_map(|key| obj.get(*key))
+        .find_map(parse_positive_u64)
+}
+
 /// 从 OpenAI-compatible `/models` 的供应商扩展字段中读取输入模态。
 ///
 /// 只有上游明确声明时才透传，避免把未知能力误推成支持图片。
@@ -526,6 +536,7 @@ fn parse_volcengine_plan_model_entry(entry: &serde_json::Value) -> Option<Fetche
             id: model_id.to_string(),
             owned_by: Some("volcengine".to_string()),
             context_window: None,
+            max_context_window: None,
             input_modalities: None,
             supports_image: None,
             reasoning: None,
@@ -552,6 +563,7 @@ fn parse_volcengine_plan_model_entry(entry: &serde_json::Value) -> Option<Fetche
         id: id.to_string(),
         owned_by: Some("volcengine".to_string()),
         context_window: extract_context_window(obj),
+        max_context_window: extract_max_context_window(obj),
         input_modalities: extract_input_modalities(obj),
         supports_image: extract_supports_image(obj),
         reasoning: None,
@@ -1531,7 +1543,7 @@ mod tests {
     #[test]
     fn parse_models_response_keeps_model_metadata_on_the_success_path() {
         let models = parse_models_response(
-            r#"{"object":"list","data":[{"id":"glm-5.2","owned_by":"zhipu","context_window":200000,"input_modalities":["text"]}]}"#,
+            r#"{"object":"list","data":[{"id":"glm-5.2","owned_by":"zhipu","context_window":200000,"max_context_window":872000,"input_modalities":["text"]}]}"#,
             &[],
         )
         .expect("parse a valid OpenAI-compatible model list");
@@ -1540,6 +1552,7 @@ mod tests {
         assert_eq!(models[0].id, "glm-5.2");
         assert_eq!(models[0].owned_by.as_deref(), Some("zhipu"));
         assert_eq!(models[0].context_window, Some(200_000));
+        assert_eq!(models[0].max_context_window, Some(872_000));
         assert_eq!(models[0].input_modalities, Some(vec!["text".to_string()]));
     }
 
@@ -1553,6 +1566,7 @@ mod tests {
             .into_iter()
             .map(|entry| FetchedModel {
                 context_window: extract_context_window(&entry.extra),
+                max_context_window: extract_max_context_window(&entry.extra),
                 id: entry.id,
                 input_modalities: None,
                 owned_by: entry.owned_by,
@@ -1562,7 +1576,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(data[0].context_window, Some(262_144));
+        assert_eq!(data[0].max_context_window, None);
         assert_eq!(data[1].context_window, Some(1_000_000));
+        assert_eq!(data[1].max_context_window, Some(1_000_000));
         assert_eq!(data[2].context_window, Some(262_144));
         assert_eq!(data[3].context_window, Some(131_072));
         assert_eq!(data[4].context_window, None);
@@ -1823,6 +1839,7 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 id: "glm-5.2".to_string(),
                 owned_by: Some("zhipu".to_string()),
                 context_window: Some(123_456),
+                max_context_window: None,
                 input_modalities: None,
                 supports_image: None,
                 reasoning: None,
@@ -1831,6 +1848,7 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 id: "glm-5.1".to_string(),
                 owned_by: Some("zhipu".to_string()),
                 context_window: None,
+                max_context_window: None,
                 input_modalities: None,
                 supports_image: None,
                 reasoning: None,
@@ -1854,6 +1872,7 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 id: "gpt-5.5".to_string(),
                 owned_by: Some("openai".to_string()),
                 context_window: Some(123_456),
+                max_context_window: None,
                 input_modalities: Some(vec!["text".to_string()]),
                 supports_image: Some(false),
                 reasoning: None,
@@ -1862,6 +1881,7 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 id: "gpt-5.6".to_string(),
                 owned_by: Some("openai".to_string()),
                 context_window: None,
+                max_context_window: None,
                 input_modalities: None,
                 supports_image: None,
                 reasoning: None,

@@ -6,25 +6,6 @@ use tauri_plugin_updater::UpdaterExt;
 
 const UPDATER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// Preview from the same trusted local metadata used by catalog projection; no network or writes.
-#[tauri::command]
-pub async fn get_codex_official_context_limits(
-    enabled: bool,
-) -> Result<Vec<crate::codex_context::CodexContextWindowStatus>, String> {
-    let models = crate::codex_config::codex_official_models_cache().unwrap_or_default();
-    let mut limits = models
-        .iter()
-        .filter_map(|model| {
-            let slug = model.get("slug")?.as_str()?;
-            Some(crate::codex_context::codex_context_window_status(
-                slug, model, enabled,
-            ))
-        })
-        .collect::<Vec<_>>();
-    limits.sort_by(|left, right| left.model.cmp(&right.model));
-    Ok(limits)
-}
-
 /// Tauri Updater 使用自己的 HTTP client，不会自动继承代理转发器的 client。
 /// 因此显式复用用户已保存的全局代理，避免模型能访问外网而更新器直连超时。
 fn updater_builder_with_runtime_proxy(app: &AppHandle) -> tauri_plugin_updater::UpdaterBuilder {
@@ -456,22 +437,6 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn official_context_preference_is_opt_in_and_round_trips_with_frontend_key() {
-        let default = crate::settings::AppSettings::default();
-        assert!(!default.codex_official_context_1m);
-        let mut value = serde_json::to_value(default).unwrap();
-        assert_eq!(value["codexOfficialContext1M"], false);
-        value["codexOfficialContext1M"] = serde_json::json!(true);
-        let decoded: crate::settings::AppSettings = serde_json::from_value(value.clone()).unwrap();
-        assert!(decoded.codex_official_context_1m);
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("codexOfficialContext1M");
-        let legacy: crate::settings::AppSettings = serde_json::from_value(value).unwrap();
-        assert!(!legacy.codex_official_context_1m);
-    }
     use super::{build_app_update_info, merge_settings_for_save};
     use crate::settings::{CodexEgressTimezoneMode, CodexEgressTimezoneSettings};
 

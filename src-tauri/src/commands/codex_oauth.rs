@@ -245,7 +245,10 @@ pub async fn get_codex_oauth_models(
         .await
         .map_err(|e| format!("Codex OAuth token unavailable: {e}"))?;
 
-    crate::services::codex_oauth_models::fetch_models_with_token(&token, &workspace_id).await
+    let models =
+        crate::services::codex_oauth_models::fetch_models_with_token(&token, &workspace_id).await?;
+    crate::services::codex_oauth_models::record_authenticated_model_limits(&id, &models);
+    Ok(models)
 }
 
 /// 获取无需 CCSM OAuth 的 Codex 官方备用模型目录。

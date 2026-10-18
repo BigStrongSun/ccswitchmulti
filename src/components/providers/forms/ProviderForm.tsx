@@ -1792,7 +1792,8 @@ function ProviderFormFull({
           shouldPersistCodexLocalConfig && (codexConfig ?? "").trim()
             ? setCodexWireApi(codexConfig ?? "", "responses")
             : (codexConfig ?? "");
-        const shouldPersistCodexCatalog = shouldPersistCodexLocalConfig;
+        const shouldPersistCodexCatalog =
+          shouldPersistCodexLocalConfig || isCanonicalCodexOfficial;
         const normalizedCatalogModels = shouldPersistCodexCatalog
           ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
           : [];
@@ -2086,7 +2087,8 @@ function ProviderFormFull({
             : (activePreset?.presetKey ?? initialData?.meta?.codexPresetId)
           : undefined,
       codexLocalModelMapping:
-        appId === "codex" && category !== "official"
+        appId === "codex" &&
+        (category !== "official" || isCanonicalCodexOfficial)
           ? effectiveCodexMenuProjection
           : undefined,
       promptCacheRouting:
@@ -2899,6 +2901,11 @@ function ProviderFormFull({
               ) : null}
               <CodexFormFields
                 providerId={providerId}
+                isCanonicalOfficial={isCanonicalCodexOfficial}
+                officialAccountId={codexOfficialAuth.accountId ?? null}
+                officialManagedOAuth={
+                  codexOfficialAuth.mode === "managed_oauth"
+                }
                 providerName={form.watch("name")}
                 codexProviderEditorSnapshot={codexProviderEditorSnapshot}
                 isXaiOauthPreset={

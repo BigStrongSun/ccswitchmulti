@@ -140,40 +140,6 @@ pub fn compile_v2(
     plan: &CodexRoutingConfigV2,
     providers: &HashMap<String, Provider>,
 ) -> Result<CompiledCodexRoutingPlan, CodexRoutingCompileError> {
-    if !crate::settings::codex_official_context_1m() {
-        return compile_v2_impl(plan, providers);
-    }
-    let official = crate::codex_config::codex_official_models_cache().unwrap_or_default();
-    compile_v2_with_official_context(plan, providers, &official)
-}
-
-fn compile_v2_with_official_context(
-    plan: &CodexRoutingConfigV2,
-    providers: &HashMap<String, Provider>,
-    official: &[Value],
-) -> Result<CompiledCodexRoutingPlan, CodexRoutingCompileError> {
-    // Apply before compilation so previews, role windows and the fingerprint share one truth.
-    let projected = providers
-        .iter()
-        .map(|(id, provider)| {
-            (
-                id.clone(),
-                crate::codex_context::provider_with_codex_context_preference(
-                    provider,
-                    official,
-                    crate::codex_config::codex_provider_record_is_official(provider),
-                    true,
-                ),
-            )
-        })
-        .collect();
-    compile_v2_impl(plan, &projected)
-}
-
-fn compile_v2_impl(
-    plan: &CodexRoutingConfigV2,
-    providers: &HashMap<String, Provider>,
-) -> Result<CompiledCodexRoutingPlan, CodexRoutingCompileError> {
     if let Err(issues) = validate_v2(plan, providers) {
         let issue = issues
             .first()
@@ -1004,55 +970,48 @@ mod tests {
     }
 
     #[test]
-    fn official_context_preference_is_per_target_and_part_of_fingerprint() {
+    fn explicit_official_windows_are_per_model_and_part_of_fingerprint() {
         let mut official = provider(
             "official",
             "Official",
             "openai_responses",
-            json!([{ "model": "gpt-test", "contextWindow": 272000 }]),
+            json!([
+                {"model":"gpt-long", "contextWindow":1000000},
+                {"model":"gpt-small", "contextWindow":272000}
+            ]),
         );
         official.category = Some("official".into());
         let relay = provider(
             "relay",
             "Relay",
             "openai_responses",
-            json!([{ "model": "gpt-test", "contextWindow": 128000 }]),
+            json!([
+                {"model":"private", "contextWindow":128000}
+            ]),
         );
-        let providers = [official, relay]
-            .into_iter()
-            .map(|provider| (provider.id.clone(), provider))
-            .collect::<HashMap<_, _>>();
         let routing = plan(vec![
             route("official", "official", CodexModelSelection::All),
             route("relay", "relay", CodexModelSelection::All),
         ]);
-        let baseline = compile_v2_impl(&routing, &providers).unwrap();
-        let long = compile_v2_with_official_context(
-            &routing,
-            &providers,
-            &[json!({
-                "slug": "gpt-test", "context_window": 272000, "max_context_window": 1050000,
-            })],
-        )
-        .unwrap();
-        let window = |compiled: &CompiledCodexRoutingPlan, target: &str| {
+        let compiled = compile(&routing, [official.clone(), relay.clone()]);
+        let window = |model: &str| {
             compiled
                 .model_catalog
                 .iter()
-                .find(|m| m.target_provider_id == target)
+                .find(|entry| entry.upstream_model == model)
                 .unwrap()
                 .capability_summary
                 .context_window
         };
-        assert_eq!(window(&long, "official"), Some(1_000_000));
-        assert_eq!(window(&long, "relay"), Some(128_000));
-        assert_eq!(window(&baseline, "official"), Some(272_000));
-        assert_ne!(long.dependency_fingerprint, baseline.dependency_fingerprint);
-        assert_eq!(
-            providers["official"].settings_config["modelCatalog"]["models"][0]["contextWindow"],
-            272000
+        assert_eq!(window("gpt-long"), Some(1000000));
+        assert_eq!(window("gpt-small"), Some(272000));
+        assert_eq!(window("private"), Some(128000));
+        official.settings_config["modelCatalog"]["models"][0]["contextWindow"] = json!(272000);
+        let baseline = compile(&routing, [official, relay]);
+        assert_ne!(
+            compiled.dependency_fingerprint,
+            baseline.dependency_fingerprint
         );
-        assert_eq!(compile_v2_impl(&routing, &providers).unwrap(), baseline);
     }
 
     #[test]

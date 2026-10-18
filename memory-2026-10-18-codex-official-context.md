@@ -1,5 +1,23 @@
 # Codex 官方模型上下文设置
 
+## 当前 Provider 方案（替代下方历史全局方案）
+
+- 用户后续明确要求入口放在 OpenAI Official Provider，复用其他供应商的逐模型上下文编辑与模型发现；不再提供全局 1M 设置。下面 `ead9246f7` 的全局方案从未部署，本批删除其 AppSettings/Settings UI、编译前覆盖、native 1M 注入及归属 marker，不能再按旧方案实现或恢复。
+- 根因之一是官方 Provider 的模型目录 portal 没有 mount target，而且保存路径排除了 official catalog 和映射 meta；不是模型编辑组件缺失。修复须同时打通显示、探测、Provider 源存储和 live 投影，不能只增加按钮。
+- 官方探测 DTO 的 default/max 原先混用。现在 `FetchedModel.contextWindow` 与 `maxContextWindow` 分开；只接受官方显式 max 字段作上限，不按型号、用户 catalog 声明或 API 产品页猜测当前 Codex 上限。
+- 后端 Provider 写入前校验变更的官方逐模型窗口：1M 或更大必须有可信 max，且不得超出该 max；有可信 max 的较小设置同样不能超限。不自动修改任何模型窗口。旧窗口未改、上游及认证绑定未改时允许无关编辑，避免旧记录阻断改名等操作；第三方逻辑不变。
+- 托管 OAuth 探测走已选账号的 `backend-api/codex/models`，成功结果按本地 account_id 存进程内限额快照（32 账号、每账号最多 2048 模型、15 分钟），不存 Token。该账号明确缺失 max 也能覆盖公共目录的较大声明；失败不刷新快照，不串账号。Desktop 当前登录/账号池入口的公共目录发现不等同于账号可用性证明。
+- 另一根因是 direct Official 的旧顶层 `model_context_window` / `model_auto_compact_token_limit` 在 live merge 后仍会覆盖逐模型窗口。官方写入边界在 merge 后清理这两个覆盖，仅当本次 provider 配置声明 CCSM-owned catalog；无目录、外部目录、非官方 provider 保持原行为。源 DB 不注入全局请求值，认证写入边界保持原样。
+- 代理接管 placeholder writer 不经过普通 Provider merge，是额外写入边界；它也在投影/认证对齐之后复用官方受管目录清理。删除 Provider 后的无类别 verbatim backup 恢复不猜测官方身份。
+- 本轮 Rust：context validator 4 passed；OAuth parser/账号快照 17 passed；全库 lib 4343 passed、9 ignored。独立审查随后指出 takeover 绕行并修复，新增隔离 writer 测试核验两模型 1M/272K 及 auth 不变，再跑 `services::proxy` 110 passed。该增量发生在 full lib 之后，不能把 full lib 数字说成包含新增测试。初次新增测试因缺失 Path import 编译失败，改为 std::path::Path 后通过。下方数字只属于历史提交。
+- 最终 Rust Clippy `-D warnings` 和格式通过。前端独立审查发现官方身份退出未作废在途结果、visible alias匹配错误，均修正；视觉验收再发现空 upstream 字符串遮蔽 visible fallback 造成重复导入，从共用模型身份 helper 修复并加测试。
+- Playwright 使用真实 CodexFormFields 源码、合成 IPC，在 1440x1000 与 390x844 验证只有显式 max=1050000 行可设1M，max=872000/未知行保持272K；探测传所选accountId，失败不调用公共fallback，无pageerror及document横向溢出。证据在忽略目录 `release/acceptance/codex-provider-context-visual/evidence/`。这是源码UI和隔离写入验收，不是安装态或服务端1M长请求E2E。
+- 前端最终聚焦 4 文件共 82 tests 通过，覆盖 ProviderForm 官方目录/投影保存、探测与上下文交互，以及原全局入口删除回归。类型检查曾发现新增测试 initialData 多传 id，移除该非法字段后最终 `pnpm typecheck` 通过；不涉及运行行为修改。
+- 最终 Prettier、`git diff --check`、30 个变更文本严格 UTF-8 无 BOM/U+FFFD 检查通过；renderer production build 在最终 i18n 后重跑通过，Playwright 两尺寸也重跑通过。构建仅有既有浏览器数据陈旧、动态/静态导入和大 chunk 提示。复用同批 Rust/独立审查结果，不重复执行全库测试。
+- 本批本地提交包含源码、测试和本项目记录，绕过自动 release hook；不 push、不发布、不安装，现役配置和认证未改。视觉验收临时 4179 服务在收尾停止；现有集成 worktree 由未结束的 4.0 同步任务继续持有。
+
+## 历史方案（已撤除，保留溯源）
+
 ## 范围
 
 - 用户要求 CCSM 最新代码增加 Codex 官方模型 1M 上下文设置。复用 `bigstrongsun/ccsm-4.0-integration`，基线 `c2f925e87`，包版本保持 `3.20.4-3`。不改内部 AgentMesh，不改上游 PR #8403，不自动发版、安装、重启或写现役配置/数据库。

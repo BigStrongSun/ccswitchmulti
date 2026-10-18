@@ -6124,7 +6124,7 @@ fn prune_stale_codex_managed_agent_files(
     Ok(())
 }
 
-pub(crate) fn codex_model_catalog_path_is_cc_switch_owned(path: &str) -> bool {
+fn codex_model_catalog_path_is_cc_switch_owned(path: &str) -> bool {
     Path::new(path).file_name().and_then(|name| name.to_str())
         == Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
 }
@@ -7448,8 +7448,6 @@ fn remove_codex_provider_owned_fields_missing_from_provider(
 
 // 空 official provider 配置表示回到 Codex 默认 provider，同时保留用户全局配置。
 fn strip_codex_provider_owned_fields_from_live(live_config_text: &str) -> Result<String, AppError> {
-    let live_config_text =
-        crate::codex_context::restore_native_context_preference(live_config_text)?;
     if live_config_text.trim().is_empty() {
         return Ok(String::new());
     }
@@ -7525,9 +7523,7 @@ pub(crate) fn merge_codex_provider_config_texts(
     live_config_text: &str,
     provider_config_text: &str,
 ) -> Result<String, AppError> {
-    let live_config_text = crate::codex_context::restore_native_context_preference(
-        &normalize_codex_config_text_for_live_read(live_config_text)?,
-    )?;
+    let live_config_text = normalize_codex_config_text_for_live_read(live_config_text)?;
     let provider_config_text = normalize_codex_config_text_for_live_read(provider_config_text)?;
 
     if provider_config_text.trim().is_empty() {
@@ -7607,6 +7603,42 @@ pub(crate) fn merge_codex_provider_config_with_live(config_text: &str) -> Result
     merge_codex_provider_config_texts(&live_config, config_text)
 }
 
+fn merge_codex_provider_config_for_category(
+    live: &str,
+    provider_config: &str,
+    category: Option<&str>,
+) -> Result<String, AppError> {
+    let merged = merge_codex_provider_config_texts(live, provider_config)?;
+    official_catalog_context_config_for_live(&merged, provider_config, category)
+}
+
+pub(crate) fn official_catalog_context_config_for_live(
+    config: &str,
+    provider_config: &str,
+    category: Option<&str>,
+) -> Result<String, AppError> {
+    if category != Some("official") {
+        return Ok(config.to_string());
+    }
+    let provider_doc = provider_config
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let owns_catalog = provider_doc
+        .get("model_catalog_json")
+        .and_then(Item::as_str)
+        .is_some_and(codex_model_catalog_path_is_cc_switch_owned);
+    if !owns_catalog {
+        return Ok(config.to_string());
+    }
+    // Official model rows own their individual windows. Remove both source and
+    // stale live overrides after merging so native Codex cannot mask those rows.
+    let mut doc = config
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    remove_multi_router_context_overrides(&mut doc);
+    Ok(doc.to_string())
+}
+
 pub(crate) fn write_codex_provider_live_with_catalog_and_provider_context(
     settings: &Value,
     category: Option<&str>,
@@ -7680,8 +7712,10 @@ pub(crate) fn write_codex_provider_config_only_with_catalog_and_provider_context
         .as_deref()
         .or(prepared_config.as_deref())
         .unwrap_or("");
-    reconcile_codex_live_config_atomic(|live| merge_codex_provider_config_texts(live, config_text))
-        .map(|_| ())
+    reconcile_codex_live_config_atomic(|live| {
+        merge_codex_provider_config_for_category(live, config_text, category)
+    })
+    .map(|_| ())
 }
 
 /// Extract a provider-scoped `experimental_bearer_token` from Codex `config.toml`.
@@ -8400,7 +8434,9 @@ pub fn write_codex_live_for_provider(
     if should_write_auth {
         reconcile_codex_live_with_auth_atomic(auth, |live| {
             config_text
-                .map(|provider_config| merge_codex_provider_config_texts(live, provider_config))
+                .map(|provider_config| {
+                    merge_codex_provider_config_for_category(live, provider_config, category)
+                })
                 .transpose()
                 .map(|merged| merged.unwrap_or_else(|| live.to_string()))
         })
@@ -8408,7 +8444,9 @@ pub fn write_codex_live_for_provider(
     } else {
         reconcile_codex_live_config_atomic(|live| {
             let merged = config_text
-                .map(|provider_config| merge_codex_provider_config_texts(live, provider_config))
+                .map(|provider_config| {
+                    merge_codex_provider_config_for_category(live, provider_config, category)
+                })
                 .transpose()?
                 .unwrap_or_else(|| live.to_string());
             prepare_codex_provider_live_config(auth, &merged)
@@ -8486,11 +8524,6 @@ pub fn restore_codex_settings_for_backfill(
     template_settings: &Value,
     restore_provider_token: bool,
 ) -> Result<(), AppError> {
-    if let Some(config) = settings.get("config").and_then(Value::as_str) {
-        settings["config"] = Value::String(
-            crate::codex_context::restore_native_context_preference(config)?,
-        );
-    }
     if restore_provider_token {
         restore_codex_provider_token_for_backfill(settings, template_settings)?;
     }
@@ -8674,6 +8707,35 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_managed_catalog_windows_survive_source_and_live_global_overrides() {
+        let live = "model_context_window = 128000\nmodel_auto_compact_token_limit = 96000\n[mcp_servers.user]\ncommand = \"keep\"\n";
+        let provider = format!("model = \"gpt-long\"\nmodel_context_window = 272000\nmodel_auto_compact_token_limit = 244800\nmodel_catalog_json = \"C:/test/{}\"\n", CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
+        let merged =
+            merge_codex_provider_config_for_category(live, &provider, Some("official")).unwrap();
+        let doc = merged.parse::<DocumentMut>().unwrap();
+        assert!(doc.get("model_context_window").is_none());
+        assert!(doc.get("model_auto_compact_token_limit").is_none());
+        assert_eq!(doc["mcp_servers"]["user"]["command"].as_str(), Some("keep"));
+        for (category, config) in [
+            (Some("custom"), provider.clone()),
+            (
+                Some("official"),
+                provider.replace(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME, "user-catalog.json"),
+            ),
+            (
+                Some("official"),
+                "model = \"gpt-long\"\nmodel_context_window = 272000\n".into(),
+            ),
+        ] {
+            let merged = merge_codex_provider_config_for_category(live, &config, category).unwrap();
+            assert_eq!(
+                merged.parse::<DocumentMut>().unwrap()["model_context_window"].as_integer(),
+                Some(272000)
+            );
+        }
+    }
 
     #[test]
     fn deepseek_vendor_catalog_keeps_mcp_tools_directly_visible() {
@@ -12876,34 +12938,6 @@ wire_api = "responses"
             Some(240_000),
             "single-model providers must keep an explicit user compaction override"
         );
-    }
-
-    #[test]
-    fn official_context_projection_is_restored_before_switch_and_backfill() {
-        let original = "model = \"gpt-test\"\nmodel_context_window = 272000\n";
-        let projected = crate::codex_context::apply_native_context_preference(original).unwrap();
-        let third_party = "model_provider = \"relay\"\n[model_providers.relay]\nbase_url = \"https://relay.example/v1\"\n";
-        let switched = merge_codex_provider_config_texts(&projected, third_party).unwrap();
-        let doc = switched.parse::<DocumentMut>().unwrap();
-        assert_eq!(doc["model_context_window"].as_integer(), Some(272000));
-        assert!(!switched.contains("CCSM_OFFICIAL_CONTEXT"));
-        let fresh_projection = merge_codex_provider_config_texts(&projected, &projected).unwrap();
-        assert_eq!(
-            fresh_projection.parse::<DocumentMut>().unwrap()["model_context_window"].as_integer(),
-            Some(1000000)
-        );
-        let mut settings = json!({"config": projected});
-        restore_codex_settings_for_backfill(&mut settings, &json!({}), false).unwrap();
-        assert_eq!(settings["config"], original);
-        let no_original =
-            crate::codex_context::apply_native_context_preference("model = \"gpt-test\"\n")
-                .unwrap();
-        let reverted = merge_codex_provider_config_texts(&no_original, "").unwrap();
-        assert!(reverted
-            .parse::<DocumentMut>()
-            .unwrap()
-            .get("model_context_window")
-            .is_none());
     }
 
     #[test]

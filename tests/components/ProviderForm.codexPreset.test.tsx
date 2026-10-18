@@ -30,7 +30,15 @@ vi.mock("@/lib/api", async () => {
   return {
     ...actual,
     authApi: {
-      authGetStatus: vi.fn().mockResolvedValue({ authenticated: false }),
+      authGetStatus: vi.fn().mockImplementation(async (provider: string) => ({
+        provider,
+        authenticated: provider === "codex_oauth",
+        default_account_id: "account-7",
+        accounts:
+          provider === "codex_oauth"
+            ? [{ id: "account-7", requires_reauth: false, is_default: true }]
+            : [],
+      })),
       authStartLogin: vi.fn(),
       authPollForAccount: vi.fn(),
       authLogout: vi.fn(),
@@ -106,6 +114,9 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     catalogModels,
     presetCatalogModels,
     takeoverEnabled,
+    isCanonicalOfficial,
+    officialAccountId,
+    officialManagedOAuth,
     allowModelMenuProjectionToggle,
     onApiKeyChange,
     onCatalogModelsChange,
@@ -123,6 +134,9 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     }>;
     presetCatalogModels?: Array<{ model: string; reasoning?: unknown }>;
     takeoverEnabled: boolean;
+    isCanonicalOfficial?: boolean;
+    officialAccountId?: string | null;
+    officialManagedOAuth?: boolean;
     allowModelMenuProjectionToggle?: boolean;
     onApiKeyChange?: (value: string) => void;
     onCatalogModelsChange?: (
@@ -140,6 +154,9 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
       <div data-testid="codex-base-url">{codexBaseUrl}</div>
       <div data-testid="codex-takeover">
         {takeoverEnabled ? "enabled" : "disabled"}
+      </div>
+      <div data-testid="codex-official-props">
+        {`${Boolean(isCanonicalOfficial)}|${officialManagedOAuth}|${officialAccountId ?? ""}`}
       </div>
       <div data-testid="codex-menu-projection-editability">
         {allowModelMenuProjectionToggle ? "editable" : "managed"}
@@ -288,6 +305,48 @@ describe("ProviderForm Codex preset selection", () => {
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalled());
     expect(onSubmit.mock.calls[0][0].meta.codexLocalModelMapping).toBe(true);
+  });
+
+  it("saves the canonical official model catalog and projection setting", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      showButtons: true,
+      providerId: "codex-official",
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "OpenAI Official",
+        category: "official",
+        settingsConfig: {
+          auth: {},
+          config: "",
+          modelCatalog: {
+            models: [{ model: "gpt-5.6", contextWindow: 1000000 }],
+          },
+        },
+        meta: {
+          codexLocalModelMapping: false,
+          codexOfficialAuth: {
+            mode: "managed_oauth",
+            accountId: "account-7",
+          },
+        },
+      },
+    });
+
+    expect(screen.getByTestId("codex-official-props")).toHaveTextContent(
+      "true|true|account-7",
+    );
+    await waitFor(() => screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    const payload = onSubmit.mock.calls[0][0];
+    const settings = JSON.parse(payload.settingsConfig);
+    expect(settings.modelCatalog.models).toEqual([
+      expect.objectContaining({ model: "gpt-5.6", contextWindow: 1000000 }),
+    ]);
+    expect(payload.meta.codexLocalModelMapping).toBe(false);
   });
 
   it("does not scroll when applying the default Codex source preset on mount", async () => {

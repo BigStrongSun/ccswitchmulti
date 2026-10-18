@@ -1,10 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { History, KeyRound, RotateCcw } from "lucide-react";
+import { History, KeyRound } from "lucide-react";
 import { toast } from "sonner";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import { ToggleRow } from "@/components/ui/toggle-row";
-import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { settingsApi } from "@/lib/api";
 
@@ -114,13 +113,6 @@ export function CodexAuthSettings({
         onCheckedChange={handleUnifyHistoryChange}
       />
 
-      <CodexOfficialContextSettings
-        enabled={settings.codexOfficialContext1M ?? false}
-        onChange={async (enabled) =>
-          await onChange({ codexOfficialContext1M: enabled })
-        }
-      />
-
       <ConfirmDialog
         isOpen={showEnableConfirm}
         title={t("confirm.unifyCodexHistory.title")}
@@ -145,188 +137,6 @@ export function CodexAuthSettings({
         onConfirm={(restoreBackup) => void handleDisableConfirm(restoreBackup)}
         onCancel={() => setShowDisableConfirm(false)}
       />
-    </section>
-  );
-}
-
-function CodexOfficialContextSettings({
-  enabled,
-  onChange,
-}: {
-  enabled: boolean;
-  onChange: (enabled: boolean) => Promise<void | boolean>;
-}) {
-  const { t } = useTranslation();
-  const [limits, setLimits] = useState<
-    Awaited<ReturnType<typeof settingsApi.getCodexOfficialContextLimits>>
-  >([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError("");
-    void settingsApi
-      .getCodexOfficialContextLimits(enabled)
-      .then((next) => {
-        if (active) setLimits(next);
-      })
-      .catch(() => {
-        if (active) setError(t("settings.codexOfficialContextLoadFailed"));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [enabled, t]);
-
-  const select = async (next: boolean) => {
-    if (next === enabled || saving) return;
-    setSaving(true);
-    setError("");
-    let saved: void | boolean;
-    try {
-      saved = await onChange(next);
-    } catch {
-      setError(t("settings.saveFailedGeneric"));
-      setSaving(false);
-      return;
-    }
-    if (saved === false) {
-      setError(t("settings.saveFailedGeneric"));
-      setSaving(false);
-      return;
-    }
-
-    try {
-      const refreshed = await settingsApi.getCodexOfficialContextLimits(next);
-      setLimits(refreshed);
-    } catch {
-      setError(t("settings.codexOfficialContextLoadFailed"));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const format = (value: number | null) =>
-    value == null
-      ? t("settings.codexOfficialContextUnknown")
-      : value.toLocaleString();
-
-  return (
-    <section className="space-y-3 border-t border-border/40 pt-4">
-      <div>
-        <h4 className="text-sm font-medium text-foreground">
-          {t("settings.codexOfficialContextTitle")}
-        </h4>
-        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-          {t("settings.codexOfficialContextDescription")}
-        </p>
-      </div>
-      <div
-        className="inline-flex rounded-md border border-border p-0.5"
-        role="group"
-        aria-label={t("settings.codexOfficialContextTitle")}
-      >
-        <Button
-          type="button"
-          size="sm"
-          variant={!enabled ? "default" : "ghost"}
-          aria-pressed={!enabled}
-          disabled={saving}
-          onClick={() => void select(false)}
-        >
-          {t("settings.codexOfficialContextDefault")}
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant={enabled ? "default" : "ghost"}
-          aria-pressed={enabled}
-          disabled={saving}
-          onClick={() => void select(true)}
-        >
-          {t("settings.codexOfficialContext1M")}
-        </Button>
-      </div>
-      {loading ? (
-        <p role="status" className="text-xs text-muted-foreground">
-          {t("settings.codexOfficialContextLoading")}
-        </p>
-      ) : limits.length > 0 ? (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <caption className="pb-1 text-left text-muted-foreground">
-              {t("settings.codexOfficialContextCalculated")}
-            </caption>
-            <thead className="text-muted-foreground">
-              <tr>
-                <th className="py-1 pr-3 font-medium">
-                  {t("settings.codexOfficialContextModel")}
-                </th>
-                <th className="py-1 pr-3 font-medium">
-                  {t("settings.codexOfficialContextDefaultWindow")}
-                </th>
-                <th className="py-1 pr-3 font-medium">
-                  {t("settings.codexOfficialContextRequested")}
-                </th>
-                <th className="py-1 pr-3 font-medium">
-                  {t("settings.codexOfficialContextWindow")}
-                </th>
-                <th className="py-1 font-medium">
-                  {t("settings.codexOfficialContextCompact")}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {limits.map((item) => (
-                <tr key={item.model} className="border-t border-border/40">
-                  <td className="py-1.5 pr-3 font-mono">{item.model}</td>
-                  <td className="py-1.5 pr-3">
-                    {format(item.defaultContextWindow)}
-                  </td>
-                  <td className="py-1.5 pr-3">
-                    {format(item.requestedContextWindow)}
-                  </td>
-                  <td className="py-1.5 pr-3">
-                    {format(item.effectiveContextWindow)}
-                    {item.maxContextWindow != null && (
-                      <span className="ml-1 text-muted-foreground">
-                        /{" "}
-                        {t("settings.codexOfficialContextMax", {
-                          value: format(item.maxContextWindow),
-                        })}
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-1.5">
-                    {format(item.autoCompactTokenLimit)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-      {error && (
-        <p role="alert" className="text-xs text-destructive">
-          {error}
-        </p>
-      )}
-      <Button
-        type="button"
-        size="sm"
-        variant="ghost"
-        disabled={saving || !enabled}
-        onClick={() => void select(false)}
-      >
-        <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-        {t("settings.codexOfficialContextRestore")}
-      </Button>
     </section>
   );
 }

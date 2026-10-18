@@ -825,11 +825,6 @@ fn codex_settings_for_live_projection(provider: &Provider) -> Result<Value, AppE
         }
     }
 
-    if crate::settings::codex_official_context_1m() {
-        let official = crate::codex_config::codex_official_models_cache().unwrap_or_default();
-        settings = codex_live_settings_with_context_preference(provider, settings, &official)?;
-    }
-
     // Codex MCP declarations are owned by the unified database table. Provider snapshots can
     // contain historical/imported [mcp_servers] blocks, but writing those blocks before the
     // ownership-aware MCP reconciler runs would make them look user-owned and therefore
@@ -837,41 +832,6 @@ fn codex_settings_for_live_projection(provider: &Provider) -> Result<Value, AppE
     // routing and user preferences; McpService projects the complete enabled MCP set afterwards.
     crate::codex_config::strip_codex_mcp_servers_from_settings(&mut settings)?;
     Ok(settings)
-}
-
-fn codex_live_settings_with_context_preference(
-    provider: &Provider,
-    settings: Value,
-    official: &[Value],
-) -> Result<Value, AppError> {
-    if !crate::codex_config::codex_provider_record_is_official(provider)
-        || settings.get("codexRouting").is_some()
-    {
-        return Ok(settings);
-    }
-    let config = settings.get("config").and_then(Value::as_str).unwrap_or("");
-    let doc = config
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
-    if doc
-        .get("model_catalog_json")
-        .and_then(|item| item.as_str())
-        .is_some_and(|path| !crate::codex_config::codex_model_catalog_path_is_cc_switch_owned(path))
-    {
-        return Ok(settings);
-    }
-    let mut effective = provider.clone();
-    effective.settings_config = settings;
-    let mut projected = crate::codex_context::provider_with_codex_context_preference(
-        &effective, official, true, true,
-    )
-    .settings_config;
-    // Only official routes reach this branch. ModelInfo bounds the request by each
-    // model's native/catalog max; mixed-provider Routers never get a global override.
-    projected["config"] = Value::String(crate::codex_context::apply_native_context_preference(
-        &doc.to_string(),
-    )?);
-    Ok(projected)
 }
 
 /// 只刷新 Codex provider 的 live `config.toml`，不覆盖当前 `auth.json`。
@@ -1100,10 +1060,9 @@ fn restore_live_settings_for_provider_backfill(
         restore_provider_token,
     ) {
         log::warn!(
-            "Skipping Codex backfill after restoration failed for '{}': {err}",
+            "Failed to restore Codex settings while backfilling '{}': {err}",
             provider.id
         );
-        return provider.settings_config.clone();
     }
 
     // MCP 服务器归 DB mcp_servers 表所有，live 里的 [mcp_servers] 是同步投影；
@@ -3330,121 +3289,6 @@ web_search = true
         assert!(
             provider.settings_config.get("modelCatalog").is_some(),
             "DB-side provider settings keep catalog metadata for /models and context windows"
-        );
-    }
-
-    #[test]
-    fn official_context_preference_projects_native_request_without_mutating_source() {
-        let mut provider = Provider::with_id(
-            "official".into(),
-            "Official".into(),
-            json!({"config": "model = \"gpt-test\"\nmodel_context_window = 272000\n"}),
-            None,
-        );
-        provider.category = Some("official".into());
-        let projected = codex_live_settings_with_context_preference(
-            &provider,
-            provider.settings_config.clone(),
-            &[],
-        )
-        .unwrap();
-        let doc = projected["config"]
-            .as_str()
-            .unwrap()
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap();
-        assert_eq!(doc["model_context_window"].as_integer(), Some(1_000_000));
-        assert_eq!(
-            provider.settings_config["config"],
-            "model = \"gpt-test\"\nmodel_context_window = 272000\n"
-        );
-        assert!(projected.get("modelCatalog").is_none());
-    }
-
-    #[test]
-    fn official_context_corrupt_marker_cannot_be_persisted_by_backfill() {
-        let mut provider = Provider::with_id(
-            "official".into(),
-            "Official".into(),
-            json!({"config":"model = \"gpt-test\"\n", "auth":{"auth_mode":"chatgpt"}}),
-            None,
-        );
-        provider.category = Some("official".into());
-        let corrupted = json!({"config": "model_context_window = 1000000 # CCSM_OFFICIAL_CONTEXT_1M_V1:broken\n"});
-        assert_eq!(
-            restore_live_settings_for_provider_backfill(&AppType::Codex, &provider, corrupted,),
-            provider.settings_config
-        );
-    }
-
-    #[test]
-    fn official_context_preference_preserves_external_catalogs_and_third_parties() {
-        let mut provider = Provider::with_id(
-            "official".into(),
-            "Official".into(),
-            json!({"config": "model_catalog_json = \"C:/user/custom-models.json\"\n"}),
-            None,
-        );
-        provider.category = Some("official".into());
-        assert_eq!(
-            codex_live_settings_with_context_preference(
-                &provider,
-                provider.settings_config.clone(),
-                &[],
-            )
-            .unwrap(),
-            provider.settings_config
-        );
-        provider.category = None;
-        provider.settings_config = json!({"config": "model = \"gpt-test\"\n"});
-        assert_eq!(
-            codex_live_settings_with_context_preference(
-                &provider,
-                provider.settings_config.clone(),
-                &[],
-            )
-            .unwrap(),
-            provider.settings_config
-        );
-    }
-
-    #[test]
-    fn official_context_preference_caps_catalog_and_preserves_user_compact_limit() {
-        let mut provider = Provider::with_id(
-            "official".into(),
-            "Official".into(),
-            json!({
-                "config": "model_context_window = 272000\nmodel_auto_compact_token_limit = 100000\n",
-                "modelCatalog": {"models": [{"model":"gpt-test", "contextWindow":272000}]}
-            }),
-            None,
-        );
-        provider.category = Some("official".into());
-        let projected = codex_live_settings_with_context_preference(
-            &provider,
-            provider.settings_config.clone(),
-            &[json!({
-                "slug":"gpt-test", "context_window":272000, "max_context_window":872000
-            })],
-        )
-        .unwrap();
-        assert_eq!(
-            projected["modelCatalog"]["models"][0]["contextWindow"],
-            872000
-        );
-        let doc = projected["config"]
-            .as_str()
-            .unwrap()
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap();
-        assert_eq!(doc["model_context_window"].as_integer(), Some(1_000_000));
-        assert_eq!(
-            doc["model_auto_compact_token_limit"].as_integer(),
-            Some(100000)
-        );
-        assert_eq!(
-            provider.settings_config["modelCatalog"]["models"][0]["contextWindow"],
-            272000
         );
     }
 

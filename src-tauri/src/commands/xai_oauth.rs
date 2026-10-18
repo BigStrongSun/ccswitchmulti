@@ -129,6 +129,7 @@ pub async fn get_xai_oauth_models(
             id: model.id,
             owned_by: model.owned_by,
             context_window: None,
+            max_context_window: None,
             input_modalities: None,
             supports_image: None,
             reasoning: None,
