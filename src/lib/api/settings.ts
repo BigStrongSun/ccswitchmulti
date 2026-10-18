@@ -6,6 +6,7 @@ import type {
   RemoteSnapshotInfo,
   EnvInjectionSyncReport,
   SettingsSaveResult,
+  CodexOfficialContextLimit,
 } from "@/types";
 import type { AppId } from "./types";
 
@@ -96,6 +97,15 @@ const disabledEnvInjectionReport = (): EnvInjectionSyncReport => ({
 });
 
 export const settingsApi = {
+  async getCodexOfficialContextLimits(
+    enabled: boolean,
+  ): Promise<CodexOfficialContextLimit[]> {
+    return await invoke<CodexOfficialContextLimit[]>(
+      "get_codex_official_context_limits",
+      { enabled },
+    );
+  },
+
   async get(): Promise<Settings> {
     return await invoke("get_settings");
   },

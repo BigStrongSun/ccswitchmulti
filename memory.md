@@ -1,5 +1,9 @@
 # CC Switch Repository Memory
 
+## 2026-10-18 Codex 官方上下文设置
+
+- 设置页新增官方上下文默认 / 请求 1M，官方原生配置与受管目录共用可信元数据限幅；多路由只投影官方 target，不能把全局 1M 带给第三方。实现、官方来源、可恢复归属和验证见 [memory-2026-10-18-codex-official-context.md](memory-2026-10-18-codex-official-context.md)。本批只改公开 CCSM 集成分支，不操作 AgentMesh 或上游 PR。
+
 ## 2026-10-16 官方 4.0 集成尝试
 
 - 目标、233 个三方冲突的边界、4.0.13 改动解释、可靠性适配批次与后续配置事务迁移顺序见 [memory-2026-10-16-v4-integration.md](memory-2026-10-16-v4-integration.md)。集成基线为 CCSM `f78cbeddd` 与官方 `8c2c89e0b`，不得把本批局部适配标记为完整 4.0 架构迁移；不改变 CCSM 品牌、schema 25、版本号或发布目标。

@@ -542,6 +542,9 @@ pub struct AppSettings {
     /// Opt-in: defaults to false so third-party switches cleanly overwrite auth.json.
     #[serde(default)]
     pub preserve_codex_official_auth_on_switch: bool,
+    /// Request a long context only for official Codex models, bounded by their metadata.
+    #[serde(default, rename = "codexOfficialContext1M")]
+    pub codex_official_context_1m: bool,
     /// Run official Codex providers under the shared "custom" model_provider id
     /// so official sessions share one resume-history bucket with third-party
     /// providers. Opt-in: defaults to false.
@@ -703,6 +706,7 @@ impl Default for AppSettings {
             enable_failover_toggle: false,
             show_profile_switcher: true,
             preserve_codex_official_auth_on_switch: false,
+            codex_official_context_1m: false,
             unify_codex_session_history: false,
             unify_codex_migrate_existing: None,
             failover_confirmed: None,
@@ -1183,6 +1187,13 @@ pub fn preserve_codex_official_auth_on_switch() -> bool {
             e.into_inner()
         })
         .preserve_codex_official_auth_on_switch
+}
+
+pub fn codex_official_context_1m() -> bool {
+    settings_store()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .codex_official_context_1m
 }
 
 pub fn unify_codex_session_history() -> bool {

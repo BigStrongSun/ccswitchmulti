@@ -3328,6 +3328,29 @@ command = "legacy-cmd"
     }
 
     #[test]
+    fn official_context_projection_does_not_become_common_config() {
+        let projected = crate::codex_context::apply_native_context_preference(
+            "model = \"gpt-test\"\nmodel_context_window = 272000\n",
+        )
+        .unwrap();
+        let snippet =
+            ProviderService::extract_codex_common_config(&json!({"config": projected})).unwrap();
+        let doc = snippet.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(doc["model_context_window"].as_integer(), Some(272000));
+        assert!(!snippet.contains("CCSM_OFFICIAL_CONTEXT"));
+        let projected =
+            crate::codex_context::apply_native_context_preference("model = \"gpt-test\"\n")
+                .unwrap();
+        let snippet =
+            ProviderService::extract_codex_common_config(&json!({"config": projected})).unwrap();
+        assert!(snippet
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap()
+            .get("model_context_window")
+            .is_none());
+    }
+
+    #[test]
     fn extract_codex_common_config_keeps_user_set_web_search() {
         let config_toml = "web_search = \"enabled\"\ndisable_response_storage = true\n";
         let settings = json!({ "config": config_toml });
@@ -9026,6 +9049,7 @@ impl ProviderService {
             return Ok(String::new());
         }
 
+        let config_toml = crate::codex_context::restore_native_context_preference(config_toml)?;
         let mut doc = config_toml
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| AppError::Message(format!("TOML parse error: {e}")))?;

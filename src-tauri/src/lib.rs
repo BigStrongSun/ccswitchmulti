@@ -7,6 +7,7 @@ mod claude_mcp;
 mod claude_plugin;
 pub mod codex_config;
 pub mod codex_config_consistency;
+mod codex_context;
 mod codex_desktop;
 mod codex_egress_timezone;
 #[cfg(test)]
@@ -1559,6 +1560,7 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::get_settings,
+            commands::get_codex_official_context_limits,
             codex_egress_timezone::detect_codex_egress_timezone,
             codex_egress_timezone::get_codex_egress_timezone_monitor_status,
             codex_egress_timezone::inspect_codex_runtime_timezone,

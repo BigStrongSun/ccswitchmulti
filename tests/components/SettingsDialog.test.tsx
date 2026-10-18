@@ -133,6 +133,7 @@ vi.mock("@/hooks/useImportExport", () => ({
 vi.mock("@/lib/api", () => ({
   settingsApi: {
     restart: vi.fn().mockResolvedValue(true),
+    getCodexOfficialContextLimits: vi.fn().mockResolvedValue([]),
   },
 }));
 

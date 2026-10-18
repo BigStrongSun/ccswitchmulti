@@ -51,6 +51,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(true);
     expect(settings.minimizeToTrayOnClose).toBe(true);
     expect(settings.enableClaudePluginIntegration).toBe(false);
+    expect(settings.codexOfficialContext1M).toBe(false);
     expect(settings.claudeConfigDir).toBe("/Users/demo");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("en");
@@ -178,6 +179,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(false);
     expect(settings.minimizeToTrayOnClose).toBe(false);
     expect(settings.enableClaudePluginIntegration).toBe(true);
+    expect(settings.codexOfficialContext1M).toBe(false);
     expect(settings.claudeConfigDir).toBe("/reset");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("zh");
