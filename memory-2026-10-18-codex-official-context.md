@@ -4,6 +4,9 @@
 
 - 用户要求立即本地构建新版本；四处版本元数据统一为 `3.20.4-4`，功能基线为 `d649eb5dc`。沿用现有 local-release pipeline，产物写入主项目忽略目录 `release/local-v3.20.4-4`，不覆盖现役安装，不推送或发布。
 - 本阶段只变更版本和记录，复用上一批有效测试、类型检查和独立审查；构建结果与产物哈希以随后流水线和实际文件核验为准。版本递增和本地打包属于机械操作，不需要新的外部事实检索。
+- 从 clean source `5ab3e514cedc5c33832090e6bd6760b81d5c3039` 构建，2026-10-19 09:58:54 开始、10:17:47 成功导出；helper release 8m27s，Tauri main release 9m24s。流水线退出 0，finally 清理本次隔离 target（3.2 GiB）。没有安装、重启或发布。
+- 导出目录 `C:/Users/sunda/Documents/LLMservice/cc-switch/release/local-v3.20.4-4`：`SHA256SUMS.txt` 16/16 重算匹配，metadata source commit/version 正确，raw PE ProductName=CCSwitchMulti、FileVersion/ProductVersion 均为 `3.20.4-4`。portable ZIP 内 EXE 与 raw EXE SHA-256 均为 `35DF10EDF9A3B94B111B0D79E3DAD6B64669EC2A88425C32A362C9318191C18E`。
+- NSIS `windows/installer/CCSwitchMulti_3.20.4-4_x64-setup.exe` SHA-256 为 `376BE890F6BD3414FEB15E9909E47814EA990E76C5BA0E01CB57AE9AA6BA8032`；本地 updater metadata 版本及 signature 与 `.sig` 一致，这是一致性核验，不是另行公钥验签。真实服务端 1M 请求和安装态验收仍未执行。
 
 ## 当前 Provider 方案（替代下方历史全局方案）
 
