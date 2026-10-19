@@ -4,9 +4,11 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import zh from "@/i18n/locales/zh.json";
 import { CodexFormFields } from "@/components/providers/forms/CodexFormFields";
 import {
   fetchModelsForConfig,
@@ -52,8 +54,20 @@ vi.mock("@/lib/api/codexSubagentV2", () => ({
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
-    t: (_key: string, options?: { defaultValue?: string }) =>
-      options?.defaultValue ?? _key,
+    t: (
+      _key: string,
+      options?: { defaultValue?: string; [key: string]: unknown },
+    ) => {
+      const text =
+        options?.defaultValue ??
+        (zh.codexConfig as Record<string, string>)[
+          _key.replace(/^codexConfig\./, "")
+        ] ??
+        _key;
+      return text.replace(/\{\{(\w+)\}\}/g, (_, key: string) =>
+        String(options?.[key] ?? ""),
+      );
+    },
   }),
 }));
 
@@ -721,13 +735,15 @@ describe("CodexFormFields local model routing", () => {
     ).toHaveValue("64000");
   });
 
-  it("offers the 1M shortcut only when the discovered maximum is at least 1M", async () => {
+  it("offers only trusted context presets and separates input/output limits", async () => {
     vi.mocked(fetchCodexOauthModels).mockResolvedValue([
       {
         id: "eligible",
         ownedBy: "openai",
         contextWindow: 400000,
         maxContextWindow: 1050000,
+        maxInputTokens: 900000,
+        maxOutputTokens: 128000,
       },
       {
         id: "limited",
@@ -745,12 +761,28 @@ describe("CodexFormFields local model routing", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
+    const eligible = await screen.findByRole("group", { name: "eligible" });
     await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: "设为 1M" })).toHaveLength(
-        1,
-      ),
+      expect(within(eligible).getByText("900,000")).toBeInTheDocument(),
     );
-    fireEvent.click(screen.getByRole("button", { name: "设为 1M" }));
+    expect(
+      within(eligible).getByText("128,000", { selector: "dd" }),
+    ).toBeInTheDocument();
+    const eligibleSelect = within(eligible).getByRole("combobox");
+    expect(
+      within(eligibleSelect).getByRole("option", {
+        name: "1,000,000",
+      }),
+    ).toBeInTheDocument();
+    const limited = screen.getByRole("group", { name: "limited" });
+    expect(
+      within(limited).getByText("可提高上下文，最高 872,000 tokens。"),
+    ).toBeInTheDocument();
+    expect(within(limited).getAllByText("目录未提供")).toHaveLength(2);
+    expect(
+      within(limited).queryByRole("option", { name: "1,000,000" }),
+    ).not.toBeInTheDocument();
+    fireEvent.change(eligibleSelect, { target: { value: "1000000" } });
     expect(
       screen.getByRole("textbox", { name: "eligible 上下文窗口" }),
     ).toHaveValue("1000000");
@@ -760,6 +792,60 @@ describe("CodexFormFields local model routing", () => {
     expect(
       screen.getByRole("textbox", { name: "unknown 上下文窗口" }),
     ).toHaveValue("");
+    expect(
+      screen.getByRole("textbox", { name: "unknown 上下文窗口" }),
+    ).toBeDisabled();
+    fireEvent.change(within(limited).getByRole("combobox"), {
+      target: { value: "872000" },
+    });
+    expect(
+      screen.getByRole("textbox", { name: "limited 上下文窗口" }),
+    ).toHaveValue("872000");
+    fireEvent.change(eligibleSelect, { target: { value: "default" } });
+    expect(
+      screen.getByRole("textbox", { name: "eligible 上下文窗口" }),
+    ).toHaveValue("");
+  });
+
+  it("distinguishes default-only and fixed limits and flags out-of-range values", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([
+      {
+        id: "fixed",
+        ownedBy: "openai",
+        contextWindow: 272000,
+        maxContextWindow: 272000,
+      },
+      { id: "default-only", ownedBy: "openai", contextWindow: 272000 },
+    ]);
+    const { latestCatalog } = renderCatalogHarness([], {
+      official: true,
+      openAdvancedOptions: false,
+      officialManagedOAuth: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
+    const fixed = await screen.findByRole("group", { name: "fixed" });
+    expect(
+      within(fixed).getByText("默认值已达目录上限，可调低，不能提高。"),
+    ).toBeInTheDocument();
+    const input = within(fixed).getByRole("textbox");
+    fireEvent.change(input, { target: { value: "1000000" } });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(within(fixed).getByRole("alert")).toHaveTextContent("1–272,000");
+    const defaults = screen.getByRole("group", { name: "default-only" });
+    expect(within(defaults).getByText(/提高上限尚未核实/)).toBeInTheDocument();
+    fireEvent.change(within(defaults).getByRole("combobox"), {
+      target: { value: "128000" },
+    });
+    expect(within(defaults).getByRole("textbox")).toHaveValue("128000");
+    fireEvent.change(within(defaults).getByRole("combobox"), {
+      target: { value: "default" },
+    });
+    await waitFor(() =>
+      expect(
+        latestCatalog().find((row) => row.model === "default-only")
+          ?.contextWindow,
+      ).toBe(""),
+    );
   });
 
   it("restores split persistence and per-model transports from the editor snapshot", async () => {

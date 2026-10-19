@@ -61,6 +61,7 @@ import { CodexProviderReadinessSection } from "./CodexProviderReadinessSection";
 import { CodexModelReasoningCard } from "./CodexModelReasoningCard";
 import { CodexModelReasoningEditor } from "./CodexModelReasoningEditor";
 import { CodexModelReasoningSummary } from "./CodexModelReasoningSummary";
+import { CodexOfficialContextRow } from "./CodexOfficialContextRow";
 import { cn } from "@/lib/utils";
 import { buildCodexProtocolProbeProviderDraft } from "@/lib/codexProtocolSettings";
 import {
@@ -1949,6 +1950,9 @@ export function CodexFormFields({
               })}
             />
           </div>
+          <p className="text-xs text-muted-foreground">
+            {t("codexConfig.officialContextTokenBudget")}
+          </p>
           {catalogRows.map((row, index) => {
             const fetched = fetchedModels.find(
               (item) =>
@@ -1956,69 +1960,23 @@ export function CodexFormFields({
                 catalogRowUpstreamModel(row).trim().toLowerCase(),
             );
             return (
-              <div
+              <CodexOfficialContextRow
                 key={row.rowId}
-                className="grid grid-cols-1 gap-2 border-b border-border-default pb-3 md:grid-cols-[minmax(0,1fr)_160px_160px]"
-              >
-                <div className="min-w-0">
-                  <div className="truncate text-sm">{row.model}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {fetched?.contextWindow
-                      ? `${t("codexConfig.officialContextDefault", { defaultValue: "官方默认" })} ${fetched.contextWindow.toLocaleString()}`
-                      : t("codexConfig.officialContextDefaultUnknown", {
-                          defaultValue: "官方默认值未知",
-                        })}
-                    {fetched?.maxContextWindow
-                      ? ` · ${t("codexConfig.officialContextMax", { defaultValue: "最大" })} ${fetched.maxContextWindow.toLocaleString()}`
-                      : ` · ${t("codexConfig.officialContextMaxUnknown", { defaultValue: "最大值未知" })}`}
-                  </div>
-                </div>
-                <Input
-                  aria-label={`${row.model} ${t("codexConfig.officialContextWindow", { defaultValue: "上下文窗口" })}`}
-                  inputMode="numeric"
-                  value={row.contextWindow ?? ""}
-                  placeholder={t("codexConfig.officialContextWindow", {
-                    defaultValue: "上下文窗口",
-                  })}
-                  onChange={(event) => {
-                    const value = event.target.value.replace(/[^0-9]/g, "");
-                    setCatalogRows((current) => {
-                      const next = current.map((item, rowIndex) =>
-                        rowIndex === index
-                          ? { ...item, contextWindow: value }
-                          : item,
-                      );
-                      catalogRowsRef.current = next;
-                      return next;
-                    });
-                  }}
-                />
-                {Boolean(
-                  fetched?.maxContextWindow &&
-                    fetched.maxContextWindow >= 1_000_000,
-                ) && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setCatalogRows((current) => {
-                        const next = current.map((item, rowIndex) =>
-                          rowIndex === index
-                            ? { ...item, contextWindow: "1000000" }
-                            : item,
-                        );
-                        catalogRowsRef.current = next;
-                        return next;
-                      });
-                    }}
-                  >
-                    {t("codexConfig.officialContextSet1M", {
-                      defaultValue: "设为 1M",
-                    })}
-                  </Button>
-                )}
-              </div>
+                model={row.model}
+                value={String(row.contextWindow ?? "")}
+                discovered={fetched}
+                onChange={(value) => {
+                  setCatalogRows((current) => {
+                    const next = current.map((item, rowIndex) =>
+                      rowIndex === index
+                        ? { ...item, contextWindow: value }
+                        : item,
+                    );
+                    catalogRowsRef.current = next;
+                    return next;
+                  });
+                }}
+              />
             );
           })}
         </section>

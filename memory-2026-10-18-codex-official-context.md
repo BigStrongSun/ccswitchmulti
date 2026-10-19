@@ -1,5 +1,15 @@
 # Codex 官方模型上下文设置
 
+## 2026-10-19 上下文可调范围与输入输出分栏
+
+- 用户指出旧界面只有手输框和上限，无法知道哪些模型可提高以及输入/输出各是多少。根因是发现 DTO 仅有 default/max context，UI 未区分可提高、默认即上限与未知能力；872K 上限的模型也没有快捷档位。现拆出 `CodexOfficialContextRow`，按可信目录展示默认窗口、可设置上限、独立最大输入、最大输出，后两者只透传显式正整数字段，缺失显示“目录未提供”。不由上下文减法猜输出，不把 API 产品规格用于解锁 Codex 上限。
+- 档位包含跟随官方默认（清除 override）、已知默认、有效常用值和真实上限；1M 仅在 ceiling 允许时出现。未知 max 时只允许已知 default 或更低；连 default 都未知时禁用输入。手输超限即时提示，原后端可信 max 保存校验继续生效。恢复默认由现有保存规范化清除空 contextWindow，不制造全局覆盖。
+- 2026-10-19 只读公共缓存：Astra/Sol/Luna、5.6 三型、daybreak-blue 和 auto-review 的 default=272000/max=872000；daybreak-red 为372000/372000，5.5为272000/272000。公共目录不是当前账号授权证明，UI不硬编码这些值。当前公共缓存未给独立 input/output 上限，证据不足，不能称这些 Codex 账号都可1M输入或128K输出。
+- 内置 Web 打开 OpenAI GPT-5.4 API 文档，官方规格为1,050,000 context/128,000 max output；本地官方 Codex 源码确认 context override 由 max_context_window限幅。独立 Matrix search 返回HTTP521，第二搜索链不可用，不能声称双链一致。API 总规格与 Codex 当前来源的可设置上限分开。
+- 验证：前端 CodexFormFields 45 + ProviderForm 21，共66 tests；Rust model_fetch 48 + codex_oauth_models 18，共66 tests（含2个新显式输入/输出解析回归）通过；TypeScript、rustfmt、renderer production build通过。初轮测试因测试翻译mock未加载新key及查询多匹配失败，修改测试mock/精确dd查询后通过；typecheck修正row值string/number转换和测试类型后通过。
+- Playwright真实源码组件、合成IPC在390x844和1440x1000验证1M/872K档位、未知字段、清除默认、所选账号、失败不静默fallback，pageerror=0、横向overflow=0。截图/结果在 `release/acceptance/codex-provider-context-visual/evidence/`，不是安装态或长请求E2E。独立只读审查无新增阻断；generic第三方parser既有max_input_tokens兼容上下文语义不属于官方专用解析链，未扩展改动。
+- 本轮版本统一为3.20.4-6，沿用原集成worktree、本地提交并绕过自动release hook。不push、不发布、不安装、不改现役配置/认证/DB。本地打包结果与哈希待构建完成后追加；此前3.20.4-5包保持不可变，本版保留近5分钟tok/s统计。
+
 ## 2026-10-19 本地新版构建
 
 - 用户要求立即本地构建新版本；四处版本元数据统一为 `3.20.4-4`，功能基线为 `d649eb5dc`。沿用现有 local-release pipeline，产物写入主项目忽略目录 `release/local-v3.20.4-4`，不覆盖现役安装，不推送或发布。

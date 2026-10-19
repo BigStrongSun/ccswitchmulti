@@ -19,6 +19,10 @@ pub struct FetchedModel {
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     pub input_modalities: Option<Vec<String>>,
     pub supports_image: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,6 +295,8 @@ fn parse_models_response(
         .map(|entry| FetchedModel {
             context_window: extract_context_window(&entry.extra),
             max_context_window: extract_max_context_window(&entry.extra),
+            max_input_tokens: extract_max_input_tokens(&entry.extra),
+            max_output_tokens: extract_max_output_tokens(&entry.extra),
             id: entry.id,
             input_modalities: extract_input_modalities(&entry.extra),
             owned_by: entry.owned_by,
@@ -420,6 +426,20 @@ fn extract_max_context_window(obj: &serde_json::Map<String, serde_json::Value>) 
         .find_map(parse_positive_u64)
 }
 
+fn extract_max_input_tokens(obj: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+    ["max_input_tokens", "maxInputTokens"]
+        .iter()
+        .filter_map(|key| obj.get(*key))
+        .find_map(parse_positive_u64)
+}
+
+fn extract_max_output_tokens(obj: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+    ["max_output_tokens", "maxOutputTokens"]
+        .iter()
+        .filter_map(|key| obj.get(*key))
+        .find_map(parse_positive_u64)
+}
+
 /// 从 OpenAI-compatible `/models` 的供应商扩展字段中读取输入模态。
 ///
 /// 只有上游明确声明时才透传，避免把未知能力误推成支持图片。
@@ -537,6 +557,8 @@ fn parse_volcengine_plan_model_entry(entry: &serde_json::Value) -> Option<Fetche
             owned_by: Some("volcengine".to_string()),
             context_window: None,
             max_context_window: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
             input_modalities: None,
             supports_image: None,
             reasoning: None,
@@ -564,6 +586,8 @@ fn parse_volcengine_plan_model_entry(entry: &serde_json::Value) -> Option<Fetche
         owned_by: Some("volcengine".to_string()),
         context_window: extract_context_window(obj),
         max_context_window: extract_max_context_window(obj),
+        max_input_tokens: extract_max_input_tokens(obj),
+        max_output_tokens: extract_max_output_tokens(obj),
         input_modalities: extract_input_modalities(obj),
         supports_image: extract_supports_image(obj),
         reasoning: None,
@@ -1553,7 +1577,31 @@ mod tests {
         assert_eq!(models[0].owned_by.as_deref(), Some("zhipu"));
         assert_eq!(models[0].context_window, Some(200_000));
         assert_eq!(models[0].max_context_window, Some(872_000));
+        assert_eq!(models[0].max_input_tokens, None);
+        assert_eq!(models[0].max_output_tokens, None);
         assert_eq!(models[0].input_modalities, Some(vec!["text".to_string()]));
+    }
+
+    #[test]
+    fn parse_models_response_reads_only_explicit_positive_token_limits() {
+        let models = parse_models_response(
+            r#"{"data":[{"id":"snake","max_input_tokens":120000,"max_output_tokens":"16000"},{"id":"camel","maxInputTokens":"90000","maxOutputTokens":8000},{"id":"zero","max_input_tokens":0,"max_output_tokens":0},{"id":"negative","max_input_tokens":-1,"max_output_tokens":"-2"},{"id":"noninteger","max_input_tokens":1.5,"max_output_tokens":"8000 tokens"},{"id":"context-only","context_window":1000000,"max_context_window":2000000}]}"#,
+            &[],
+        )
+        .expect("parse model token limits");
+
+        assert_eq!(models[0].max_input_tokens, Some(120_000));
+        assert_eq!(models[0].max_output_tokens, Some(16_000));
+        assert_eq!(models[1].max_input_tokens, Some(90_000));
+        assert_eq!(models[1].max_output_tokens, Some(8_000));
+        assert_eq!(models[2].max_input_tokens, None);
+        assert_eq!(models[2].max_output_tokens, None);
+        assert_eq!(models[3].max_input_tokens, None);
+        assert_eq!(models[3].max_output_tokens, None);
+        assert_eq!(models[4].max_input_tokens, None);
+        assert_eq!(models[4].max_output_tokens, None);
+        assert_eq!(models[5].max_input_tokens, None);
+        assert_eq!(models[5].max_output_tokens, None);
     }
 
     #[test]
@@ -1567,6 +1615,8 @@ mod tests {
             .map(|entry| FetchedModel {
                 context_window: extract_context_window(&entry.extra),
                 max_context_window: extract_max_context_window(&entry.extra),
+                max_input_tokens: extract_max_input_tokens(&entry.extra),
+                max_output_tokens: extract_max_output_tokens(&entry.extra),
                 id: entry.id,
                 input_modalities: None,
                 owned_by: entry.owned_by,
@@ -1579,6 +1629,8 @@ mod tests {
         assert_eq!(data[0].max_context_window, None);
         assert_eq!(data[1].context_window, Some(1_000_000));
         assert_eq!(data[1].max_context_window, Some(1_000_000));
+        assert_eq!(data[0].max_input_tokens, None);
+        assert_eq!(data[0].max_output_tokens, None);
         assert_eq!(data[2].context_window, Some(262_144));
         assert_eq!(data[3].context_window, Some(131_072));
         assert_eq!(data[4].context_window, None);
@@ -1840,6 +1892,8 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 owned_by: Some("zhipu".to_string()),
                 context_window: Some(123_456),
                 max_context_window: None,
+                max_input_tokens: None,
+                max_output_tokens: None,
                 input_modalities: None,
                 supports_image: None,
                 reasoning: None,
@@ -1849,6 +1903,8 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 owned_by: Some("zhipu".to_string()),
                 context_window: None,
                 max_context_window: None,
+                max_input_tokens: None,
+                max_output_tokens: None,
                 input_modalities: None,
                 supports_image: None,
                 reasoning: None,
@@ -1873,6 +1929,8 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 owned_by: Some("openai".to_string()),
                 context_window: Some(123_456),
                 max_context_window: None,
+                max_input_tokens: None,
+                max_output_tokens: None,
                 input_modalities: Some(vec!["text".to_string()]),
                 supports_image: Some(false),
                 reasoning: None,
@@ -1882,6 +1940,8 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 owned_by: Some("openai".to_string()),
                 context_window: None,
                 max_context_window: None,
+                max_input_tokens: None,
+                max_output_tokens: None,
                 input_modalities: None,
                 supports_image: None,
                 reasoning: None,

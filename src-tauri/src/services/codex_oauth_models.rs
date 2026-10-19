@@ -61,6 +61,8 @@ pub fn record_authenticated_model_limits(account_id: &str, models: &[FetchedMode
             owned_by: None,
             context_window: model.context_window,
             max_context_window: model.max_context_window,
+            max_input_tokens: model.max_input_tokens,
+            max_output_tokens: model.max_output_tokens,
             input_modalities: None,
             supports_image: None,
             reasoning: None,
@@ -585,6 +587,8 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
         models.push(FetchedModel {
             context_window: None,
             max_context_window: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
             id: id.to_string(),
             input_modalities: None,
             owned_by: Some("Codex".to_string()),
@@ -599,6 +603,8 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
             models.push(FetchedModel {
                 context_window: None,
                 max_context_window: None,
+                max_input_tokens: None,
+                max_output_tokens: None,
                 id: id.to_string(),
                 input_modalities: None,
                 owned_by: Some("Codex".to_string()),
@@ -631,6 +637,8 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
 
     let context_window = extract_context_window(obj);
     let max_context_window = extract_max_context_window(obj);
+    let max_input_tokens = extract_max_input_tokens(obj);
+    let max_output_tokens = extract_max_output_tokens(obj);
     let input_modalities = extract_input_modalities(obj);
     let supports_image = extract_supports_image(obj, input_modalities.as_deref());
     let reasoning =
@@ -643,6 +651,8 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
     models.push(FetchedModel {
         context_window,
         max_context_window,
+        max_input_tokens,
+        max_output_tokens,
         id,
         input_modalities,
         owned_by,
@@ -709,6 +719,20 @@ fn extract_context_window(obj: &serde_json::Map<String, Value>) -> Option<u64> {
 
 fn extract_max_context_window(obj: &serde_json::Map<String, Value>) -> Option<u64> {
     ["max_context_window", "maxContextWindow"]
+        .iter()
+        .filter_map(|key| obj.get(*key))
+        .find_map(parse_positive_u64)
+}
+
+fn extract_max_input_tokens(obj: &serde_json::Map<String, Value>) -> Option<u64> {
+    ["max_input_tokens", "maxInputTokens"]
+        .iter()
+        .filter_map(|key| obj.get(*key))
+        .find_map(parse_positive_u64)
+}
+
+fn extract_max_output_tokens(obj: &serde_json::Map<String, Value>) -> Option<u64> {
+    ["max_output_tokens", "maxOutputTokens"]
         .iter()
         .filter_map(|key| obj.get(*key))
         .find_map(parse_positive_u64)
@@ -1001,6 +1025,33 @@ mod tests {
         assert_eq!(by_id["gpt-max-only"].max_context_window, Some(1_000_000));
         assert_eq!(by_id["bad"].context_window, None);
         assert_eq!(by_id["bad"].max_context_window, None);
+    }
+
+    #[test]
+    fn parse_codex_oauth_models_reads_only_explicit_positive_token_limits() {
+        let models = parse_models(json!({
+            "models": [
+                { "slug": "snake", "max_input_tokens": 120000, "max_output_tokens": "16000" },
+                { "slug": "camel", "maxInputTokens": "90000", "maxOutputTokens": 8000 },
+                { "slug": "zero", "max_input_tokens": 0, "max_output_tokens": 0 },
+                { "slug": "negative", "max_input_tokens": -1, "max_output_tokens": "-2" },
+                { "slug": "noninteger", "max_input_tokens": 1.5, "max_output_tokens": "8000 tokens" },
+                { "slug": "context-only", "context_window": 1000000, "max_context_window": 2000000 }
+            ]
+        }));
+        let by_id = models
+            .iter()
+            .map(|model| (model.id.as_str(), model))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(by_id["snake"].max_input_tokens, Some(120_000));
+        assert_eq!(by_id["snake"].max_output_tokens, Some(16_000));
+        assert_eq!(by_id["camel"].max_input_tokens, Some(90_000));
+        assert_eq!(by_id["camel"].max_output_tokens, Some(8_000));
+        for id in ["zero", "negative", "noninteger", "context-only"] {
+            assert_eq!(by_id[id].max_input_tokens, None, "{id}");
+            assert_eq!(by_id[id].max_output_tokens, None, "{id}");
+        }
     }
 
     #[test]
