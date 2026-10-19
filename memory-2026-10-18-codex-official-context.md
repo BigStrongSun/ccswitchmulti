@@ -1,5 +1,11 @@
 # Codex 官方模型上下文设置
 
+## 2026-10-19 近月1M配置关键词检索
+
+- 用户明确要求搜索“为codex配置1m上下文”，近月范围为2026-09-19至2026-10-19。内置Web使用中文原词、英文config与明确日期过滤；独立Matrix search返回HTTP521。搜索recency标签会混入8月旧教程，必须以正文发布日期核对，不能把近期crawl当近期发布。
+- 日期核验后的线索：2026-10-12 `https://www.allagent.wiki/blog/codex-day-7-context-500k-no-long-context-fee/` 转述6.1可手动提高到1M并介绍config窗口1M/compact900K，但没有证明当前客户端未被catalog限幅；2026-10-08项目维护者原始答复 `https://github.com/BigPizzaV3/CodexPlusPlus/issues/905` 明确需选中模型catalog条目生效、顶层数字不一定覆盖外部catalog；10月原始运行报告 `https://github.com/openai/codex/issues/52567` 记载配置1M而有效828400。三者分开使用，不把教程标题当作实测证明。
+- 新检索还找到 `https://docs.xhyapi.com/codex/one-million-context` 自定义model_catalog_json方案：复制完整目录并修改目标条目context/max字段以提高客户端预算。该页无可核实日期，不计入近月清单；来源是教程服务商而非OpenAI，且只用/status显示证明配置，不能证明服务端接受同长度请求。这一路与只改TOML是不同方案，值得独立隔离验证；当前872K是显式目录限幅，不应把它直接等同服务端物理上限。未实施自定义max、未写缓存或现役配置。
+
 ## 2026-10-19 订阅长上下文计费核对
 
 - 后续多方核对找到直接官方依据，替代下方仅有社区转述的阶段：`https://help.openai.com/en/articles/20001275-chatgpt-work-and-codex`（2026-10-19读取，页面标4天前更新）明确 GPT-6.1 Sol 在 Work/Codex 默认500,000；订阅 included allowance 无额外 long-context surcharge，但长任务仍计额度；purchased credits、Enterprise PAYG、API继续各自原价规则。不能再把6.1的订阅计费记为“只有转述，无法确认”，也不能套用5.4历史2倍额度。
