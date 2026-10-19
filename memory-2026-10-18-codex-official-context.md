@@ -9,6 +9,10 @@
 - 验证：前端 CodexFormFields 45 + ProviderForm 21，共66 tests；Rust model_fetch 48 + codex_oauth_models 18，共66 tests（含2个新显式输入/输出解析回归）通过；TypeScript、rustfmt、renderer production build通过。初轮测试因测试翻译mock未加载新key及查询多匹配失败，修改测试mock/精确dd查询后通过；typecheck修正row值string/number转换和测试类型后通过。
 - Playwright真实源码组件、合成IPC在390x844和1440x1000验证1M/872K档位、未知字段、清除默认、所选账号、失败不静默fallback，pageerror=0、横向overflow=0。截图/结果在 `release/acceptance/codex-provider-context-visual/evidence/`，不是安装态或长请求E2E。独立只读审查无新增阻断；generic第三方parser既有max_input_tokens兼容上下文语义不属于官方专用解析链，未扩展改动。
 - 本轮版本统一为3.20.4-6，沿用原集成worktree、本地提交并绕过自动release hook。不push、不发布、不安装、不改现役配置/认证/DB。本地打包结果与哈希待构建完成后追加；此前3.20.4-5包保持不可变，本版保留近5分钟tok/s统计。
+- 构建已完成：源提交 `eb2ed2397`，12:40:20开始、12:59:24导出成功，helper release 8m19s、main release 9m28s。产物目录为 `C:/Users/sunda/Documents/LLMservice/cc-switch/release/local-v3.20.4-6`，流水线退出0并finally清理本次3.2GiB隔离target。
+- 安装包13,984,096 bytes，SHA256 `2362BA7EE2A6E1BFC39421B597824EB46A6BC4ECE798453F129207F6C713ABC2`；portable ZIP16,506,806 bytes，SHA256 `AE021C44689B7F40EF709FC5865E07DB148B20A79A37A80756F88A0824FC6F43`；raw/ZIP内EXE44,885,504 bytes，SHA256 `A06E6BFB1D4B5AB51283ED1EB8FD3C1ABB926CC898B4BE0DA3A16031B3E09557`。16/16 manifest哈希、metadata源提交、PE CCSwitchMulti/3.20.4-6、portable/raw一致性、latest.json版本与signature文本一致性通过。签名检查是元数据一致性，不是另行公钥验签。
+- 初次验收把安装态EXE hash直接与raw比较失败；随后复读既有 `Write-NsisInstalledExeHash`，确认Tauri打包时把raw的UNK标记临时改为NSS，故二者本来不同。复用 `Get-TauriNsisInstalledExeSha256` 核对安装态派生hash `842AD54A5A6790FD53DC52C60A1D36FFDFE20CFBA748C2E1A74303FE8A56A48A` 通过；没有执行安装、没有把派生核对当安装运行证明。
+- 追加只读审查记录一个当前公共目录无法触发的边界：若未来目录default>=1M但缺显式max，Row按default产生的高档位/手输可能被后端>=1M可信max门禁拒绝。后端仍fail-closed，不会越权写入；当前default272K/372K不触发。本轮未为未来大default且缺max放宽后端，后续处理应让前端preset/invalid与该门禁一致，并补该组合测试，不要伪造max。这项不计入当前目录范围的通过证明。
 
 ## 2026-10-19 本地新版构建
 
