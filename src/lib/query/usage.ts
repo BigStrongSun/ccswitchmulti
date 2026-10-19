@@ -177,8 +177,10 @@ export const usageKeys = {
 };
 
 export interface RecentUsageRate {
-  totalTokens: number;
-  tokensPerSecond: number;
+  inputTokens: number;
+  outputTokens: number;
+  inputTokensPerSecond: number;
+  outputTokensPerSecond: number;
   windowSeconds: number;
 }
 
@@ -274,10 +276,16 @@ export function useUsageRecentRate(
         providerName,
         model,
       );
-      const totalTokens = summary.realTotalTokens;
+      const inputTokens =
+        summary.totalInputTokens +
+        summary.totalCacheCreationTokens +
+        summary.totalCacheReadTokens;
+      const outputTokens = summary.totalOutputTokens;
       return {
-        totalTokens,
-        tokensPerSecond: totalTokens / RECENT_USAGE_WINDOW_SECONDS,
+        inputTokens,
+        outputTokens,
+        inputTokensPerSecond: inputTokens / RECENT_USAGE_WINDOW_SECONDS,
+        outputTokensPerSecond: outputTokens / RECENT_USAGE_WINDOW_SECONDS,
         windowSeconds: RECENT_USAGE_WINDOW_SECONDS,
       };
     },

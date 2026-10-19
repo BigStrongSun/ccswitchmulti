@@ -50,7 +50,13 @@ describe("UsageHero cache-write availability", () => {
     useUsageSummaryByAppMock.mockReset();
     useUsageRecentRateMock.mockReset();
     useUsageRecentRateMock.mockReturnValue({
-      data: { totalTokens: 0, tokensPerSecond: 0, windowSeconds: 300 },
+      data: {
+        inputTokens: 0,
+        outputTokens: 0,
+        inputTokensPerSecond: 0,
+        outputTokensPerSecond: 0,
+        windowSeconds: 300,
+      },
       isLoading: false,
     });
   });
@@ -97,7 +103,13 @@ describe("UsageHero cache-write availability", () => {
   it("shows the rolling token rate while historical totals are loading", () => {
     useUsageSummaryByAppMock.mockReturnValue({ data: [], isLoading: true });
     useUsageRecentRateMock.mockReturnValue({
-      data: { totalTokens: 600, tokensPerSecond: 2, windowSeconds: 300 },
+      data: {
+        inputTokens: 600,
+        outputTokens: 300,
+        inputTokensPerSecond: 2,
+        outputTokensPerSecond: 1,
+        windowSeconds: 300,
+      },
       isLoading: false,
       isError: false,
     });
@@ -105,12 +117,19 @@ describe("UsageHero cache-write availability", () => {
     renderHero("all");
 
     expect(screen.getByText("2 tok/s")).toBeInTheDocument();
+    expect(screen.getByText("1 tok/s")).toBeInTheDocument();
   });
 
   it("does not show stale rate data after a failed refresh", () => {
     useUsageSummaryByAppMock.mockReturnValue({ data: [], isLoading: false });
     useUsageRecentRateMock.mockReturnValue({
-      data: { totalTokens: 600, tokensPerSecond: 2, windowSeconds: 300 },
+      data: {
+        inputTokens: 600,
+        outputTokens: 300,
+        inputTokensPerSecond: 2,
+        outputTokensPerSecond: 1,
+        windowSeconds: 300,
+      },
       isLoading: false,
       isError: true,
     });
@@ -118,6 +137,7 @@ describe("UsageHero cache-write availability", () => {
     renderHero("all");
 
     expect(screen.queryByText("2 tok/s")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 tok/s")).not.toBeInTheDocument();
     expect(screen.getAllByText("--").length).toBeGreaterThan(0);
   });
 });

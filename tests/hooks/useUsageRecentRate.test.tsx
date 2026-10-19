@@ -21,15 +21,20 @@ function createWrapper() {
   );
 }
 
-const summary = (realTotalTokens: number) => ({
+const summary = (
+  inputTokens: number,
+  outputTokens = 0,
+  cacheCreation = 0,
+  cacheRead = 0,
+) => ({
   totalRequests: 1,
   totalCost: "0",
-  totalInputTokens: realTotalTokens,
-  totalOutputTokens: 0,
-  totalCacheCreationTokens: 0,
-  totalCacheReadTokens: 0,
+  totalInputTokens: inputTokens,
+  totalOutputTokens: outputTokens,
+  totalCacheCreationTokens: cacheCreation,
+  totalCacheReadTokens: cacheRead,
   successRate: 100,
-  realTotalTokens,
+  realTotalTokens: inputTokens + outputTokens + cacheCreation + cacheRead,
   cacheHitRate: 0,
 });
 
@@ -50,7 +55,9 @@ describe("useUsageRecentRate", () => {
       { wrapper: createWrapper() },
     );
 
-    await waitFor(() => expect(result.current.data?.tokensPerSecond).toBe(2));
+    await waitFor(() =>
+      expect(result.current.data?.inputTokensPerSecond).toBe(2),
+    );
     expect(getUsageSummaryMock).toHaveBeenCalledWith(
       1_700_000_000,
       1_700_000_300,
@@ -71,7 +78,7 @@ describe("useUsageRecentRate", () => {
     await waitFor(() => expect(result.current.data).toBeDefined());
 
     vi.mocked(Date.now).mockReturnValue(1_700_000_600_000);
-    getUsageSummaryMock.mockResolvedValueOnce(summary(300));
+    getUsageSummaryMock.mockResolvedValueOnce(summary(300, 30));
     await result.current.refetch();
 
     expect(getUsageSummaryMock).toHaveBeenLastCalledWith(
@@ -81,7 +88,7 @@ describe("useUsageRecentRate", () => {
       undefined,
       undefined,
     );
-    await waitFor(() => expect(result.current.data?.totalTokens).toBe(300));
+    await waitFor(() => expect(result.current.data?.outputTokens).toBe(30));
   });
 
   it("keeps filters isolated in the query key", () => {
@@ -98,10 +105,7 @@ describe("useUsageRecentRate", () => {
   });
 
   it("uses backend real-total semantics, including cache tokens", async () => {
-    getUsageSummaryMock.mockResolvedValueOnce({
-      ...summary(0),
-      realTotalTokens: 450,
-    });
+    getUsageSummaryMock.mockResolvedValueOnce(summary(100, 40, 200, 150));
     const { result } = renderHook(
       () =>
         useUsageRecentRate("all", undefined, undefined, {
@@ -109,7 +113,10 @@ describe("useUsageRecentRate", () => {
         }),
       { wrapper: createWrapper() },
     );
-    await waitFor(() => expect(result.current.data?.totalTokens).toBe(450));
+    await waitFor(() => expect(result.current.data?.inputTokens).toBe(450));
+    expect(result.current.data?.inputTokensPerSecond).toBe(1.5);
+    expect(result.current.data?.outputTokens).toBe(40);
+    expect(result.current.data?.outputTokensPerSecond).toBeCloseTo(40 / 300);
     expect(getUsageSummaryMock).toHaveBeenLastCalledWith(
       1_700_000_000,
       1_700_000_300,
@@ -137,6 +144,9 @@ describe("useUsageRecentRate", () => {
     const { result } = renderHook(() => useUsageRecentRate(), {
       wrapper: createWrapper(),
     });
-    await waitFor(() => expect(result.current.data?.tokensPerSecond).toBe(0));
+    await waitFor(() =>
+      expect(result.current.data?.inputTokensPerSecond).toBe(0),
+    );
+    expect(result.current.data?.outputTokensPerSecond).toBe(0);
   });
 });

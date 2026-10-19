@@ -9,6 +9,16 @@
 - 从 clean source `a4df25110a6e928e379d5cce23f3250cd65c2e56` 实际构建，2026-10-19 11:29:26 开始、11:46:49 成功导出，退出 0；helper 7m56s、前端 8.63s、main 8m39s。本次隔离 target 在 finally 清理（3.2 GiB）。独立兼容性审查无阻断；四处版本源及 PE FileVersion/ProductVersion 均为 `3.20.4-5`，ProductName=CCSwitchMulti。
 - 最终生产 renderer `index-BAhma40j.js` 同时包含 `usage.recentRate`、`recent-rate`、`tok/s` 与 `codexConfig.officialContextSet1M`；SHA-256 为 `66A9D0DBE5ED6E03CF2807BE9F4747414EE8AA34F23720EB7ED24AF89F1C8AA7`。确认的是实际生产 bundle，不仅是源文件。
 - 导出 `SHA256SUMS.txt` 16/16 重算匹配，metadata commit/version 正确。NSIS 为 13,985,492 bytes / SHA-256 `AC307C2985FD0F8CC0878A8A43DF97AED73DDE0DB64F69B00D839E8456854190`；portable ZIP 为 16,514,805 bytes，内部 EXE 与 raw EXE 一致，SHA-256 `C521FD37140F6F4B2E775CB0980AB7F6FDAF3BB7534B7558E3E03EE79B2D4658`。本地 updater metadata 版本及 signature 与 `.sig` 一致，未另行公钥验签。未安装或运行新版，也未发布。
+## 2026-10-19 主分支与输入输出拆分
+
+- 用户指定在 `main` 继续开发。原功能提交 `6f8bcdc2c` 位于 `bigstrongsun/te-provider-type`；仅 cherry-pick 该提交到 `main`，新提交为 `c0a7e712e`，没有合并原分支的其它源码。
+- 当前 UI 以两个同级指标替代合计速度：近五分钟输入速度与近五分钟输出速度，均为 `tok/s`。
+- 输入总量 = `totalInputTokens + totalCacheCreationTokens + totalCacheReadTokens`。后端输入字段已经通过 `fresh_input_sql` 归一化，因此缓存只计一次。输出总量 = `totalOutputTokens`；两者分别除以固定 300 秒。两项合计等于此前总速度。
+- 复用同一次汇总查询、相同窗口与筛选，不新增轮询、IPC 或数据库变更。
+- 本轮 Playwright 实际组件预览使用预置查询缓存，检查 1280px、1024px、390px；输入和输出为同级相邻项，无横向溢出。截图在忽略目录 `.local-archives/usage-rate-20261019/`，不作为安装态真实流量证据。
+- 本轮没有外部 API 或依赖变化，仅转换已有内部字段；无需联网事实确认，直接核对 `fresh_input_sql`、现有汇总及聚焦测试。
+- 切换 `main` 时临时保存的原有 `memory.md` 未提交修改已恢复；原有协议测试属性删除和供应商布局预览不归本任务。本任务仅提交统计功能及测试、此记录与项目归档忽略规则。
+- 以下记录是 2026-10-18 合计速度实现的历史；最新口径以上述输入/输出拆分为准。
 
 ## 实现与口径
 

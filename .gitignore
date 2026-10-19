@@ -1,4 +1,5 @@
 node_modules/
+/.local-archives/
 dist/
 release/
 .DS_Store

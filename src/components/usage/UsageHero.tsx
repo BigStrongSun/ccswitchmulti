@@ -319,7 +319,7 @@ export function UsageHero({
             </div>
 
             {/* Bottom row: Breakdown and Hit Rate */}
-            <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+            <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-3">
               <MiniStat
                 icon={<ArrowDownToLine className="h-3.5 w-3.5" />}
                 label={t("usage.freshInput", "新增输入")}
@@ -349,23 +349,51 @@ export function UsageHero({
 
               <MiniStat
                 icon={<Gauge className="h-3.5 w-3.5" />}
-                label={t("usage.recentRate", "近 5 分钟速度")}
+                label={t("usage.recentInputRate", "近 5 分钟输入速度")}
                 value={
                   recentRate && !isRecentRateLoading && !isRecentRateError
-                    ? `${recentRate.tokensPerSecond.toLocaleString(undefined, {
-                        maximumFractionDigits: 1,
-                      })} tok/s`
+                    ? `${recentRate.inputTokensPerSecond.toLocaleString(
+                        undefined,
+                        {
+                          maximumFractionDigits: 1,
+                        },
+                      )} tok/s`
                     : "--"
                 }
                 accent="text-cyan-500"
                 tooltip={
                   recentRate && !isRecentRateLoading && !isRecentRateError
                     ? t(
-                        "usage.recentRateDetail",
-                        "近 5 分钟共 {{count}} Tokens",
+                        "usage.recentInputRateDetail",
+                        "近 5 分钟输入共 {{count}} Tokens（含缓存）",
                         {
-                          count: recentRate.totalTokens,
+                          count: recentRate.inputTokens,
                         },
+                      )
+                    : undefined
+                }
+              />
+
+              <MiniStat
+                icon={<ArrowUpFromLine className="h-3.5 w-3.5" />}
+                label={t("usage.recentOutputRate", "近 5 分钟输出速度")}
+                value={
+                  recentRate && !isRecentRateLoading && !isRecentRateError
+                    ? `${recentRate.outputTokensPerSecond.toLocaleString(
+                        undefined,
+                        {
+                          maximumFractionDigits: 1,
+                        },
+                      )} tok/s`
+                    : "--"
+                }
+                accent="text-indigo-500"
+                tooltip={
+                  recentRate && !isRecentRateLoading && !isRecentRateError
+                    ? t(
+                        "usage.recentOutputRateDetail",
+                        "近 5 分钟输出共 {{count}} Tokens",
+                        { count: recentRate.outputTokens },
                       )
                     : undefined
                 }
