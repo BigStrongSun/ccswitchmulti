@@ -6,6 +6,9 @@
 - 仅移入独立功能提交为 `ea606246c`；没有引入整个主分支、TP 变化或内部 AgentMesh。前端 Hero/query/test 与原功能提交完全相同，后端 `get_usage_summary` 及 UsageDashboard 调用契约兼容，不新增 IPC 或迁移。
 - 新版本四处统一为 `3.20.4-5`，同包保留官方 Provider 上下文编辑和模型探测。合并后聚焦 9 文件 109 tests（44 usage + 65 Provider/context）与 `pnpm typecheck` 通过；原桌面/窄屏截图的组件与相关样式未变，复用该证据。不重复运行未变更的 Rust 全库测试。
 - 本阶段是已有功能的本地集成和版本打包，无需新外部 API 事实，未重复联网检索。产物目标为主项目忽略目录 `release/local-v3.20.4-5`；保留 `3.20.4-4` 旧包供溯源，不安装、不重启、不发布。构建完成与哈希待实际产物核验后记录。
+- 从 clean source `a4df25110a6e928e379d5cce23f3250cd65c2e56` 实际构建，2026-10-19 11:29:26 开始、11:46:49 成功导出，退出 0；helper 7m56s、前端 8.63s、main 8m39s。本次隔离 target 在 finally 清理（3.2 GiB）。独立兼容性审查无阻断；四处版本源及 PE FileVersion/ProductVersion 均为 `3.20.4-5`，ProductName=CCSwitchMulti。
+- 最终生产 renderer `index-BAhma40j.js` 同时包含 `usage.recentRate`、`recent-rate`、`tok/s` 与 `codexConfig.officialContextSet1M`；SHA-256 为 `66A9D0DBE5ED6E03CF2807BE9F4747414EE8AA34F23720EB7ED24AF89F1C8AA7`。确认的是实际生产 bundle，不仅是源文件。
+- 导出 `SHA256SUMS.txt` 16/16 重算匹配，metadata commit/version 正确。NSIS 为 13,985,492 bytes / SHA-256 `AC307C2985FD0F8CC0878A8A43DF97AED73DDE0DB64F69B00D839E8456854190`；portable ZIP 为 16,514,805 bytes，内部 EXE 与 raw EXE 一致，SHA-256 `C521FD37140F6F4B2E775CB0980AB7F6FDAF3BB7534B7558E3E03EE79B2D4658`。本地 updater metadata 版本及 signature 与 `.sig` 一致，未另行公钥验签。未安装或运行新版，也未发布。
 
 ## 实现与口径
 
