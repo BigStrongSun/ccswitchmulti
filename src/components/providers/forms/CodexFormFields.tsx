@@ -1963,6 +1963,7 @@ export function CodexFormFields({
               <CodexOfficialContextRow
                 key={row.rowId}
                 model={row.model}
+                upstreamModel={catalogRowUpstreamModel(row)}
                 value={String(row.contextWindow ?? "")}
                 discovered={fetched}
                 onChange={(value) => {

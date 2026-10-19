@@ -1,10 +1,12 @@
 import { useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Input } from "@/components/ui/input";
+import { getCodexOfficialModelSpec } from "@/config/codexOfficialModelSpecs";
 import type { FetchedModel } from "@/lib/api/model-fetch";
 
 interface Props {
   model: string;
+  upstreamModel?: string;
   value: string;
   discovered?: FetchedModel;
   onChange: (value: string) => void;
@@ -12,6 +14,7 @@ interface Props {
 
 export function CodexOfficialContextRow({
   model,
+  upstreamModel,
   value,
   discovered,
   onChange,
@@ -20,12 +23,15 @@ export function CodexOfficialContextRow({
   const inputRef = useRef<HTMLInputElement>(null);
   const defaultWindow = discovered?.contextWindow;
   const maximum = discovered?.maxContextWindow;
+  const hasMaximum = typeof maximum === "number" && maximum > 0;
+  const apiSpec = getCodexOfficialModelSpec(upstreamModel ?? model);
   // An explicit default is safe to restore/lower, but is not evidence of a larger maximum.
   const ceiling = maximum ?? defaultWindow;
   const presets = [128_000, 256_000, 512_000, 1_000_000].filter(
     (tokens) =>
       ceiling &&
       tokens <= ceiling &&
+      (hasMaximum || tokens < 1_000_000) &&
       tokens !== defaultWindow &&
       tokens !== maximum,
   );
@@ -36,24 +42,29 @@ export function CodexOfficialContextRow({
       : Number(value) === defaultWindow || presets.includes(Number(value))
         ? String(Number(value))
         : "custom";
+  const requiresTrustedMaximum = Boolean(
+    value && !hasMaximum && Number(value) >= 1_000_000,
+  );
   const invalid = Boolean(
-    value && (Number(value) <= 0 || (ceiling && Number(value) > ceiling)),
+    value &&
+      (Number(value) <= 0 ||
+        (ceiling && Number(value) > ceiling) ||
+        requiresTrustedMaximum),
   );
   const unknown = t("codexConfig.officialTokensUnknown");
+  const outputSource = discovered?.maxOutputTokens
+    ? t("codexConfig.officialDirectorySource")
+    : apiSpec
+      ? t("codexConfig.officialApiSource")
+      : undefined;
+  const outputValue = discovered?.maxOutputTokens ?? apiSpec?.maxOutputTokens;
+  const inputValue = discovered?.maxInputTokens;
   const metrics = [
     [
       t("codexConfig.officialContextDefault"),
       defaultWindow?.toLocaleString() ?? unknown,
     ],
     [t("codexConfig.officialContextMax"), maximum?.toLocaleString() ?? unknown],
-    [
-      t("codexConfig.officialMaxInput"),
-      discovered?.maxInputTokens?.toLocaleString() ?? unknown,
-    ],
-    [
-      t("codexConfig.officialMaxOutput"),
-      discovered?.maxOutputTokens?.toLocaleString() ?? unknown,
-    ],
   ];
 
   return (
@@ -63,13 +74,73 @@ export function CodexOfficialContextRow({
       aria-label={model}
     >
       <div className="break-all text-sm font-medium">{model}</div>
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs md:grid-cols-4">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs md:grid-cols-5">
         {metrics.map(([label, text]) => (
           <div key={label} className="min-w-0">
             <dt className="text-muted-foreground">{label}</dt>
             <dd className="break-words tabular-nums">{text}</dd>
           </div>
         ))}
+        <div className="min-w-0">
+          <dt className="text-muted-foreground">
+            {t("codexConfig.officialMaxInput")}
+          </dt>
+          <dd className="break-words tabular-nums">
+            {inputValue?.toLocaleString() ??
+              t("codexConfig.officialInputSharedBudget")}
+          </dd>
+          {inputValue && (
+            <dd className="text-muted-foreground">
+              {t("codexConfig.officialDirectorySource")}
+            </dd>
+          )}
+        </div>
+        <div className="min-w-0">
+          <dt className="text-muted-foreground">
+            {t("codexConfig.officialMaxOutput")}
+          </dt>
+          <dd className="break-words tabular-nums">
+            {outputValue?.toLocaleString() ?? unknown}
+          </dd>
+          {outputSource && (
+            <dd>
+              {apiSpec && !discovered?.maxOutputTokens ? (
+                <a
+                  href={apiSpec.documentationUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`${apiSpec.modelId} · ${apiSpec.verifiedAt}`}
+                  className="text-primary underline"
+                >
+                  {outputSource}
+                </a>
+              ) : (
+                <span className="text-muted-foreground">{outputSource}</span>
+              )}
+            </dd>
+          )}
+        </div>
+        {apiSpec && (
+          <div className="min-w-0">
+            <dt className="text-muted-foreground">
+              {t("codexConfig.officialApiContext")}
+            </dt>
+            <dd className="break-words tabular-nums">
+              {apiSpec.contextWindow.toLocaleString()}
+            </dd>
+            <dd>
+              <a
+                href={apiSpec.documentationUrl}
+                target="_blank"
+                rel="noreferrer"
+                title={`${apiSpec.modelId} · ${apiSpec.verifiedAt}`}
+                className="text-primary underline"
+              >
+                {t("codexConfig.officialApiSource")}
+              </a>
+            </dd>
+          </div>
+        )}
       </dl>
       <p className="text-xs text-muted-foreground">
         {maximum
@@ -79,6 +150,13 @@ export function CodexOfficialContextRow({
               })
             : t("codexConfig.officialContextCanLower")
           : t("codexConfig.officialContextUnverified")}
+        {apiSpec && (
+          <span className="ml-1">
+            {t("codexConfig.officialApiContextNote", {
+              context: apiSpec.contextWindow.toLocaleString(),
+            })}
+          </span>
+        )}
       </p>
       <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
         <label className="min-w-0 space-y-1 text-xs">
@@ -105,12 +183,14 @@ export function CodexOfficialContextRow({
                 {tokens.toLocaleString()}
               </option>
             ))}
-            {defaultWindow && defaultWindow !== maximum && (
-              <option value={defaultWindow}>
-                {t("codexConfig.officialContextDefault")} ·{" "}
-                {defaultWindow.toLocaleString()}
-              </option>
-            )}
+            {defaultWindow &&
+              defaultWindow !== maximum &&
+              (hasMaximum || defaultWindow < 1_000_000) && (
+                <option value={defaultWindow}>
+                  {t("codexConfig.officialContextDefault")} ·{" "}
+                  {defaultWindow.toLocaleString()}
+                </option>
+              )}
             {maximum && (
               <option value={maximum}>
                 {t("codexConfig.officialContextUseMax", {
@@ -141,9 +221,11 @@ export function CodexOfficialContextRow({
       </div>
       {invalid && (
         <p className="text-xs text-destructive" role="alert">
-          {t("codexConfig.officialContextRange", {
-            max: ceiling?.toLocaleString() ?? unknown,
-          })}
+          {requiresTrustedMaximum
+            ? t("codexConfig.officialContextTrustedMaxRequired")
+            : t("codexConfig.officialContextRange", {
+                max: ceiling?.toLocaleString() ?? unknown,
+              })}
         </p>
       )}
     </div>

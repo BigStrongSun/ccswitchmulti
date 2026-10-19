@@ -1,5 +1,23 @@
 # Codex 官方模型上下文设置
 
+## 2026-10-19 订阅长上下文计费核对
+
+- OpenAI 2026-03-05 GPT-5.4 发布说明明确：Codex 实验性支持 1M，通过 `model_context_window` / `model_auto_compact_token_limit` 配置；超过标准 272K 的请求按正常速率 2 倍消耗 usage limits。来源：`https://openai.com/pa-IN/index/introducing-gpt-5-4/`（Availability and pricing）。这是该型号当时的订阅额度规则，不是全部新型号的通用规则。
+- 当前 `https://learn.chatgpt.com/docs/pricing` 明确 API token prices 与 subscription usage 分离，不能用 API 价估算订阅任务数；上下文、推理、工具、缓存共同影响消耗。设置窗口上限与实际请求超过计费阈值也不是一回事。
+- 官方社区 `https://community.openai.com/t/28-days-of-shipping-at-openai/1403897` 的 Day 7 聚合转述 2026-10-12 Tibo 公告：GPT-6.1 Sol 在 Codex/Work 默认从272K升至500K、仍可设到1M、从订阅额度扣用量时不收长上下文额外费用。原始链接 `https://x.com/thsottiaux/status/2109430343346581527` 与补充 `https://x.com/thsottiaux/status/2109430894604026039` 本轮均403，未直接读取原帖；该新规则只获得聚合转述，原始证据仍不足，不能作为已直接核验的账号能力或所有型号计费规则。
+- Enterprise token-based USD rate card 的 >272K 输入/缓存2倍、输出1.5倍适用于对应企业合同，不能混成 Plus/Pro 通用订阅规则；该页另明确 Astra 在 Codex 无额外长上下文倍率。来源：`https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing`。
+- 本轮使用内置 Web 检索并读取官方页面，独立 Matrix search 仍HTTP521。当前所见272K/872K是目录来源的观测值，不足以证明 GPT-6.1 Sol 永久只支持872K；继续追踪公共目录/账号目录/本地缓存来源，不用 API 文档覆盖可信 max。
+
+## 2026-10-19 官方文档规格与 Codex 目录来源分离
+
+- 用户安装 3.20.4-6 后指出输出一直显示“目录未提供”。根因不是缺输出导致上下文保存失败，而是 UI 只展示 Codex 目录字段、未接入官方文档参考；该目录通常没有独立 input/output 字段，不能由字段缺失推断模型没有公开规格。
+- 内置 Web 独立检索并打开 `https://developers.openai.com/api/docs/models/gpt-6-luna`、`gpt-6-sol`、`gpt-6.1-sol`，三个精确型号均声明 API context 1,050,000、max output 128,000。Matrix 独立检索返回 HTTP 521，不能称第二检索链交叉验证成功。文档参考必须标来源和核验日期，不可写回可信 Codex max、账号发现缓存、DB 或运行目录来虚构账号支持 1M。
+- 当前本地 Codex 源码的 Config/ModelInfo/Responses 请求没有模型输出预算配置入口；不要混淆工具执行的 `max_output_tokens`。CCSM ProviderMeta.maxOutputTokens 仅在 Codex→Anthropic 协议转换时注入，不适用于 Official。API 最大输出是模型能力规格，不能制作一个在原生 Official 下无效的输出设置控件。
+- 本批按真实 upstreamModel 精确匹配已核验的 API 文档参考：目录输出优先，缺失时另标 API 文档的 128K；1.05M API 上下文与 Codex 可设置上限分开。文档不会将目录 872K 抬高，也不推算独立最大输入。上下文设置不以输出字段是否存在为前提。
+- 只读进程复核：用户已安装运行 3.20.4-6，不能继续沿用上轮“运行 3.20.4-4”的旧结论。本批版本递增为 3.20.4-7，沿用公开 CCSM 集成 worktree，不改 AgentMesh、不 push 或发布，不自动安装/重启或写现役配置。
+- 本批源码验证：CodexFormFields 48/48、TypeScript typecheck、diff check、严格UTF-8/no BOM/no U+FFFD通过；独立审查无阻断。Playwright真实组件/合成IPC在390x844和1440x1000验证三型号128K参考、正确官方链接、只有上下文可写、872K仍可设置且API文档不解锁1M，pageerror=0、横向overflow=0。证据在 `release/acceptance/codex-provider-context-visual/evidence/docs-reference-v7/`；不是安装态或真实长请求E2E。
+- 下方旧记录的“default>=1M而max缺失”前后端不一致已在本批修复：排除>=1M快捷档位，手输标invalid，清空override恢复默认仍允许。已补组合回归；未放宽后端可信max门禁。
+
 ## 2026-10-19 上下文可调范围与输入输出分栏
 
 - 用户指出旧界面只有手输框和上限，无法知道哪些模型可提高以及输入/输出各是多少。根因是发现 DTO 仅有 default/max context，UI 未区分可提高、默认即上限与未知能力；872K 上限的模型也没有快捷档位。现拆出 `CodexOfficialContextRow`，按可信目录展示默认窗口、可设置上限、独立最大输入、最大输出，后两者只透传显式正整数字段，缺失显示“目录未提供”。不由上下文减法猜输出，不把 API 产品规格用于解锁 Codex 上限。

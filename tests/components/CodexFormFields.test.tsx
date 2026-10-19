@@ -778,7 +778,10 @@ describe("CodexFormFields local model routing", () => {
     expect(
       within(limited).getByText("可提高上下文，最高 872,000 tokens。"),
     ).toBeInTheDocument();
-    expect(within(limited).getAllByText("目录未提供")).toHaveLength(2);
+    expect(within(limited).getAllByText("目录未提供")).toHaveLength(1);
+    expect(
+      within(limited).getByText("未单独声明（共享上下文预算）"),
+    ).toBeInTheDocument();
     expect(
       within(limited).queryByRole("option", { name: "1,000,000" }),
     ).not.toBeInTheDocument();
@@ -805,6 +808,96 @@ describe("CodexFormFields local model routing", () => {
     expect(
       screen.getByRole("textbox", { name: "eligible 上下文窗口" }),
     ).toHaveValue("");
+  });
+
+  it("shows API documentation specs only for exact upstream model IDs", async () => {
+    renderCatalogHarness(
+      [
+        { model: "Luna alias", upstreamModel: " GPT-6-LUNA " },
+        { model: "Sol alias", upstreamModel: "gpt-6-sol" },
+        { model: "6.1 alias", upstreamModel: "gpt-6.1-sol" },
+        { model: "suffix", upstreamModel: "gpt-6-luna-2026-10-19" },
+      ],
+      { official: true, openAdvancedOptions: false },
+    );
+
+    for (const name of ["Luna alias", "Sol alias", "6.1 alias"]) {
+      const row = screen.getByRole("group", { name });
+      expect(within(row).getByText("1,050,000")).toBeInTheDocument();
+      expect(within(row).getByText("128,000")).toBeInTheDocument();
+      expect(
+        within(row).getAllByRole("link", { name: "API 文档规格" }),
+      ).toHaveLength(2);
+      expect(within(row).getAllByText("目录未提供")).toHaveLength(2);
+    }
+    const suffix = screen.getByRole("group", { name: "suffix" });
+    expect(within(suffix).queryByText("1,050,000")).not.toBeInTheDocument();
+    expect(within(suffix).queryByText("128,000")).not.toBeInTheDocument();
+    expect(within(suffix).getAllByText("目录未提供")).toHaveLength(3);
+  });
+
+  it("prefers discovered output limits and keeps API context separate from Codex ceilings", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([
+      {
+        id: "gpt-6-luna",
+        ownedBy: "openai",
+        contextWindow: 272000,
+        maxContextWindow: 872000,
+        maxOutputTokens: 64000,
+      },
+    ]);
+    renderCatalogHarness([{ model: "Luna", upstreamModel: "gpt-6-luna" }], {
+      official: true,
+      openAdvancedOptions: false,
+      officialManagedOAuth: true,
+      officialAccountId: "account-7",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
+    const row = await screen.findByRole("group", { name: "Luna" });
+    expect(within(row).getByText("64,000")).toBeInTheDocument();
+    expect(within(row).getByText("官方模型目录")).toBeInTheDocument();
+    expect(within(row).getByText("1,050,000")).toBeInTheDocument();
+    expect(
+      within(row).getByText("可提高上下文，最高 872,000 tokens。"),
+    ).toBeInTheDocument();
+    expect(
+      within(row).queryByRole("option", { name: "1,000,000" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not offer or accept a million-token override from a large default alone", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([
+      {
+        id: "large-default",
+        ownedBy: "openai",
+        contextWindow: 1050000,
+      },
+    ]);
+    renderCatalogHarness([], {
+      official: true,
+      openAdvancedOptions: false,
+      officialManagedOAuth: true,
+      officialAccountId: "account-7",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
+    const row = await screen.findByRole("group", { name: "large-default" });
+    const select = within(row).getByRole("combobox");
+    const input = within(row).getByRole("textbox");
+    expect(
+      within(select).queryByRole("option", { name: "1,000,000" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(select).queryByRole("option", { name: /1,050,000/ }),
+    ).not.toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "1000000" } });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(
+      within(row).getByText(
+        "设置 1M 或更高值需要官方目录明确提供可信上限。",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.change(select, { target: { value: "default" } });
+    expect(input).toHaveValue("");
   });
 
   it("distinguishes default-only and fixed limits and flags out-of-range values", async () => {
