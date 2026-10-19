@@ -1212,12 +1212,7 @@ export function CodexFormFields({
                 model.toLowerCase(),
             );
             if (index >= 0) {
-              rows[index] = {
-                ...rows[index],
-                ...(!rows[index].contextWindow && fetched.contextWindow
-                  ? { contextWindow: String(fetched.contextWindow) }
-                  : {}),
-              };
+              continue;
             } else {
               const visibleAliasCollision = rows.some(
                 (row) =>
@@ -1231,9 +1226,6 @@ export function CodexFormFields({
                   model,
                   upstreamModel: model,
                   displayName: model,
-                  ...(fetched.contextWindow
-                    ? { contextWindow: String(fetched.contextWindow) }
-                    : {}),
                 }),
               );
             }
@@ -1736,7 +1728,9 @@ export function CodexFormFields({
         model: currentVisibleModel?.trim() ? currentVisibleModel : modelId,
         upstreamModel: modelId,
         displayName: currentDisplayName?.trim() ? currentDisplayName : modelId,
-        ...(contextWindow ? { contextWindow: String(contextWindow) } : {}),
+        ...(!isCanonicalOfficial && contextWindow
+          ? { contextWindow: String(contextWindow) }
+          : {}),
         ...(Array.isArray(fetched?.inputModalities)
           ? { inputModalities: [...fetched.inputModalities] }
           : {}),
@@ -1750,6 +1744,7 @@ export function CodexFormFields({
       codexBaseUrl,
       fetchedModels,
       handleUpdateCatalogRow,
+      isCanonicalOfficial,
       providerId,
       websiteUrl,
     ],

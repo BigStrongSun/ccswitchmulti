@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "source": "OpenAI Help Center: ChatGPT Work and Codex",
+  "sourceDate": "2026-10-20",
+  "documentationUrl": "https://help.openai.com/en/articles/20001275-chatgpt-work-and-codex",
+  "models": [
+    {
+      "model": "gpt-6.1-sol",
+      "contextWindow": 500000
+    }
+  ]
+}

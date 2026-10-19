@@ -5278,6 +5278,7 @@ impl ProxyService {
                     }
                 }
             }
+            crate::codex_context::apply_official_context_defaults(provider, &mut next);
             return next;
         }
 
@@ -8878,6 +8879,33 @@ respect_system_proxy = false
             provider.settings_config.get("codexRoutingProjection"),
             "projection must retain the Provider-derived dependency fingerprint"
         );
+    }
+
+    #[test]
+    fn official_model_catalog_projection_uses_published_context_default_on_clone() {
+        let live_snapshot = json!({
+            "auth": { "auth_mode": "chatgpt" },
+            "config": "model_provider = \"openai\"\n"
+        });
+        let mut provider = Provider::with_id(
+            "official-context".to_string(),
+            "Official context".to_string(),
+            json!({ "modelCatalog": { "models": [{ "model": "gpt-6.1-sol" }] } }),
+            None,
+        );
+        provider.category = Some("official".into());
+        let source_settings = provider.settings_config.clone();
+
+        let projected = ProxyService::codex_settings_for_model_catalog_projection(
+            &live_snapshot,
+            Some(&provider),
+        );
+
+        assert_eq!(
+            projected["modelCatalog"]["models"][0]["contextWindow"],
+            500000
+        );
+        assert_eq!(provider.settings_config, source_settings);
     }
 
     #[test]

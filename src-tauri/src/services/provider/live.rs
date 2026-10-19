@@ -819,6 +819,7 @@ fn codex_settings_for_live_projection(provider: &Provider) -> Result<Value, AppE
         .unwrap_or_else(|| provider.settings_config.get("modelCatalog").is_some());
 
     let mut settings = provider.settings_config.clone();
+    crate::codex_context::apply_official_context_defaults(provider, &mut settings);
     if !should_project {
         if let Some(obj) = settings.as_object_mut() {
             obj.remove("modelCatalog");
@@ -3314,6 +3315,51 @@ web_search = true
         assert!(
             projected.get("modelCatalog").is_some(),
             "old providers without codexLocalModelMapping must keep the previous catalog projection behavior"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn official_live_projection_uses_published_context_default_on_clone() {
+        let _home = TempHome::new();
+        let stale_cache = json!({
+            "etag": "cc-switch-model-catalog",
+            "models": [{
+                "slug": "gpt-6.1-sol",
+                "context_window": 272000,
+                "max_context_window": 272000
+            }]
+        });
+        let cache_path = crate::codex_config::get_codex_config_dir().join("models_cache.json");
+        assert!(
+            cache_path.starts_with(_home.dir.path()),
+            "test cache must be isolated"
+        );
+        crate::config::write_json_file(&cache_path, &stale_cache).expect("seed owned old cache");
+        let mut provider = Provider::with_id(
+            "codex-official-context".to_string(),
+            "Official context".to_string(),
+            json!({
+                "auth": { "auth_mode": "chatgpt" },
+                "config": "model_provider = \"openai\"\n",
+                "modelCatalog": { "models": [{ "model": "gpt-6.1-sol" }] }
+            }),
+            None,
+        );
+        provider.category = Some("official".into());
+
+        let source_settings = provider.settings_config.clone();
+        let projected = codex_settings_for_live_projection(&provider)
+            .expect("build official Codex live projection");
+
+        assert_eq!(
+            projected["modelCatalog"]["models"][0]["contextWindow"],
+            500000
+        );
+        assert_eq!(provider.settings_config, source_settings);
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&cache_path).expect("read unchanged cache"),
+            stale_cache
         );
     }
 

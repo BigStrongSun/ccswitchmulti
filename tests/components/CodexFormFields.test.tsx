@@ -684,12 +684,15 @@ describe("CodexFormFields local model routing", () => {
     vi.mocked(fetchCodexOauthModels).mockResolvedValue([
       { id: "gpt-5.6", ownedBy: "openai", contextWindow: 272000 },
     ]);
-    renderCatalogHarness([{ model: "gpt-5.6", upstreamModel: "" }], {
-      official: true,
-      openAdvancedOptions: false,
-      officialManagedOAuth: true,
-      officialAccountId: "account-7",
-    });
+    const { latestCatalog } = renderCatalogHarness(
+      [{ model: "gpt-5.6", upstreamModel: "" }],
+      {
+        official: true,
+        openAdvancedOptions: false,
+        officialManagedOAuth: true,
+        officialAccountId: "account-7",
+      },
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
     await waitFor(() =>
@@ -699,7 +702,8 @@ describe("CodexFormFields local model routing", () => {
     );
     expect(
       screen.getByRole("textbox", { name: "gpt-5.6 上下文窗口" }),
-    ).toHaveValue("272000");
+    ).toHaveValue("");
+    expect(latestCatalog()[0].contextWindow ?? "").toBe("");
   });
 
   it("does not overwrite a visible alias whose upstream model differs", async () => {
@@ -791,7 +795,7 @@ describe("CodexFormFields local model routing", () => {
     ).toHaveValue("1000000");
     expect(
       screen.getByRole("textbox", { name: "limited 上下文窗口" }),
-    ).toHaveValue("272000");
+    ).toHaveValue("");
     expect(
       screen.getByRole("textbox", { name: "unknown 上下文窗口" }),
     ).toHaveValue("");
@@ -828,12 +832,85 @@ describe("CodexFormFields local model routing", () => {
       expect(
         within(row).getAllByRole("link", { name: "API 文档规格" }),
       ).toHaveLength(2);
-      expect(within(row).getAllByText("目录未提供")).toHaveLength(2);
+      expect(within(row).getAllByText("目录未提供")).toHaveLength(1);
     }
     const suffix = screen.getByRole("group", { name: "suffix" });
     expect(within(suffix).queryByText("1,050,000")).not.toBeInTheDocument();
     expect(within(suffix).queryByText("128,000")).not.toBeInTheDocument();
-    expect(within(suffix).getAllByText("目录未提供")).toHaveLength(3);
+    expect(within(suffix).getAllByText("目录未提供")).toHaveLength(2);
+  });
+
+  it("separates the official default from directory context and bounds its preset", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([
+      {
+        id: "gpt-6.1-sol",
+        ownedBy: "openai",
+        contextWindow: 272000,
+        maxContextWindow: 872000,
+      },
+      {
+        id: "gpt-6.1-sol-limited",
+        ownedBy: "openai",
+        contextWindow: 272000,
+        maxContextWindow: 400000,
+      },
+    ]);
+    const { latestCatalog } = renderCatalogHarness(
+      [
+        { model: "Sol alias", upstreamModel: " GPT-6.1-SOL " },
+        {
+          model: "Preserved",
+          upstreamModel: "gpt-6.1-sol",
+          contextWindow: "64000",
+        },
+        { model: "GPT-6 Sol", upstreamModel: "gpt-6-sol" },
+      ],
+      {
+        official: true,
+        openAdvancedOptions: false,
+        officialManagedOAuth: true,
+        officialAccountId: "account-7",
+      },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
+    const row = await screen.findByRole("group", { name: "Sol alias" });
+    expect(within(row).getAllByText("500,000").length).toBeGreaterThan(0);
+    expect(within(row).getByText("目录默认：272,000")).toBeInTheDocument();
+    const select = within(row).getByRole("combobox");
+    expect(
+      within(select).getByRole("option", { name: "官方默认 · 500,000" }),
+    ).toBeInTheDocument();
+    expect(latestCatalog()[0].contextWindow).toBe("");
+    fireEvent.change(select, { target: { value: "500000" } });
+    expect(within(row).getByRole("textbox")).toHaveValue("500000");
+    fireEvent.change(select, { target: { value: "default" } });
+    expect(within(row).getByRole("textbox")).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "探测当前来源模型" }));
+    await waitFor(() =>
+      expect(within(row).getByRole("textbox")).toHaveValue(""),
+    );
+    expect(
+      within(screen.getByRole("group", { name: "Preserved" })).getByRole(
+        "textbox",
+      ),
+    ).toHaveValue("64000");
+
+    const otherModel = screen.getByRole("group", { name: "GPT-6 Sol" });
+    expect(within(otherModel).getByText("官方默认值未知")).toBeInTheDocument();
+    expect(
+      within(otherModel).queryByRole("option", { name: /500,000/ }),
+    ).not.toBeInTheDocument();
+
+    const limited = await screen.findByRole("group", {
+      name: "gpt-6.1-sol-limited",
+    });
+    expect(within(limited).getByText("目录默认：272,000")).toBeInTheDocument();
+    expect(within(limited).getByRole("textbox")).toHaveValue("");
+    expect(
+      within(limited).queryByRole("option", {
+        name: "官方默认 · 500,000",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("prefers discovered output limits and keeps API context separate from Codex ceilings", async () => {
@@ -892,9 +969,7 @@ describe("CodexFormFields local model routing", () => {
     fireEvent.change(input, { target: { value: "1000000" } });
     expect(input).toHaveAttribute("aria-invalid", "true");
     expect(
-      within(row).getByText(
-        "设置 1M 或更高值需要官方目录明确提供可信上限。",
-      ),
+      within(row).getByText("设置 1M 或更高值需要官方目录明确提供可信上限。"),
     ).toBeInTheDocument();
     fireEvent.change(select, { target: { value: "default" } });
     expect(input).toHaveValue("");

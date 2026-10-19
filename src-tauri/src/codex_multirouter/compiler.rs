@@ -608,13 +608,46 @@ fn effective_capability_summary(
     provider: &Provider,
     model_entry: &Value,
 ) -> CodexModelCapabilitySummary {
-    let (context_window, context_window_source) = value_with_source(
-        u64_field(model_entry, &["contextWindow", "context_window"]),
-        u64_field(
-            &provider.settings_config,
-            &["contextWindow", "context_window", "modelContextWindow"],
-        ),
+    let model_context_window = crate::codex_context::explicit_context_window(
+        model_entry,
+        &["contextWindow", "context_window"],
     );
+    let provider_context_window = crate::codex_context::explicit_context_window(
+        &provider.settings_config,
+        &[
+            "contextWindow",
+            "context_window",
+            "modelContextWindow",
+            "model_context_window",
+        ],
+    );
+    let (context_window, context_window_source) = if model_context_window.is_some() {
+        (model_context_window, "provider_model".to_string())
+    } else if provider_context_window.is_some() {
+        (provider_context_window, "provider".to_string())
+    } else {
+        let model = ["upstreamModel", "upstream_model", "model", "id"]
+            .iter()
+            .find_map(|key| {
+                model_entry
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+            });
+        let max_context_window =
+            u64_field(model_entry, &["maxContextWindow", "max_context_window"]);
+        model
+            .and_then(|model| {
+                crate::codex_context::resolved_official_context_window(
+                    provider,
+                    model,
+                    max_context_window,
+                )
+            })
+            .map(|(window, source)| (Some(window), source.to_string()))
+            .unwrap_or((None, "unknown".to_string()))
+    };
     let (input_modalities, input_modalities_source) = value_with_source(
         model_input_modalities(model_entry),
         string_array_field(
@@ -1383,6 +1416,52 @@ mod tests {
                 .and_then(|value| value.get("providerEffort")),
             Some(&json!("high"))
         );
+    }
+
+    #[test]
+    fn official_multirouter_context_uses_account_snapshot_before_published_default() {
+        let account_id = format!("compiler-context-test-{}", uuid::Uuid::new_v4());
+        let mut official = provider(
+            "official",
+            "Official",
+            "openai_responses",
+            json!([{"model":"gpt-6.1-sol"}]),
+        );
+        official.category = Some("official".to_string());
+        official.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            codex_official_auth: Some(crate::provider::CodexOfficialAuthConfig {
+                mode: crate::provider::CodexOfficialAuthMode::ManagedOauth,
+                account_id: Some(account_id.clone()),
+            }),
+            ..Default::default()
+        });
+        crate::services::codex_oauth_models::record_authenticated_model_limits(
+            &account_id,
+            &[crate::services::model_fetch::FetchedModel {
+                id: "gpt-6.1-sol".to_string(),
+                owned_by: None,
+                context_window: Some(600_000),
+                max_context_window: Some(450_000),
+                max_input_tokens: None,
+                max_output_tokens: None,
+                input_modalities: None,
+                supports_image: None,
+                reasoning: None,
+            }],
+        );
+
+        let compiled = compile(
+            &plan(vec![route(
+                "official-route",
+                "official",
+                CodexModelSelection::All,
+            )]),
+            [official],
+        );
+        let summary = &compiled.model_catalog[0].capability_summary;
+        assert_eq!(summary.context_window, Some(450_000));
+        assert_eq!(summary.context_window_source, "account_directory");
     }
 
     #[test]

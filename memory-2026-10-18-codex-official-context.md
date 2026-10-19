@@ -1,5 +1,17 @@
 # Codex 官方模型上下文设置
 
+## 2026-10-20 原生500K默认同步
+
+- 官方 Help Center `https://help.openai.com/en/articles/20001275-chatgpt-work-and-codex` 本轮重新读取，明确仅 GPT-6.1 Sol 在 Work/Codex 默认500000；当前公共 `openai/codex` `models-manager/models.json` 同型号仍context272000/max872000。内置Web已读取两处一手材料；独立Matrix search仍HTTP521，不能称双链搜索成功。不要把公告500K推广到其他型号，也不要把默认当成最大能力。
+- 根因是CCSM受管静态目录不能自行跟随远端刷新，且generic specs缺省路径会读取CCSM自产 `models_cache.json` 的旧272K。另一个根因在官方模型探测UI：此前把发现的默认写入持久 `contextWindow`，把“跟随默认”变成手动覆盖。修复生成边界和未来探测行为，不猜测迁移已有272K到底是人工值还是历史自动值。
+- 新的前后端共享版本化参考表为 `src/config/codexOfficialContextDefaults.json`，只登记精确型号 `gpt-6.1-sol=500000`，记录来源/日期/URL。有效默认优先级是用户显式值（含数字字符串） > 已绑定账号的新鲜目录默认 > 公告默认；可信max仍约束缺省结果。静态官方目录仅提供max夹限，不用旧context覆盖公告。账号快照缺少或过期时不谎称使用了账号探测结果，不修改raw发现DTO和可信cache。
+- `codex_context` 共享解析只在Official身份下工作；direct live、proxy/takeover的catalog投影在clone中补缺省值，MultiRouter能力摘要和依赖指纹使用同一解析来源。第三方同名模型不注入公告值；已保存窗口不覆盖，源Provider/DB不写500K。保留已有reasoning/picker目录合并顺序和1M可信max门禁，没有开放静态catalog实验性1M max覆盖。
+- UI分别显示官方公布默认、原始目录默认、可信可设置上限和API规格。500K快捷档位只有当前目录ceiling允许才出现；未知max不因公告扩容，500K等于目录default/max时不产生重复选项。官方探测/导入仅导入模型身份，不填持久context覆盖；清空覆盖后再次探测仍保持跟随默认，第三方导入原行为不变。
+- 本批前端2文件51tests、typecheck、Prettier、renderer production build通过。真实源码组件/合成IPC Playwright在390x844及1440x1000复跑，pageerror=0、横向overflow=0，已实际查看两尺寸截图；证据在 `release/acceptance/codex-provider-context-visual/evidence/native-default-500k/`。这是组件验收，不是安装态或真实长输入请求验证。
+- Rust首轮全库4352 passed/1 failed/9 ignored，唯一 `usage_rollup::test_rollup_merges_with_existing` 预期13得10。旧基线测试binary同样复现；环境 `TZ=Asia/Tokyo` 被Windows CRT/SQLite解释为与Windows系统UTC+08不同的本地时间，导致测试使用chrono生成的预置日期和SQL localtime分桶错开。只在子测试进程清除TZ复验，不修改系统时区、生产聚合或无关测试。本批补充隔离owned cache context/max均272K的回归，确认有效投影500K且源Provider和旧cache不变；写入前断言路径在临时home内。
+- 最终Rust在子进程清除TZ并将TEMP/TMP限定到项目忽略目录后复跑全库：4353 passed/9 ignored/0 failed，含新增owned-cache隔离回归。Rustfmt、diff check、16个变更文本严格UTF-8/no BOM/no U+FFFD通过。两位执行者交叉只读审查及追加cache回归审查无阻断。视觉验收服务已结束且4179无监听；其watcher在验收之后因同root下测试临时文件EBUSY退出，后续测试临时目录应放Vite fixture root之外，避免无关文件监视。
+- 复用既有集成worktree，不新建、不push、不安装、不发布，不改现役认证/配置/数据库；包版本仍3.20.4-7，旧安装包不包含本批源码。本地提交绕过自动release hook，提交说明保留本批根因、来源优先级、测试结果和运行边界。
+
 ## 2026-10-20 自定义目录配置方法核对
 
 - 用户本轮要求核对正确配置方法，不是授权切换现役配置。内置 Web 重新读取官方 config reference/advanced 及 openai/codex 当前 main 源码；独立 Matrix 搜索仍 HTTP521。没有改现役 TOML、认证、DB、缓存，没有安装、重启、推送或发布。

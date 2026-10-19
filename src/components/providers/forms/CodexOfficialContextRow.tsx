@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Input } from "@/components/ui/input";
 import { getCodexOfficialModelSpec } from "@/config/codexOfficialModelSpecs";
+import { getCodexOfficialContextDefault } from "@/config/codexOfficialContextDefaults";
 import type { FetchedModel } from "@/lib/api/model-fetch";
 
 interface Props {
@@ -25,16 +26,27 @@ export function CodexOfficialContextRow({
   const maximum = discovered?.maxContextWindow;
   const hasMaximum = typeof maximum === "number" && maximum > 0;
   const apiSpec = getCodexOfficialModelSpec(upstreamModel ?? model);
+  const officialDefault = getCodexOfficialContextDefault(
+    upstreamModel ?? model,
+  );
   // An explicit default is safe to restore/lower, but is not evidence of a larger maximum.
   const ceiling = maximum ?? defaultWindow;
-  const presets = [128_000, 256_000, 512_000, 1_000_000].filter(
-    (tokens) =>
-      ceiling &&
-      tokens <= ceiling &&
-      (hasMaximum || tokens < 1_000_000) &&
-      tokens !== defaultWindow &&
-      tokens !== maximum,
-  );
+  const presets = [
+    128_000,
+    256_000,
+    officialDefault?.contextWindow,
+    512_000,
+    1_000_000,
+  ]
+    .filter((tokens): tokens is number => typeof tokens === "number")
+    .filter(
+      (tokens) =>
+        ceiling &&
+        tokens <= ceiling &&
+        (hasMaximum || tokens < 1_000_000) &&
+        tokens !== defaultWindow &&
+        tokens !== maximum,
+    );
   const selected = !value
     ? "default"
     : maximum && Number(value) === maximum
@@ -60,10 +72,6 @@ export function CodexOfficialContextRow({
   const outputValue = discovered?.maxOutputTokens ?? apiSpec?.maxOutputTokens;
   const inputValue = discovered?.maxInputTokens;
   const metrics = [
-    [
-      t("codexConfig.officialContextDefault"),
-      defaultWindow?.toLocaleString() ?? unknown,
-    ],
     [t("codexConfig.officialContextMax"), maximum?.toLocaleString() ?? unknown],
   ];
 
@@ -75,6 +83,38 @@ export function CodexOfficialContextRow({
     >
       <div className="break-all text-sm font-medium">{model}</div>
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs md:grid-cols-5">
+        <div className="min-w-0">
+          <dt className="text-muted-foreground">
+            {t("codexConfig.officialDefaultContext")}
+          </dt>
+          {officialDefault ? (
+            <>
+              <dd className="break-words tabular-nums">
+                {officialDefault.contextWindow.toLocaleString()}
+              </dd>
+              <dd>
+                <a
+                  href={officialDefault.documentationUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`${officialDefault.source} · ${officialDefault.sourceDate}`}
+                  className="text-primary underline"
+                >
+                  {t("codexConfig.officialDefaultSource")}
+                </a>
+              </dd>
+            </>
+          ) : (
+            <dd className="break-words tabular-nums">
+              {t("codexConfig.officialContextDefaultUnknown")}
+            </dd>
+          )}
+          <dd className="mt-1 text-muted-foreground">
+            {t("codexConfig.officialDirectoryDefault", {
+              value: defaultWindow?.toLocaleString() ?? unknown,
+            })}
+          </dd>
+        </div>
         {metrics.map(([label, text]) => (
           <div key={label} className="min-w-0">
             <dt className="text-muted-foreground">{label}</dt>
@@ -180,14 +220,29 @@ export function CodexOfficialContextRow({
             </option>
             {presets.map((tokens) => (
               <option key={tokens} value={tokens}>
-                {tokens.toLocaleString()}
+                {tokens === officialDefault?.contextWindow
+                  ? t("codexConfig.officialDefaultPreset", {
+                      value: tokens.toLocaleString(),
+                    })
+                  : tokens.toLocaleString()}
               </option>
             ))}
+            {officialDefault &&
+              !presets.includes(officialDefault.contextWindow) &&
+              officialDefault.contextWindow !== defaultWindow &&
+              officialDefault.contextWindow !== maximum &&
+              officialDefault.contextWindow <= (ceiling ?? 0) && (
+                <option value={officialDefault.contextWindow}>
+                  {t("codexConfig.officialDefaultPreset", {
+                    value: officialDefault.contextWindow.toLocaleString(),
+                  })}
+                </option>
+              )}
             {defaultWindow &&
               defaultWindow !== maximum &&
               (hasMaximum || defaultWindow < 1_000_000) && (
                 <option value={defaultWindow}>
-                  {t("codexConfig.officialContextDefault")} ·{" "}
+                  {t("codexConfig.officialDirectoryContext")} ·{" "}
                   {defaultWindow.toLocaleString()}
                 </option>
               )}
