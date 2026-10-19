@@ -2,11 +2,23 @@
 
 ## 2026-10-19 订阅长上下文计费核对
 
+- 后续多方核对找到直接官方依据，替代下方仅有社区转述的阶段：`https://help.openai.com/en/articles/20001275-chatgpt-work-and-codex`（2026-10-19读取，页面标4天前更新）明确 GPT-6.1 Sol 在 Work/Codex 默认500,000；订阅 included allowance 无额外 long-context surcharge，但长任务仍计额度；purchased credits、Enterprise PAYG、API继续各自原价规则。不能再把6.1的订阅计费记为“只有转述，无法确认”，也不能套用5.4历史2倍额度。
 - OpenAI 2026-03-05 GPT-5.4 发布说明明确：Codex 实验性支持 1M，通过 `model_context_window` / `model_auto_compact_token_limit` 配置；超过标准 272K 的请求按正常速率 2 倍消耗 usage limits。来源：`https://openai.com/pa-IN/index/introducing-gpt-5-4/`（Availability and pricing）。这是该型号当时的订阅额度规则，不是全部新型号的通用规则。
 - 当前 `https://learn.chatgpt.com/docs/pricing` 明确 API token prices 与 subscription usage 分离，不能用 API 价估算订阅任务数；上下文、推理、工具、缓存共同影响消耗。设置窗口上限与实际请求超过计费阈值也不是一回事。
-- 官方社区 `https://community.openai.com/t/28-days-of-shipping-at-openai/1403897` 的 Day 7 聚合转述 2026-10-12 Tibo 公告：GPT-6.1 Sol 在 Codex/Work 默认从272K升至500K、仍可设到1M、从订阅额度扣用量时不收长上下文额外费用。原始链接 `https://x.com/thsottiaux/status/2109430343346581527` 与补充 `https://x.com/thsottiaux/status/2109430894604026039` 本轮均403，未直接读取原帖；该新规则只获得聚合转述，原始证据仍不足，不能作为已直接核验的账号能力或所有型号计费规则。
+- 官方社区 `https://community.openai.com/t/28-days-of-shipping-at-openai/1403897` 的 Day 7 聚合转述 2026-10-12 Tibo 公告：GPT-6.1 Sol 在 Codex/Work 默认从272K升至500K、仍可设到1M、从订阅额度扣用量时不收长上下文额外费用。原始链接 `https://x.com/thsottiaux/status/2109430343346581527` 与补充 `https://x.com/thsottiaux/status/2109430894604026039` 本轮均403，未直接读取原帖。默认500K和订阅无附加费已由上方Help Center独立确认；“可设到1M”仍只有转述且受实际目录限幅，不能作为本机账号1M运行证明。
 - Enterprise token-based USD rate card 的 >272K 输入/缓存2倍、输出1.5倍适用于对应企业合同，不能混成 Plus/Pro 通用订阅规则；该页另明确 Astra 在 Codex 无额外长上下文倍率。来源：`https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing`。
 - 本轮使用内置 Web 检索并读取官方页面，独立 Matrix search 仍HTTP521。当前所见272K/872K是目录来源的观测值，不足以证明 GPT-6.1 Sol 永久只支持872K；继续追踪公共目录/账号目录/本地缓存来源，不用 API 文档覆盖可信 max。
+- 本机只读结构化核对：`.cc-switch/codex-official-models-cache.json` source=`https://github.com/openai/codex`、fetched_at=`2026-10-19T03:25:17.467576300Z`，Luna/Sol/6.1 Sol三型均显式default272000/max872000、无独立input/output。`.codex/models_cache.json` 的etag=`cc-switch-model-catalog`，为CCSM生成的投影，不是独立官方账号证据。解析分别取context_window/max_context_window，没有default→max换算；872K的直接来源是公开快照。此轮未重取账号OAuth目录、未发送推理请求；fresh public raw请求超时。
+- 官方Codex配置参考 `https://learn.chatgpt.com/docs/config-file/config-reference` 区分窗口、auto compact阈值、compact scope；官方源码 `codex-rs/models-manager/src/model_info.rs` 把配置窗口按server max取min，`protocol/src/openai_models.rs` 的compact最多为raw resolved window的90%。95% effective window另算，不能将其再乘90%当阈值。于是目录max872000时，即使填写1000000，仍只得到raw872000、95%有效828400、自然compact上限784800；500000对应有效475000、自然compact450000。这是源码计算，不是本机实际长请求验证。
+- 独立一手报告旁证但不当官方保证：`https://github.com/openai/codex/issues/53336` 作者控制账号/endpoint/client_version仅改originator时得到272K/500K，正常切账号后另一账号也可收500K，报告中max仍872K；`https://github.com/openai/codex/issues/52567` 作者填写1M后记录有效828400，并在后续恢复测试报告802805输入成功。不能据此认定本机账号已接受对应容量，不部署originator冒充或修改trusted max。
+- 可落地于CCSM的方案仍是OpenAI Official Provider逐模型的6.1窗口：选择500000匹配公告默认，或选择该次可信目录的max（本次快照872000）；保存并重新应用对应Provider/路由，新会话再读实际model_context_window。不要在MultiRouter全局写1M/compact而污染其他模型；native独立配置示例与CCSM管理目录模式不是同一个写入口。真1M输入/有效窗口尚无本机账号运行证明。
+
+## 2026-10-19 3.20.4-7本地构建交付
+
+- 源提交 `b70dec331d8b0bcca5182715b2f6c08ee0192f58`，16:50:42启动local-release pipeline、17:08:19完成原子导出至主项目 `release/local-v3.20.4-7`。helper编译8m05s，renderer production build和typecheck通过；执行会话收尾输出未取回（session已消失），不伪称拿到pipeline退出码。导出metadata、全部产物及源版本已实查，构建进程已结束，隔离Cargo target与lock均已清理。
+- 安装包13,982,572 bytes，SHA256 `11E8F669F27C05B8C3D1B11390EDA5B43814FF10AFF0EC2D00881CCA815EA7FA`；portable ZIP16,514,036 bytes，SHA256 `31EC91341FF8C982F1371D1C8079B8E42F0871CE852DB39AF8563284482BB3A0`；raw/ZIP内EXE44,886,016 bytes，SHA256 `80D50C4C01EDEFE81A8617617FD21460196F5F06A07EC10A18F403644FAB9C7D`。
+- 16/16 manifest哈希、PE ProductName=CCSwitchMulti、FileVersion/ProductVersion=3.20.4-7、metadata源提交、portable/raw一致、latest版本及signature文本一致通过。复用NSIS派生校验函数得到installed EXE hash `90C6A2598FDECD9F97FAC2731D7F6DE6343AABBABACDCA964DB74132B6675C0D`，与导出声明相符；签名文本一致不是额外公钥验签，派生hash不是安装验收。
+- 未安装/重启/发布/push，现役认证、Provider配置与DB不变。源码组件验收Vite4179已停止。此包修正文档输出规格展示和未知max的UI校验，不代表已修复公共目录默认漂移或证明真实1M运行。
 
 ## 2026-10-19 官方文档规格与 Codex 目录来源分离
 
