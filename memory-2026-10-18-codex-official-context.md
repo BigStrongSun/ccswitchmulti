@@ -1,5 +1,15 @@
 # Codex 官方模型上下文设置
 
+## 2026-10-20 自定义目录配置方法核对
+
+- 用户本轮要求核对正确配置方法，不是授权切换现役配置。内置 Web 重新读取官方 config reference/advanced 及 openai/codex 当前 main 源码；独立 Matrix 搜索仍 HTTP521。没有改现役 TOML、认证、DB、缓存，没有安装、重启、推送或发布。
+- 官方配置参考确认 `model_catalog_json` 是启动时加载的 JSON 目录路径，可由单独 profile 配置覆盖。完整目录解析成 `ModelsResponse`，要求非空 `models`，模型条目还有非默认必需字段，不能只拿几个窗口字段组成最小 JSON 替换整份目录；保留原模型工具、instructions、v2、modalities 等元数据。来源：`https://learn.chatgpt.com/docs/config-file/config-reference`、`https://learn.chatgpt.com/docs/config-file/config-advanced`。
+- 关键调用链纠正：本地 `codex-source-latest/codex-rs/model-provider/src/provider.rs:396` 等入口遇到 `config_model_catalog=Some` 直接选择 `StaticModelsManager`；官方当前 main 的 `ConfiguredModelProvider::create_models_manager` 也相同。静态 manager 返回本地 models，忽略刷新策略，`refresh_if_new_etag` 无操作，不会被远端 `/models` 再覆盖。不能用未选中的 `OpenAiModelsManager` 刷新逻辑推导静态目录会被覆盖。来源：`https://github.com/openai/codex/blob/main/codex-rs/model-provider/src/provider.rs`、`https://github.com/openai/codex/blob/main/codex-rs/models-manager/src/manager.rs`。
+- 独立 Codex 的候选配置：只对目标 `gpt-6.1-sol` 的完整条目设 `context_window=1000000`、`max_context_window=1000000`、`effective_context_window_percent=95`、`auto_compact_token_limit=900000`，顶层 `model_catalog_json` 指向此独立完整目录。若另设顶层窗口/compact，分别为1000000/900000，并指定或保持默认 `model_auto_compact_token_limit_scope="total"`。这是客户端预算覆盖方法，不是证明账号服务端容量的能力声明，不应把本地 override 反写成可信发现 max。
+- `with_config_overrides` 仍按 catalog max 限幅，故只填 TOML 的1M而目录max872K时仍受限；静态目录提高max才改变该客户端计算。1M raw、95% effective对应950000有效预算；total scope自动compact为 `min(configured, raw*90%)`，故900000，不是950000。`body_after_prefix` 是不同计数口径，可能直接用显式配置值，不应把90%结论无条件套到所有scope。来源：官方 `models-manager/src/model_info.rs`、`protocol/src/openai_models.rs`；本地 `core/src/session/context_window.rs:31`、`turn_context.rs:309`。
+- 实际读取 `https://github.com/openai/codex/issues/41325`：这是2026-08-28 GPT-5.6 Sol报告；作者仅提高 bundled max，远端目录随后替换bundled，未测试静态 `model_catalog_json`，没有执行被服务端拒绝的1M推理。因此标题的 remote cap 不等于服务端推理硬上限，也不能直接套到6.1。响应usage路径使用 `turn_context.model_context_window()` 更新本地token状态，未找到stream返回metadata重写模型窗口的路径；服务端仍可独立拒绝过长请求。
+- CCSM 已有受管 catalog 且按Provider逐模型投影context/max，保存门禁仍只信任发现上限。当前3.20.4-7并未开放这项本地实验性max覆盖；正确后续改法是在Official目标模型上区分可信发现能力与显式本地override，保留其他模型和元数据，经受管投影生效，不另挂全局catalog、不全局写1M污染MultiRouter。先验客户端resolved预算，再做目标账号长请求接受验收；本轮只完成文档/源码交叉核对，未执行隔离binary或真实长请求测试。
+
 ## 2026-10-19 近月1M配置关键词检索
 
 - 用户明确要求搜索“为codex配置1m上下文”，近月范围为2026-09-19至2026-10-19。内置Web使用中文原词、英文config与明确日期过滤；独立Matrix search返回HTTP521。搜索recency标签会混入8月旧教程，必须以正文发布日期核对，不能把近期crawl当近期发布。
