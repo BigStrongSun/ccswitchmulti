@@ -1,5 +1,9 @@
 # CC Switch Repository Memory
 
+## 2026-10-19 本地候选补齐统计速度
+
+- `3.20.4-4` 构建分支包含官方 Provider 上下文设置，但漏了主 checkout 已完成的近五分钟 Token 消耗速度提交 `6f8bcdc2c`。仅将该独立提交移入公开 CCSM 集成分支为 `ea606246c`，不合并整个 TP 主分支或内部 AgentMesh。`3.20.4-5` 的功能验收清单必须同时包含官方逐模型上下文与统计概览 `tok/s`；后续冻结构建要核对已完成的功能提交，不能只看当前分支 clean。详情见 [memory-2026-10-18-usage-recent-token-rate.md](memory-2026-10-18-usage-recent-token-rate.md)。
+
 ## 2026-10-18 Codex 官方上下文设置
 
 - 当前方案是 OpenAI Official Provider 逐模型编辑上下文与模型发现；全局 1M 方案在未部署前撤除。只有可信官方 max 明确支持的模型允许新设 1M，不自动抬高 872K 或未知模型。实现、来源和分批验证见 [memory-2026-10-18-codex-official-context.md](memory-2026-10-18-codex-official-context.md)。只改公开 CCSM 集成分支，不操作 AgentMesh 或上游 PR。
