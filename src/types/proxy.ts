@@ -238,23 +238,6 @@ export interface CodexHistoryVisibilityRepairOptions {
   skipProviderBucketSync?: boolean | null;
 }
 
-/** Explicit recovery of legacy Router plaintext envelopes; never a provider migration. */
-export interface CodexHistoryContentRepairOutcome {
-  dryRun: boolean;
-  codexHome: string;
-  previewToken: string | null;
-  planPath: string | null;
-  backupDir: string | null;
-  scannedFiles: number;
-  affectedFiles: number;
-  compressedFiles: number;
-  repairedParts: number;
-  nativeConfig: boolean;
-  requiresCodexExit: boolean;
-  stage: string;
-  message: string;
-}
-
 export interface CodexHistoryVisibilityRepairOutcome {
   dryRun: boolean;
   codexHome: string;

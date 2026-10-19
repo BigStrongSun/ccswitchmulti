@@ -12,7 +12,6 @@ mod codex_egress_timezone;
 #[cfg(test)]
 mod codex_egress_timezone_tests;
 mod codex_guardian;
-pub mod codex_history_content_repair;
 pub mod codex_history_migration;
 pub mod codex_multirouter;
 pub mod codex_runtime_refresh;
@@ -1780,8 +1779,6 @@ pub fn run() {
             commands::get_codex_guardian_status,
             commands::sync_codex_history_to_multirouter,
             commands::repair_codex_history_visibility,
-            commands::preview_codex_history_content_repair,
-            commands::apply_codex_history_content_repair,
             commands::list_codex_history_sessions,
             commands::read_codex_history_session,
             commands::start_external_openai_api_server,

@@ -41,7 +41,6 @@ import type {
 } from "@/types/proxy";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { SessionMessageItem } from "./SessionMessageItem";
-import { CodexHistoryContentRepairDialog } from "./CodexHistoryContentRepairPanel";
 
 const AUTO_TARGET = "__auto__";
 const DEFAULT_SOURCE_FILTER = "all";
@@ -370,7 +369,6 @@ export function CodexHistoryRepairPanel({
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <CodexHistoryContentRepairDialog />
             <Button
               size="sm"
               variant="outline"

@@ -1,38 +1,4 @@
 {
-  "codexHistoryContentRepair": {
-    "title": "Repair older conversations",
-    "close": "Close conversation repair",
-    "description": "Restores a known format where older CCSM Router versions stored readable replies as encrypted_content, causing invalid_encrypted_content after returning to official Codex. Actual ciphertext is preserved; this does not resolve every conversation error.",
-    "scope": "Scans all ordinary and compressed history in the Codex home, including archives and subtasks. Preview reads history and saves a plan. Before applying, switch to the official native OpenAI configuration and fully exit Codex. The backend rechecks the configuration, processes and plan, then fully backs up history, the session index and valid SQLite snapshots before restoring and verifying content.",
-    "home": "Codex home",
-    "homePlaceholder": "Default: ~/.codex",
-    "preview": "Preview conversation repair",
-    "apply": "Apply conversation repair",
-    "scanning": "Scanning ordinary, compressed, archived and subtask history…",
-    "applying": "Checking exit status, backing up, writing and verifying…",
-    "noChanges": "No recognized mislabeled plaintext found. No repair is needed.",
-    "waitingForExit": "Waiting for Codex to exit",
-    "ready": "Preview complete. Exit Codex before applying.",
-    "completed": "Restoration complete. Reopen official Codex to continue your conversations.",
-    "idle": "Preview the scan results before applying restoration.",
-    "nativeRequired": "Switch to the official native OpenAI configuration, then fully exit Codex before applying. The current configuration will be checked again.",
-    "scannedFiles": "Scanned files",
-    "affectedFiles": "Affected files",
-    "compressedFiles": "Affected compressed files",
-    "pendingParts": "Content parts to restore",
-    "repairedParts": "Restored content parts",
-    "stage": "Backend stage: {{stage}}",
-    "stages": {
-      "preview": "Preview complete",
-      "completed": "Restoration complete"
-    },
-    "resolvedHome": "Codex home: {{path}}",
-    "plan": "Preview plan",
-    "backup": "Complete backup",
-    "copiedPath": "Copied {{label}} path",
-    "copyPath": "Copy {{label}} path",
-    "copyFailed": "Copy failed"
-  },
   "app": {
     "title": "CCSwitchMulti",
     "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"

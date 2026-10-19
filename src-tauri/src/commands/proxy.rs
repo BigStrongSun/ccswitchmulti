@@ -691,41 +691,6 @@ pub async fn sync_codex_history_to_multirouter(
     .map_err(|error| error.to_string())
 }
 
-/// 显式预览旧 Router 明文误标；不迁移 Provider，也不安装 renderer 补丁。
-#[tauri::command]
-pub async fn preview_codex_history_content_repair(
-    state: tauri::State<'_, AppState>,
-    codex_home: Option<String>,
-) -> Result<crate::codex_history_content_repair::ContentRepairOutcome, String> {
-    let guard = state.proxy_service.lock_switch_for_app("codex").await;
-    tokio::task::spawn_blocking(move || {
-        let _guard = guard;
-        crate::codex_history_content_repair::preview(codex_home)
-    })
-    .await
-    .map_err(|error| format!("历史恢复预览任务失败：{error}"))?
-}
-
-/// 执行用户已预览的续聊恢复，后台切换锁保持到完整读回结束。
-#[tauri::command]
-pub async fn apply_codex_history_content_repair(
-    state: tauri::State<'_, AppState>,
-    preview_token: String,
-) -> Result<crate::codex_history_content_repair::ContentRepairOutcome, String> {
-    let guard = state.proxy_service.lock_switch_for_app("codex").await;
-    if !crate::services::provider::ProviderService::current_codex_uses_native(state.inner())
-        .map_err(|error| error.to_string())?
-    {
-        return Err("请先切回官方原生模式并退出 Codex，再执行旧对话续聊修复。".to_string());
-    }
-    tokio::task::spawn_blocking(move || {
-        let _guard = guard;
-        crate::codex_history_content_repair::apply(preview_token)
-    })
-    .await
-    .map_err(|error| format!("历史恢复执行任务失败：{error}"))?
-}
-
 /// 修复当前 Codex Desktop 历史侧边栏可见性；调用方应先 dry-run，再由用户确认 apply。
 #[tauri::command]
 pub async fn repair_codex_history_visibility(
