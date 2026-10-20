@@ -34,6 +34,8 @@
 
 ## 验证记录
 
+- 修复源码提交：主 checkout `92259a8b5`，现有集成线摘取为 `bc8ae9274`；唯一冲突为 memory 顶部索引，保留两边全部知识项。集成候选元数据设为 `3.20.4-9`（四处版本源一致），仅作本地修复验收，不打标签或公开推送。
+
 - 首轮 183/49/3/1 聚焦测试通过，生产 Clippy 发现测试专用 `StreamReconnector::new` dead_code；已用 `cfg(test)` 修正，不用 allow 掩盖。
 - 最终聚焦回归全部通过：forwarder 183、streaming_retry 52、error 3、managed_codex_retry_budget 1，共 239 passed/0 failed；生产 `cargo clippy --lib -- -D warnings` exit 0。Rustfmt、diff whitespace、UTF-8 严格解码/no BOM/no U+FFFD 检查通过。原始日志保存在 `.local-archives/20261020-transport-owner/verify-final.log`。目标生命周期由 `Invoke-WithLocalReleaseCargoTarget` 负责，失败也回收。
 - Luna 集中审查发现 ProxyManaged 容量否决仍继续的条件缺口，已统一终止并增加 quota503/错误体超时负向测试；只读审查未发现其它 owner 传递阻断。没有将真实 TLS 回环测试当成生产上游成功证明。
