@@ -11,10 +11,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: Change Scope
+    runs-on: ubuntu-latest
+    outputs:
+      scope: ${{ steps.changes.outputs.scope }}
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Test change classification
+        run: python3 -B -m unittest discover -s scripts/ci -p 'test_*.py'
+
+      - name: Classify changed files
+        id: changes
+        run: python3 -B scripts/ci/changed_files.py
+
   frontend:
     name: Frontend Checks
+    needs: scope
+    # Keep the required check present even when the change is documentation-only.
+    if: ${{ always() && (needs.scope.result != 'success' || needs.scope.outputs.scope != 'docs') }}
     runs-on: ubuntu-latest
     steps:
+      - name: Require change classification
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: test "$SCOPE_RESULT" = success
+
       - name: Checkout
         uses: actions/checkout@v6
 
@@ -46,33 +72,80 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: TypeScript type check
-        run: pnpm typecheck
-
       - name: Check formatting
         run: pnpm format:check
+
+      - name: TypeScript type check
+        run: pnpm typecheck
 
       - name: Unit tests
         run: pnpm test:unit
 
-  backend:
-    name: Backend Checks
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+  rustfmt:
+    name: Rust Formatting
+    needs: scope
+    if: ${{ always() && (needs.scope.result != 'success' || needs.scope.outputs.scope != 'docs') }}
+    runs-on: ubuntu-latest
     steps:
+      - name: Require change classification
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: test "$SCOPE_RESULT" = success
+
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+
+      - name: Check Rust formatting
+        run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
+
+  backend:
+    name: Backend Checks (${{ matrix.os }})
+    needs: [scope, frontend, rustfmt]
+    # Always expand all three required check names, including docs-only changes.
+    if: ${{ always() }}
+    # Docs and failed prerequisites need only a lightweight Ubuntu result gate.
+    runs-on: >-
+      ${{ needs.scope.result == 'success' && needs.scope.outputs.scope != 'docs' &&
+          needs.frontend.result == 'success' && needs.rustfmt.result == 'success' &&
+          matrix.os || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    steps:
+      - name: Require successful frontend and formatting checks
+        shell: bash
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          CHANGE_SCOPE: ${{ needs.scope.outputs.scope }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          RUSTFMT_RESULT: ${{ needs.rustfmt.result }}
+        run: |
+          test "$SCOPE_RESULT" = success
+          if [ "$CHANGE_SCOPE" = docs ]; then
+            echo "Documentation-only change: backend checks are satisfied without building."
+          else
+            test "$FRONTEND_RESULT" = success
+            test "$RUSTFMT_RESULT" = success
+          fi
+
+      - name: Checkout
+        if: needs.scope.outputs.scope != 'docs'
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        if: needs.scope.outputs.scope != 'docs'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Install Linux system deps
-        if: runner.os == 'Linux'
+        if: needs.scope.outputs.scope != 'docs' && runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -84,6 +157,7 @@ jobs:
             || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
 
       - name: Cache Cargo registry and build
+        if: needs.scope.outputs.scope != 'docs'
         uses: actions/cache@v6
         with:
           path: |
@@ -94,14 +168,14 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Create frontend dist placeholder
+        if: needs.scope.outputs.scope != 'docs'
         shell: bash
         run: mkdir -p dist
 
-      - name: Check Rust formatting
-        run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
-
       - name: Clippy
+        if: needs.scope.outputs.scope != 'docs'
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
       - name: Run tests
+        if: needs.scope.outputs.scope != 'docs'
         run: cargo test --manifest-path src-tauri/Cargo.toml
