@@ -2965,7 +2965,7 @@ fn build_chat_proxy_error_response(
 ) -> Result<axum::response::Response, ProxyError> {
     let status = axum::http::StatusCode::from_u16(map_proxy_error_to_status(error))
         .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    let body = json!({
+    let mut body = json!({
         "error": {
             "message": format!(
                 "{} (provider={}, model={}, endpoint={})",
@@ -2979,6 +2979,9 @@ fn build_chat_proxy_error_response(
             "param": Value::Null
         }
     });
+    if let Some(error_object) = body.get_mut("error").and_then(Value::as_object_mut) {
+        error.apply_local_transport_error_metadata(error_object);
+    }
     let body = serde_json::to_vec(&body)
         .map_err(|e| ProxyError::Internal(format!("Failed to serialize proxy error: {e}")))?;
     let mut builder = axum::response::Response::builder().status(status).header(
@@ -5201,6 +5204,7 @@ fn codex_proxy_error_json(
             Value::String(codex_proxy_error_code(error).to_string()),
         );
     }
+    error.apply_local_transport_error_metadata(error_obj);
 
     if !error_obj.contains_key("param") {
         error_obj.insert("param".to_string(), Value::Null);
@@ -5228,7 +5232,7 @@ fn codex_proxy_error_json(
 
 fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
     match error {
-        ProxyError::ForwardFailed(_) => "cc_switch_forward_failed",
+        ProxyError::ForwardFailed(_) => super::error::CCSM_UPSTREAM_TRANSPORT_ERROR_CODE,
         ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => "cc_switch_timeout",
         ProxyError::ResponsePending(_) => "cc_switch_response_pending",
         ProxyError::NoAvailableProvider => "cc_switch_no_available_provider",
@@ -6183,7 +6187,8 @@ mod image_edits_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        body_looks_like_sse, build_external_codex_official_oauth_provider,
+        body_looks_like_sse, build_chat_proxy_error_response, build_codex_proxy_error_response,
+        build_external_codex_official_oauth_provider,
         chat_completion_to_response_from_verified_profile, chat_sse_to_response_value,
         classify_body_for_diagnostics, codex_catalog_models_response, codex_proxy_error_json,
         codex_proxy_error_status, codex_request_classification_fields,
@@ -6211,6 +6216,7 @@ mod tests {
                 ExternalOpenAiApiProfileUpdate,
             },
             failover_switch::FailoverSwitchManager,
+            handler_context::RequestContext,
             provider_router::ProviderRouter,
             providers::{
                 codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore,
@@ -7772,9 +7778,127 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"
         assert!(message.contains("gpt-5.6-sol"));
         assert!(message.contains("/responses"));
         assert!(message.contains("dns lookup failed"));
-        assert_eq!(body["error"]["code"], "cc_switch_forward_failed");
+        assert_eq!(body["error"]["code"], "ccsm_upstream_transport_error");
+        assert_eq!(body["error"]["source"], "ccsm");
+        assert_eq!(body["error"].get("upstream_status"), Some(&Value::Null));
         assert_eq!(body["error"]["provider"], "OpenAI Official");
         assert_eq!(body["error"]["model"], "gpt-5.6-sol");
+    }
+
+    async fn codex_error_test_context() -> RequestContext {
+        let state = build_state(Arc::new(Database::memory().expect("memory db")));
+        RequestContext::new_with_provider(
+            &state,
+            &json!({"model": "gpt-image-2"}),
+            &HeaderMap::new(),
+            AppType::Codex,
+            "Codex",
+            "codex",
+            Provider::with_id(
+                "codex-test".to_string(),
+                "OpenAI Official".to_string(),
+                json!({}),
+                None,
+            ),
+        )
+        .await
+        .expect("Codex request context")
+    }
+
+    #[tokio::test]
+    async fn codex_local_transport_502_is_marked_for_text_and_image_responses() {
+        for endpoint in ["/responses", "/v1/images/generations"] {
+            let ctx = codex_error_test_context().await;
+            let response = build_codex_proxy_error_response(
+                &ctx,
+                endpoint,
+                &ProxyError::ForwardFailed("TLS handshake failed".to_string()),
+            )
+            .expect("Codex error response");
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let body: Value = serde_json::from_slice(&bytes).expect("JSON error body");
+            assert_eq!(body["error"]["code"], "ccsm_upstream_transport_error");
+            assert_eq!(body["error"]["source"], "ccsm");
+            assert_eq!(body["error"].get("upstream_status"), Some(&Value::Null));
+            assert_eq!(body["error"]["provider"], "OpenAI Official");
+            assert_eq!(body["error"]["model"], "gpt-image-2");
+            assert_eq!(body["error"]["endpoint"], endpoint);
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("TLS handshake failed"));
+            assert!(body["error"]["param"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_chat_local_transport_502_has_canonical_source_metadata() {
+        let ctx = codex_error_test_context().await;
+        let response = build_chat_proxy_error_response(
+            &ctx,
+            "/v1/chat/completions",
+            &ProxyError::ForwardFailed("connection refused".to_string()),
+        )
+        .expect("Chat error response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON error body");
+        assert_eq!(body["error"]["code"], "ccsm_upstream_transport_error");
+        assert_eq!(body["error"]["source"], "ccsm");
+        assert_eq!(body["error"].get("upstream_status"), Some(&Value::Null));
+        assert_eq!(body["error"]["param"], Value::Null);
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("connection refused"));
+    }
+
+    #[tokio::test]
+    async fn codex_upstream_http_502_keeps_upstream_identity() {
+        let ctx = codex_error_test_context().await;
+        let response = build_codex_proxy_error_response(
+            &ctx,
+            "/responses",
+            &ProxyError::UpstreamError {
+                status: 502,
+                body: Some(
+                    json!({"error":{"message":"gateway unavailable","code":"upstream_failure"}})
+                        .to_string(),
+                ),
+            },
+        )
+        .expect("Codex error response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON error body");
+        assert_eq!(body["error"]["upstream_status"], 502);
+        assert!(!body["error"].as_object().unwrap().contains_key("source"));
+        assert_eq!(body["error"]["code"], "upstream_failure");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("gateway unavailable"));
+    }
+
+    #[tokio::test]
+    async fn codex_response_pending_keeps_424_nonretryable_without_retry_after() {
+        let ctx = codex_error_test_context().await;
+        let response = build_codex_proxy_error_response(
+            &ctx,
+            "/responses",
+            &ProxyError::ResponsePending("upstream response not received".to_string()),
+        )
+        .expect("Codex error response");
+        assert_eq!(response.status(), StatusCode::FAILED_DEPENDENCY);
+        assert!(!response
+            .headers()
+            .contains_key(axum::http::header::RETRY_AFTER));
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON error body");
+        assert_eq!(body["error"]["code"], "cc_switch_response_result_unknown");
+        assert_eq!(body["error"]["retryable"], false);
+        assert!(!body["error"].as_object().unwrap().contains_key("source"));
     }
 
     #[test]

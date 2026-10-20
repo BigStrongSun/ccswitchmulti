@@ -43,3 +43,9 @@
 ## 检索
 
 内置 Web 搜索并打开 [AWS 关于重试乘法与单点重试的官方说明](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/) 和 [OpenAI Codex 配置参考](https://developers.openai.com/codex/config-reference)；Matrix 独立搜索返回 `fetch failed`，不声称外部双链一致。具体根因由版本匹配的 CCSM 源码、CCSM/客户端日志和本地 Codex 源码交叉核验，外部材料只支持设计原则。
+
+## 后续公开保留与集成验收
+
+- PR 集成任务的后续推送意外带入 `bc8ae9274` 与 `5d5f0209c`；用户随后明确同意保留并先验收。以上“仅本地、不公开推送”是最初范围，不再代表用户当前决定；本次不因此新建 Release 或操作安装态。
+- 包含这两笔及四个贡献者 PR 的 `7ea5663ef` 已通过完整 CI `39399660268`，前端与三平台后端六个 job 全 success。
+- 集成复审发现 502 来源标记仅覆盖通用 `IntoResponse`，Codex/Chat/图片自定义错误响应绕过它；补充根修改为三个入口复用同一 metadata helper，保留真实上游 502 与未知结果 424 的语义。RED/GREEN、后续提交和最终验收见 [PR 集成记录](memory-2026-10-20-pr-triage.md)。先前冻结/构建的候选不自动视为含有这次补充修复；交付时仍须核对最终源码提交。
