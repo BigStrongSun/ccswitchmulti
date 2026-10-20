@@ -1,8 +1,9 @@
 # CC Switch Repository Memory
 
-## 2026-10-20 v3.20.4-8 发布候选
+## 2026-10-20 v3.20.4-8 正式发布
 
 - 公开发布目标为 `BigStrongSun/ccswitchmulti`，不发布 AgentMesh。遗漏的输入/输出速率拆分 `a7ae078d9` 已摘为 `fdf008b9b`；Official Provider 上下文与 GPT-6.1 Sol 500K 默认修复均在候选树中。前端 209 文件/1701 测试、typecheck、Prettier、Cargo check --tests、严格 Clippy、rustfmt 通过；Rust 全库同源行为证据为 4353 passed/9 ignored。发布、资产核验与未合入范围见 [memory-2026-10-20-v3.20.4-8-release.md](memory-2026-10-20-v3.20.4-8-release.md)。
+- annotated tag 固定到 `7f48b3ef771e115913662da4b6cdf9fbe6e3a9d4`，Release workflow `39383898390` 七 job 与主线 CI `39383898940` 四 job 全 success；正式 Latest Release 共 19 资产。六平台更新清单与五份签名文件一致，下载的 Windows x64 installer、签名及 manifest 共七文件大小/SHA-256 全匹配 GitHub。未安装或重启本机程序。
 
 ## 2026-10-19 本地候选补齐统计速度
 
