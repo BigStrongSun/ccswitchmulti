@@ -54,9 +54,11 @@ All five were closed using GitHub comments thanking contributors and identifying
 - Test TEMP/TMP belong to ignored project path `release/acceptance/pr-triage/test-temp`; existing project Cargo target reused. Do not treat loopback fixtures as a real upstream image-generation or installed-app E2E test.
 - Independent Luna reviews covered recent PRs/CI, legacy PR supersession and official/image boundaries, plus dependency blockers. No unresolved merge blocker remains for the four accepted PRs. An additional external-client image credential non-forwarding handler E2E is a possible follow-up; existing forwarder authentication tests remain.
 
-## Publication State At This Commit
+## Verified Publication And Full CI
 
-- Four merge commits completed locally. Remote `fork/main` rechecked at `7f48b3ef771e115913662da4b6cdf9fbe6e3a9d4`; normal fast-forward push and actual GitHub PR merge/CI confirmation follow.
-- Five superseded PR closures and all six dependency reviews already exist on GitHub.
-- Public source/CI state and unchanged Release/installation state must be reported separately. Do not trigger a docs-only push until full CI finishes, because concurrency would cancel the active main run.
+- Normal fast-forward push updated public `fork/main` to `844ca809dbbd64d9569f3dc86b0637a34daa8326`; remote SHA was checked again after CI completed. GitHub confirms #119, #117, #113 and #108 are `MERGED` with the merge commits listed above.
+- [Full CI 39397265757](https://github.com/BigStrongSun/ccswitchmulti/actions/runs/39397265757) completed with all six jobs `success`: Change Scope, Rust Formatting, Frontend Checks and Backend Checks for Windows, Ubuntu and macOS. All three backend jobs actually executed strict Clippy and Cargo tests after successful frontend/formatting prerequisites; no backend check was skipped or replaced by a docs gate in this run.
+- Five superseded PR closures and all six dependency reviews exist on GitHub; #122 and #112 are `CHANGES_REQUESTED`, and only those six dependency PRs remain open at verification time.
+- This follow-up changes only root Markdown memory files after the full run has completed, exercising the docs-only path without cancelling full validation. Expected: frontend/rustfmt skipped, the same three backend names succeed using Ubuntu result gates, and all backend checkout/toolchain/cache/compile/test steps skipped. The actual result and run link are maintained in [PR #119 verification comment](https://github.com/BigStrongSun/ccswitchmulti/pull/119#issuecomment-6287652955), avoiding a recursive documentation commit solely to record its own CI ID.
+- Public source/CI state and unchanged Release/installation state remain separate. Release `v3.20.4-8` still points to `7f48b3ef771e115913662da4b6cdf9fbe6e3a9d4`; these four PRs are source-main improvements, not included in that existing package.
 - Search: built-in web checked public repository/official GitHub Actions documentation; independent Matrix search was discovered and attempted but returned `fetch failed`. Current `git`/`gh` source, PR and CI evidence was used to resolve stale indexing; no claim of successful Matrix corroboration.
