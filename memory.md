@@ -1,5 +1,9 @@
 # CC Switch Repository Memory
 
+## 2026-10-20 贡献者 PR 集中处理
+
+- 公开 CCSM 集成批次合入 #119（CI 调度）、#117（向导失败测试时序）、#113（官方认证保存不得改写原生默认模型）、#108（Desktop 原生登录图像路由）；5 个已有等价主线修复的旧 PR 关闭，6 个依赖 PR 留下审查意见而不合并。范围、根因、提交和验证见 [memory-2026-10-20-pr-triage.md](memory-2026-10-20-pr-triage.md)。本批不改变版本号、既有 v3.20.4-8 Release 或安装态；远端合入及 CI 结果以该记录的后续更新为准。
+
 ## 2026-10-20 v3.20.4-8 正式发布
 
 - 公开发布目标为 `BigStrongSun/ccswitchmulti`，不发布 AgentMesh。遗漏的输入/输出速率拆分 `a7ae078d9` 已摘为 `fdf008b9b`；Official Provider 上下文与 GPT-6.1 Sol 500K 默认修复均在候选树中。前端 209 文件/1701 测试、typecheck、Prettier、Cargo check --tests、严格 Clippy、rustfmt 通过；Rust 全库同源行为证据为 4353 passed/9 ignored。发布、资产核验与未合入范围见 [memory-2026-10-20-v3.20.4-8-release.md](memory-2026-10-20-v3.20.4-8-release.md)。
