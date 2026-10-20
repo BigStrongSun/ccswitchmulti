@@ -1818,6 +1818,7 @@ function ProviderFormFull({
             item.enabled === false && item.model === currentDefaultModel,
         );
         if (
+          shouldPersistCodexLocalConfig &&
           enabledCatalogModels.length > 0 &&
           (!currentDefaultModel || defaultModelDisabled)
         ) {
