@@ -10,9 +10,10 @@
 //! 撤回已发给客户端的字节。因此重试只在下游尚未收到任何实质内容（至多收到
 //! `message_start`/`ping` 这类协议脚手架）时进行——这恰好覆盖最常见的中断窗口：
 //! 预热在 reasoning `output_item.added`（不向下游产出字节）后提交，随后模型长时间
-//! 静默思考，空闲切断发生时下游只收到过 `message_start`。重试用全新的转换器实例
-//! 重发同一上游请求，并抑制重复的 `message_start`，对客户端完全透明；一旦转发过
-//! 实质内容，行为与现状一致（错误事件透传）。
+//! 静默思考，空闲切断发生时下游只收到过 `message_start`。仅在
+//! `StreamReconnector::transport_retry_enabled` 开启时才允许代理重发；客户端拥有
+//! 传输预算的原生 Codex 流即使尚无语义输出也把失败交回客户端。一旦转发过实质
+//! 内容，行为与现状一致（错误事件透传）。
 //!
 //! 上游语义性失败（`response.failed`/`error` 事件）不重试：那是上游的明确判决，
 //! 与 #5546 在提交边界前的处理保持同一分界。可重试与否由转换器附加的
@@ -79,6 +80,10 @@ pub(crate) type ConnectFn = Box<dyn Fn() -> ConnectFuture + Send + Sync>;
 pub struct StreamReconnector {
     connect: ConnectFn,
     first_byte_timeout: Duration,
+    /// Whether this reconnect factory may retry transport failures itself.
+    /// Client-managed native Codex streams disable this; capacity recovery remains
+    /// independently eligible, but a failed reconnect is returned to the client.
+    pub(crate) transport_retry_enabled: bool,
 }
 
 /// 上游原生 Responses SSE 的最小排障关联信息。
@@ -93,10 +98,20 @@ pub(crate) struct StreamLogContext {
 }
 
 impl StreamReconnector {
+    #[cfg(test)]
     pub fn new(connect: ConnectFn, first_byte_timeout: Duration) -> Self {
+        Self::new_with_transport_retry_enabled(connect, first_byte_timeout, true)
+    }
+
+    pub fn new_with_transport_retry_enabled(
+        connect: ConnectFn,
+        first_byte_timeout: Duration,
+        transport_retry_enabled: bool,
+    ) -> Self {
         Self {
             connect,
             first_byte_timeout,
+            transport_retry_enabled,
         }
     }
 
@@ -663,6 +678,19 @@ fn native_responses_transport_error_message(error: &std::io::Error) -> &'static 
     }
 }
 
+fn native_reconnect_failure_message(reason: &str) -> &'static str {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("timed out") || reason.contains("timeout") {
+        "上游响应流重连超时，请检查网络或代理后重试"
+    } else if reason.contains("http 429") {
+        "上游响应流重连被限流（429），请稍后重试"
+    } else if reason.contains("http ") {
+        "上游响应流重连收到拒绝状态，请检查上游配置后重试"
+    } else {
+        "上游响应流重连传输失败，请检查网络或代理后重试"
+    }
+}
+
 /// 中途截断 / 协议拒绝的终态事件：发 `event: response.failed`。
 ///
 /// Codex 客户端按 JSON `type` 字段分派（而非 SSE 事件名）：裸 `event: error`
@@ -874,6 +902,19 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                     ));
                     break 'attempts;
                 };
+                // Native Codex owns transport recovery. A pre-semantic stream
+                // failure is surfaced once so the client can consume its own
+                // stream_max_retries budget; the proxy must not replay it.
+                if !reconnector.transport_retry_enabled && !retrying_capacity {
+                    let message = native_reconnect_failure_message(&reason);
+                    log::warn!("[Codex/Responses] {message}: {reason}");
+                    yield Ok(native_responses_failed_terminal_sse(
+                        response_id.as_deref(),
+                        "stream_error",
+                        message,
+                    ));
+                    break 'attempts;
+                }
                 let attempt = if retrying_capacity {
                     &mut capacity_attempt
                 } else {
@@ -914,16 +955,56 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                     yield Ok(Bytes::from_static(b": ping\n\n"));
                 }
                 tokio::time::sleep(backoff_delay(*attempt)).await;
+                let mut capacity_status_retryable = false;
                 match reconnector.connect().await {
                     Ok(response) if response.status().is_success() => {
                         current = Some(Box::pin(response.bytes_stream()));
                         continue 'attempts;
                     }
                     Ok(response) => {
-                        reason = format!("reconnect got HTTP {} from upstream", response.status().as_u16());
-                        crate::proxy::error_journal::capture_discarded_response(response);
+                        let status = response.status();
+                        reason = format!("reconnect got HTTP {} from upstream", status.as_u16());
+                        if retrying_capacity {
+                            let headers = response.headers().clone();
+                            match tokio::time::timeout(
+                                Duration::from_secs(1),
+                                response.bytes_with_limit(64 * 1024),
+                            ).await {
+                                Ok(Ok(body)) => {
+                                    let body_text = std::str::from_utf8(&body).ok();
+                                    capacity_status_retryable = body_text.is_some_and(|body| {
+                                        is_capacity_error_response(status, Some(body))
+                                    });
+                                    crate::proxy::error_journal::capture_discarded_response(
+                                        ProxyResponse::buffered(status, headers, body),
+                                    );
+                                }
+                                Ok(Err(error)) => {
+                                    reason.push_str(&format!("; response body unavailable: {error}"));
+                                }
+                                Err(_) => reason.push_str("; response body inspection timed out"),
+                            }
+                        } else {
+                            crate::proxy::error_journal::capture_discarded_response(response);
+                        }
                     }
                     Err(error) => reason = format!("reconnect failed: {error}"),
+                }
+                if (retrying_capacity && !capacity_status_retryable)
+                    || (!retrying_capacity && !reconnector.transport_retry_enabled)
+                {
+                    let message = if retrying_capacity {
+                        "上游容量恢复已停止，请稍后重试"
+                    } else {
+                        native_reconnect_failure_message(&reason)
+                    };
+                    log::warn!("[Codex/Responses] {message}: {reason}");
+                    yield Ok(native_responses_failed_terminal_sse(
+                        response_id.as_deref(),
+                        if retrying_capacity { "capacity_retry_stopped" } else { "stream_error" },
+                        message,
+                    ));
+                    break 'attempts;
                 }
             }
         }
@@ -1440,6 +1521,28 @@ mod tests {
         (reconnector, calls)
     }
 
+    fn scripted_client_managed_reconnector(
+        script: Vec<Result<ProxyResponse, ProxyError>>,
+    ) -> (StreamReconnector, Arc<AtomicU32>) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let script = Arc::new(Mutex::new(script));
+        let reconnector = StreamReconnector::new_with_transport_retry_enabled(
+            Box::new(move || {
+                calls_clone.fetch_add(1, Ordering::SeqCst);
+                let next = script
+                    .lock()
+                    .unwrap()
+                    .pop()
+                    .unwrap_or_else(|| Err(ProxyError::ForwardFailed("script empty".into())));
+                Box::pin(async move { next })
+            }),
+            Duration::ZERO,
+            false,
+        );
+        (reconnector, calls)
+    }
+
     async fn collect(stream: impl Stream<Item = Result<Bytes, std::io::Error>>) -> String {
         futures::pin_mut!(stream);
         let mut out = String::new();
@@ -1509,6 +1612,155 @@ mod tests {
         assert_eq!(out.matches("event: response.created").count(), 1);
         assert!(out.contains("recovered"));
         assert!(!out.contains("server_is_overloaded"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_client_managed_capacity_recovery_still_succeeds() {
+        let retry_body = [created(), text_delta("recovered"), completed()].concat();
+        let (reconnector, calls) = scripted_client_managed_reconnector(vec![Ok(
+            streamed_response(&[retry_body.as_str()]),
+        )]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(out.contains("recovered"));
+        assert!(!out.contains("capacity_retry_stopped"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_transport_failure_stops_after_one_reconnect() {
+        let (reconnector, calls) = scripted_client_managed_reconnector(vec![Err(
+            ProxyError::ForwardFailed("TLS handshake EOF".into()),
+        )]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(out.contains("response.failed"));
+        assert!(out.contains("capacity_retry_stopped"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_quota_429_does_not_continue_reconnect_budget() {
+        let (reconnector, calls) =
+            scripted_client_managed_reconnector(vec![Ok(ProxyResponse::buffered(
+                http::StatusCode::TOO_MANY_REQUESTS,
+                http::HeaderMap::new(),
+                Bytes::new(),
+            ))]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(out.contains("capacity_retry_stopped"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_quota_503_does_not_continue_reconnect_budget() {
+        let (reconnector, calls) =
+            scripted_client_managed_reconnector(vec![Ok(ProxyResponse::buffered(
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                http::HeaderMap::new(),
+                Bytes::from_static(br#"{"error":{"type":"insufficient_quota"}}"#),
+            ))]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(out.contains("capacity_retry_stopped"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn proxy_capacity_quota_503_stops_recovery() {
+        let (reconnector, calls) = scripted_reconnector(vec![Ok(ProxyResponse::buffered(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            http::HeaderMap::new(),
+            Bytes::from_static(br#"{"error":{"type":"insufficient_quota"}}"#),
+        ))]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(out.contains("capacity_retry_stopped"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn proxy_capacity_body_timeout_stops_recovery() {
+        let (reconnector, calls) = scripted_reconnector(vec![Ok(ProxyResponse::streamed(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            http::HeaderMap::new(),
+            stream::once(async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"{}"))
+            }),
+        ))]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+        let task = tokio::spawn(async move {
+            collect(create_resilient_responses_sse_stream_with_context(
+                first,
+                Some(reconnector),
+                None,
+                true,
+            ))
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let out = task.await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(out.contains("capacity_retry_stopped"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2150,6 +2402,23 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 5);
         assert!(out.contains("after 5 reconnect attempt(s)"), "got: {out}");
         assert_eq!(out.matches("event: message_start").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn client_managed_transport_drop_is_returned_without_reconnect() {
+        let (reconnector, calls) = scripted_client_managed_reconnector(Vec::new());
+        let first = chunks_then_error(&[created().as_str()]);
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            false,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(out.contains("event: response.failed"));
+        assert!(out.contains("stream_error"));
     }
 
     #[tokio::test(start_paused = true)]

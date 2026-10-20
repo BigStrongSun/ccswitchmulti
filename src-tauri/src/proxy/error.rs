@@ -176,12 +176,19 @@ impl IntoResponse for ProxyError {
                     ProxyError::UpstreamError { .. } => unreachable!(),
                 };
 
-                let error_body = json!({
+                let mut error_body = json!({
                     "error": {
                         "message": message,
                         "type": "proxy_error",
                     }
                 });
+                if matches!(self, ProxyError::ForwardFailed(_)) {
+                    // This 502 is generated locally without an upstream HTTP status.
+                    // Preserve the status contract but do not impersonate upstream 502s.
+                    error_body["error"]["code"] = json!("ccsm_upstream_transport_error");
+                    error_body["error"]["source"] = json!("ccsm");
+                    error_body["error"]["upstream_status"] = serde_json::Value::Null;
+                }
 
                 (http_status, error_body)
             }
@@ -259,6 +266,33 @@ pub fn categorize_error(error: &reqwest::Error) -> ErrorCategory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_transport_502_is_distinct_from_upstream_http_502() {
+        let local = ProxyError::ForwardFailed("TLS handshake failed".into()).into_response();
+        assert_eq!(local.status(), StatusCode::BAD_GATEWAY);
+        let bytes = axum::body::to_bytes(local.into_body(), 8192).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "ccsm_upstream_transport_error");
+        assert_eq!(body["error"]["source"], "ccsm");
+        assert!(body["error"]["upstream_status"].is_null());
+
+        let upstream_body =
+            json!({"error": {"message": "upstream unavailable", "code": "upstream_failure"}});
+        let upstream = ProxyError::UpstreamError {
+            status: 502,
+            body: Some(upstream_body.to_string()),
+        }
+        .into_response();
+        assert_eq!(upstream.status(), StatusCode::BAD_GATEWAY);
+        let bytes = axum::body::to_bytes(upstream.into_body(), 8192)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            upstream_body
+        );
+    }
 
     #[test]
     fn error_chain_message_includes_deepest_source() {

@@ -1,5 +1,9 @@
 # CC Switch Repository Memory
 
+## 2026-10-20 CCSM 传输重试归属修复
+
+- 用户要求修 CCSM 放大，不是换节点。根因是代理内部 6 次 send 与客户端 request/stream 恢复叠加，以及原生 Responses SSE 的第二个传输 owner。方案、证据、验证和安装状态见 [memory-2026-10-20-transport-retry-ownership.md](memory-2026-10-20-transport-retry-ownership.md)；保留客户端 2/10，不再对 Codex 初始建连和原生 SSE 传输故障暗中重放，未知结果仍 424。
+
 ## 2026-10-20 贡献者 PR 集中处理
 
 - 公开 CCSM 集成批次合入 #119（CI 调度）、#117（向导失败测试时序）、#113（官方认证保存不得改写原生默认模型）、#108（Desktop 原生登录图像路由）；5 个已有等价主线修复的旧 PR 关闭，6 个依赖 PR 留下审查意见而不合并。范围、根因、提交和验证见 [memory-2026-10-20-pr-triage.md](memory-2026-10-20-pr-triage.md)。本批不改变版本号、既有 v3.20.4-8 Release 或安装态；远端合入及 CI 结果以该记录的后续更新为准。
@@ -17,6 +21,7 @@
 
 - 当前方案是 OpenAI Official Provider 逐模型编辑上下文与模型发现；全局 1M 方案在未部署前撤除。只有可信官方 max 明确支持的模型允许新设 1M，不自动抬高 872K 或未知模型。实现、来源和分批验证见 [memory-2026-10-18-codex-official-context.md](memory-2026-10-18-codex-official-context.md)。只改公开 CCSM 集成分支，不操作 AgentMesh 或上游 PR。
 - 2026-10-20 已在源码将精确型号 `gpt-6.1-sol` 的缺省窗口跟进官方公布的500K；账号实时目录与用户显式覆盖优先。探测不再把目录默认固化成手动覆盖，旧自产272K缓存不参与官方默认解析。未打新包、安装或发布，3.20.4-7包仍为此前源码。
+
 
 ## 2026-10-16 官方 4.0 集成尝试
 
