@@ -1,5 +1,9 @@
 # CC Switch Repository Memory
 
+## 2026-10-20 v3.20.4-8 发布候选
+
+- 公开发布目标为 `BigStrongSun/ccswitchmulti`，不发布 AgentMesh。遗漏的输入/输出速率拆分 `a7ae078d9` 已摘为 `fdf008b9b`；Official Provider 上下文与 GPT-6.1 Sol 500K 默认修复均在候选树中。前端 209 文件/1701 测试、typecheck、Prettier、Cargo check --tests、严格 Clippy、rustfmt 通过；Rust 全库同源行为证据为 4353 passed/9 ignored。发布、资产核验与未合入范围见 [memory-2026-10-20-v3.20.4-8-release.md](memory-2026-10-20-v3.20.4-8-release.md)。
+
 ## 2026-10-19 本地候选补齐统计速度
 
 - `3.20.4-4` 构建分支包含官方 Provider 上下文设置，但漏了主 checkout 已完成的近五分钟 Token 消耗速度提交 `6f8bcdc2c`。仅将该独立提交移入公开 CCSM 集成分支为 `ea606246c`，不合并整个 TP 主分支或内部 AgentMesh。`3.20.4-5` 的功能验收清单必须同时包含官方逐模型上下文与统计概览 `tok/s`；后续冻结构建要核对已完成的功能提交，不能只看当前分支 clean。详情见 [memory-2026-10-18-usage-recent-token-rate.md](memory-2026-10-18-usage-recent-token-rate.md)。
