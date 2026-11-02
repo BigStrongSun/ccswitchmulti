@@ -6194,22 +6194,20 @@ mod image_edits_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        body_looks_like_sse, build_chat_proxy_error_response, build_codex_proxy_error_response,
-        build_external_codex_official_oauth_provider,
+        body_looks_like_sse, body_snippet, build_chat_proxy_error_response,
+        build_codex_proxy_error_response, build_external_codex_official_oauth_provider,
         chat_completion_to_response_from_verified_profile, chat_sse_to_response_value,
         classify_body_for_diagnostics, codex_catalog_models_response, codex_proxy_error_json,
         codex_proxy_error_status, codex_request_classification_fields,
         create_codex_chat_sse_stream_from_verified_profile, external_openai_api_models_response,
         external_openai_api_unsupported_response, mark_external_openai_headers,
         resolve_codex_image_generation_provider, resolve_external_codex_router_raw_target,
-        resolve_external_codex_router_target, resolve_forward_error_provider_for_logging,
-        resolve_forward_error_route_provider, responses_response_to_compaction_sse,
-        responses_response_to_completed_sse, responses_response_to_full_sse,
-        responses_sse_to_response_value, should_handle_as_codex_client,
-        should_use_claude_transform_streaming, should_wrap_native_codex_responses_stream,
-        transform, upstream_body_parse_error,
-            body_snippet, resolve_external_openai_compatible_provider,
-        };
+        resolve_external_codex_router_target, resolve_external_openai_compatible_provider,
+        resolve_forward_error_provider_for_logging, resolve_forward_error_route_provider,
+        responses_response_to_compaction_sse, responses_response_to_completed_sse,
+        responses_response_to_full_sse, responses_sse_to_response_value,
+        should_handle_as_codex_client, should_use_claude_transform_streaming,
+        should_wrap_native_codex_responses_stream, transform, upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
