@@ -6194,8 +6194,8 @@ mod image_edits_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        body_looks_like_sse, body_snippet, build_chat_proxy_error_response,
-        build_codex_proxy_error_response, build_external_codex_official_oauth_provider,
+        body_looks_like_sse, build_chat_proxy_error_response, build_codex_proxy_error_response,
+        build_external_codex_official_oauth_provider,
         chat_completion_to_response_from_verified_profile, chat_sse_to_response_value,
         classify_body_for_diagnostics, codex_catalog_models_response, codex_proxy_error_json,
         codex_proxy_error_status, codex_request_classification_fields,
