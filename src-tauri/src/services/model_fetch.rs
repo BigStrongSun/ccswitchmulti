@@ -2150,6 +2150,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_vllm_model_card_max_model_len() {
+        // vLLM uses the OpenAI ModelList envelope, but publishes its configured
+        // serving limit as `max_model_len` on each ModelCard.
+        let models = parse_models_response(
+            r#"{"object":"list","data":[{"id":"Qwen/Qwen3.8","object":"model","owned_by":"vllm","root":"Qwen/Qwen3.8","max_model_len":262144,"permission":[]}]}"#,
+            &[],
+        )
+        .expect("parse vLLM ModelList and ModelCard response");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "Qwen/Qwen3.8");
+        assert_eq!(models[0].owned_by.as_deref(), Some("vllm"));
+        assert_eq!(models[0].context_window, Some(262_144));
+    }
+
+    #[test]
+    fn parse_strata_vllm_compatible_model_card_with_engine_metadata() {
+        // Strata keeps the OpenAI-compatible `data[]` shape while exposing
+        // llama.cpp engine metadata under `meta.n_ctx` and architecture.
+        let models = parse_models_response(
+            r#"{"object":"list","data":[{"id":"qwen3.8","object":"model","owned_by":"strata","status":"loaded","meta":{"n_ctx":1048576},"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}}]}"#,
+            &[],
+        )
+        .expect("parse Strata model card");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "qwen3.8");
+        assert_eq!(models[0].owned_by.as_deref(), Some("strata"));
+        assert_eq!(models[0].context_window, Some(1_048_576));
+        assert_eq!(
+            models[0].input_modalities,
+            Some(vec!["text".to_string(), "image".to_string()])
+        );
+        assert_eq!(models[0].supports_image, Some(true));
+        assert_eq!(models[0].output_modalities, Some(vec!["text".to_string()]));
+    }
+
+    #[test]
     fn dashscope_capability_codes_are_not_mistaken_for_modalities() {
         let models = parse_models_response(
             r#"{"output":{"models":[{"model":"qwen-vl","capabilities":["VU","TG"]}]}}"#,
