@@ -1038,6 +1038,19 @@ async fn enrich_zhipu_context_windows(
         if model.max_output_tokens.is_none() {
             model.max_output_tokens = facts.max_output_tokens;
         }
+        if model.input_modalities.is_none() {
+            model.input_modalities = facts.input_modalities.clone();
+        }
+        if model.output_modalities.is_none() {
+            model.output_modalities = facts.output_modalities.clone();
+        }
+        if model.supports_image.is_none() {
+            model.supports_image = model.input_modalities.as_ref().map(|modalities| {
+                modalities
+                    .iter()
+                    .any(|modality| modality.eq_ignore_ascii_case("image"))
+            });
+        }
     }
 }
 
@@ -1255,22 +1268,31 @@ async fn enrich_missing_zhipu_detail_contexts(
     metadata: &mut HashMap<String, ZhipuModelMetadata>,
 ) {
     for model in models {
-        if model.context_window.is_some() {
+        if model.context_window.is_some() && model.max_output_tokens.is_some() {
             continue;
         }
         let key = normalize_zhipu_model_id(&model.id);
-        if metadata
-            .get(&key)
-            .and_then(|facts| facts.context_window)
-            .is_some()
-        {
+        let existing = metadata.get(&key).cloned().unwrap_or_default();
+        if existing.context_window.is_some() && existing.max_output_tokens.is_some() {
             continue;
         }
         let Some(slug) = zhipu_docs_slug_for_model_id(&model.id) else {
             continue;
         };
-        if let Some(context_window) = fetch_zhipu_detail_context(client, &slug).await {
-            metadata.entry(key).or_default().context_window = Some(context_window);
+        if let Some(facts) = fetch_zhipu_detail_metadata(client, &slug).await {
+            let merged = metadata.entry(key).or_default();
+            if merged.context_window.is_none() {
+                merged.context_window = facts.context_window;
+            }
+            if merged.max_output_tokens.is_none() {
+                merged.max_output_tokens = facts.max_output_tokens;
+            }
+            if merged.input_modalities.is_none() {
+                merged.input_modalities = facts.input_modalities;
+            }
+            if merged.output_modalities.is_none() {
+                merged.output_modalities = facts.output_modalities;
+            }
         }
     }
 }
@@ -1287,8 +1309,11 @@ fn zhipu_docs_slug_for_model_id(model_id: &str) -> Option<String> {
     Some(normalized)
 }
 
-/// 拉取单模型 markdown 页面，并解析“上下文窗口”卡片。
-async fn fetch_zhipu_detail_context(client: &reqwest::Client, slug: &str) -> Option<u64> {
+/// 拉取单模型 markdown 页面并解析官方模型卡片中的 token 限制与输入/输出模态。
+async fn fetch_zhipu_detail_metadata(
+    client: &reqwest::Client,
+    slug: &str,
+) -> Option<ZhipuModelMetadata> {
     let url = format!("https://docs.bigmodel.cn/cn/guide/models/text/{slug}.md");
     let response = client
         .get(url)
@@ -1300,13 +1325,15 @@ async fn fetch_zhipu_detail_context(client: &reqwest::Client, slug: &str) -> Opt
         return None;
     }
     let text = response.text().await.ok()?;
-    parse_zhipu_detail_context(&text)
+    Some(parse_zhipu_detail_metadata(&text))
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ZhipuModelMetadata {
     context_window: Option<u64>,
     max_output_tokens: Option<u64>,
+    input_modalities: Option<Vec<String>>,
+    output_modalities: Option<Vec<String>>,
 }
 
 /// 解析智谱官方模型概览 markdown 表格中的模型、上下文窗口和最大输出列。
@@ -1354,6 +1381,7 @@ fn parse_zhipu_overview_table_row(row: &str) -> Option<(String, ZhipuModelMetada
     let facts = ZhipuModelMetadata {
         context_window: parse_context_tokens(columns[2]),
         max_output_tokens: parse_context_tokens(columns[3]),
+        ..ZhipuModelMetadata::default()
     };
     if facts.context_window.is_none() && facts.max_output_tokens.is_none() {
         return None;
@@ -1368,32 +1396,85 @@ fn extract_markdown_link_label(value: &str) -> Option<&str> {
     Some(&value[start..end])
 }
 
-/// 解析单模型页概览卡片中的“上下文窗口”值。
-fn parse_zhipu_detail_context(markdown: &str) -> Option<u64> {
-    let mut seen_context_card = false;
-    let mut waiting_for_value = false;
+/// 解析官方 Mintlify Markdown 卡片和旧 HTML Card 里的值。
+fn parse_zhipu_detail_metadata(markdown: &str) -> ZhipuModelMetadata {
+    #[derive(Clone, Copy)]
+    enum DetailField {
+        ContextWindow,
+        MaxOutputTokens,
+        InputModalities,
+        OutputModalities,
+    }
 
-    for line in markdown.lines() {
-        let trimmed = line.trim();
-        if trimmed.contains("title=\"上下文窗口\"") {
-            seen_context_card = true;
-            waiting_for_value = trimmed.contains("}>");
-            continue;
-        }
-        if seen_context_card && trimmed.contains("}>") {
-            waiting_for_value = true;
-            continue;
-        }
-        if waiting_for_value
-            && !trimmed.is_empty()
-            && !trimmed.starts_with('<')
-            && !trimmed.starts_with('}')
-        {
-            return parse_context_tokens(trimmed);
+    fn detail_field(title: &str) -> Option<DetailField> {
+        let title = title.trim().trim_start_matches("[card]").trim();
+        match title {
+            "上下文窗口" => Some(DetailField::ContextWindow),
+            "最大输出 Tokens" | "最大输出Token" | "最大输出 tokens" => {
+                Some(DetailField::MaxOutputTokens)
+            }
+            "输入模态" => Some(DetailField::InputModalities),
+            "输出模态" => Some(DetailField::OutputModalities),
+            _ => None,
         }
     }
 
-    None
+    let mut result = ZhipuModelMetadata::default();
+    let mut active_field = None;
+
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        let card_text = trimmed.trim_start_matches('>').trim();
+        let html_title = trimmed
+            .split("title=\"")
+            .nth(1)
+            .and_then(|value| value.split('\"').next());
+        if let Some(field) = html_title.and_then(detail_field) {
+            active_field = Some(field);
+            if !trimmed.contains("}>") {
+                continue;
+            }
+            continue;
+        }
+        if let Some(field) = detail_field(card_text) {
+            active_field = Some(field);
+            continue;
+        }
+        let Some(field) = active_field else {
+            continue;
+        };
+        let value = card_text.trim_matches('`').trim();
+        if value.is_empty() || value.starts_with("[card]") || value.starts_with("</") {
+            continue;
+        }
+        match field {
+            DetailField::ContextWindow => result.context_window = parse_context_tokens(value),
+            DetailField::MaxOutputTokens => result.max_output_tokens = parse_context_tokens(value),
+            DetailField::InputModalities => result.input_modalities = parse_zhipu_modalities(value),
+            DetailField::OutputModalities => {
+                result.output_modalities = parse_zhipu_modalities(value)
+            }
+        }
+        active_field = None;
+    }
+
+    result
+}
+
+fn parse_zhipu_modalities(value: &str) -> Option<Vec<String>> {
+    let lower = value.to_ascii_lowercase();
+    let mut modalities = Vec::new();
+    for (labels, modality) in [
+        (&["文本", "text"][..], "text"),
+        (&["图像", "图片", "image"][..], "image"),
+        (&["音频", "语音", "audio"][..], "audio"),
+        (&["视频", "video"][..], "video"),
+    ] {
+        if labels.iter().any(|label| lower.contains(label)) {
+            modalities.push(modality.to_string());
+        }
+    }
+    (!modalities.is_empty()).then_some(modalities)
 }
 
 /// 统一模型 id：大小写、空格、`ZhipuAI/` 命名空间和 `[1m]` 后缀都不影响匹配。
@@ -2389,14 +2470,46 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
     }
 
     #[test]
-    fn test_parse_zhipu_detail_context() {
+    fn test_parse_zhipu_legacy_html_detail_card() {
         let markdown = r#"
 <Card title="上下文窗口" icon={<svg />}>
   128K
 </Card>
 "#;
 
-        assert_eq!(parse_zhipu_detail_context(markdown), Some(128_000));
+        assert_eq!(
+            parse_zhipu_detail_metadata(markdown).context_window,
+            Some(128_000)
+        );
+    }
+
+    #[test]
+    fn test_parse_zhipu_current_mintlify_detail_card() {
+        // Shape verified against the current official GLM-5.2 Markdown page:
+        // https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2.md
+        let markdown = r#"
+> [card] 输入模态
+>
+> 文本
+
+> [card] 输出模态
+>
+> 文本
+
+> [card] 上下文窗口
+>
+> 1M
+
+> [card] 最大输出 Tokens
+>
+> 128K
+"#;
+
+        let metadata = parse_zhipu_detail_metadata(markdown);
+        assert_eq!(metadata.context_window, Some(1_000_000));
+        assert_eq!(metadata.max_output_tokens, Some(128_000));
+        assert_eq!(metadata.input_modalities, Some(vec!["text".to_string()]));
+        assert_eq!(metadata.output_modalities, Some(vec!["text".to_string()]));
     }
 
     #[test]
@@ -2410,10 +2523,13 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
 </Card>
 "#;
 
-        assert_eq!(parse_zhipu_detail_context(markdown), Some(1_000_000));
         assert_eq!(
-            parse_zhipu_detail_context("<Card title=\"最大输出\">128K</Card>"),
-            None
+            parse_zhipu_detail_metadata(markdown).context_window,
+            Some(1_000_000)
+        );
+        assert_eq!(
+            parse_zhipu_detail_metadata("<Card title=\"最大输出\">128K</Card>").context_window,
+            None,
         );
     }
 
