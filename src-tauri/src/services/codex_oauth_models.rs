@@ -64,8 +64,10 @@ pub fn record_authenticated_model_limits(account_id: &str, models: &[FetchedMode
             max_input_tokens: model.max_input_tokens,
             max_output_tokens: model.max_output_tokens,
             input_modalities: None,
+            output_modalities: None,
             supports_image: None,
             reasoning: None,
+            effort: None,
         })
         .collect::<Vec<_>>();
     snapshot.sort_by(|left, right| left.id.cmp(&right.id));
@@ -591,9 +593,11 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
             max_output_tokens: None,
             id: id.to_string(),
             input_modalities: None,
+            output_modalities: None,
             owned_by: Some("Codex".to_string()),
             supports_image: None,
             reasoning: None,
+            effort: None,
         });
         return;
     }
@@ -607,9 +611,11 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
                 max_output_tokens: None,
                 id: id.to_string(),
                 input_modalities: None,
+                output_modalities: None,
                 owned_by: Some("Codex".to_string()),
                 supports_image: None,
                 reasoning: None,
+                effort: None,
             });
         }
         return;
@@ -655,9 +661,11 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
         max_output_tokens,
         id,
         input_modalities,
+        output_modalities: None,
         owned_by,
         supports_image,
         reasoning,
+        effort: None,
     });
 }
 

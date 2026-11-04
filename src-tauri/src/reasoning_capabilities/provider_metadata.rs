@@ -36,6 +36,13 @@ pub fn detect_platform(provider: &Provider) -> Option<&'static str> {
         Some("openrouter")
     } else if platform.contains("vllm") {
         Some("vllm")
+    } else if reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "api.deepseek.com")
+    {
+        // 仅官方 API 主机名命中；不能因模型叫 DeepSeek 就把第三方托管商归为官方。
+        Some("deepseek")
     } else {
         None
     }
@@ -342,6 +349,25 @@ mod tests {
         assert_eq!(
             detect_platform(&provider("Qwen vLLM", "http://vllm-roglinux:8000")),
             Some("vllm")
+        );
+    }
+
+    #[test]
+    fn detects_deepseek_only_on_official_api_host() {
+        assert_eq!(
+            detect_platform(&provider(
+                "DeepSeek Official",
+                "https://api.deepseek.com/v1"
+            )),
+            Some("deepseek")
+        );
+        assert_eq!(
+            detect_platform(&provider("DeepSeek Gateway", "https://gateway.example/v1")),
+            None
+        );
+        assert_eq!(
+            detect_platform(&provider("Gateway", "https://api.deepseek.com.example/v1")),
+            None
         );
     }
 

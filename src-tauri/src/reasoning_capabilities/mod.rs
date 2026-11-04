@@ -677,6 +677,97 @@ mod tests {
     }
 
     #[test]
+    fn official_deepseek_models_resolve_from_maintained_library() {
+        let provider = plain_provider("DeepSeek Official", "https://api.deepseek.com/v1");
+        let library = catalog::load_library_from_str(include_str!(
+            "../../resources/reasoning-capabilities.json"
+        ))
+        .expect("packaged reasoning library is valid");
+
+        for model in ["deepseek-flash", "deepseek-v4-pro"] {
+            let resolved =
+                resolve_codex_model_capability_with_library(&provider, model, None, Some(&library));
+            let capability = resolved.capability.expect("maintained DeepSeek capability");
+            assert_eq!(resolved.source, CapabilitySource::Library);
+            assert_eq!(capability.default_effort.as_deref(), Some("high"));
+            assert_eq!(
+                capability.supported_efforts,
+                vec!["none", "low", "high", "max"]
+            );
+            assert_eq!(
+                capability
+                    .upstream
+                    .effort_map
+                    .get("minimal")
+                    .map(String::as_str),
+                Some("low")
+            );
+            assert_eq!(
+                capability
+                    .upstream
+                    .effort_map
+                    .get("medium")
+                    .map(String::as_str),
+                Some("high")
+            );
+            assert_eq!(
+                capability
+                    .upstream
+                    .effort_map
+                    .get("xhigh")
+                    .map(String::as_str),
+                Some("high")
+            );
+            assert_eq!(capability.upstream.effort_map.get("ultra"), None);
+
+            let projected =
+                crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(
+                    Some(&capability),
+                );
+            use crate::proxy::providers::codex_reasoning::CodexReasoningEffort as Effort;
+            assert!(projected.disable_allowed);
+            assert_eq!(projected.provider_default_effort, Some(Effort::High));
+            assert_eq!(
+                projected.effort_map.get(&Effort::Minimal),
+                Some(&Effort::Low)
+            );
+            assert_eq!(
+                projected.effort_map.get(&Effort::Medium),
+                Some(&Effort::High)
+            );
+            assert_eq!(
+                projected.effort_map.get(&Effort::XHigh),
+                Some(&Effort::High)
+            );
+            assert_eq!(projected.effort_map.get(&Effort::Ultra), Some(&Effort::Max));
+        }
+    }
+
+    #[test]
+    fn explicit_deepseek_model_config_overrides_maintained_library() {
+        let provider = provider_with_catalog("deepseek-flash", Some(user_declared_reasoning()));
+        let mut provider = provider;
+        provider.name = "DeepSeek Official".into();
+        provider.settings_config["base_url"] = json!("https://api.deepseek.com/v1");
+        let library = catalog::load_library_from_str(include_str!(
+            "../../resources/reasoning-capabilities.json"
+        ))
+        .expect("packaged reasoning library is valid");
+
+        let resolved = resolve_codex_model_capability_with_library(
+            &provider,
+            "deepseek-flash",
+            None,
+            Some(&library),
+        );
+        assert_eq!(resolved.source, CapabilitySource::UserConfig);
+        assert_eq!(
+            resolved.capability.unwrap().supported_efforts,
+            vec!["low", "high"]
+        );
+    }
+
+    #[test]
     fn catalog_ultra_setting_overlays_library_capability_without_changing_its_source() {
         let mut provider = plain_provider("OpenRouter", "https://openrouter.ai/api/v1");
         provider.settings_config = json!({

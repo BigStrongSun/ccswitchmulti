@@ -466,6 +466,23 @@ function catalogRowUpstreamModel(
   );
 }
 
+export function selectOnlyDiscoveredCodexCatalogRows<
+  T extends CodexCatalogModel,
+>(
+  rows: readonly T[],
+  discoveredModelIds: readonly string[],
+): Array<T & { enabled: boolean }> {
+  const discoveredIds = new Set(
+    discoveredModelIds.map((model) => model.trim().toLowerCase()),
+  );
+  return rows.map((row) => ({
+    ...row,
+    enabled: discoveredIds.has(
+      catalogRowUpstreamModel(row).trim().toLowerCase(),
+    ),
+  }));
+}
+
 // Compares rows (with rowId) to incoming models (without) by data fields only,
 // so both sync effects can use the same equality definition. Hidden native-profile
 // fields are included so switching between providers with identical visible fields
@@ -1948,6 +1965,36 @@ export function CodexFormFields({
           <p className="text-xs text-muted-foreground">
             {t("codexConfig.officialContextTokenBudget")}
           </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">
+              {t("codexConfig.officialModelSelectionHint", {
+                count: catalogRows.filter((row) => row.enabled !== false)
+                  .length,
+                defaultValue:
+                  "勾选要保留在 Codex /model 菜单中的模型（已启用 {{count}} 个）。取消旧模型可将其从菜单中移除。",
+              })}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={fetchedModels.length === 0}
+              onClick={() => {
+                setCatalogRows((current) => {
+                  const next = selectOnlyDiscoveredCodexCatalogRows(
+                    current,
+                    fetchedModels.map((model) => model.id),
+                  );
+                  catalogRowsRef.current = next;
+                  return next;
+                });
+              }}
+            >
+              {t("codexConfig.officialSelectDiscovered", {
+                defaultValue: "仅启用本次探测到的模型",
+              })}
+            </Button>
+          </div>
           {catalogRows.map((row, index) => {
             const fetched = fetchedModels.find(
               (item) =>
@@ -1961,6 +2008,16 @@ export function CodexFormFields({
                 upstreamModel={catalogRowUpstreamModel(row)}
                 value={String(row.contextWindow ?? "")}
                 discovered={fetched}
+                enabled={row.enabled !== false}
+                onEnabledChange={(enabled) => {
+                  setCatalogRows((current) => {
+                    const next = current.map((item, rowIndex) =>
+                      rowIndex === index ? { ...item, enabled } : item,
+                    );
+                    catalogRowsRef.current = next;
+                    return next;
+                  });
+                }}
                 onChange={(value) => {
                   setCatalogRows((current) => {
                     const next = current.map((item, rowIndex) =>

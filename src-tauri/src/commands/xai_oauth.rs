@@ -133,8 +133,10 @@ pub async fn get_xai_oauth_models(
             max_input_tokens: None,
             max_output_tokens: None,
             input_modalities: None,
+            output_modalities: None,
             supports_image: None,
             reasoning: None,
+            effort: None,
         })
         .collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));

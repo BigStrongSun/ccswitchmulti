@@ -1,7 +1,61 @@
 {
-  "libraryVersion": 1,
-  "verifiedAt": "2026-08-18",
+  "libraryVersion": 2,
+  "verifiedAt": "2026-11-04",
   "entries": [
+    {
+      "platform": "deepseek",
+      "model": "deepseek-flash",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": ["none", "low", "high", "max"],
+        "defaultEffort": "high",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning_effort",
+          "effortMap": {
+            "minimal": "low",
+            "medium": "high",
+            "xhigh": "high"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "verifiedAt": "2026-11-04",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "deepseek",
+      "model": "deepseek-v4-pro",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": ["none", "low", "high", "max"],
+        "defaultEffort": "high",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning_effort",
+          "effortMap": {
+            "minimal": "low",
+            "medium": "high",
+            "xhigh": "high"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "verifiedAt": "2026-11-04",
+      "evidenceLevel": "vendor_docs"
+    },
     {
       "platform": "openrouter",
       "model": "deepseek/deepseek-v4-pro",

@@ -11,8 +11,10 @@ export interface FetchedModel {
   maxInputTokens?: number | null;
   maxOutputTokens?: number | null;
   inputModalities?: string[] | null;
+  outputModalities?: string[] | null;
   supportsImage?: boolean | null;
   reasoning?: CodexModelReasoningCapability | null;
+  effort?: unknown | null;
 }
 
 export interface VolcengineModelListOptions {

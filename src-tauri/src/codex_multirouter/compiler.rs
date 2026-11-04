@@ -1446,8 +1446,10 @@ mod tests {
                 max_input_tokens: None,
                 max_output_tokens: None,
                 input_modalities: None,
+                output_modalities: None,
                 supports_image: None,
                 reasoning: None,
+                effort: None,
             }],
         );
 

@@ -1,8 +1,31 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { CodexOfficialContextRow } from "./CodexOfficialContextRow";
 
 describe("CodexOfficialContextRow", () => {
+  it("lets the user include or exclude a discovered official model", () => {
+    const onEnabledChange = vi.fn();
+    render(
+      <CodexOfficialContextRow
+        model="gpt-6.1-terra"
+        value=""
+        discovered={{ id: "gpt-6.1-terra", ownedBy: "openai" }}
+        enabled
+        onEnabledChange={onEnabledChange}
+        onChange={vi.fn()}
+      />,
+    );
+
+    const row = screen.getByRole("group", { name: "gpt-6.1-terra" });
+    expect(within(row).getByText("本次探测到")).toBeInTheDocument();
+    const checkbox = within(row).getByRole("checkbox", {
+      name: "启用 gpt-6.1-terra",
+    });
+    expect(checkbox).toBeChecked();
+    fireEvent.click(checkbox);
+    expect(onEnabledChange).toHaveBeenCalledWith(false);
+  });
+
   it("does not offer the documented default above an unknown or lower limit", () => {
     const { rerender } = render(
       <CodexOfficialContextRow

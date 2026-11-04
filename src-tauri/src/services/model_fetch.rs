@@ -7,7 +7,7 @@
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, USER_AGENT};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 /// 获取到的模型信息
@@ -24,9 +24,13 @@ pub struct FetchedModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
     pub input_modalities: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_modalities: Option<Vec<String>>,
     pub supports_image: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<serde_json::Value>,
 }
 
 /// 模型列表获取服务的统一入参。
@@ -56,14 +60,23 @@ pub struct VolcengineModelListRequest<'a> {
     pub secret_access_key: Option<&'a str>,
 }
 
-/// OpenAI 兼容的 /v1/models 响应格式
+/// 常见模型列表响应封套：OpenAI-compatible `data` / Google `models` / DashScope `output.models`。
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Option<Vec<ModelEntry>>,
+    models: Option<Vec<ModelEntry>>,
+    output: Option<ModelListOutput>,
     #[serde(default)]
     msg: Option<String>,
     #[serde(default)]
     error: Option<ModelFetchError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelListOutput {
+    models: Option<Vec<ModelEntry>>,
+    total: Option<u64>,
+    page_no: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +103,7 @@ impl ModelsResponse {
 
 #[derive(Debug, Deserialize)]
 struct ModelEntry {
+    #[serde(default)]
     id: String,
     owned_by: Option<String>,
     #[serde(flatten)]
@@ -97,6 +111,7 @@ struct ModelEntry {
 }
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
+const MAX_MODEL_LIST_PAGES: u64 = 100;
 const MAX_REQUEST_HEADERS: usize = 64;
 const MAX_HEADER_NAME_BYTES: usize = 256;
 const MAX_HEADER_VALUE_BYTES: usize = 16 * 1024;
@@ -249,7 +264,74 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
 
         if status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            let mut models = parse_models_response(&body, &log_secrets)?;
+            let (mut models, mut pagination) =
+                parse_models_response_with_pagination(&body, &log_secrets)?;
+
+            let mut page_count = 1;
+            let mut next_page = pagination
+                .filter(|page| (models.len() as u64) < page.total)
+                .map(|page| page.page_no.saturating_add(1));
+            let mut seen_model_ids = models
+                .iter()
+                .map(|model| model.id.clone())
+                .collect::<HashSet<_>>();
+            while let Some(page_no) = next_page {
+                if page_count >= MAX_MODEL_LIST_PAGES {
+                    return Err(format!(
+                        "Model list exceeds the maximum supported page count ({MAX_MODEL_LIST_PAGES})"
+                    ));
+                }
+                let page_url = dashscope_models_page_url(url, page_no)?;
+                let page_response = client
+                    .get(page_url.as_str())
+                    .headers(headers.clone())
+                    .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        format!("Request failed while fetching model page {page_no}: {error}")
+                    })?;
+                if !page_response.status().is_success() {
+                    let status = page_response.status();
+                    let body = redact_model_fetch_error_body(
+                        page_response.text().await.unwrap_or_default(),
+                        &log_secrets,
+                    );
+                    return Err(format!(
+                        "HTTP {status} fetching model page {page_no}: {body}"
+                    ));
+                }
+                let body = page_response.text().await.unwrap_or_default();
+                let (page_models, page_pagination) =
+                    parse_models_response_with_pagination(&body, &log_secrets)?;
+                if page_models.is_empty() {
+                    return Err(format!(
+                        "Model list page {page_no} was empty before reaching the reported total"
+                    ));
+                }
+                let previous_count = models.len();
+                models.extend(
+                    page_models
+                        .into_iter()
+                        .filter(|model| seen_model_ids.insert(model.id.clone())),
+                );
+                if models.len() == previous_count {
+                    return Err(format!(
+                        "Model list page {page_no} repeated only previously returned models"
+                    ));
+                }
+                page_count += 1;
+                let previous_total = pagination.map(|page| page.total).unwrap_or(0);
+                pagination = page_pagination;
+                if pagination.is_none() && (models.len() as u64) < previous_total {
+                    return Err(format!(
+                        "Model list page {page_no} omitted pagination metadata before completion"
+                    ));
+                }
+                next_page = pagination
+                    .filter(|page| (models.len() as u64) < page.total)
+                    .map(|page| page.page_no.saturating_add(1));
+            }
 
             enrich_missing_context_windows(&client, url, &mut models).await;
             models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -276,34 +358,119 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
     ))
 }
 
+#[cfg(test)]
 fn parse_models_response(
     body: &str,
     known_secrets: &[String],
 ) -> Result<Vec<FetchedModel>, String> {
+    parse_models_response_with_pagination(body, known_secrets).map(|(models, _)| models)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ModelListPagination {
+    total: u64,
+    page_no: u64,
+}
+
+fn parse_models_response_with_pagination(
+    body: &str,
+    known_secrets: &[String],
+) -> Result<(Vec<FetchedModel>, Option<ModelListPagination>), String> {
     let response: ModelsResponse =
         serde_json::from_str(body).map_err(|error| format!("Failed to parse response: {error}"))?;
-    let Some(entries) = response.data else {
-        let detail = response
-            .error_message()
-            .map(|message| crate::redact_known_secrets(message, known_secrets))
+    let pagination = response.output.as_ref().and_then(|output| {
+        Some(ModelListPagination {
+            total: output.total?,
+            page_no: output.page_no?,
+        })
+    });
+    let error_detail = response
+        .error_message()
+        .map(|message| crate::redact_known_secrets(message, known_secrets));
+    let Some(entries) = response
+        .data
+        .or(response.models)
+        .or_else(|| response.output.and_then(|output| output.models))
+    else {
+        let detail = error_detail
             .unwrap_or_else(|| redact_model_fetch_error_body(body.to_string(), known_secrets));
         return Err(format!("Model fetch failed: {detail}"));
     };
 
-    Ok(entries
+    let models = entries
         .into_iter()
-        .map(|entry| FetchedModel {
-            context_window: extract_context_window(&entry.extra),
-            max_context_window: extract_max_context_window(&entry.extra),
-            max_input_tokens: extract_max_input_tokens(&entry.extra),
-            max_output_tokens: extract_max_output_tokens(&entry.extra),
-            id: entry.id,
-            input_modalities: extract_input_modalities(&entry.extra),
-            owned_by: entry.owned_by,
-            supports_image: extract_supports_image(&entry.extra),
-            reasoning: None,
+        .filter_map(|entry| {
+            let id = model_entry_id(&entry)?;
+            Some(FetchedModel {
+                context_window: extract_context_window(&entry.extra),
+                max_context_window: extract_max_context_window(&entry.extra),
+                max_input_tokens: extract_max_input_tokens(&entry.extra),
+                max_output_tokens: extract_max_output_tokens(&entry.extra),
+                id,
+                input_modalities: extract_input_modalities(&entry.extra),
+                output_modalities: extract_output_modalities(&entry.extra),
+                owned_by: entry.owned_by.or_else(|| {
+                    ["publisher", "ownedBy", "provider", "inference_provider"]
+                        .iter()
+                        .filter_map(|key| entry.extra.get(*key))
+                        .find_map(serde_json::Value::as_str)
+                        .map(ToString::to_string)
+                }),
+                supports_image: extract_supports_image(&entry.extra),
+                reasoning: None,
+                effort: entry
+                    .extra
+                    .get("effort")
+                    .filter(|value| !value.is_null())
+                    .cloned(),
+            })
         })
-        .collect())
+        .collect();
+    Ok((models, pagination))
+}
+
+fn dashscope_models_page_url(url: &str, page_no: u64) -> Result<reqwest::Url, String> {
+    let mut parsed = reqwest::Url::parse(url)
+        .map_err(|error| format!("Invalid model-list URL for pagination: {error}"))?;
+    let mut query = parsed
+        .query_pairs()
+        .filter(|(key, _)| key != "page_no")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    query.push(("page_no".to_string(), page_no.to_string()));
+    parsed.set_query(None);
+    parsed.query_pairs_mut().extend_pairs(query);
+    Ok(parsed)
+}
+
+fn model_entry_id(entry: &ModelEntry) -> Option<String> {
+    let id = [
+        Some(entry.id.as_str()),
+        entry.extra.get("key").and_then(|value| value.as_str()),
+        entry.extra.get("slug").and_then(|value| value.as_str()),
+        entry
+            .extra
+            .get("baseModelId")
+            .and_then(|value| value.as_str()),
+        entry
+            .extra
+            .get("base_model_id")
+            .and_then(|value| value.as_str()),
+        entry.extra.get("model").and_then(|value| value.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .or_else(|| {
+        entry
+            .extra
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| value.starts_with("models/") && value.len() > "models/".len())
+    })?;
+    Some(id.strip_prefix("models/").unwrap_or(id).to_string())
 }
 
 fn redact_model_fetch_error_body(body: String, known_secrets: &[String]) -> String {
@@ -397,26 +564,63 @@ fn extract_context_window(obj: &serde_json::Map<String, serde_json::Value>) -> O
         "maxContextLength",
         "max_model_len",
         "maxModelLen",
-        "max_input_tokens",
-        "maxInputTokens",
-        "max_prompt_tokens",
-        "maxPromptTokens",
-        "input_token_limit",
-        "inputTokenLimit",
+        "max_context_tokens",
+        "maxContextTokens",
     ];
 
-    let direct = KEYS
+    // Only read fields that declare a total context length. Input-only limits are not
+    // equivalent to the total context window (which includes generated output).
+    let direct_context_keys: &[&str] = &[
+        "context",
+        "context_window",
+        "contextWindow",
+        "context_length",
+        "contextLength",
+        "ContextWindow",
+        "ContextLength",
+        "max_context_window",
+        "maxContextWindow",
+        "max_context_length",
+        "maxContextLength",
+        "max_model_len",
+        "maxModelLen",
+        "max_context_tokens",
+        "maxContextTokens",
+    ];
+    if let Some(value) = direct_context_keys
         .iter()
         .filter_map(|key| obj.get(*key))
-        .find_map(parse_positive_u64);
-    if direct.is_some() {
-        return direct;
+        .find_map(parse_positive_u64)
+    {
+        return Some(value);
     }
 
-    ["limit", "limits", "capabilities", "metadata"]
-        .iter()
-        .filter_map(|key| obj.get(*key).and_then(|value| value.as_object()))
-        .find_map(extract_context_window)
+    // Strata's documented model-card extension; keep it below standard explicit fields.
+    if let Some(value) = obj
+        .get("meta")
+        .and_then(|meta| meta.get("n_ctx"))
+        .and_then(parse_positive_u64)
+    {
+        return Some(value);
+    }
+
+    let nested_context = [
+        "limit",
+        "limits",
+        "capabilities",
+        "metadata",
+        "meta",
+        "model_info",
+        "top_provider",
+    ]
+    .iter()
+    .filter_map(|key| obj.get(*key).and_then(|value| value.as_object()))
+    .find_map(extract_context_window);
+    nested_context.or_else(|| {
+        KEYS.iter()
+            .filter_map(|key| obj.get(*key))
+            .find_map(parse_positive_u64)
+    })
 }
 
 fn extract_max_context_window(obj: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
@@ -427,17 +631,55 @@ fn extract_max_context_window(obj: &serde_json::Map<String, serde_json::Value>) 
 }
 
 fn extract_max_input_tokens(obj: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
-    ["max_input_tokens", "maxInputTokens"]
+    ["max_input_tokens", "maxInputTokens", "inputTokenLimit"]
         .iter()
         .filter_map(|key| obj.get(*key))
         .find_map(parse_positive_u64)
+        .or_else(|| {
+            obj.get("model_info")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|info| {
+                    ["max_input_tokens", "maxInputTokens"]
+                        .iter()
+                        .filter_map(|key| info.get(*key))
+                        .find_map(parse_positive_u64)
+                })
+        })
 }
 
 fn extract_max_output_tokens(obj: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
-    ["max_output_tokens", "maxOutputTokens"]
-        .iter()
-        .filter_map(|key| obj.get(*key))
-        .find_map(parse_positive_u64)
+    [
+        "max_output_tokens",
+        "maxOutputTokens",
+        "outputTokenLimit",
+        "max_tokens",
+        "maxTokens",
+        "max_completion_tokens",
+        "maxCompletionTokens",
+    ]
+    .iter()
+    .filter_map(|key| obj.get(*key))
+    .find_map(parse_positive_u64)
+    .or_else(|| {
+        obj.get("top_provider")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|provider| {
+                ["max_completion_tokens", "maxCompletionTokens"]
+                    .iter()
+                    .filter_map(|key| provider.get(*key))
+                    .find_map(parse_positive_u64)
+            })
+    })
+    .or_else(|| {
+        obj.get("model_info")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|info| {
+                ["max_output_tokens", "maxOutputTokens"]
+                    .iter()
+                    .filter_map(|key| info.get(*key))
+                    .find_map(parse_positive_u64)
+            })
+    })
 }
 
 /// 从 OpenAI-compatible `/models` 的供应商扩展字段中读取输入模态。
@@ -450,7 +692,8 @@ fn extract_input_modalities(
         "input_modalities",
         "inputModalities",
         "modalities",
-        "capabilities",
+        "architecture",
+        "inference_metadata",
         "metadata",
     ]
     .iter()
@@ -458,21 +701,50 @@ fn extract_input_modalities(
     .find_map(parse_input_modalities)
 }
 
+/// 解析响应模态。供应商的能力标签（例如 DashScope `TG`/`Reasoning`）不是模态，
+/// 因此只接受明确的 output/response modality 字段。
+fn extract_output_modalities(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<String>> {
+    [
+        "output_modalities",
+        "outputModalities",
+        "inference_metadata",
+        "metadata",
+        "architecture",
+    ]
+    .iter()
+    .filter_map(|key| obj.get(*key))
+    .find_map(parse_output_modalities)
+}
+
+fn parse_output_modalities(value: &serde_json::Value) -> Option<Vec<String>> {
+    let value = if let Some(object) = value.as_object() {
+        object
+            .get("output")
+            .or_else(|| object.get("outputs"))
+            .or_else(|| object.get("output_modalities"))
+            .or_else(|| object.get("outputModalities"))
+            .or_else(|| object.get("response_modality"))
+            .or_else(|| object.get("responseModality"))
+            .or_else(|| object.get("response_modalities"))?
+    } else {
+        value
+    };
+    parse_media_modalities(value)
+}
+
 fn parse_input_modalities(value: &serde_json::Value) -> Option<Vec<String>> {
     let values = match value {
-        serde_json::Value::Array(items) => items
-            .iter()
-            .filter_map(|item| item.as_str())
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
+        serde_json::Value::Array(_) => return parse_media_modalities(value),
         serde_json::Value::Object(obj) => {
             if let Some(input) = obj
                 .get("input")
                 .or_else(|| obj.get("inputs"))
                 .or_else(|| obj.get("input_modalities"))
                 .or_else(|| obj.get("inputModalities"))
+                .or_else(|| obj.get("request_modality"))
+                .or_else(|| obj.get("requestModality"))
                 .or_else(|| obj.get("modalities"))
             {
                 parse_input_modalities(input)?
@@ -490,6 +762,23 @@ fn parse_input_modalities(value: &serde_json::Value) -> Option<Vec<String>> {
     }
 }
 
+fn parse_media_modalities(value: &serde_json::Value) -> Option<Vec<String>> {
+    let values = value
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|item| {
+            matches!(
+                item.to_ascii_lowercase().as_str(),
+                "text" | "image" | "audio" | "video"
+            )
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then_some(values)
+}
+
 fn extract_supports_image(obj: &serde_json::Map<String, serde_json::Value>) -> Option<bool> {
     let explicit = [
         "supports_image",
@@ -505,6 +794,34 @@ fn extract_supports_image(obj: &serde_json::Map<String, serde_json::Value>) -> O
     .find_map(serde_json::Value::as_bool);
     if explicit.is_some() {
         return explicit;
+    }
+
+    let nested = ["capabilities", "metadata"]
+        .iter()
+        .filter_map(|key| obj.get(*key).and_then(|value| value.as_object()))
+        .find_map(|value| {
+            [
+                "supports_image",
+                "supportsImage",
+                "vision",
+                "supports_vision",
+                "supportsVision",
+            ]
+            .iter()
+            .find_map(|key| value.get(*key).and_then(serde_json::Value::as_bool))
+        });
+    if nested.is_some() {
+        return nested;
+    }
+
+    // Alibaba Model Studio documents `VU` as visual understanding. This is a
+    // provider-specific image-input signal; other capability labels are not modalities.
+    if obj
+        .get("capabilities")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("VU")))
+    {
+        return Some(true);
     }
 
     extract_input_modalities(obj).map(|modalities| {
@@ -560,8 +877,10 @@ fn parse_volcengine_plan_model_entry(entry: &serde_json::Value) -> Option<Fetche
             max_input_tokens: None,
             max_output_tokens: None,
             input_modalities: None,
+            output_modalities: None,
             supports_image: None,
             reasoning: None,
+            effort: None,
         });
     }
 
@@ -589,8 +908,10 @@ fn parse_volcengine_plan_model_entry(entry: &serde_json::Value) -> Option<Fetche
         max_input_tokens: extract_max_input_tokens(obj),
         max_output_tokens: extract_max_output_tokens(obj),
         input_modalities: extract_input_modalities(obj),
+        output_modalities: extract_output_modalities(obj),
         supports_image: extract_supports_image(obj),
         reasoning: None,
+        effort: None,
     })
 }
 
@@ -606,14 +927,16 @@ async fn enrich_missing_context_windows(
 ) {
     if !models.iter().any(|model| {
         model.context_window.is_none()
+            || model.max_output_tokens.is_none()
             || model.input_modalities.is_none()
             || model.supports_image.is_none()
     }) {
         return;
     }
 
-    enrich_preset_catalog_context_windows(endpoint_url, models);
     enrich_zhipu_context_windows(client, endpoint_url, models).await;
+    // A provider's official documentation outranks the general offline preset table.
+    enrich_preset_catalog_context_windows(endpoint_url, models);
     enrich_models_dev_context_windows(client, endpoint_url, models).await;
 }
 
@@ -693,20 +1016,29 @@ async fn enrich_zhipu_context_windows(
     models: &mut [FetchedModel],
 ) {
     if !is_zhipu_models_endpoint(endpoint_url)
-        || !models
-            .iter()
-            .any(|model| model.context_window.is_none() && is_glm_model_id(&model.id))
+        || !models.iter().any(|model| {
+            (model.context_window.is_none() || model.max_output_tokens.is_none())
+                && is_glm_model_id(&model.id)
+        })
     {
         return;
     }
 
-    let mut contexts = fetch_zhipu_model_overview_contexts(client).await;
-    enrich_missing_zhipu_detail_contexts(client, models, &mut contexts).await;
+    let mut metadata = fetch_zhipu_model_overview_metadata(client).await;
+    enrich_missing_zhipu_detail_contexts(client, models, &mut metadata).await;
 
-    apply_missing_context_windows(models, |model_id| {
-        let key = normalize_zhipu_model_id(model_id);
-        contexts.get(&key).copied()
-    });
+    for model in models.iter_mut().filter(|model| is_glm_model_id(&model.id)) {
+        let key = normalize_zhipu_model_id(&model.id);
+        let Some(facts) = metadata.get(&key) else {
+            continue;
+        };
+        if model.context_window.is_none() {
+            model.context_window = facts.context_window;
+        }
+        if model.max_output_tokens.is_none() {
+            model.max_output_tokens = facts.max_output_tokens;
+        }
+    }
 }
 
 /// 通过 models.dev 的 `limit.context` 补齐上下文窗口。
@@ -895,7 +1227,9 @@ fn is_glm_model_id(model_id: &str) -> bool {
 /// 拉取智谱模型概览表，并解析模型上下文列。
 ///
 /// 网络或文档格式异常只会导致补充 metadata 缺失，不阻断 `/models` 本身成功返回。
-async fn fetch_zhipu_model_overview_contexts(client: &reqwest::Client) -> HashMap<String, u64> {
+async fn fetch_zhipu_model_overview_metadata(
+    client: &reqwest::Client,
+) -> HashMap<String, ZhipuModelMetadata> {
     let text = match client
         .get(ZHIPU_MODEL_OVERVIEW_MD_URL)
         .timeout(Duration::from_secs(5))
@@ -907,7 +1241,7 @@ async fn fetch_zhipu_model_overview_contexts(client: &reqwest::Client) -> HashMa
     };
 
     text.as_deref()
-        .map(parse_zhipu_model_overview_contexts)
+        .map(parse_zhipu_model_overview_metadata)
         .unwrap_or_default()
 }
 
@@ -918,21 +1252,25 @@ async fn fetch_zhipu_model_overview_contexts(client: &reqwest::Client) -> HashMa
 async fn enrich_missing_zhipu_detail_contexts(
     client: &reqwest::Client,
     models: &[FetchedModel],
-    contexts: &mut HashMap<String, u64>,
+    metadata: &mut HashMap<String, ZhipuModelMetadata>,
 ) {
     for model in models {
         if model.context_window.is_some() {
             continue;
         }
         let key = normalize_zhipu_model_id(&model.id);
-        if contexts.contains_key(&key) {
+        if metadata
+            .get(&key)
+            .and_then(|facts| facts.context_window)
+            .is_some()
+        {
             continue;
         }
         let Some(slug) = zhipu_docs_slug_for_model_id(&model.id) else {
             continue;
         };
-        if let Some(context) = fetch_zhipu_detail_context(client, &slug).await {
-            contexts.insert(key, context);
+        if let Some(context_window) = fetch_zhipu_detail_context(client, &slug).await {
+            metadata.entry(key).or_default().context_window = Some(context_window);
         }
     }
 }
@@ -965,9 +1303,15 @@ async fn fetch_zhipu_detail_context(client: &reqwest::Client, slug: &str) -> Opt
     parse_zhipu_detail_context(&text)
 }
 
-/// 解析智谱模型概览 markdown 表格中的“模型 / 上下文”列。
-fn parse_zhipu_model_overview_contexts(markdown: &str) -> HashMap<String, u64> {
-    let mut contexts = HashMap::new();
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ZhipuModelMetadata {
+    context_window: Option<u64>,
+    max_output_tokens: Option<u64>,
+}
+
+/// 解析智谱官方模型概览 markdown 表格中的模型、上下文窗口和最大输出列。
+fn parse_zhipu_model_overview_metadata(markdown: &str) -> HashMap<String, ZhipuModelMetadata> {
+    let mut metadata = HashMap::new();
     let mut pending_row = String::new();
 
     for line in markdown.lines() {
@@ -986,17 +1330,17 @@ fn parse_zhipu_model_overview_contexts(markdown: &str) -> HashMap<String, u64> {
             continue;
         }
 
-        if let Some((model, context)) = parse_zhipu_overview_table_row(&pending_row) {
-            contexts.insert(model, context);
+        if let Some((model, facts)) = parse_zhipu_overview_table_row(&pending_row) {
+            metadata.insert(model, facts);
         }
         pending_row.clear();
     }
 
-    contexts
+    metadata
 }
 
 /// 解析单行智谱模型表格。
-fn parse_zhipu_overview_table_row(row: &str) -> Option<(String, u64)> {
+fn parse_zhipu_overview_table_row(row: &str) -> Option<(String, ZhipuModelMetadata)> {
     let columns = row
         .split('|')
         .map(str::trim)
@@ -1007,8 +1351,14 @@ fn parse_zhipu_overview_table_row(row: &str) -> Option<(String, u64)> {
     }
 
     let model = extract_markdown_link_label(columns[0]).unwrap_or(columns[0]);
-    let context = parse_context_tokens(columns[2])?;
-    Some((normalize_zhipu_model_id(model), context))
+    let facts = ZhipuModelMetadata {
+        context_window: parse_context_tokens(columns[2]),
+        max_output_tokens: parse_context_tokens(columns[3]),
+    };
+    if facts.context_window.is_none() && facts.max_output_tokens.is_none() {
+        return None;
+    }
+    Some((normalize_zhipu_model_id(model), facts))
 }
 
 /// 从 markdown 链接 `[label](url)` 中取 label；非链接返回 `None`。
@@ -1153,8 +1503,10 @@ pub fn build_models_url_candidates(
     // （否则 .../coding/paas/v4/v1/models → 404）。
     if ends_with_version_segment(trimmed) {
         candidates.push(format!("{trimmed}/models"));
-        // 版本段非 /v1 时，保留旧的 /v1/models 作为兜底次候选（正确路径已在前）。
-        if !trimmed.ends_with("/v1") {
+        // 常见主版本段（v1 / v1beta / v1alpha）已经是完整 API 前缀；
+        // 其他版本（例如厂商 v4）保留旧的 /v1/models 作为兜底。
+        let version_segment = trimmed.rsplit('/').next().unwrap_or("");
+        if !matches!(version_segment, "v1" | "v1beta" | "v1alpha") {
             candidates.push(format!("{trimmed}/v1/models"));
         }
     } else {
@@ -1204,13 +1556,19 @@ fn strip_compat_suffix(base_url: &str) -> Option<&str> {
     None
 }
 
-/// 判断 baseURL 是否以 OpenAI 风格的版本段 `/v{N}` 结尾（`N` 为一个或多个数字），
-/// 例如 `/v1`、`.../paas/v4`。这类 URL 版本号已在路径中，模型端点应为
+/// 判断 baseURL 是否以 `/v{N}`、`/v{N}beta` 或 `/v{N}alpha` 版本段结尾，
+/// 例如 `/v1`、`/v1beta`、`.../paas/v4`。这类 URL 版本号已在路径中，模型端点应为
 /// `{base}/models`，不能再补 `/v1`（智谱 Coding Plan 即 `.../coding/paas/v4`）。
 fn ends_with_version_segment(url: &str) -> bool {
     let last = url.rsplit('/').next().unwrap_or("");
-    last.strip_prefix('v')
-        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+    let Some(version) = last.strip_prefix('v') else {
+        return false;
+    };
+    let digits = version
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    digits > 0 && matches!(&version[digits..], "" | "beta" | "alpha")
 }
 
 #[cfg(test)]
@@ -1320,6 +1678,20 @@ mod tests {
     fn test_candidates_with_v1() {
         let c = build_models_url_candidates("https://api.example.com/v1", false, None).unwrap();
         assert_eq!(c, vec!["https://api.example.com/v1/models"]);
+    }
+
+    #[test]
+    fn google_v1beta_base_url_uses_models_list_path_without_openai_suffix() {
+        let candidates = build_models_url_candidates(
+            "https://generativelanguage.googleapis.com/v1beta",
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            candidates,
+            vec!["https://generativelanguage.googleapis.com/v1beta/models"]
+        );
     }
 
     #[test]
@@ -1583,6 +1955,166 @@ mod tests {
     }
 
     #[test]
+    fn parse_google_models_envelope_and_token_limits() {
+        let models = parse_models_response(
+            r#"{"models":[{"name":"models/gemini-3.1-flash","baseModelId":"gemini-3.1-flash","inputTokenLimit":1048576,"outputTokenLimit":65536,"supportedGenerationMethods":["generateContent"]}]}"#,
+            &[],
+        )
+        .expect("parse Google's ListModels response");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gemini-3.1-flash");
+        assert_eq!(models[0].context_window, None);
+        assert_eq!(models[0].max_input_tokens, Some(1_048_576));
+        assert_eq!(models[0].max_output_tokens, Some(65_536));
+    }
+
+    #[test]
+    fn parse_models_envelope_ignores_entries_without_a_model_identifier() {
+        let models = parse_models_response(
+            r#"{"models":[{"displayName":"No id"},{"name":"human-readable label"},{"name":"models/gemini-flash","inputTokenLimit":32768}]}"#,
+            &[],
+        )
+        .expect("valid response with one identifiable model");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gemini-flash");
+        assert_eq!(models[0].context_window, None);
+        assert_eq!(models[0].max_input_tokens, Some(32_768));
+    }
+
+    #[test]
+    fn parse_lm_studio_models_envelope_and_metadata() {
+        let models = parse_models_response(
+            r#"{"models":[{"key":"qwen/qwen3.8","publisher":"Qwen","max_context_length":1048576,"capabilities":{"vision":true}}]}"#,
+            &[],
+        )
+        .expect("parse LM Studio List Models response");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "qwen/qwen3.8");
+        assert_eq!(models[0].owned_by.as_deref(), Some("Qwen"));
+        assert_eq!(models[0].context_window, Some(1_048_576));
+        assert_eq!(models[0].supports_image, Some(true));
+    }
+
+    #[test]
+    fn parse_anthropic_and_openrouter_token_limits_without_conflating_context() {
+        let anthropic = parse_models_response(
+            r#"{"data":[{"id":"claude-example","max_input_tokens":200000,"max_tokens":64000}]}"#,
+            &[],
+        )
+        .expect("parse Anthropic Models API response");
+        assert_eq!(anthropic[0].context_window, None);
+        assert_eq!(anthropic[0].max_input_tokens, Some(200_000));
+        assert_eq!(anthropic[0].max_output_tokens, Some(64_000));
+
+        let openrouter = parse_models_response(
+            r#"{"data":[{"id":"provider/model","context_length":262144,"top_provider":{"context_length":131072,"max_completion_tokens":32768}}]}"#,
+            &[],
+        )
+        .expect("parse OpenRouter models response");
+        assert_eq!(openrouter[0].context_window, Some(262_144));
+        assert_eq!(openrouter[0].max_output_tokens, Some(32_768));
+    }
+
+    #[test]
+    fn parse_deepseek_documented_model_metadata() {
+        let models = parse_models_response(
+            r#"{"object":"list","data":[{"id":"deepseek-flash","object":"model","owned_by":"deepseek","name":"DeepSeek-V4.1-Flash","context_window":1048576,"max_output_tokens":393216,"input_modalities":["text","image"],"output_modalities":["text"],"effort":{"supported_levels":["low","high","max"],"default_level":"high"}}]}"#,
+            &[],
+        )
+        .expect("parse DeepSeek List Models response");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "deepseek-flash");
+        assert_eq!(models[0].owned_by.as_deref(), Some("deepseek"));
+        assert_eq!(models[0].context_window, Some(1_048_576));
+        assert_eq!(models[0].max_output_tokens, Some(393_216));
+        assert_eq!(
+            models[0].input_modalities,
+            Some(vec!["text".to_string(), "image".to_string()])
+        );
+        assert_eq!(models[0].supports_image, Some(true));
+        assert_eq!(models[0].output_modalities, Some(vec!["text".to_string()]));
+        assert_eq!(
+            models[0].effort,
+            Some(serde_json::json!({
+                "supported_levels": ["low", "high", "max"],
+                "default_level": "high"
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_dashscope_native_models_envelope_and_nested_metadata() {
+        let models = parse_models_response(
+            r#"{"output":{"total":1,"page_no":1,"page_size":20,"models":[{"model":"qwen3.8-max","name":"Qwen3.8-Max","provider":"qwen","inference_provider":"aliyun-bailian","capabilities":["TG","Reasoning"],"inference_metadata":{"request_modality":["Text","Image"],"response_modality":["Text"]},"model_info":{"context_window":131072,"max_input_tokens":130048,"max_output_tokens":16384}}]}}"#,
+            &[],
+        )
+        .expect("parse Alibaba Cloud Model Studio List Models response");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "qwen3.8-max");
+        assert_eq!(models[0].owned_by.as_deref(), Some("qwen"));
+        assert_eq!(models[0].context_window, Some(131_072));
+        assert_eq!(models[0].max_input_tokens, Some(130_048));
+        assert_eq!(models[0].max_output_tokens, Some(16_384));
+        assert_eq!(
+            models[0].input_modalities,
+            Some(vec!["Text".to_string(), "Image".to_string()])
+        );
+        assert_eq!(models[0].supports_image, Some(true));
+        assert_eq!(models[0].output_modalities, Some(vec!["Text".to_string()]));
+    }
+
+    #[test]
+    fn dashscope_capability_codes_are_not_mistaken_for_modalities() {
+        let models = parse_models_response(
+            r#"{"output":{"models":[{"model":"qwen-vl","capabilities":["VU","TG"]}]}}"#,
+            &[],
+        )
+        .expect("parse Model Studio capabilities");
+
+        assert_eq!(models[0].input_modalities, None);
+        assert_eq!(models[0].supports_image, Some(true));
+    }
+
+    #[test]
+    fn dashscope_model_pages_preserve_filters_and_replace_page_number() {
+        let url = dashscope_models_page_url(
+            "https://example.com/api/v1/models?providers=qwen&page_no=1&page_size=100",
+            2,
+        )
+        .expect("build page URL");
+        let query = url.query_pairs().collect::<Vec<_>>();
+
+        assert!(query
+            .iter()
+            .any(|(key, value)| key == "providers" && value == "qwen"));
+        assert!(query
+            .iter()
+            .any(|(key, value)| key == "page_size" && value == "100"));
+        assert_eq!(
+            query
+                .iter()
+                .filter(|(key, _)| key == "page_no")
+                .map(|(_, value)| value.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["2"]
+        );
+
+        let (_, pagination) = parse_models_response_with_pagination(
+            r#"{"output":{"total":168,"page_no":1,"page_size":20,"models":[{"model":"qwen3.8-max"}]}}"#,
+            &[],
+        )
+        .expect("parse DashScope pagination metadata");
+        let pagination = pagination.expect("pagination is explicitly advertised");
+        assert_eq!(pagination.total, 168);
+        assert_eq!(pagination.page_no, 1);
+    }
+
+    #[test]
     fn parse_models_response_reads_only_explicit_positive_token_limits() {
         let models = parse_models_response(
             r#"{"data":[{"id":"snake","max_input_tokens":120000,"max_output_tokens":"16000"},{"id":"camel","maxInputTokens":"90000","maxOutputTokens":8000},{"id":"zero","max_input_tokens":0,"max_output_tokens":0},{"id":"negative","max_input_tokens":-1,"max_output_tokens":"-2"},{"id":"noninteger","max_input_tokens":1.5,"max_output_tokens":"8000 tokens"},{"id":"context-only","context_window":1000000,"max_context_window":2000000}]}"#,
@@ -1606,7 +2138,7 @@ mod tests {
 
     #[test]
     fn test_parse_response_extracts_context_window() {
-        let json = r#"{"object":"list","data":[{"id":"model-a","context_window":262144},{"id":"model-b","maxContextWindow":"1000000"},{"id":"model-c","max_model_len":262144},{"id":"model-d","maxModelLen":"131072"},{"id":"model-e","contextWindow":"128000 tokens"},{"id":"model-f","context_length":200000},{"id":"model-g","max_context_length":"204800"},{"id":"model-h","max_input_tokens":1000000},{"id":"model-i","limit":{"context":262144}},{"id":"model-j","limits":{"context_window":"32768"}},{"id":"model-k","metadata":{"maxContextLength":65536}}]}"#;
+        let json = r#"{"object":"list","data":[{"id":"model-a","context_window":262144},{"id":"model-b","maxContextWindow":"1000000"},{"id":"model-c","max_model_len":262144},{"id":"model-d","maxModelLen":"131072"},{"id":"model-e","contextWindow":"128000 tokens"},{"id":"model-f","context_length":200000},{"id":"model-g","max_context_length":"204800"},{"id":"model-h","max_input_tokens":1000000},{"id":"model-i","limit":{"context":262144}},{"id":"model-j","limits":{"context_window":"32768"}},{"id":"model-k","metadata":{"maxContextLength":65536}},{"id":"model-l","inputTokenLimit":32768}]}"#;
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         let data = resp
             .data
@@ -1619,9 +2151,11 @@ mod tests {
                 max_output_tokens: extract_max_output_tokens(&entry.extra),
                 id: entry.id,
                 input_modalities: None,
+                output_modalities: None,
                 owned_by: entry.owned_by,
                 supports_image: None,
                 reasoning: None,
+                effort: None,
             })
             .collect::<Vec<_>>();
 
@@ -1636,10 +2170,13 @@ mod tests {
         assert_eq!(data[4].context_window, None);
         assert_eq!(data[5].context_window, Some(200_000));
         assert_eq!(data[6].context_window, Some(204_800));
-        assert_eq!(data[7].context_window, Some(1_000_000));
+        assert_eq!(data[7].context_window, None);
+        assert_eq!(data[7].max_input_tokens, Some(1_000_000));
         assert_eq!(data[8].context_window, Some(262_144));
         assert_eq!(data[9].context_window, Some(32_768));
         assert_eq!(data[10].context_window, Some(65_536));
+        assert_eq!(data[11].context_window, None);
+        assert_eq!(data[11].max_input_tokens, Some(32_768));
     }
 
     #[test]
@@ -1660,6 +2197,74 @@ mod tests {
         assert_eq!(extract_supports_image(&data[1].extra), Some(true));
         assert_eq!(extract_supports_image(&data[2].extra), Some(false));
         assert_eq!(extract_supports_image(&data[3].extra), None);
+    }
+
+    #[test]
+    fn test_strata_metadata_context_and_input_types() {
+        let model = serde_json::json!({
+            "id": "qwen3.8",
+            "meta": {"n_ctx": 1048576},
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}
+        });
+        let obj = model.as_object().unwrap();
+        assert_eq!(extract_context_window(obj), Some(1_048_576));
+        assert_eq!(
+            extract_input_modalities(obj),
+            Some(vec!["text".to_string()])
+        );
+        assert_eq!(extract_supports_image(obj), Some(false));
+
+        let nested = serde_json::json!({
+            "meta": {"n_ctx": 1048576},
+            "metadata": {"context_window": 65536},
+            "capabilities": {"vision": true}
+        });
+        let obj = nested.as_object().unwrap();
+        assert_eq!(extract_context_window(obj), Some(1_048_576));
+        assert_eq!(extract_supports_image(obj), Some(true));
+
+        let vision = serde_json::json!({"architecture": {"input_modalities": ["text", "image"]}});
+        assert_eq!(
+            extract_supports_image(vision.as_object().unwrap()),
+            Some(true)
+        );
+
+        let explicit = serde_json::json!({
+            "context_window": 32768,
+            "meta": {"n_ctx": 1048576},
+            "input_modalities": ["text"], "supports_image": false,
+            "architecture": {"input_modalities": ["text", "image"]}
+        });
+        let obj = explicit.as_object().unwrap();
+        assert_eq!(extract_context_window(obj), Some(32_768));
+        assert_eq!(
+            extract_input_modalities(obj),
+            Some(vec!["text".to_string()])
+        );
+        assert_eq!(extract_supports_image(obj), Some(false));
+    }
+
+    #[test]
+    fn test_strata_metadata_unknown_and_invalid_remain_unknown() {
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(true),
+            serde_json::json!(1.5),
+            serde_json::json!("128K"),
+            serde_json::Value::Null,
+        ] {
+            let model = serde_json::json!({"meta": {"n_ctx": value}, "architecture": {"output_modalities": ["image"]}});
+            let obj = model.as_object().unwrap();
+            assert_eq!(extract_context_window(obj), None);
+            assert_eq!(extract_input_modalities(obj), None);
+            assert_eq!(extract_supports_image(obj), None);
+        }
+        let model = serde_json::json!({"meta": {"n_ctx": "1048576"}});
+        assert_eq!(
+            extract_context_window(model.as_object().unwrap()),
+            Some(1_048_576)
+        );
     }
 
     #[test]
@@ -1726,7 +2331,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_zhipu_model_overview_contexts() {
+    fn test_parse_zhipu_model_overview_metadata() {
         let markdown = r#"
 | 模型 | 特点 | 上下文 | 最大输出 |
 | :--- | :--- | :--- | :--- |
@@ -1735,15 +2340,29 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
 | [GLM-5.1](/cn/guide/models/text/glm-5.1) | 长程任务显著提升 | 200K | 128K |
 | [GLM-OCR](/cn/guide/models/vlm/glm-ocr) | 文档理解 | 输入：单图 ≤ 10 MB | |
 "#;
-        let contexts = parse_zhipu_model_overview_contexts(markdown);
+        let metadata = parse_zhipu_model_overview_metadata(markdown);
 
-        assert_eq!(contexts.get("glm-5.2"), Some(&1_000_000));
-        assert_eq!(contexts.get("glm-5.1"), Some(&200_000));
-        assert!(!contexts.contains_key("glm-ocr"));
+        assert_eq!(
+            metadata.get("glm-5.2").unwrap().context_window,
+            Some(1_000_000)
+        );
+        assert_eq!(
+            metadata.get("glm-5.2").unwrap().max_output_tokens,
+            Some(128_000)
+        );
+        assert_eq!(
+            metadata.get("glm-5.1").unwrap().context_window,
+            Some(200_000)
+        );
+        assert_eq!(
+            metadata.get("glm-5.1").unwrap().max_output_tokens,
+            Some(128_000)
+        );
+        assert!(!metadata.contains_key("glm-ocr"));
     }
 
     #[test]
-    fn test_parse_zhipu_model_overview_contexts_skips_unparseable_rows() {
+    fn test_parse_zhipu_model_overview_metadata_skips_unparseable_rows() {
         let markdown = r#"
 | 模型 | 特点 | 上下文 | 最大输出 |
 | :--- | :--- | :--- | :--- |
@@ -1751,14 +2370,21 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
 | [GLM-OCR](/cn/guide/models/vlm/glm-ocr) | 文档理解 | 输入：单图 ≤ 10 MB | |
 | [GLM-Pending](/cn/guide/models/text/glm-pending) | 待发布 | 即将上线 | |
 "#;
-        let contexts = parse_zhipu_model_overview_contexts(markdown);
+        let metadata = parse_zhipu_model_overview_metadata(markdown);
 
-        assert_eq!(contexts.get("glm-4.6"), Some(&200_000));
-        assert!(!contexts.contains_key("glm-ocr"));
-        assert!(!contexts.contains_key("glm-pending"));
-        assert!(parse_zhipu_model_overview_contexts("").is_empty());
+        assert_eq!(
+            metadata.get("glm-4.6").unwrap().context_window,
+            Some(200_000)
+        );
+        assert_eq!(
+            metadata.get("glm-4.6").unwrap().max_output_tokens,
+            Some(128_000)
+        );
+        assert!(!metadata.contains_key("glm-ocr"));
+        assert!(!metadata.contains_key("glm-pending"));
+        assert!(parse_zhipu_model_overview_metadata("").is_empty());
         assert!(
-            parse_zhipu_model_overview_contexts("| 模型 | 特点 | 上下文 | 最大输出 |").is_empty()
+            parse_zhipu_model_overview_metadata("| 模型 | 特点 | 上下文 | 最大输出 |").is_empty()
         );
     }
 
@@ -1895,8 +2521,10 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 max_input_tokens: None,
                 max_output_tokens: None,
                 input_modalities: None,
+                output_modalities: None,
                 supports_image: None,
                 reasoning: None,
+                effort: None,
             },
             FetchedModel {
                 id: "glm-5.1".to_string(),
@@ -1906,8 +2534,10 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 max_input_tokens: None,
                 max_output_tokens: None,
                 input_modalities: None,
+                output_modalities: None,
                 supports_image: None,
                 reasoning: None,
+                effort: None,
             },
         ];
 
@@ -1932,8 +2562,10 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 max_input_tokens: None,
                 max_output_tokens: None,
                 input_modalities: Some(vec!["text".to_string()]),
+                output_modalities: None,
                 supports_image: Some(false),
                 reasoning: None,
+                effort: None,
             },
             FetchedModel {
                 id: "gpt-5.6".to_string(),
@@ -1943,8 +2575,10 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
                 max_input_tokens: None,
                 max_output_tokens: None,
                 input_modalities: None,
+                output_modalities: None,
                 supports_image: None,
                 reasoning: None,
+                effort: None,
             },
         ];
         let entry = serde_json::json!({
