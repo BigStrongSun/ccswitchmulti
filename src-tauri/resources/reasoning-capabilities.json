@@ -1,6 +1,6 @@
 {
   "libraryVersion": 2,
-  "verifiedAt": "2026-11-04",
+  "verifiedAt": "2026-11-05",
   "entries": [
     {
       "platform": "deepseek",
@@ -99,6 +99,499 @@
       "sourceUrl": "https://openrouter.ai/api/v1/models",
       "verifiedAt": "2026-08-18",
       "evidenceLevel": "platform_api"
+    },
+    {
+      "platform": "deepseek",
+      "model": "deepseek-v4-flash",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ],
+        "defaultEffort": "high",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "low",
+            "medium": "high",
+            "xhigh": "high"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "dashscope",
+      "model": "qwen3.8-max",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "defaultEffort": "xhigh",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "xhigh",
+            "xhigh": "xhigh",
+            "max": "xhigh"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://help.aliyun.com/en/model-studio/qwen-api-via-openai-responses",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "dashscope",
+      "model": "qwen3.8-max-0902",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "defaultEffort": "xhigh",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "xhigh",
+            "xhigh": "xhigh",
+            "max": "xhigh"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://help.aliyun.com/en/model-studio/qwen-api-via-openai-responses",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "dashscope",
+      "model": "qwen3.8-flash",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "defaultEffort": "xhigh",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "xhigh",
+            "xhigh": "xhigh",
+            "max": "xhigh"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://help.aliyun.com/en/model-studio/qwen-api-via-openai-responses",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "dashscope",
+      "model": "qwen3.8-2.4t-a95b",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "defaultEffort": "xhigh",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "xhigh",
+            "xhigh": "xhigh",
+            "max": "xhigh"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://help.aliyun.com/en/model-studio/qwen-api-via-openai-responses",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "dashscope",
+      "model": "qwen3.8-27b",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "defaultEffort": "xhigh",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "xhigh",
+            "xhigh": "xhigh",
+            "max": "xhigh"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://help.aliyun.com/en/model-studio/qwen-api-via-openai-responses",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "dashscope",
+      "model": "glm-5.3",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "defaultEffort": "max",
+        "disableAllowed": false,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://help.aliyun.com/en/model-studio/glm",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "dashscope",
+      "model": "glm-5.2",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "defaultEffort": "high",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://help.aliyun.com/en/model-studio/glm",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "dashscope",
+      "model": "glm-5.2-fast-preview",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "defaultEffort": "high",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://help.aliyun.com/en/model-studio/glm",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "dashscope",
+      "model": "glm-5.1",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "defaultEffort": "high",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "xhigh"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://help.aliyun.com/en/model-studio/glm",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "dashscope",
+      "model": "glm-5",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "defaultEffort": "high",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "xhigh"
+          }
+        },
+        "outputFormat": "auto",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://help.aliyun.com/en/model-studio/glm",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "zhipu",
+      "model": "glm-5.3",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "defaultEffort": "max",
+        "disableAllowed": false,
+        "upstream": {
+          "format": "string",
+          "parameter": "reasoning_effort",
+          "effortMap": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          }
+        },
+        "outputFormat": "reasoning_content",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://docs.z.ai/guides/capabilities/thinking",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "zhipu",
+      "model": "glm-5.3-flash",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "defaultEffort": "max",
+        "disableAllowed": false,
+        "upstream": {
+          "format": "string",
+          "parameter": "reasoning_effort",
+          "effortMap": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          }
+        },
+        "outputFormat": "reasoning_content",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://docs.z.ai/guides/capabilities/thinking",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
+    },
+    {
+      "platform": "zhipu",
+      "model": "glm-5.2",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": [
+          "none",
+          "high",
+          "max"
+        ],
+        "defaultEffort": "max",
+        "disableAllowed": true,
+        "upstream": {
+          "format": "string",
+          "parameter": "reasoning_effort",
+          "effortMap": {
+            "minimal": "none",
+            "low": "high",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          }
+        },
+        "outputFormat": "reasoning_content",
+        "source": "library",
+        "confidence": "maintained"
+      },
+      "sourceUrl": "https://docs.z.ai/guides/capabilities/thinking",
+      "verifiedAt": "2026-11-05",
+      "evidenceLevel": "vendor_docs"
     }
   ]
 }
