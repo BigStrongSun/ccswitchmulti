@@ -811,7 +811,7 @@ impl RequestForwarder {
                 }
                 Err(error) => {
                     log::warn!("[CodexOAuthPool] 额度刷新失败 account={account_id}: {error}");
-                    manager.mark_pool_quota_checked(&account_id).await;
+                    manager.mark_pool_quota_attempted(&account_id).await;
                 }
             }
         }
@@ -9196,7 +9196,7 @@ mod tests {
             )
             .await
             .expect("enable managed-only account pool");
-        manager.mark_pool_quota_checked("pool-local-id").await;
+        manager.mark_pool_quota_attempted("pool-local-id").await;
         let mut official = test_codex_official_provider();
         official.settings_config["codexTestBaseUrl"] = json!(upstream);
         official.meta = Some(ProviderMeta {
@@ -9300,7 +9300,7 @@ mod tests {
             .ordered_pool_entries("", Some("Bearer desktop-access-token"))
             .await;
         manager
-            .mark_pool_quota_checked(NATIVE_CODEX_ACCOUNT_ID)
+            .mark_pool_quota_attempted(NATIVE_CODEX_ACCOUNT_ID)
             .await;
         let mut official = test_codex_official_provider();
         official.settings_config["codexTestBaseUrl"] = json!(upstream);
@@ -9409,7 +9409,7 @@ mod tests {
             )
             .await
             .expect("enable routed managed-only account pool");
-        manager.mark_pool_quota_checked("pool-local-id").await;
+        manager.mark_pool_quota_attempted("pool-local-id").await;
 
         let mut official = test_codex_official_provider();
         official.settings_config["codexTestBaseUrl"] = json!(upstream);

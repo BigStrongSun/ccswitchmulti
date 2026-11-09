@@ -28,7 +28,8 @@ pub(crate) struct PoolSessionBinding {
 pub(crate) struct PoolAccountRuntime {
     pub(crate) credential_generation: u64,
     pub(crate) remaining_percent: Option<f64>,
-    pub(crate) quota_checked_at_ms: Option<i64>,
+    pub(crate) quota_attempted_at_ms: Option<i64>,
+    pub(crate) quota_observed_at_ms: Option<i64>,
     pub(crate) reauth_required: bool,
     pub(crate) cooldown_until_ms: Option<i64>,
     pub(crate) consecutive_failures: u32,
@@ -165,28 +166,31 @@ impl CodexPoolRuntimeState {
             return false;
         };
         runtime.remaining_percent = Some(remaining_percent.clamp(0.0, 100.0));
-        runtime.quota_checked_at_ms = Some(now_ms);
+        runtime.quota_attempted_at_ms = Some(now_ms);
+        runtime.quota_observed_at_ms = Some(now_ms);
         true
     }
 
-    pub(crate) fn remaining_percent(&self, account_id: &str) -> Option<f64> {
-        self.accounts
-            .get(account_id)
-            .and_then(|runtime| runtime.remaining_percent)
+    pub(crate) fn fresh_remaining_percent(&self, account_id: &str, now_ms: i64) -> Option<f64> {
+        let runtime = self.accounts.get(account_id)?;
+        let observed_at = runtime.quota_observed_at_ms?;
+        (now_ms.saturating_sub(observed_at) < QUOTA_REFRESH_TTL_MS)
+            .then_some(runtime.remaining_percent)
+            .flatten()
     }
 
     pub(crate) fn quota_refresh_due(&self, account_id: &str, now_ms: i64) -> bool {
         self.accounts
             .get(account_id)
-            .and_then(|runtime| runtime.quota_checked_at_ms)
-            .is_none_or(|checked_at| now_ms.saturating_sub(checked_at) >= QUOTA_REFRESH_TTL_MS)
+            .and_then(|runtime| runtime.quota_attempted_at_ms)
+            .is_none_or(|attempted_at| now_ms.saturating_sub(attempted_at) >= QUOTA_REFRESH_TTL_MS)
     }
 
-    pub(crate) fn mark_quota_checked(&mut self, account_id: &str, now_ms: i64) -> bool {
+    pub(crate) fn mark_quota_attempted(&mut self, account_id: &str, now_ms: i64) -> bool {
         let Some(runtime) = self.accounts.get_mut(account_id) else {
             return false;
         };
-        runtime.quota_checked_at_ms = Some(now_ms);
+        runtime.quota_attempted_at_ms = Some(now_ms);
         true
     }
 
@@ -215,7 +219,8 @@ impl CodexPoolRuntimeState {
             CodexPoolAttemptOutcome::Credential { .. } => {
                 if let Some(runtime) = self.accounts.get_mut(account_id) {
                     runtime.remaining_percent = None;
-                    runtime.quota_checked_at_ms = None;
+                    runtime.quota_attempted_at_ms = None;
+                    runtime.quota_observed_at_ms = None;
                     runtime.reauth_required = true;
                     runtime.cooldown_until_ms = None;
                     runtime.consecutive_failures = 0;
@@ -426,6 +431,47 @@ mod tests {
         assert_eq!(state.bound_account("quota-thread", 2_002), None);
         assert!(!state.is_account_selectable("b", 1, 62_000));
         assert!(state.is_account_selectable("b", 1, 62_001));
+    }
+
+    #[test]
+    fn stale_quota_observation_expires_even_after_failed_refresh_attempt() {
+        let mut state = CodexPoolRuntimeState::default();
+        state.prepare_account("a", 1);
+        let observed_at = 1_000;
+        state.record_remaining_percent("a", 4.0, observed_at);
+
+        assert_eq!(
+            state.fresh_remaining_percent("a", observed_at + QUOTA_REFRESH_TTL_MS - 1),
+            Some(4.0)
+        );
+        assert_eq!(
+            state.fresh_remaining_percent("a", observed_at + QUOTA_REFRESH_TTL_MS),
+            None,
+            "an expired observation must stop enforcing the old reserve threshold"
+        );
+
+        let failed_attempt_at = observed_at + QUOTA_REFRESH_TTL_MS;
+        assert!(state.mark_quota_attempted("a", failed_attempt_at));
+        assert_eq!(
+            state.fresh_remaining_percent("a", failed_attempt_at),
+            None,
+            "a failed refresh must not make the stale observation fresh again"
+        );
+        assert!(!state.quota_refresh_due("a", failed_attempt_at));
+        assert!(state.quota_refresh_due("a", failed_attempt_at + QUOTA_REFRESH_TTL_MS));
+    }
+
+    #[test]
+    fn successful_quota_refresh_renews_observation_and_retry_time() {
+        let mut state = CodexPoolRuntimeState::default();
+        state.prepare_account("a", 1);
+        state.record_remaining_percent("a", 4.0, 1_000);
+        state.mark_quota_attempted("a", 2_000);
+        state.record_remaining_percent("a", 12.0, 3_000);
+
+        assert_eq!(state.fresh_remaining_percent("a", 3_001), Some(12.0));
+        assert!(!state.quota_refresh_due("a", 3_001));
+        assert!(state.quota_refresh_due("a", 3_000 + QUOTA_REFRESH_TTL_MS));
     }
 
     #[test]

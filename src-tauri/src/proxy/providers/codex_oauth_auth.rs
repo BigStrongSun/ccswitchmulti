@@ -1192,7 +1192,7 @@ impl CodexOAuthManager {
                     )
                     && (bound.as_deref() == Some(entry.account_id.as_str())
                         || runtime
-                            .remaining_percent(&entry.account_id)
+                            .fresh_remaining_percent(&entry.account_id, now)
                             .is_none_or(|value| value > entry.reserve_percent)))
                 .then_some(CodexPoolCandidate {
                     entry,
@@ -1214,7 +1214,7 @@ impl CodexOAuthManager {
                         *enabled_account_generations.get(&entry.account_id)?;
                     let within_reserve = bound.as_deref() == Some(entry.account_id.as_str())
                         || runtime
-                            .remaining_percent(&entry.account_id)
+                            .fresh_remaining_percent(&entry.account_id, now)
                             .is_none_or(|value| value > entry.reserve_percent);
                     if !within_reserve {
                         return None;
@@ -1275,10 +1275,10 @@ impl CodexOAuthManager {
         .unwrap_or(false)
     }
 
-    pub async fn mark_pool_quota_checked(&self, account_id: &str) {
+    pub async fn mark_pool_quota_attempted(&self, account_id: &str) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         self.with_prepared_pool_account_runtime(account_id, |runtime| {
-            runtime.mark_quota_checked(account_id, now_ms)
+            runtime.mark_quota_attempted(account_id, now_ms)
         })
         .await;
     }
