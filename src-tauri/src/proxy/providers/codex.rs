@@ -701,6 +701,16 @@ pub fn resolve_codex_v2_routed_provider(
                 .expect("compiled model route must exist"),
             "exact",
         )
+    } else if codex_image_generation_model(request_model) {
+        let Some(route) = compiled.routes.iter().find(|route| {
+            route.enabled
+                && providers
+                    .get(&route.target_provider_id)
+                    .is_some_and(is_codex_official_provider)
+        }) else {
+            return Ok(None);
+        };
+        (route, "official_image_fallback")
     } else {
         return Ok(None);
     };
@@ -714,6 +724,13 @@ pub fn resolve_codex_v2_routed_provider(
         providers,
     )
     .map(Some)
+}
+
+/// Standalone Codex ImageGen uses image model IDs that are intentionally absent from the
+/// text-model catalog. Keep that native fallback narrow: unknown text models still fail closed.
+fn codex_image_generation_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("gpt-image-") || model.starts_with("chatgpt-image-")
 }
 
 /// Resolve raw OpenAI-compatible endpoints through schema v2 without falling back to legacy
@@ -8210,6 +8227,48 @@ wire_api = "responses"
             "an uncompiled prefix model must fail closed"
         );
         assert!(fallback.is_none(), "an unmatched model must fail closed");
+    }
+
+    #[test]
+    fn v2_image_generation_routes_to_official_identity_without_catalog_entry() {
+        let mut official = v2_target_provider(
+            "codex-official",
+            "openai_responses",
+            json!([{"model": "gpt-5.6-sol"}]),
+        );
+        official.category = Some("official".to_string());
+        let router = v2_router(
+            json!([
+                v2_route("qwen", "qwen", json!({"mode": "all"})),
+                v2_route("official", "codex-official", json!({"mode": "all"}))
+            ]),
+            "qwen",
+        );
+        let providers = v2_providers([
+            official,
+            v2_target_provider("qwen", "openai_chat", json!([{"model": "qwen3.8"}])),
+        ]);
+
+        let image =
+            resolve_codex_v2_routed_provider(&router, &json!({"model": "gpt-image-2"}), &providers)
+                .expect("compile image fallback")
+                .expect("official image fallback");
+        let unknown = resolve_codex_v2_routed_provider(
+            &router,
+            &json!({"model": "unknown-text-model"}),
+            &providers,
+        )
+        .expect("compile unknown text model");
+
+        assert_eq!(image.route_id, "official");
+        assert_eq!(image.target_provider_id, "codex-official");
+        assert_eq!(image.visible_model, "gpt-image-2");
+        assert_eq!(image.upstream_model, "gpt-image-2");
+        assert_eq!(image.matched_by, "official_image_fallback");
+        assert!(
+            unknown.is_none(),
+            "the image fallback must not make unknown text models routable"
+        );
     }
 
     #[test]
