@@ -28,6 +28,12 @@
 - updater signature SHA-256：`22BE89D016CC2B0064FD62C54F046FE389FA984FD8DBD0C58628CE3A6BA78DCC`
 - raw EXE 与 NSIS 的 `ProductVersion`、`FileVersion` 均为 `3.20.4-13`；文件长度分别为 44,933,120 和 14,064,292 bytes。
 
+## 远程同步
+
+- 推送前 `fork/main` 为 `181a16e25`，本地 `main` 为其纯快进后继。
+- `git push fork main` 成功，远端 ref 与 GitHub API 均确认 `fork/main = a2f0540895279310a0a25200bb91e3c55a93afd3`，领先原远端 4 个提交。
+- 本次没有创建或推送 `v3.20.4-13` tag，也没有触发 GitHub Release workflow。
+
 ## 未完成边界
 
 - 没有替换或重启现役安装 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe`；现场仍是 `3.20.4-11`。
