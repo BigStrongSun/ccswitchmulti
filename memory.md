@@ -1,5 +1,9 @@
 # CC Switch Repository Memory
 
+## 2026-11-17 Codex Capacity Replay
+
+- Screenshot incident, root causes, test evidence, and installation boundary: [memory-2026-11-17-codex-capacity-replay.md](memory-2026-11-17-codex-capacity-replay.md). Generic error type masked the overload code; empty Responses progress incorrectly closed the replay gate. Preserve client-owned transport recovery and prohibit replay after semantic output.
+
 ## 2026-10-20 CCSM 传输重试归属修复
 
 - 用户要求修 CCSM 放大，不是换节点。根因是代理内部 6 次 send 与客户端 request/stream 恢复叠加，以及原生 Responses SSE 的第二个传输 owner。方案、证据、验证和安装状态见 [memory-2026-10-20-transport-retry-ownership.md](memory-2026-10-20-transport-retry-ownership.md)；保留客户端 2/10，不再对 Codex 初始建连和原生 SSE 传输故障暗中重放，未知结果仍 424。

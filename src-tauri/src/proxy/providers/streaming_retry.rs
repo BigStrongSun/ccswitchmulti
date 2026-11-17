@@ -379,12 +379,14 @@ pub(crate) fn is_capacity_error_payload(payload: &Value, status: Option<http::St
         .pointer("/response/error")
         .or_else(|| payload.get("error"))
         .unwrap_or(payload);
-    let error_type = error
-        .get("type")
-        .and_then(Value::as_str)
-        .or_else(|| error.get("code").and_then(Value::as_str))
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    if is_explicit_non_replayable_error_payload(payload) {
+        return false;
+    }
+    let error_markers = ["type", "code"]
+        .iter()
+        .filter_map(|field| error.get(field).and_then(Value::as_str))
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
     let message = error
         .get("message")
         .and_then(Value::as_str)
@@ -400,7 +402,7 @@ pub(crate) fn is_capacity_error_payload(payload: &Value, status: Option<http::St
         "capacity_exceeded",
     ]
     .iter()
-    .any(|marker| error_type.contains(marker));
+    .any(|marker| error_markers.iter().any(|kind| kind.contains(marker)));
     let explicit_capacity_message = [
         "selected model is at capacity",
         "model is at capacity",
@@ -439,12 +441,11 @@ fn is_explicit_non_replayable_error_payload(payload: &Value) -> bool {
         .pointer("/response/error")
         .or_else(|| payload.get("error"))
         .unwrap_or(payload);
-    let kind = error
-        .get("type")
-        .and_then(Value::as_str)
-        .or_else(|| error.get("code").and_then(Value::as_str))
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let kinds = ["type", "code"]
+        .iter()
+        .filter_map(|field| error.get(field).and_then(Value::as_str))
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
     let message = error
         .get("message")
         .and_then(Value::as_str)
@@ -465,7 +466,7 @@ fn is_explicit_non_replayable_error_payload(payload: &Value) -> bool {
         "unsupported_parameter",
     ]
     .iter()
-    .any(|marker| kind.contains(marker))
+    .any(|marker| kinds.iter().any(|kind| kind.contains(marker)))
         || [
             "quota exhausted",
             "insufficient quota",
@@ -476,6 +477,30 @@ fn is_explicit_non_replayable_error_payload(payload: &Value) -> bool {
         ]
         .iter()
         .any(|marker| message.contains(marker))
+}
+
+fn native_progress_event_is_nonsemantic(event_name: &str, payload: &Value) -> bool {
+    let expected_status = match event_name {
+        "response.queued" => "queued",
+        "response.in_progress" => "in_progress",
+        _ => return false,
+    };
+    let Some(response) = payload.get("response").and_then(Value::as_object) else {
+        return false;
+    };
+    let valid_id = response
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    let matching_event = payload.get("type").and_then(Value::as_str) == Some(event_name);
+    let matching_status = response.get("status").and_then(Value::as_str) == Some(expected_status);
+    let empty_output = response
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty);
+    let no_error = response.get("error").is_none_or(Value::is_null);
+
+    valid_id && matching_event && matching_status && empty_output && no_error
 }
 
 struct NativeResponsesSseErrorDiagnostic {
@@ -852,12 +877,50 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                                     yield Ok(block);
                                 }
                                 NativeResponsesTerminalDisposition::Failed => {
-                                    if capacity_retry_enabled
+                                    let capacity_failure = payload.as_ref().is_some_and(|payload| {
+                                        is_capacity_error_payload(payload, None)
+                                    });
+                                    let eligible_capacity_retry = capacity_retry_enabled
                                         && !semantic_output_forwarded
-                                        && payload.as_ref().is_some_and(|payload| {
-                                            is_capacity_error_payload(payload, None)
-                                        })
-                                    {
+                                        && capacity_failure
+                                        && reconnector.is_some();
+                                    let retry_reason = if !capacity_retry_enabled {
+                                        "retry_disabled"
+                                    } else if semantic_output_forwarded {
+                                        "semantic_output_forwarded"
+                                    } else if !capacity_failure {
+                                        "not_capacity"
+                                    } else if reconnector.is_none() {
+                                        "reconnector_unavailable"
+                                    } else if capacity_attempt >= CAPACITY_STREAM_MAX_RETRIES {
+                                        "budget_exhausted"
+                                    } else {
+                                        "retry_started"
+                                    };
+                                    if let Some(context) = log_context.as_ref() {
+                                        let event_class = match event_name.as_deref() {
+                                            Some("error" | "response.error") => "generic_error",
+                                            Some("response.failed") => "response_failed",
+                                            _ => "other_terminal",
+                                        };
+                                        crate::proxy::codex_router_log::append_event(
+                                            "capacity_retry_decision",
+                                            &[
+                                                ("stage", "native_responses".to_string()),
+                                                ("session", context.session_id.clone()),
+                                                ("model", context.model.clone()),
+                                                ("provider", context.provider_id.clone()),
+                                                ("reason", retry_reason.to_string()),
+                                                ("capacity", capacity_failure.to_string()),
+                                                ("enabled", capacity_retry_enabled.to_string()),
+                                                ("semantic", semantic_output_forwarded.to_string()),
+                                                ("reconnector", reconnector.is_some().to_string()),
+                                                ("attempt", capacity_attempt.to_string()),
+                                                ("event_class", event_class.to_string()),
+                                            ],
+                                        );
+                                    }
+                                    if eligible_capacity_retry {
                                         retrying_capacity = true;
                                         break 'stream "upstream reported model capacity pressure".into();
                                     }
@@ -880,7 +943,13 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                             break 'attempts;
                         }
                         _ => {
-                            semantic_output_forwarded = true;
+                            if !event_name.as_deref().is_some_and(|event_name| {
+                                payload.as_ref().is_some_and(|payload| {
+                                    native_progress_event_is_nonsemantic(event_name, payload)
+                                })
+                            }) {
+                                semantic_output_forwarded = true;
+                            }
                             yield Ok(block);
                         }
                     }
@@ -1399,6 +1468,16 @@ mod tests {
         )
     }
 
+    fn empty_progress(event: &str) -> String {
+        sse(
+            event,
+            json!({
+                "type":event,
+                "response":{"id":"resp_1","status":event.strip_prefix("response.").unwrap_or(event),"output":[]}
+            }),
+        )
+    }
+
     fn text_delta(text: &str) -> String {
         sse(
             "response.output_text.delta",
@@ -1636,6 +1715,192 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(out.contains("recovered"));
         assert!(!out.contains("capacity_retry_stopped"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_retries_after_empty_progress_split_across_chunks() {
+        let progress = empty_progress("response.in_progress");
+        let progress_split = progress.len() / 2;
+        let first_prefix = format!("{}{}", created(), &progress[..progress_split]);
+        let first_suffix = format!(
+            "{}{}",
+            &progress[progress_split..],
+            capacity_failed("server_is_overloaded", "Selected model is at capacity")
+        );
+        let retry_body = [
+            created(),
+            empty_progress("response.in_progress"),
+            text_delta("recovered"),
+            completed(),
+        ]
+        .concat();
+        let (reconnector, calls) = scripted_client_managed_reconnector(vec![Ok(
+            streamed_response(&[retry_body.as_str()]),
+        )]);
+        let first = ok_chunks(&[first_prefix.as_str(), first_suffix.as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(out.matches("event: response.created").count(), 1);
+        assert_eq!(out.matches("event: response.in_progress").count(), 2);
+        assert!(out.contains("recovered"));
+        assert!(!out.contains("server_is_overloaded"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_retry_allows_empty_queued_metadata() {
+        let retry_body = [created(), text_delta("recovered"), completed()].concat();
+        let (reconnector, calls) = scripted_client_managed_reconnector(vec![Ok(
+            streamed_response(&[retry_body.as_str()]),
+        )]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            empty_progress("response.queued").as_str(),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(out.contains("event: response.queued"));
+        assert!(out.contains("recovered"));
+    }
+
+    #[test]
+    fn native_progress_scaffolding_requires_matching_empty_response_shape() {
+        for payload in [
+            json!({"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress"}}),
+            json!({"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress","output":null}}),
+            json!({"type":"response.in_progress","response":{"id":"resp_1","status":"queued","output":[]}}),
+            json!({"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress","output":[],"error":{"message":"not clean"}}}),
+            json!({"type":"response.in_progress","response":{"status":"in_progress","output":[]}}),
+        ] {
+            assert!(
+                !native_progress_event_is_nonsemantic("response.in_progress", &payload),
+                "invalid progress scaffold was accepted: {payload}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_does_not_retry_nonempty_progress_output() {
+        let (reconnector, calls) = scripted_client_managed_reconnector(vec![]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            &sse(
+                "response.in_progress",
+                json!({"type":"response.in_progress","response":{"status":"in_progress","output":[{"type":"message"}]}}),
+            ),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(out.contains("response.in_progress"));
+        assert!(out.contains("server_is_overloaded"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_does_not_retry_unknown_event_before_capacity() {
+        let (reconnector, calls) = scripted_client_managed_reconnector(vec![]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            &sse(
+                "response.future_event",
+                json!({"type":"response.future_event"}),
+            ),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(out.contains("response.future_event"));
+        assert!(out.contains("server_is_overloaded"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_does_not_retry_after_output_even_with_empty_progress() {
+        let (reconnector, calls) = scripted_client_managed_reconnector(vec![]);
+        let first = ok_chunks(&[
+            created().as_str(),
+            text_delta("already visible").as_str(),
+            empty_progress("response.in_progress").as_str(),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(out.contains("already visible"));
+        assert!(out.contains("server_is_overloaded"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_capacity_retries_empty_progress_up_to_capacity_budget() {
+        let retry_body = [
+            created(),
+            empty_progress("response.in_progress"),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity"),
+        ]
+        .concat();
+        let script = (0..CAPACITY_STREAM_MAX_RETRIES)
+            .map(|_| Ok(streamed_response(&[retry_body.as_str()])))
+            .collect();
+        let (reconnector, calls) = scripted_client_managed_reconnector(script);
+        let first = ok_chunks(&[
+            created().as_str(),
+            empty_progress("response.in_progress").as_str(),
+            capacity_failed("server_is_overloaded", "Selected model is at capacity").as_str(),
+        ]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), CAPACITY_STREAM_MAX_RETRIES);
+        assert_eq!(
+            out.matches("event: response.in_progress").count(),
+            CAPACITY_STREAM_MAX_RETRIES as usize + 1
+        );
+        assert!(out.contains("capacity_retry_exhausted"));
+        assert!(!out.contains("Selected model is at capacity"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1914,6 +2179,81 @@ mod tests {
             &json!({"error":{"type":"server_error","message":"Please try again later"}}),
             Some(http::StatusCode::SERVICE_UNAVAILABLE),
         ));
+    }
+
+    #[test]
+    fn capacity_classifier_uses_explicit_capacity_code_alongside_generic_type() {
+        assert!(is_capacity_error_payload(
+            &json!({
+                "error": {
+                    "type": "service_unavailable_error",
+                    "code": "server_is_overloaded",
+                    "message": "The model is temporarily overloaded"
+                }
+            }),
+            None,
+        ));
+
+        assert!(!is_capacity_error_payload(
+            &json!({
+                "error": {
+                    "type": "service_unavailable_error",
+                    "message": "The service is temporarily unavailable"
+                }
+            }),
+            None,
+        ));
+        for code in [
+            "insufficient_quota",
+            "authentication_error",
+            "policy_violation",
+        ] {
+            assert!(
+                !is_capacity_error_payload(
+                    &json!({
+                        "error": {
+                            "type": "service_unavailable_error",
+                            "code": code,
+                            "message": "Selected model is at capacity"
+                        }
+                    }),
+                    None,
+                ),
+                "non-replayable code must override capacity wording: {code}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_error_event_retries_when_capacity_code_is_behind_generic_type() {
+        let retry_body = [created(), text_delta("recovered"), completed()].concat();
+        let (reconnector, calls) = scripted_client_managed_reconnector(vec![Ok(
+            streamed_response(&[retry_body.as_str()]),
+        )]);
+        let capacity_error = sse(
+            "error",
+            json!({
+                "type":"error",
+                "error":{
+                    "type":"service_unavailable_error",
+                    "code":"server_is_overloaded",
+                    "message":"The model is temporarily overloaded"
+                }
+            }),
+        );
+        let first = ok_chunks(&[created().as_str(), capacity_error.as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream_with_context(
+            first,
+            Some(reconnector),
+            None,
+            true,
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(out.contains("recovered"));
+        assert!(!out.contains("service_unavailable_error"));
     }
 
     #[test]
