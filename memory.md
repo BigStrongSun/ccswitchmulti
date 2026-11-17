@@ -1,5 +1,9 @@
 # CC Switch Repository Memory
 
+## 2026-11-17 CCSwitchMulti v3.20.4-16 Release
+
+- Native compression-choice fix release: [memory-2026-11-17-v3.20.4-16-release.md](memory-2026-11-17-v3.20.4-16-release.md). Preserve plain/identity for trusted native official Responses/compact while keeping compressed/default/managed/external behavior. Publication and installed runtime are separate acceptance boundaries.
+
 ## 2026-11-17 CCSwitchMulti v3.20.4-15 Release
 
 - Final release continuation: [memory-2026-11-17-v3.20.4-15-release.md](memory-2026-11-17-v3.20.4-15-release.md). v14 code passed full CI but its macos-14 runner was rejected before allocation; preserve that tag and publish a new version with a supported pinned macOS runner. Product code and successful v14 evidence are reused.
