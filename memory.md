@@ -1,5 +1,9 @@
 # CC Switch Repository Memory
 
+## 2026-11-17 CCSwitchMulti v3.20.4-14 Release
+
+- Release scope, frozen-candidate lifecycle, checks and publication state: [memory-2026-11-17-v3.20.4-14-release.md](memory-2026-11-17-v3.20.4-14-release.md). Includes capacity replay and unreleased image/pool fixes; excludes existing unrelated dirty changes and does not install locally.
+
 ## 2026-11-17 Codex Capacity Replay
 
 - Screenshot incident, root causes, test evidence, and installation boundary: [memory-2026-11-17-codex-capacity-replay.md](memory-2026-11-17-codex-capacity-replay.md). Generic error type masked the overload code; empty Responses progress incorrectly closed the replay gate. Preserve client-owned transport recovery and prohibit replay after semantic output.
