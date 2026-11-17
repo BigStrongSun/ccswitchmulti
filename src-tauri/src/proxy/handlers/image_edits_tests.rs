@@ -496,74 +496,76 @@ fn image_edits_v2_text_only_official_route_falls_back_without_text_model_overrid
 fn image_requests_v2_desktop_login_route_falls_back_without_image_catalog() {
     use crate::proxy::providers::{CodexAdapter, ProviderAdapter};
 
-    for text_model in ["gpt-5.6-sol", "review-alias"] {
-        let db = Arc::new(Database::memory().expect("memory db"));
-        let router = v2_router(
-            json!([v2_route(
+    for image_model in ["gpt-image-2", "chatgpt-image-latest"] {
+        for text_model in ["gpt-5.6-sol", "review-alias"] {
+            let db = Arc::new(Database::memory().expect("memory db"));
+            let router = v2_router(
+                json!([v2_route(
+                    "official",
+                    "codex-official",
+                    json!({"mode": "include", "models": [text_model]}),
+                    "provider_config"
+                )]),
                 "official",
+            );
+            let mut official = managed_oauth_official_provider(
                 "codex-official",
-                json!({"mode": "include", "models": [text_model]}),
-                "provider_config"
-            )]),
-            "official",
-        );
-        let mut official = managed_oauth_official_provider(
-            "codex-official",
-            json!([{"model": text_model, "upstreamModel": "gpt-5.6-sol"}]),
-        );
-        official.meta.as_mut().unwrap().codex_official_auth = Some(CodexOfficialAuthConfig {
-            mode: CodexOfficialAuthMode::DesktopCurrentLogin,
-            account_id: None,
-        });
-        db.save_provider("codex", &router).unwrap();
-        db.save_provider("codex", &official).unwrap();
-        let before = serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap();
-        let providers = HashMap::from([(official.id.clone(), official.clone())]);
-        let image_body = json!({"model": "gpt-image-2", "prompt": "draw a square"});
-        assert!(crate::proxy::providers::resolve_codex_v2_routed_provider(
-            &router,
-            &image_body,
-            &providers
-        )
-        .unwrap()
-        .is_none());
-        assert!(
-            crate::proxy::providers::resolve_codex_v2_raw_passthrough_provider(
+                json!([{"model": text_model, "upstreamModel": "gpt-5.6-sol"}]),
+            );
+            official.meta.as_mut().unwrap().codex_official_auth = Some(CodexOfficialAuthConfig {
+                mode: CodexOfficialAuthMode::DesktopCurrentLogin,
+                account_id: None,
+            });
+            db.save_provider("codex", &router).unwrap();
+            db.save_provider("codex", &official).unwrap();
+            let before = serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap();
+            let providers = HashMap::from([(official.id.clone(), official.clone())]);
+            let image_body = json!({"model": image_model, "prompt": "draw a square"});
+            assert!(crate::proxy::providers::resolve_codex_v2_routed_provider(
                 &router,
                 &image_body,
                 &providers,
-                None
             )
             .unwrap()
-            .is_none()
-        );
-        let state = build_state(db.clone());
-        let resolved = resolve_codex_image_generation_provider(&state, &router, &image_body)
-            .unwrap()
-            .expect("Desktop login must serve images without adding an image catalog entry");
-
-        assert!(crate::proxy::providers::provider_uses_native_codex_auth(
-            &resolved
-        ));
-        assert!(resolved.meta.as_ref().unwrap().provider_type.is_none());
-        assert_eq!(
-            resolved.settings_config["codexResolvedRouteMatched"],
-            json!(text_model == "gpt-5.6-sol")
-        );
-        assert!(resolved
-            .settings_config
-            .get("codexResolvedUpstreamModelOverride")
             .is_none());
-        assert_eq!(
-            CodexAdapter.extract_base_url(&resolved).unwrap(),
-            crate::proxy::providers::CHATGPT_CODEX_BASE_URL
-        );
-        assert_eq!(image_body["model"], "gpt-image-2");
-        assert_eq!(
-            serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap(),
-            before,
-            "image fallback must not change stored providers"
-        );
+            assert!(
+                crate::proxy::providers::resolve_codex_v2_raw_passthrough_provider(
+                    &router,
+                    &image_body,
+                    &providers,
+                    None
+                )
+                .unwrap()
+                .is_none()
+            );
+            let state = build_state(db.clone());
+            let resolved = resolve_codex_image_generation_provider(&state, &router, &image_body)
+                .unwrap()
+                .expect("Desktop login must serve images without adding an image catalog entry");
+
+            assert!(crate::proxy::providers::provider_uses_native_codex_auth(
+                &resolved
+            ));
+            assert!(resolved.meta.as_ref().unwrap().provider_type.is_none());
+            assert_eq!(
+                resolved.settings_config["codexResolvedRouteMatched"],
+                json!(text_model == "gpt-5.6-sol")
+            );
+            assert!(resolved
+                .settings_config
+                .get("codexResolvedUpstreamModelOverride")
+                .is_none());
+            assert_eq!(
+                CodexAdapter.extract_base_url(&resolved).unwrap(),
+                crate::proxy::providers::CHATGPT_CODEX_BASE_URL
+            );
+            assert_eq!(image_body["model"], image_model);
+            assert_eq!(
+                serde_json::to_value(db.get_all_providers("codex").unwrap()).unwrap(),
+                before,
+                "image fallback must not change stored providers"
+            );
+        }
     }
 }
 

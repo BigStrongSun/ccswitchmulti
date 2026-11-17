@@ -30,3 +30,10 @@
 - `cargo test ... image_generation --lib`: 15 passed.
 - `cargo fmt --check` and `git diff --check`: passed.
 - No paid image request was sent. Live end-to-end image generation remains the user's next acceptance step.
+
+## 2026-11-17 Release Gate Correction
+
+- Full v3.20.4-14 candidate testing exposed two deliberate image-handler boundary regressions: `image_edits_v2_text_only_official_route_falls_back_without_text_model_override` and `image_requests_v2_desktop_login_route_falls_back_without_image_catalog`.
+- The original v13 fallback in shared `resolve_codex_v2_routed_provider` broadened ordinary Responses routing beyond the model catalog, although the reported request was an Images endpoint. The image-only handler already has official identity fallback and sanitizes text model overrides.
+- Preserve those negative assertions. Remove prefix fallback from the shared resolver and verify image-only fallback for both image model families, explicit third-party precedence, disabled/missing official routes and unchanged stored providers. The original v13 implementation description above is historical, not the release's current boundary.
+- Current release acceptance and final results: `memory-2026-11-17-v3.20.4-14-release.md`.
