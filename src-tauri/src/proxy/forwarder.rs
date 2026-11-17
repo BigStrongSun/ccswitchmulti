@@ -18,7 +18,7 @@ use super::providers::{
 };
 use super::{
     body_filter::filter_private_params_with_whitelist,
-    content_encoding::{decompress_body_with_limit, get_content_encoding},
+    content_encoding::{decompress_body_with_limit, get_content_encoding, CodexInboundEncoding},
     error::*,
     failover_switch::FailoverSwitchManager,
     json_canonical::{canonicalize_value, short_value_hash},
@@ -3894,6 +3894,9 @@ impl RequestForwarder {
             })?;
         }
 
+        let inbound_codex_encoding = extensions.get::<CodexInboundEncoding>().copied();
+        let trusted_native_official_passthrough =
+            self.preserve_codex_client_originator && codex_official_auth_passthrough;
         let zstd_compress_codex_official_upstream = should_zstd_compress_codex_official_upstream(
             app_type,
             method,
@@ -3903,6 +3906,8 @@ impl RequestForwarder {
                 || codex_responses_to_chat
                 || codex_responses_to_messages
                 || codex_responses_to_anthropic,
+            trusted_native_official_passthrough,
+            inbound_codex_encoding,
         );
         body_bytes = encode_codex_official_upstream_body(
             &mut ordered_headers,
@@ -7929,12 +7934,22 @@ fn should_zstd_compress_codex_official_upstream(
     upstream_url: &str,
     official_auth: bool,
     transformed: bool,
+    trusted_native_passthrough: bool,
+    inbound_encoding: Option<CodexInboundEncoding>,
 ) -> bool {
-    matches!(app_type, AppType::Codex)
+    let default = matches!(app_type, AppType::Codex)
         && method == http::Method::POST
         && official_auth
         && !transformed
-        && is_chatgpt_codex_responses_upstream_url(upstream_url)
+        && is_chatgpt_codex_responses_upstream_url(upstream_url);
+    if !default || !trusted_native_passthrough {
+        return default;
+    }
+    match inbound_encoding {
+        Some(CodexInboundEncoding::Plain) => false,
+        Some(CodexInboundEncoding::Compressed) => true,
+        None => default,
+    }
 }
 
 /// Encode the final JSON entity exactly as the official Codex transport does.
@@ -11072,6 +11087,8 @@ mod tests {
             "https://chatgpt.com/backend-api/codex/responses",
             /* official_auth */ true,
             /* transformed */ false,
+            /* trusted_native_passthrough */ false,
+            /* inbound_encoding */ None,
         ));
     }
 
@@ -11083,6 +11100,8 @@ mod tests {
             "https://api.deepseek.com/v1/responses",
             /* official_auth */ true,
             /* transformed */ false,
+            /* trusted_native_passthrough */ false,
+            /* inbound_encoding */ None,
         ));
         assert!(!should_zstd_compress_codex_official_upstream(
             &AppType::Codex,
@@ -11090,7 +11109,74 @@ mod tests {
             "https://chatgpt.com/backend-api/codex/responses",
             /* official_auth */ true,
             /* transformed */ true,
+            /* trusted_native_passthrough */ false,
+            /* inbound_encoding */ None,
         ));
+    }
+
+    #[test]
+    fn trusted_native_passthrough_preserves_inbound_encoding_choice() {
+        let url = "https://chatgpt.com/backend-api/codex/responses";
+        let selected = |trusted_native_passthrough, inbound_encoding| {
+            should_zstd_compress_codex_official_upstream(
+                &AppType::Codex,
+                &http::Method::POST,
+                url,
+                true,
+                false,
+                trusted_native_passthrough,
+                inbound_encoding,
+            )
+        };
+
+        assert!(!selected(true, Some(CodexInboundEncoding::Plain)));
+        assert!(selected(true, Some(CodexInboundEncoding::Compressed)));
+        // Legacy callers without typed metadata keep the previous default.
+        assert!(selected(true, None));
+        // Managed OAuth and other non-passthrough callers keep the old default.
+        assert!(selected(false, Some(CodexInboundEncoding::Plain)));
+    }
+
+    #[test]
+    fn native_plain_preference_controls_final_upstream_headers_and_entity_bytes() {
+        let original =
+            br#"{"model":"gpt-5.6-luna","input":[{"role":"user","content":"probe"}]}"#.to_vec();
+        for endpoint in ["responses", "responses/compact"] {
+            let url = format!("https://chatgpt.com/backend-api/codex/{endpoint}");
+            for (preference, expected_compression) in [
+                (CodexInboundEncoding::Plain, false),
+                (CodexInboundEncoding::Compressed, true),
+            ] {
+                let compress = should_zstd_compress_codex_official_upstream(
+                    &AppType::Codex,
+                    &http::Method::POST,
+                    &url,
+                    true,
+                    false,
+                    true,
+                    Some(preference),
+                );
+                assert_eq!(compress, expected_compression);
+
+                let mut headers = HeaderMap::new();
+                let wire_body =
+                    encode_codex_official_upstream_body(&mut headers, original.clone(), compress)
+                        .expect("encode final upstream entity");
+                assert_eq!(
+                    headers
+                        .get(http::header::CONTENT_ENCODING)
+                        .and_then(|value| value.to_str().ok()),
+                    expected_compression.then_some("zstd")
+                );
+                let decoded = if expected_compression {
+                    zstd::stream::decode_all(std::io::Cursor::new(wire_body))
+                        .expect("decode outgoing zstd entity")
+                } else {
+                    wire_body
+                };
+                assert_eq!(decoded, original);
+            }
+        }
     }
 
     #[test]

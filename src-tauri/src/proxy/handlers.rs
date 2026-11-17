@@ -8,7 +8,9 @@
 //! - Claude 的格式转换逻辑保留在此文件（用于 OpenRouter 旧接口回退）
 
 use super::{
-    content_encoding::{decompress_body, get_content_encoding, is_supported_content_encoding},
+    content_encoding::{
+        decompress_body, get_content_encoding, is_supported_content_encoding, CodexInboundEncoding,
+    },
     error_mapper::{get_error_message, map_proxy_error_to_status},
     external_openai_api::{
         self, ExternalOpenAiApiAuthError, ExternalOpenAiApiBackendType, ExternalOpenAiApiProfile,
@@ -1370,6 +1372,37 @@ fn decode_codex_request_body(
     headers.remove(axum::http::header::TRANSFER_ENCODING);
 
     Ok(Bytes::from(decompressed))
+}
+
+/// Snapshot a native Codex caller's entity preference before decoding removes
+/// Content-Encoding. The caller stores this in Extensions only after decoding
+/// succeeds, so malformed/unsupported encodings never influence forwarding.
+fn codex_inbound_encoding_preference(
+    app_type: &AppType,
+    headers: &axum::http::HeaderMap,
+) -> Option<CodexInboundEncoding> {
+    if *app_type != AppType::Codex || !should_handle_as_codex_client(headers) {
+        return None;
+    }
+    Some(if get_content_encoding(headers).is_some() {
+        CodexInboundEncoding::Compressed
+    } else {
+        CodexInboundEncoding::Plain
+    })
+}
+
+fn decode_and_record_codex_inbound_encoding(
+    app_type: &AppType,
+    headers: &mut axum::http::HeaderMap,
+    body_bytes: Bytes,
+    extensions: &mut axum::http::Extensions,
+) -> Result<Bytes, ProxyError> {
+    let preference = codex_inbound_encoding_preference(app_type, headers);
+    let decoded = decode_codex_request_body(headers, body_bytes)?;
+    if let Some(preference) = preference {
+        extensions.insert(preference);
+    }
+    Ok(decoded)
 }
 
 // ============================================================================
@@ -3045,7 +3078,7 @@ async fn handle_responses_for_app(
     let method = parts.method.clone();
     let uri = parts.uri;
     let mut headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut extensions = parts.extensions;
 
     if app_type == AppType::Codex {
         let mut fields = codex_request_classification_fields(&headers);
@@ -3059,7 +3092,12 @@ async fn handle_responses_for_app(
         .await
         .map_err(|e| ProxyError::Internal(format!("Failed to read request body: {e}")))?
         .to_bytes();
-    let body_bytes = decode_codex_request_body(&mut headers, body_bytes)?;
+    let body_bytes = decode_and_record_codex_inbound_encoding(
+        &app_type,
+        &mut headers,
+        body_bytes,
+        &mut extensions,
+    )?;
     let body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
     let request_body_for_history = body.clone();
@@ -3396,13 +3434,18 @@ async fn handle_responses_compact_for_app(
     let method = parts.method.clone();
     let uri = parts.uri;
     let mut headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
         .map_err(|e| ProxyError::Internal(format!("Failed to read request body: {e}")))?
         .to_bytes();
-    let body_bytes = decode_codex_request_body(&mut headers, body_bytes)?;
+    let body_bytes = decode_and_record_codex_inbound_encoding(
+        &app_type,
+        &mut headers,
+        body_bytes,
+        &mut extensions,
+    )?;
     let body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
     let request_body_for_history = body.clone();
@@ -6199,7 +6242,8 @@ mod tests {
         chat_completion_to_response_from_verified_profile, chat_sse_to_response_value,
         classify_body_for_diagnostics, codex_catalog_models_response, codex_proxy_error_json,
         codex_proxy_error_status, codex_request_classification_fields,
-        create_codex_chat_sse_stream_from_verified_profile, external_openai_api_models_response,
+        create_codex_chat_sse_stream_from_verified_profile,
+        decode_and_record_codex_inbound_encoding, external_openai_api_models_response,
         external_openai_api_unsupported_response, mark_external_openai_headers,
         resolve_codex_image_generation_provider, resolve_external_codex_router_raw_target,
         resolve_external_codex_router_target, resolve_external_openai_compatible_provider,
@@ -7244,6 +7288,126 @@ data: [DONE]\n\n";
         );
 
         assert!(should_handle_as_codex_client(&headers));
+    }
+
+    #[test]
+    fn responses_and_compact_share_successful_native_encoding_capture() {
+        use super::CodexInboundEncoding;
+
+        let body = br#"{"model":"gpt-5.6-luna","input":[]}"#;
+        let native_headers = || {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::USER_AGENT,
+                HeaderValue::from_static("codex_cli_rs/0.144.2"),
+            );
+            headers
+        };
+
+        let mut plain_headers = native_headers();
+        let mut plain_extensions = axum::http::Extensions::new();
+        assert_eq!(
+            decode_and_record_codex_inbound_encoding(
+                &AppType::Codex,
+                &mut plain_headers,
+                Bytes::from_static(body),
+                &mut plain_extensions,
+            )
+            .expect("plain request"),
+            Bytes::from_static(body)
+        );
+        assert_eq!(
+            plain_extensions.get::<CodexInboundEncoding>(),
+            Some(&CodexInboundEncoding::Plain)
+        );
+
+        let mut identity_headers = native_headers();
+        identity_headers.insert(
+            axum::http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+        let mut identity_extensions = axum::http::Extensions::new();
+        decode_and_record_codex_inbound_encoding(
+            &AppType::Codex,
+            &mut identity_headers,
+            Bytes::from_static(body),
+            &mut identity_extensions,
+        )
+        .expect("identity request");
+        assert_eq!(
+            identity_extensions.get::<CodexInboundEncoding>(),
+            Some(&CodexInboundEncoding::Plain)
+        );
+
+        let compressed = zstd::stream::encode_all(std::io::Cursor::new(body), 0)
+            .expect("compress native request");
+        let mut compressed_headers = native_headers();
+        compressed_headers.insert(
+            axum::http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("zstd"),
+        );
+        let mut compressed_extensions = axum::http::Extensions::new();
+        assert_eq!(
+            decode_and_record_codex_inbound_encoding(
+                &AppType::Codex,
+                &mut compressed_headers,
+                Bytes::from(compressed),
+                &mut compressed_extensions,
+            )
+            .expect("decode native request"),
+            Bytes::from_static(body)
+        );
+        assert!(!compressed_headers.contains_key(axum::http::header::CONTENT_ENCODING));
+        assert_eq!(
+            compressed_extensions.get::<CodexInboundEncoding>(),
+            Some(&CodexInboundEncoding::Compressed)
+        );
+        assert_eq!(
+            compressed_extensions.clone().get::<CodexInboundEncoding>(),
+            Some(&CodexInboundEncoding::Compressed)
+        );
+
+        let mut malformed_headers = native_headers();
+        malformed_headers.insert(
+            axum::http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("zstd"),
+        );
+        let mut malformed_extensions = axum::http::Extensions::new();
+        assert!(decode_and_record_codex_inbound_encoding(
+            &AppType::Codex,
+            &mut malformed_headers,
+            Bytes::from_static(b"bad"),
+            &mut malformed_extensions,
+        )
+        .is_err());
+        assert!(malformed_extensions.get::<CodexInboundEncoding>().is_none());
+
+        let mut external_headers = native_headers();
+        mark_external_openai_headers(&mut external_headers);
+        let mut external_extensions = axum::http::Extensions::new();
+        decode_and_record_codex_inbound_encoding(
+            &AppType::Codex,
+            &mut external_headers,
+            Bytes::from_static(body),
+            &mut external_extensions,
+        )
+        .expect("external request");
+        assert!(external_extensions.get::<CodexInboundEncoding>().is_none());
+
+        let mut unknown_headers = native_headers();
+        unknown_headers.insert(
+            axum::http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("unsupported"),
+        );
+        let mut unknown_extensions = axum::http::Extensions::new();
+        assert!(decode_and_record_codex_inbound_encoding(
+            &AppType::Codex,
+            &mut unknown_headers,
+            Bytes::from_static(body),
+            &mut unknown_extensions,
+        )
+        .is_err());
+        assert!(unknown_extensions.get::<CodexInboundEncoding>().is_none());
     }
 
     #[test]

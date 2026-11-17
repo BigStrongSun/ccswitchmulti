@@ -7,6 +7,14 @@
 use axum::http::header::HeaderMap;
 use std::io::Read;
 
+/// The normalized encoding chosen by a trusted native Codex caller before the
+/// request handler removes entity headers and rewrites the JSON body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodexInboundEncoding {
+    Plain,
+    Compressed,
+}
+
 /// 把 content-encoding 值拆成有序 coding 列表（去掉 identity 与空值）。
 ///
 /// HTTP 允许堆叠编码（如 `gzip, zstd`），各 coding 以逗号分隔；亦允许重复
