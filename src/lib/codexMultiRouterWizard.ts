@@ -13,7 +13,10 @@ import type {
   CodexSubagentVersion,
   Provider,
 } from "@/types";
-import type { CodexSubagentV2Profile } from "@/types/codexSubagentV2";
+import type {
+  CodexSubagentV2Config,
+  CodexSubagentV2Profile,
+} from "@/types/codexSubagentV2";
 import {
   normalizeHostedToolsConfig,
   type HostedToolsConfig,
@@ -56,6 +59,11 @@ export interface WizardPlanBuildOptions {
   spawnAgentModels?: string[];
   subagentVersion?: CodexSubagentVersion;
   hostedTools?: HostedToolsConfig;
+  /**
+   * 保存门禁发现“已启用角色没有声明推理能力”时，用户显式选择禁用的角色模型。
+   * 只关闭 enabled，不删除 profile，声明能力后仍可在 Sub-Agent 工作台重新启用。
+   */
+  disabledSubagentModels?: string[];
 }
 
 export interface WizardConfigIssue {
@@ -1301,6 +1309,38 @@ function buildSubagentNameRedirector(
   return { redirectVisibleName, remapSubagentV2 };
 }
 
+// 保存门禁允许用户先把没有推理声明的角色关掉再保存；这里只改 enabled，
+// 保留问卷、覆盖和输入模态，避免“保存一次就丢配置”。
+function disableSubagentModels(
+  config: CodexSubagentV2Config | undefined,
+  models: string[] | undefined,
+): CodexSubagentV2Config | undefined {
+  if (!config || !models?.length) return config;
+  const normalized = new Set(
+    models
+      .map((model) => model.trim().toLowerCase())
+      .filter((model) => model.length > 0),
+  );
+  if (normalized.size === 0) return config;
+  const profiles: Record<string, CodexSubagentV2Profile> = {
+    ...config.profiles,
+  };
+  let changed = false;
+  for (const [key, profile] of Object.entries(profiles)) {
+    const identity = (profile.model ?? key).trim().toLowerCase();
+    if (
+      !normalized.has(identity) &&
+      !normalized.has(key.trim().toLowerCase())
+    ) {
+      continue;
+    }
+    if (!profile.enabled) continue;
+    profiles[key] = { ...profile, enabled: false };
+    changed = true;
+  }
+  return changed ? { ...config, profiles } : config;
+}
+
 // 创建或更新 MultiRouter provider；草稿只在用户点击保存发布时写入数据库。
 export function buildCodexMultiRouterWizardPlan(
   allProviders: Provider[],
@@ -1397,14 +1437,16 @@ export function buildCodexMultiRouterWizardPlan(
     routes,
     resolvedSources,
   );
+  const subagentV2 = disableSubagentModels(
+    subagentNameRedirector.remapSubagentV2(existingRouting?.subagentV2),
+    options.disabledSubagentModels,
+  );
   const routing: CodexRoutingConfigV2 = {
     ...(existingRoutingV2 ?? {}),
     schemaVersion: 2,
     enabled: true,
     subagentVersion,
-    subagentV2: subagentNameRedirector.remapSubagentV2(
-      existingRouting?.subagentV2,
-    ),
+    subagentV2,
     spawnAgentModels: requestedSpawnAgentModels
       .map(
         (model) => subagentNameRedirector.redirectVisibleName(model) ?? model,

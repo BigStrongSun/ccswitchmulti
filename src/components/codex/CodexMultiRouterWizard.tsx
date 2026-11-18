@@ -91,6 +91,12 @@ import {
 } from "@/lib/hostedTools";
 import type { WorkspaceTab } from "@/components/codex/CodexRouterWorkspacePage";
 import { codexCatalogOnlyPlanModelFetchMessage } from "@/utils/codexPlanModelFetch";
+import {
+  findModelSource,
+  readUnknownReasoningBlocker,
+  unknownReasoningBlockerDetail,
+  type UnknownReasoningBlocker,
+} from "@/utils/codexSubagentReasoningBlocker";
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
 import { CodexProtocolProbeProgressDialog } from "@/components/providers/forms/CodexProtocolProbeProgressDialog";
 import { CodexProviderSetPreviewDialog } from "@/components/providers/forms/CodexProviderSetPreviewDialog";
@@ -895,6 +901,11 @@ export function CodexMultiRouterWizard({
   const [isRestoringEvidence, setIsRestoringEvidence] = useState(false);
   const [excludedProbeModels, setExcludedProbeModels] = useState<string[]>([]);
   const [wizardIssues, setWizardIssues] = useState<WizardIssue[]>([]);
+  const [reasoningBlocker, setReasoningBlocker] =
+    useState<UnknownReasoningBlocker | null>(null);
+  const [disabledReasoningModels, setDisabledReasoningModels] = useState<
+    string[]
+  >([]);
   const [modelFetchCards, setModelFetchCards] = useState<
     Record<string, ModelFetchCardState>
   >({});
@@ -1423,6 +1434,31 @@ export function CodexMultiRouterWizard({
     );
   };
 
+  // 保存失败统一在这里分流：推理能力未声明是可操作阻塞（能指名模型、能给下一步），
+  // 其余错误仍按原文展示。返回类型决定 toast 文案。
+  const recordSaveFailure = (message: string): "reasoning" | "generic" => {
+    const blocker = readUnknownReasoningBlocker(message);
+    if (blocker) {
+      setReasoningBlocker(blocker);
+      recordWizardIssue({
+        stage: "save-enable",
+        severity: "error",
+        title: "Sub-Agent 推理能力未声明",
+        detail: unknownReasoningBlockerDetail(blocker.models),
+        canContinue: false,
+      });
+      return "reasoning";
+    }
+    recordWizardIssue({
+      stage: "save-enable",
+      severity: "error",
+      title: "MultiRouter 保存失败",
+      detail: message,
+      canContinue: false,
+    });
+    return "generic";
+  };
+
   useEffect(() => {
     if (
       batchProtocolLab.state.phase !== "failed" &&
@@ -1473,15 +1509,14 @@ export function CodexMultiRouterWizard({
     }
 
     dispatchFlow({ type: "SAVE_ERROR", error: message });
-    recordWizardIssue({
-      stage: "save-enable",
-      severity: "error",
-      title: "MultiRouter 保存失败",
-      detail: message,
-      canContinue: false,
-    });
+    const failure = recordSaveFailure(message);
     if (batchProtocolLab.state.phase === "failed") {
-      toast.error(`MultiRouter 保存失败：${message}`, { closeButton: true });
+      toast.error(
+        failure === "reasoning"
+          ? "MultiRouter 保存失败：Sub-Agent 角色没有声明推理能力，请在向导中处理。"
+          : `MultiRouter 保存失败：${message}`,
+        { closeButton: true },
+      );
       // This page owns the save error and offers a new Save action, not the
       // protocol dialog's retry action. Settle the failed operation so its
       // pending promise cannot hold saveInFlightRef after the user fixes it.
@@ -2074,7 +2109,11 @@ export function CodexMultiRouterWizard({
 
   const buildBatchDraft = (
     reuseReceipts: boolean,
+    excludedSubagentModels: string[] = [],
   ): CodexProviderSetBatchDraft => {
+    const disabledSubagentModels = Array.from(
+      new Set([...disabledReasoningModels, ...excludedSubagentModels]),
+    );
     const result = buildCodexMultiRouterWizardPlan(
       providers,
       routeReadySources,
@@ -2088,6 +2127,9 @@ export function CodexMultiRouterWizard({
           webSearch: { enabled: webSearchEnabled },
           imageGeneration: { enabled: imageGenerationEnabled },
         },
+        ...(disabledSubagentModels.length > 0
+          ? { disabledSubagentModels }
+          : {}),
       },
     );
     const previousSources = new Map(
@@ -2215,14 +2257,14 @@ export function CodexMultiRouterWizard({
 
   // 保存只调用统一 batch workflow：自动 Single/Split 都由后端规划并以 accept_auto
   // 原子提交；Blocked 保留草稿和预览，不再进入第二套 Split 确认状态。
-  const saveMultiRouterPlan = () => {
+  const saveMultiRouterPlan = (excludedSubagentModels: string[] = []) => {
     if (saveInFlightRef.current) return;
     const targetGeneration = targetGenerationRef.current;
     dispatchFlow({ type: "SAVE_START" });
     clearWizardIssuesForStage("save-enable");
     let draft: CodexProviderSetBatchDraft;
     try {
-      draft = buildBatchDraft(true);
+      draft = buildBatchDraft(true, excludedSubagentModels);
     } catch (error) {
       const message = formatWizardError(error);
       dispatchFlow({ type: "SAVE_ERROR", error: message });
@@ -2294,16 +2336,33 @@ export function CodexMultiRouterWizard({
           });
         }
         dispatchFlow({ type: "SAVE_SUCCESS" });
+        setReasoningBlocker(null);
       })
       .catch((error) => {
         if (targetGeneration !== targetGenerationRef.current) return;
         if (error instanceof ProtocolLabCancelled) return;
         const message = formatWizardError(error);
         dispatchFlow({ type: "SAVE_ERROR", error: message });
+        recordSaveFailure(message);
       });
     saveInFlightRef.current = saveOperation.finally(() => {
       saveInFlightRef.current = null;
     });
+  };
+
+  // 用户选择“先禁用这些角色再保存”：把模型加入本向导的禁用集合，立刻重试保存。
+  // 状态更新是异步的，所以这次重试显式传入模型列表，避免用到旧 state。
+  const disableBlockedReasoningProfilesAndSave = () => {
+    const models = reasoningBlocker?.models ?? [];
+    if (models.length === 0) return;
+    setDisabledReasoningModels((current) => {
+      const next = new Set(current);
+      for (const model of models) next.add(model);
+      return Array.from(next);
+    });
+    setReasoningBlocker(null);
+    clearWizardIssuesForStage("save-enable");
+    saveMultiRouterPlan(models);
   };
 
   const returnFromBlockedBatch = () => {
@@ -3437,8 +3496,88 @@ export function CodexMultiRouterWizard({
                         Provider 后再保存。
                       </div>
                     ) : null}
+                    {reasoningBlocker ? (
+                      <div
+                        role="alert"
+                        className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm"
+                      >
+                        <div className="font-medium text-destructive">
+                          Sub-Agent 推理能力未声明，配置无法保存
+                        </div>
+                        <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                          这些模型被已启用的 Sub-Agent
+                          角色引用，但没有声明推理能力；保存门禁不会用“交给上游默认”绕过它。
+                        </div>
+                        {reasoningBlocker.models.length > 0 ? (
+                          <ul className="mt-3 space-y-2">
+                            {reasoningBlocker.models.map((model) => {
+                              const source = findModelSource(
+                                routeReadySources,
+                                model,
+                              );
+                              return (
+                                <li
+                                  key={model}
+                                  className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background/80 px-3 py-2"
+                                >
+                                  <span className="font-medium">{model}</span>
+                                  {source && onOpenProviderConfig ? (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() =>
+                                        onOpenProviderConfig(source)
+                                      }
+                                    >
+                                      在 {source.name} 中声明推理能力
+                                    </Button>
+                                  ) : null}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        ) : null}
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={
+                              isSavingPlan ||
+                              reasoningBlocker.models.length === 0
+                            }
+                            onClick={disableBlockedReasoningProfilesAndSave}
+                          >
+                            禁用这些 Sub-Agent 角色并保存
+                          </Button>
+                          {activePlan ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() =>
+                                onOpenWorkspace(activePlan, "subagents")
+                              }
+                            >
+                              打开 Sub-Agent V2 工作台
+                            </Button>
+                          ) : null}
+                        </div>
+                        <div className="mt-2 text-xs leading-5 text-muted-foreground">
+                          “禁用”只关闭这些角色，不会删除它们的问卷和覆盖设置；
+                          声明推理能力后可以在 Sub-Agent V2 工作台重新启用。
+                        </div>
+                      </div>
+                    ) : null}
+                    {disabledReasoningModels.length > 0 ? (
+                      <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
+                        本向导将禁用这些 Sub-Agent 角色：
+                        {disabledReasoningModels.join("、")}
+                        。保存后可在 Sub-Agent V2 工作台声明能力并重新启用。
+                      </div>
+                    ) : null}
                     <Button
-                      onClick={saveMultiRouterPlan}
+                      onClick={() => saveMultiRouterPlan()}
                       disabled={
                         isSavingPlan ||
                         editingTargetMissing ||

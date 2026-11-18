@@ -4178,6 +4178,7 @@ fn compile_configured_codex_subagent_roles(
 fn validate_codex_subagent_reasoning_completeness(
     compilation: &ConfiguredCodexSubagentCompilation,
 ) -> Result<(), AppError> {
+    let mut undeclared: Vec<String> = Vec::new();
     for (entry, compiled_status) in compilation
         .persisted
         .profiles
@@ -4196,12 +4197,26 @@ fn validate_codex_subagent_reasoning_completeness(
         if capability.is_none()
             || capability.is_some_and(|value| value.support_kind == ReasoningSupportKind::Unknown)
         {
-            return Err(AppError::InvalidInput(
-                "Codex subagent V2 configuration is incomplete (unknown_reasoning_capability_requires_declaration)".to_string(),
-            ));
+            let model = profile.model.trim();
+            if !model.is_empty()
+                && !undeclared
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(model))
+            {
+                undeclared.push(model.to_string());
+            }
         }
     }
-    Ok(())
+    if undeclared.is_empty() {
+        return Ok(());
+    }
+    // 只说错误码会让用户在 13 步向导里反复点保存：把被阻塞的模型放在错误码之后，
+    // 前端据此展示“哪个模型”和“禁用还是去声明”。错误码必须保持在消息里。
+    undeclared.sort_by_key(|model| model.to_ascii_lowercase());
+    Err(AppError::InvalidInput(format!(
+        "Codex subagent V2 configuration is incomplete (unknown_reasoning_capability_requires_declaration): {}",
+        undeclared.join(", ")
+    )))
 }
 
 fn strip_codex_subagent_v2_policy_block(value: &str) -> String {
@@ -9231,9 +9246,45 @@ wire_api = "responses"
 
         let error = validate_codex_subagent_v2_candidate(&settings, None, true)
             .expect_err("unknown reasoning capability must block provider save");
-        assert!(error
-            .to_string()
-            .contains("unknown_reasoning_capability_requires_declaration"));
+        let message = error.to_string();
+        assert!(message.contains("unknown_reasoning_capability_requires_declaration"));
+        // 只给错误码，用户无法知道该改哪个模型：消息必须带上被阻塞的模型。
+        assert!(message.contains("private-model"), "{message}");
+    }
+
+    #[test]
+    fn codex_subagent_v2_save_lists_every_undeclared_reasoning_model() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                "zeta-model": codex_subagent_profile_status_profile("zeta-model", true),
+                "alpha-model": codex_subagent_profile_status_profile("alpha-model", true),
+            }),
+            json!([
+                { "model": "zeta-model", "contextWindow": 128000 },
+                { "model": "alpha-model", "contextWindow": 128000 }
+            ]),
+            json!([
+                {
+                    "id": "zeta-route",
+                    "match": { "models": ["zeta-model"] },
+                    "upstream": { "auth": { "source": "provider_config" } }
+                },
+                {
+                    "id": "alpha-route",
+                    "match": { "models": ["alpha-model"] },
+                    "upstream": { "auth": { "source": "provider_config" } }
+                }
+            ]),
+        );
+
+        let error = validate_codex_subagent_v2_candidate(&settings, None, true)
+            .expect_err("every undeclared reasoning model must block provider save");
+        let message = error.to_string();
+        assert!(
+            message.contains("(unknown_reasoning_capability_requires_declaration): alpha-model, zeta-model"),
+            "{message}"
+        );
     }
 
     #[test]

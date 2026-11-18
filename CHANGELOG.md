@@ -5,6 +5,29 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.4-17] - 2026-11-18
+
+### Fixed
+
+- **MultiRouter Save Gate Names the Blocking Model**: Saving the MultiRouter
+  wizard's final step used to fail with only
+  `unknown_reasoning_capability_requires_declaration` when an enabled, routable
+  Sub-Agent V2 profile referenced a model whose provider catalog declared no
+  reasoning capability. The wizard showed no model name and offered no remedy,
+  so the only visible option was to press Save again. The backend gate now lists
+  every blocked model after the stable code, and the wizard turns that into an
+  actionable block: it names each model, resolves its model source, and offers
+  "declare capability in `<Provider>`", "disable these Sub-Agent roles and save",
+  and "open the Sub-Agent V2 workspace". Disabling only flips `enabled`, keeping
+  the questionnaire, overrides and input modalities so the role can be re-enabled
+  after a capability declaration.
+
+### Unchanged
+
+- `unknown` still cannot be bypassed through `delegated`, and only enabled
+  profiles that actually generate a role block the save; disabled and
+  unroutable profiles remain unaffected.
+
 ## [3.19.2-12] - 2026-08-21
 
 This patch release completes the third-party hosted-tool streaming bridge.

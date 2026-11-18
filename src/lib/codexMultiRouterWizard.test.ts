@@ -371,4 +371,30 @@ describe("buildCodexMultiRouterWizardPlan subagent profile rekey", () => {
 
     expect(profiles["removed-model"]).toEqual(removedProfile);
   });
+
+  it("disables only the role named by the save gate and keeps its settings", () => {
+    const result = buildCodexMultiRouterWizardPlan(
+      [source("vendor-a", "Vendor A")],
+      [source("vendor-a", "Vendor A")],
+      existingPlanWith({
+        "shared-model": {
+          model: "shared-model",
+          enabled: true,
+          reasoning: { policy: "fixed", effort: "high" },
+        },
+        "other-model": { model: "other-model", enabled: true },
+      }),
+      { disabledSubagentModels: [" Shared-Model "] },
+    );
+    const profiles = (
+      result.plan.settingsConfig.codexRouting as Record<string, any>
+    ).subagentV2.profiles;
+
+    expect(profiles["shared-model"]).toMatchObject({
+      model: "shared-model",
+      enabled: false,
+      reasoning: { policy: "fixed", effort: "high" },
+    });
+    expect(profiles["other-model"]).toMatchObject({ enabled: true });
+  });
 });

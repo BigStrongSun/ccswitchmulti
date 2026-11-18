@@ -1494,4 +1494,98 @@ describe("CodexMultiRouterWizard", () => {
     ).toBeChecked();
     expect(screen.getAllByText("1000000 ctx")).toHaveLength(3);
   });
+
+  it("names the undeclared reasoning model and disables that role before retrying", async () => {
+    const source: Provider = {
+      id: "reasoning-source",
+      name: "Qwen Local",
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test-only" },
+        modelCatalog: { models: [{ model: "qwen3.8" }] },
+      },
+    };
+    const plan: Provider = {
+      id: "reasoning-plan",
+      name: "Reasoning Plan",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          subagentVersion: "v2",
+          subagentV2: {
+            schemaVersion: 2,
+            selectionPolicy: "balanced",
+            profiles: {
+              "qwen3.8": {
+                model: "qwen3.8",
+                enabled: true,
+                questionnaire: {
+                  taskStrengths: ["repository_exploration"],
+                  optimization: "balanced",
+                  writeScope: "read_only",
+                  preference: "eligible",
+                },
+                reasoning: { policy: "delegated" },
+              },
+            },
+          },
+          routes: [
+            {
+              id: "reasoning-route",
+              targetProviderId: source.id,
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+    restoreCodexProviderProtocolEvidence.mockResolvedValue({
+      provider: source,
+      receiptIds: ["reasoning-receipt"],
+      observations: [],
+      protocolApplied: false,
+      adaptationPreview: { persistence: "single", status: "ready", models: [] },
+      records: [],
+    });
+    prepareCodexProviderSetBatch.mockRejectedValueOnce(
+      new Error(
+        "无效输入: Codex subagent V2 configuration is incomplete (unknown_reasoning_capability_requires_declaration): qwen3.8",
+      ),
+    );
+    prepareCodexProviderSetBatch.mockResolvedValue({
+      digest: "saved",
+      sourcePreviews: [],
+      blocked: false,
+    });
+    commitCodexProviderSetBatch.mockImplementation(
+      async (_sources, router) => ({
+        router,
+        editorRouter: router,
+        sourceSnapshots: [],
+        projections: [],
+        status: "committed",
+      }),
+    );
+
+    renderWizard([source, plan], { mode: "edit", planId: plan.id });
+    fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+
+    await screen.findByText("Sub-Agent 推理能力未声明，配置无法保存");
+    expect(screen.getByText("qwen3.8")).toBeVisible();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "禁用这些 Sub-Agent 角色并保存" }),
+    );
+
+    await waitFor(() => expect(commitCodexProviderSetBatch).toHaveBeenCalled());
+    const retriedRouter = prepareCodexProviderSetBatch.mock.calls.at(-1)![1];
+    expect(
+      retriedRouter.settingsConfig.codexRouting.subagentV2.profiles["qwen3.8"],
+    ).toMatchObject({ enabled: false });
+  });
 });
