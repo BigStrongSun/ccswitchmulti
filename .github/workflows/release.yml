@@ -4,41 +4,82 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable release tag to build
+        required: true
+        type: string
+      reuse_run_id:
+        description: Failed tag run with four successful Windows/Linux artifacts (optional)
+        required: false
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  REUSE_RUN_ID: ${{ inputs.reuse_run_id || '' }}
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: Validate Release Source
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      tag_object: ${{ steps.plan.outputs.tag_object }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      artifact_ids: ${{ steps.plan.outputs.artifact_ids }}
+    steps:
+      - name: Checkout release orchestration
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Validate immutable tag and retained artifact provenance
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/ci/release_plan.py
+
   release:
+    needs: plan
     runs-on: ${{ matrix.os }}
     environment: release
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: windows-2022
-          # GitHub 的 Windows ARM64 runner 能编译主程序，但 WiX v3 light.exe 在
-          # ARM64 runner 和 x64 cross-build 两条路径上都不稳定；ARM64 改由 x64
-          # Windows runner 交叉编译主程序，并使用 NSIS 生成安装包。
-          - os: windows-2022
-            arch: arm64
-          - os: ubuntu-22.04
-          - os: ubuntu-22.04-arm
-            arch: arm64
-          - os: macos-15-intel
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: '20'
+
+      - name: Setup pinned pnpm with system Node.js
+        shell: bash
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack install
+          node --version
+          test "$(pnpm --version)" = "$(node -p "require('./package.json').packageManager.split('@').pop()")"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -52,32 +93,6 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
-
-      - name: Build macOS universal history repair sidecar
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cargo build --manifest-path src-tauri/Cargo.toml --bin codex-history-repairer --features history-repairer --target aarch64-apple-darwin --release
-          cargo build --manifest-path src-tauri/Cargo.toml --bin codex-history-repairer --features history-repairer --target x86_64-apple-darwin --release
-          mkdir -p src-tauri/target/universal-apple-darwin/release
-          lipo -create \
-            src-tauri/target/aarch64-apple-darwin/release/codex-history-repairer \
-            src-tauri/target/x86_64-apple-darwin/release/codex-history-repairer \
-            -output src-tauri/target/universal-apple-darwin/release/codex-history-repairer
-
-      - name: Build macOS universal ccsm CLI
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cargo build --manifest-path src-tauri/Cargo.toml --bin ccsm --target aarch64-apple-darwin --release
-          cargo build --manifest-path src-tauri/Cargo.toml --bin ccsm --target x86_64-apple-darwin --release
-          mkdir -p src-tauri/target/universal-apple-darwin/release
-          lipo -create \
-            src-tauri/target/aarch64-apple-darwin/release/ccsm \
-            src-tauri/target/x86_64-apple-darwin/release/ccsm \
-            -output src-tauri/target/universal-apple-darwin/release/ccsm
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
@@ -134,22 +149,6 @@ jobs:
           apt_get install -y --no-install-recommends libsoup-3.0-dev \
             || apt_get install -y --no-install-recommends libsoup2.4-dev
 
-      - name: Setup pnpm
-        if: runner.os != 'Windows' || runner.arch != 'ARM64'
-        uses: pnpm/action-setup@v6
-        with:
-          version: 10.12.3
-          run_install: false
-
-      - name: Setup pnpm (Windows ARM64)
-        if: runner.os == 'Windows' && runner.arch == 'ARM64'
-        shell: pwsh
-        run: |
-          corepack enable
-          corepack install
-          node --version
-          pnpm --version
-
       - name: Get pnpm store directory
         if: runner.os != 'Windows' || runner.arch != 'ARM64'
         id: pnpm-store
@@ -188,7 +187,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export EXPECTED="${GITHUB_REF_NAME#v}"
+          export EXPECTED="${RELEASE_TAG#v}"
           node <<'NODE'
           const fs = require("node:fs");
           const expected = process.env.EXPECTED;
@@ -205,6 +204,32 @@ jobs:
           }
           console.log(`Release version sources agree on ${expected}`);
           NODE
+
+      - name: Build macOS universal history repair sidecar
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo build --manifest-path src-tauri/Cargo.toml --bin codex-history-repairer --features history-repairer --target aarch64-apple-darwin --release
+          cargo build --manifest-path src-tauri/Cargo.toml --bin codex-history-repairer --features history-repairer --target x86_64-apple-darwin --release
+          mkdir -p src-tauri/target/universal-apple-darwin/release
+          lipo -create \
+            src-tauri/target/aarch64-apple-darwin/release/codex-history-repairer \
+            src-tauri/target/x86_64-apple-darwin/release/codex-history-repairer \
+            -output src-tauri/target/universal-apple-darwin/release/codex-history-repairer
+
+      - name: Build macOS universal ccsm CLI
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo build --manifest-path src-tauri/Cargo.toml --bin ccsm --target aarch64-apple-darwin --release
+          cargo build --manifest-path src-tauri/Cargo.toml --bin ccsm --target x86_64-apple-darwin --release
+          mkdir -p src-tauri/target/universal-apple-darwin/release
+          lipo -create \
+            src-tauri/target/aarch64-apple-darwin/release/ccsm \
+            src-tauri/target/x86_64-apple-darwin/release/ccsm \
+            -output src-tauri/target/universal-apple-darwin/release/ccsm
 
       - name: Prepare Tauri signing key
         shell: bash
@@ -237,7 +262,6 @@ jobs:
                 echo "✅ 使用一行 Base64 私钥，已构造两行文件"
               else
                 echo "❌ TAURI_SIGNING_PRIVATE_KEY 格式无法识别：既不是两行原文，也不是其 base64，亦非一行 base64" >&2
-                echo "密钥前10个字符: $(echo "$RAW" | head -c 10)..." >&2
                 exit 1
               fi
             fi
@@ -406,7 +430,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release-assets
-          VERSION="${GITHUB_REF_NAME}"  # e.g., v3.5.0
+          VERSION="${RELEASE_TAG}"  # e.g., v3.5.0
 
           # Locate bundle artifacts
           TAR_GZ=""; APP_PATH=""
@@ -600,7 +624,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
-          $VERSION = $env:GITHUB_REF_NAME  # e.g., v3.5.0
+          $VERSION = $env:RELEASE_TAG  # e.g., v3.5.0
           $isArm64 = $env:WINDOWS_RELEASE_ARCH -eq 'arm64'
           $targetRoot = if ($isArm64) { 'src-tauri/target/aarch64-pc-windows-msvc/release' } else { 'src-tauri/target/release' }
           $assetSuffix = if ($isArm64) { '-arm64' } else { '' }
@@ -691,7 +715,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release-assets
-          VERSION="${GITHUB_REF_NAME}"  # e.g., v3.5.0
+          VERSION="${RELEASE_TAG}"  # e.g., v3.5.0
           ARCH="${{ matrix.arch || 'x86_64' }}"
           # Updater artifact: AppImage（含对应 .sig）
           APPIMAGE=$(find src-tauri/target/release/bundle -name "*.AppImage" | head -1 || true)
@@ -734,7 +758,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="$GITHUB_REF_NAME"
+          VERSION="$RELEASE_TAG"
           case "$RUNNER_OS" in
             Windows)
               suffix=""
@@ -792,17 +816,30 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     runs-on: ubuntu-22.04
-    needs: release
+    needs: [plan, release]
     permissions:
       contents: write
+      actions: read
     steps:
       - name: Checkout release notes
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
 
       - name: Download built release artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Download verified retained Windows and Linux artifacts
+        if: inputs.reuse_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.plan.outputs.artifact_ids }}
+          run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ github.token }}
           path: release-assets
           merge-multiple: true
 
@@ -816,7 +853,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="$GITHUB_REF_NAME"
+          TAG="$RELEASE_TAG"
           required=(
             "CCSwitchMulti-${TAG}-macOS.tar.gz"
             "CCSwitchMulti-${TAG}-macOS.tar.gz.sig"
@@ -841,7 +878,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${RELEASE_TAG}"
           NOTE_PATH="docs/release-notes/${TAG}-zh.md"
           {
             if [ -f "$NOTE_PATH" ]; then
@@ -870,11 +907,21 @@ jobs:
           } > release-body.md
           cat release-body.md
 
+      - name: Recheck immutable release tag before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_TAG_OBJECT: ${{ needs.plan.outputs.tag_object }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)
+          test "$actual" = "$EXPECTED_TAG_OBJECT"
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref_name }}
-          name: CCSwitchMulti ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: CCSwitchMulti ${{ env.RELEASE_TAG }}
           prerelease: false
           body_path: release-body.md
           files: release-assets/*
@@ -898,7 +945,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${RELEASE_TAG}"
           mkdir -p dl
           for attempt in 1 2 3 4 5 6; do
             rm -rf dl/*
@@ -917,7 +964,7 @@ jobs:
       - name: Generate latest.json
         env:
           REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
@@ -1026,7 +1073,7 @@ jobs:
         run: |
           set -euxo pipefail
           for attempt in 1 2 3 4 5 6; do
-            if gh release upload "$GITHUB_REF_NAME" latest.json --clobber --repo "$GITHUB_REPOSITORY"; then
+            if gh release upload "$RELEASE_TAG" latest.json --clobber --repo "$GITHUB_REPOSITORY"; then
               exit 0
             fi
             if [ "$attempt" -eq 6 ]; then
