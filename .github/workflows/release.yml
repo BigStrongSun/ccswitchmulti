@@ -347,7 +347,7 @@ jobs:
       - name: Build Tauri App (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        timeout-minutes: 60
+        timeout-minutes: 120
         env:
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
