@@ -9282,7 +9282,9 @@ wire_api = "responses"
             .expect_err("every undeclared reasoning model must block provider save");
         let message = error.to_string();
         assert!(
-            message.contains("(unknown_reasoning_capability_requires_declaration): alpha-model, zeta-model"),
+            message.contains(
+                "(unknown_reasoning_capability_requires_declaration): alpha-model, zeta-model"
+            ),
             "{message}"
         );
     }
